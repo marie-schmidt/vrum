@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M5C, M1A and M4A done; next is M6)
+Status: IN PROGRESS (M0 to M6, M1A, M4A, M5B and M5C done; next is M7)
 
 ## Inputs (from the loop file)
 
@@ -23,7 +23,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M5. Search and the semantic index (attempts: 1) (2026-11-15, commit 0b62d76)
 - [x] M5B. Agent workflow (attempts: 1) (2026-11-15, commit 366c14e)
 - [x] M5C. Extraction and reflection (needs a configured language model) (attempts: 1) (2026-11-15, commit d30ffaf)
-- [ ] M6. Hardening (attempts: 0)
+- [x] M6. Hardening (attempts: 1) (2026-11-15, commit d5a0dc2)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
 - [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
 - [ ] M9. Docs and acceptance (attempts: 0)
@@ -38,7 +38,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 Full wording is in `DECISIONS.md`.
 
 - M0: MCP SDK 2.x (`>=2.3,<3`), `uv` + `ruff` + `mypy --strict` + `pytest`, image `pgvector/pgvector:pg17`, `psycopg` 3 with its async pool.
-- M0: no authentication until M6; the server is reachable only from this machine (compose binds `127.0.0.1`). `GET /health` is unauthenticated and says only `ok` or `unavailable`.
+- M0: no authentication until M6 (M6 added the required bearer token; see the M6 lines below); the server is reachable only from this machine (compose binds `127.0.0.1`). `GET /health` is unauthenticated and says only `ok` or `unavailable`, and is the only request that needs no token.
 - M0: the database password comes from `VRUM_DB_PASSWORD` with no default (`./scripts/init-env.sh` writes a random one to the git-ignored `.env`); the database port is not published.
 - M0: the server listens on `VRUM_PORT` (default 8000) and compose publishes the same port number.
 - M0: the only tool is `server_status` (server, PostgreSQL and pgvector versions), so the client has something real to list; M1 adds the graph tools.
@@ -70,6 +70,10 @@ Full wording is in `DECISIONS.md`.
 - M5C: the four tools always exist and say plainly when no model is set up (`server_status` shows which model, or none). The model is asked for a JSON object over a plain chat request; a passage or quote counts as present only if it matches exactly after white space is collapsed (case matters); every drop is reported with its reason. Only these tools make `extracted` and `derived` items.
 - M5C: `consolidate_memory` takes facts by id, by item (and everything below it) or by search, shows at most `max_facts` (50) and counts the rest, does not record a belief with the same words as an active one, and revises only a stale belief, from the evidence that is still valid (a replaced fact or decision is followed to its replacement). `find_contradictions` `looked_at` counts active beliefs passed from the first, so it plus `remaining` is the number of active beliefs. `reflect` uses the item named first, then search plus the question's words joined with `or`, active items only.
 - M5C: `LLM_MAX_INPUT_CHARS` is 12,000 by default (Ollama gives a model 4,096 tokens and cuts what does not fit). The secret check looks only at private key blocks and tokens with known prefixes. Each answered call is a `model_call` event about no one item; a call with no usable answer wrote nothing and is not logged.
+- M6: the token is required (`VRUM_TOKEN` or `VRUM_TOKEN_FILE`, at least 16 visible characters, no default); every request but `GET /health` needs `Authorization: Bearer <token>`, refused in plain words as an error an MCP client shows in full. Wrong tokens are not rate limited. The token travels in clear over HTTP, so any address but this machine needs TLS in front. `./scripts/init-env.sh` writes a random one.
+- M6: the only limit on a write is the request size, `VRUM_MAX_REQUEST_BYTES` (4 MiB); a text too long for PostgreSQL to search (about 1 MB of different words) is refused in plain words and changes nothing. Every paged tool takes `limit` 1 to 200, and a test fails on any new tool that returns an unpaged list without being listed as bounded. `reindex` lists at most 50 failures and counts the rest.
+- M6: secrets are looked for in every argument of every tool (not only stored text) before anything else, and again where each write is recorded, so text a model proposed is caught. The refusal names the field and the kind and never the value. Validation errors are plain and do not echo what was sent.
+- M6: logs are JSON lines, one per tool call and refused request, with no arguments, answers, headers or bodies, scrubbed of the token, passwords, keys and secret formats; a call refused for holding a secret is logged with no actor. The web server's access log is off.
 
 ## M0 proof, as run
 
@@ -203,6 +207,18 @@ Full wording is in `DECISIONS.md`.
 - **A real model:** `scripts/real_model_check.py` against Ollama on this machine with `llama3.2` (3 billion parameters), nothing leaving it, from a stack started with only `compose.yaml`: 14 facts from 4 notes, none dropped (some were not really facts); 5 beliefs from 7 facts, some only restating a fact; 3 of 4 statements judged right; 1 of 3 questions answered, the other two refused by the server (a decision cited that was not among the items shown, and an unanswerable question answered with no citation). Calls took 1 to 4 seconds. A larger model was not tried. This also showed the default input limit had to be lower: Ollama gives a model 4,096 tokens and cuts the rest, so `LLM_MAX_INPUT_CHARS` is 12,000, not 30,000.
 - **Found along the way:** the tests found no bug in the product on their first full run (24 of 25 passed; the one failure was my own count of what `reflect` retrieves, which forgot the decision that replaced another). The real model changed one default, the input limit (above). In the printed run, a call with nothing to compare against rightly does not ask the model, which is why proof 8 needed a belief to compare against.
 - Scratch stacks, the clone, scratch scripts and the real-model stack are removed; no containers, volumes or `vrum` images are left. The Ollama models on this machine were only used, not changed. A `Logo/` folder that appeared in the working tree was not mine and is not in the commit.
+
+## M6 proof, as run
+
+- `./check.sh`: lint, strict types, 120 unit tests and 220 integration tests pass on a database built from scratch (43 more unit tests and 32 more integration tests than M5C: `tests/test_hardening_integration.py` has the 32 integration tests, and `test_access.py`, `test_guard.py`, `test_init_env.py` and additions to `test_config.py` and `test_secret_formats.py` are the unit tests). Every earlier test now goes through a client that sends the token, so each earlier proof is also proof that a right token gets in.
+- From a clean clone of the commit (`d5a0dc2`), `./check.sh` gave the same 120 and 220. Then the clone was started as the separate compose project `vrum-proof` on its own ports, and a script printed each proof through a real MCP client and raw HTTP:
+  1. **No token, wrong token:** raw HTTP gave 401 with "This server needs a token and none was sent. Send it in the Authorization header as 'Bearer <token>'..." for no token, "The token is not right, so nothing was done..." for a wrong one, and "The Authorization header is not a bearer token..." for a Basic scheme. A real MCP client was shown the same words (code -32001), not "Server returned an error response". `GET /health` still answered `{"status":"ok"}` with no token. None of the answers repeated a token.
+  2. **Logs:** 30 log lines, every one JSON, with `request_refused` and `tool_call` lines (a refused call logged with no actor). The token, the wrong token, the database password, the pasted secret, and the words "Authorization" and "Bearer" were in none of them, on either server.
+  3. **Oversized request:** a real client sending a 4,195,300-character body was told "This request is 4,195,631 bytes, and the most this server accepts in one request is 4,194,304 bytes. Nothing was done. Send it in smaller parts, or ask the owner to raise VRUM_MAX_REQUEST_BYTES." (code -32002). A request that declared 50 MiB and sent none got the same refusal as 413 before any of it was read. Nothing was stored and the server went on.
+  4. **A secret:** a GitHub-token-shaped string in `create_node` (body), `retain_fact` (text), `record_decision` (reason) and `create_plan` (`items[1].body`) was refused each time, naming the field and "a GitHub token" and saying it was not stored, and the refusal did not repeat it. A secret that a scripted model proposed through `extract_facts` was refused the same way when it was about to be written. The database held no more nodes, memories, rules or events, and the secret was in no table, event or actor. Ordinary text that only talks about passwords, keys and tokens was kept.
+- **Mutation checks:** with the token compare turned off, five tests failed (wrong, no and not-bearer tokens were let in); with the secret scan at the door off, three failed; with the scan where writes are recorded off, the model-proposed secret was stored and the test failed; with the size limit raised a thousand-fold, four tests failed; with the log scrub off, the unit test for the log format failed. Each was put back.
+- **Found along the way:** a body of 1,000,000 different words was refused as "cannot reach its database" (PostgreSQL's limit on one searchable text, which the old error handling mistook for a lost connection); it is now a plain refusal. The SDK's own validation message repeated the whole value sent (and the whole arguments of a call with a missing field), which could have repeated a secret; it is now plain. The SDK client shows only "Server returned an error response" for an ordinary HTTP error, so refusals are sent as JSON-RPC errors. A raw HTTP test client could not read a 413 while it was still sending a 4 MiB body (the connection is reset), so the size test uses a real client, whose HTTP library copes, and a request that only declares its size.
+- Scratch stacks, the clone and scratch scripts are removed; no containers, volumes, networks or `vrum` images are left. A `Logo/` folder in the working tree is not mine and is not in the commit.
 
 ## Notes
 
