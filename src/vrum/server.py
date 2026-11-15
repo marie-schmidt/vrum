@@ -1,11 +1,12 @@
 """The MCP server: its tools, its health check, and how it is wired to the database."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import date
 from importlib.metadata import version
-from typing import Annotated
+from typing import Annotated, Any
 
 import psycopg
 from mcp.server import MCPServer
@@ -15,16 +16,18 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
-from vrum.common import Refusal, parse_day
+from vrum.common import Refusal, clean_actor, parse_day
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
 from vrum.db import Database
 from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.embeddings import EmbeddingUnavailable
+from vrum.exchange import Exchange, ExportPage, ImportResult
 from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
 from vrum.guard import GuardedServer
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
 from vrum.llm import LanguageModel
+from vrum.logs import event
 from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
 from vrum.reflection import (
@@ -50,6 +53,8 @@ from vrum.workflow import (
     UpdateNodesResult,
     Workflow,
 )
+
+log = logging.getLogger("vrum.server")
 
 # What any agent is told when it connects: the working loop, in a few lines. A test checks that it
 # names only tools that exist.
@@ -196,6 +201,7 @@ def create_server(settings: Settings) -> GuardedServer:
     rules = Rules(database)
     decisions = Decisions(database)
     memories = Memories(database)
+    exchange = Exchange(database)
     indexer = Indexer(database, settings.embedding)
     embedding = settings.embedding
     searcher = Searcher(
@@ -1569,6 +1575,59 @@ def create_server(settings: Settings) -> GuardedServer:
                     f"{error} Nothing was indexed. Exact-words search still works; try again "
                     "when the service is back."
                 ) from error
+
+    @mcp.tool()
+    async def export_graph(
+        after: Annotated[
+            str | None,
+            Field(description="Leave empty for the first page; pass next_after for the next."),
+        ] = None,
+        limit: _Limit = 200,
+    ) -> ExportPage:
+        """Read the whole graph as data, one page at a time: every epic, story and task (with
+        dates), link, rule, decision and principle (with what each affects), fact and belief (with
+        origin, status, what each concerns and, for a belief, its evidence), and the event log.
+
+        Each page holds items of one list (nodes, links, rules, decisions, memories or events), in
+        id order. Keep calling with next_after until it is empty; the first page also says how
+        many items each list holds in all, to check you got them all. Dates and times are text.
+        Not included: claims (leases that run out) and what is worked out from the rest (what is
+        ready, what is stale, the search and semantic indexes).
+
+        The file this makes can be loaded into an empty server with import_graph, and turned into
+        a Markdown copy to read in Obsidian or keep in git. scripts/export_graph.py and
+        scripts/export_markdown.py do the paging for you.
+        """
+        with _database_errors():
+            return await exchange.export_page(after=after, limit=limit)
+
+    @mcp.tool()
+    async def import_graph(
+        actor: _Actor,
+        document: Annotated[
+            dict[str, Any],
+            Field(
+                description="The whole export, as one object with format, version, counts and the "
+                "lists nodes, links, rules, decisions, memories and events, as export_graph "
+                "pages give them."
+            ),
+        ],
+    ) -> ImportResult:
+        """Load a whole export into this server, which must be empty. Every id, date, status,
+        origin and event is kept, so what is exported afterwards is identical to the file.
+
+        It is all or nothing: the file is checked first and every problem in it is listed at once,
+        and the database checks everything again as it is loaded. A server that already holds
+        anything is refused, because the ids in the file would clash with what is there: load it
+        into a fresh one, or restore a backup. A file can be as big as one request may be (see
+        VRUM_MAX_REQUEST_BYTES). scripts/import_graph.py sends a file for you. If an embedding
+        service is set up, the server indexes the imported items by itself afterwards.
+        """
+        actor = clean_actor(actor)
+        with _database_errors():
+            result = await exchange.import_document(document)
+        event(log, logging.INFO, "import_finished", actor=actor[:100], counts=result.counts)
+        return result
 
     @mcp.tool()
     async def extract_facts(

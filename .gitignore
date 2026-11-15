@@ -14,6 +14,10 @@ dist/
 *.secret
 secrets/
 
+# Backups and exports hold all the data: never commit them
+backups/
+vrum-export*.json
+
 # macOS and sync tools leave stale copies named "file 2.ext" when a file is replaced; never commit them
 * 2
 * 2.*

@@ -61,6 +61,8 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "similar_items",
         "find_overlaps",
         "reindex",
+        "export_graph",
+        "import_graph",
         "extract_facts",
         "consolidate_memory",
         "find_contradictions",

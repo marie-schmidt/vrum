@@ -27,7 +27,11 @@ export VRUM_PORT="$port"
 export VRUM_NO_MODEL_PORT=$((port + 1))
 export VRUM_MODEL_SCRIPT_PORT=$((port + 2))
 export VRUM_BIND_ADDRESS=127.0.0.1
-trap 'docker compose down --volumes --remove-orphans >/dev/null 2>&1' EXIT
+# The tests that load or restore a database start a second, separate copy of Vrum (the compose
+# project vrum-restore, built from compose.yaml alone) on this port. The tests make it and remove
+# it; the trap below removes it too if a test dies.
+export VRUM_RESTORE_TEST_PORT=$((port + 3))
+trap 'docker compose down --volumes --remove-orphans >/dev/null 2>&1; COMPOSE_PROJECT_NAME=vrum-restore COMPOSE_FILE=compose.yaml docker compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1' EXIT
 docker compose up --detach --build --wait --wait-timeout 180
 VRUM_TEST_URL="http://127.0.0.1:${port}/mcp" \
     VRUM_NO_MODEL_TEST_URL="http://127.0.0.1:${VRUM_NO_MODEL_PORT}/mcp" \

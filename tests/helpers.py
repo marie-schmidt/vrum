@@ -359,3 +359,196 @@ def model_stopped() -> Iterator[None]:
     finally:
         started = compose("up", "--detach", "--wait", "scripted-model")
         assert started.returncode == 0, started.stderr
+
+
+async def export_everything(client: Client, limit: int = 200) -> dict[str, Any]:
+    """The whole export: every page of export_graph, put together."""
+    document: dict[str, Any] = {"format": None, "version": None, "counts": None}
+    for section in ("nodes", "links", "rules", "decisions", "memories", "events"):
+        document[section] = []
+    after: str | None = None
+    while True:
+        page = await ok(client, "export_graph", after=after, limit=limit)
+        document["format"], document["version"] = page["format"], page["version"]
+        if page["counts"] is not None:
+            document["counts"] = page["counts"]
+        if page["section"] is not None:
+            document[page["section"]].extend(page["items"])
+        after = page["next_after"]
+        if after is None:
+            return document
+
+
+async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
+    """One of everything the graph holds, made through the tools: all three kinds of node with
+    dates, every kind of link, a rule placed and one not, a decision that was replaced, a
+    principle, facts that were replaced and retracted, beliefs that are confirmed, stale, replaced
+    and promoted to a decision, a handoff, and a claim. Returns each by a short name."""
+    word = unique_word()
+    epic = await ok(
+        client,
+        "create_node",
+        actor="ann",
+        kind="epic",
+        title=f'Épic: log in "safely" {word}',
+        body="Everything about\nlogging in.",
+        start_on="2026-12-01",
+        target_on="2026-12-31",
+    )
+
+    async def node(kind: str, title: str, parent: dict[str, Any], **more: Any) -> dict[str, Any]:
+        return await ok(
+            client,
+            "create_node",
+            actor="ann",
+            kind=kind,
+            title=f"{title} {word}",
+            parent_id=parent["id"],
+            **more,
+        )
+
+    story1 = await node("story", "Log in with email", epic, body="Body of story one.")
+    story2 = await node("story", "Log in with a code", epic, priority="high")
+    task1 = await node("task", "Build the form", story1, start_on="2026-12-02")
+    task2 = await node("task", "Check the password", story1, target_on="2026-12-10")
+    task3 = await node("task", "Send the code", story2)
+    await ok(
+        client, "update_node", actor="ann", node_id=task1["id"], expected_version=1, status="done"
+    )
+    for source, target, link_type in (
+        (task2, task1, "needs_first"),
+        (story1, story2, "relates_to"),
+        (task3, task2, "duplicates"),
+        (story2, story1, "supersedes"),
+    ):
+        await ok(
+            client,
+            "add_link",
+            actor="ann",
+            source_id=source["id"],
+            target_id=target["id"],
+            link_type=link_type,
+        )
+    await ok(client, "claim_node", actor="ann", node_id=task2["id"])
+    await ok(
+        client,
+        "finish_work",
+        actor="ann",
+        node_id=task2["id"],
+        outcome="blocked",
+        note="Waiting for the design of the form.",
+    )
+    await ok(client, "claim_node", actor="bob", node_id=task3["id"])
+
+    rule1 = await ok(
+        client, "create_rule", actor="ann", title=f"Rule one {word}", story_id=story1["id"]
+    )
+    rule2 = await ok(
+        client, "create_rule", actor="ann", title=f"Rule two {word}", body="Not placed."
+    )
+    await ok(
+        client,
+        "update_rule",
+        actor="ann",
+        rule_id=rule2["id"],
+        expected_version=1,
+        status="settled",
+    )
+
+    decision1 = await make_decision(
+        client, f"Use email {word}", node_ids=[story1["id"]], rule_ids=[rule1["id"]]
+    )
+    decision2 = await ok(
+        client,
+        "supersede_decision",
+        actor="ann",
+        decision_id=decision1["id"],
+        title=f"Use email and a code {word}",
+        text="Both ways of logging in.",
+        reason="Marie changed her mind.",
+        decided_by="Marie",
+    )
+    principle = await make_decision(
+        client, f"Keep it simple {word}", kind="principle", node_ids=[epic["id"]]
+    )
+
+    fact1 = await make_fact(
+        client,
+        f"People log in on phones {word}",
+        node_ids=[story1["id"]],
+        rule_ids=[rule1["id"]],
+        decision_ids=[decision2["id"]],
+        happened_on="2026-11-01",
+    )
+    fact2 = await make_fact(client, f"Codes arrive in 5 seconds {word}", kind="experience")
+    fact3 = await make_fact(client, f"Codes arrive in 10 seconds {word}")
+    fact4 = (
+        await ok(
+            client,
+            "supersede_memory",
+            actor="ann",
+            replaces=[fact3["id"]],
+            reason="Measured again.",
+            text=f"Codes arrive in 3 seconds {word}",
+            source="A measurement",
+        )
+    )["replacement"]
+    fact5 = await make_fact(client, f"The office has a dog {word}")
+    await ok(client, "retract_memory", actor="ann", memory_ids=[fact5["id"]], reason="It is a cat.")
+
+    belief1 = await make_belief(
+        client,
+        [fact1],
+        f"Phones come first {word}",
+        evidence_decision_ids=[decision2["id"]],
+        node_ids=[story1["id"]],
+    )
+    await ok(client, "confirm_belief", actor="ann", memory_id=belief1["id"], confirmed_by="Marie")
+    belief2 = await make_belief(client, [fact2], f"Codes are quick {word}")
+    await ok(client, "retract_memory", actor="ann", memory_ids=[fact2["id"]], reason="Wrong.")
+    belief3 = await make_belief(client, [fact4], f"Codes are very quick {word}")
+    belief4 = (
+        await ok(
+            client,
+            "supersede_memory",
+            actor="ann",
+            replaces=[belief3["id"]],
+            reason="More precise.",
+            text=f"Codes take about 3 seconds {word}",
+            evidence_fact_ids=[fact4["id"]],
+        )
+    )["replacement"]
+    belief5 = await make_belief(client, [fact4], f"Keep codes short {word}")
+    decision3 = await ok(
+        client,
+        "promote_belief",
+        actor="ann",
+        memory_id=belief5["id"],
+        title=f"Codes are short {word}",
+        reason="Marie agrees.",
+        decided_by="Marie",
+    )
+    return {
+        "epic": epic,
+        "story1": story1,
+        "story2": story2,
+        "task1": task1,
+        "task2": task2,
+        "task3": task3,
+        "rule1": rule1,
+        "rule2": rule2,
+        "decision1": decision1,
+        "decision2": decision2,
+        "decision3": decision3,
+        "principle": principle,
+        "fact1": fact1,
+        "fact2": fact2,
+        "fact3": fact3,
+        "fact4": fact4,
+        "fact5": fact5,
+        "belief1": belief1,
+        "belief2": belief2,
+        "belief3": belief3,
+        "belief4": belief4,
+        "belief5": belief5,
+    }
