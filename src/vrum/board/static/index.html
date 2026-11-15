@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vrum board</title>
+  <link rel="icon" type="image/svg+xml" href="/board/brand/vrum-favicon.svg">
+  <link rel="stylesheet" href="/board/board.css">
+</head>
+<body>
+  <a class="skip" href="#page">Skip to the page</a>
+  <header id="top"></header>
+  <div id="notices" aria-label="Messages"></div>
+  <div id="layout">
+    <main id="page" tabindex="-1" aria-label="Page"></main>
+    <aside id="panel" aria-label="Details" hidden></aside>
+  </div>
+  <div id="dialogs"></div>
+  <div id="live" class="sr-only" role="status" aria-live="polite"></div>
+  <noscript>The Vrum board needs JavaScript. It loads nothing from the internet.</noscript>
+  <script type="module" src="/board/app.js"></script>
+</body>
+</html>

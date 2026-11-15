@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 
+from tests.acceptance_board import board
 from tests.acceptance_finding import finding
 from tests.acceptance_model import hardening, model_help
 from tests.acceptance_moving import moving
@@ -38,6 +39,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "finding": finding,
     "model": model_help,
     "hardening": hardening,
+    "board": board,
     "moving": moving,
 }
 

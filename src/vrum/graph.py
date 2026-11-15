@@ -39,7 +39,8 @@ _STORED_COLUMNS = (
 STATE_COLUMNS = (
     _STORED_COLUMNS
     + ", body_chars, waiting_on, schedule_conflicts, overdue, span_start, span_end, "
-    "span_worked_out, claimed_by, claim_expires_at, lapsed_claim_by, lapsed_claim_at"
+    "span_worked_out, claimed_by, claim_expires_at, lapsed_claim_by, lapsed_claim_at, "
+    "progress_done, progress_total"
 )
 # How much of a body a compact list shows.
 BODY_PREVIEW_CHARS = 120
@@ -130,6 +131,14 @@ class Node(BaseModel):
         "over: they left it with no handoff note, so ask what state it is in."
     )
     lapsed_claim_at: datetime | None = Field(description="When that claim ran out.")
+    progress_done: int | None = Field(
+        description="For an epic or a story: how many of its tasks are done. For an epic, the "
+        "tasks of its stories that are not dropped. Empty for a task."
+    )
+    progress_total: int | None = Field(
+        description="For an epic or a story: how many tasks it has that are not dropped (the "
+        "most progress_done can reach). Empty for a task."
+    )
 
 
 class Handoff(BaseModel):

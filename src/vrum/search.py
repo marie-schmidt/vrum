@@ -210,6 +210,18 @@ class Searcher:
 
     # -- what the index can do right now ------------------------------------------------------
 
+    async def index_state(self) -> IndexNote:
+        """Whether search by meaning can be used right now, and how many items are waiting to be
+        indexed: what every search says about the index, for whoever wants only that."""
+        client = self._indexer.client
+        async with self._database.transaction() as conn:
+            state = await snapshot(conn, client.model if client else None)
+        if client is None:
+            return self._index_note(state, "not_configured")
+        return self._index_note(
+            state, "used" if state.usable_with(client.model) else "index_not_ready"
+        )
+
     def _index_note(self, state: IndexSnapshot, meaning: str, note: str | None = None) -> IndexNote:
         notes = {
             "used": "Meaning was used. Matches by meaning are suggestions.",

@@ -152,6 +152,9 @@ CREATE TABLE claims (
 --                       handoff note.
 --   body_chars:         how long the body is, so a list can leave the body out and still say how
 --                       much there is.
+--   progress_done/total: for an epic or a story, its tasks that are done out of its tasks that are
+--                       not dropped (an epic's are the tasks of its stories that are not dropped).
+--                       Empty for a task.
 CREATE VIEW node_state AS
 SELECT n.id, n.kind, n.parent_id, n.title, n.body, length(n.body) AS body_chars,
        CASE WHEN n.status = 'new' AND cardinality(w.ids) = 0 THEN 'ready' ELSE n.status END
@@ -168,8 +171,20 @@ SELECT n.id, n.kind, n.parent_id, n.title, n.body, length(n.body) AS body_chars,
        c.actor AS claimed_by,
        c.expires_at AS claim_expires_at,
        lc.actor AS lapsed_claim_by,
-       lc.expires_at AS lapsed_claim_at
+       lc.expires_at AS lapsed_claim_at,
+       CASE WHEN n.kind <> 'task' THEN pr.done END AS progress_done,
+       CASE WHEN n.kind <> 'task' THEN pr.total END AS progress_total
 FROM nodes n
+CROSS JOIN LATERAL (
+    SELECT count(*) FILTER (WHERE t.status = 'done')::integer AS done, count(*)::integer AS total
+    FROM nodes t
+    WHERE n.kind <> 'task' AND t.kind = 'task' AND t.status <> 'dropped'
+      AND CASE n.kind
+              WHEN 'story' THEN t.parent_id = n.id
+              ELSE t.parent_id IN (SELECT s.id FROM nodes s
+                                   WHERE s.parent_id = n.id AND s.status <> 'dropped')
+          END
+) pr
 CROSS JOIN LATERAL (
     SELECT coalesce(array_agg(t.id ORDER BY t.id), ARRAY[]::bigint[]) AS ids,
            coalesce(array_agg(t.id ORDER BY t.id)

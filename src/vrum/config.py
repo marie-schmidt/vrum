@@ -17,6 +17,8 @@ DEFAULT_OVERLAP_THRESHOLD = 0.55
 # The most bytes one request may hold (4 MiB, a few thousand plan items or a few hundred pages of
 # text). It is the only limit on what one write may contain.
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+# How often the board asks for what changed. An agent's work shows on the board within this long.
+DEFAULT_BOARD_POLL_SECONDS = 5.0
 # The shortest token accepted: ./scripts/init-env.sh makes one of 48 characters.
 MIN_TOKEN_CHARS = 16
 
@@ -220,6 +222,8 @@ class Settings:
     token: str = field(repr=False)
     # The most bytes one request may hold. A bigger one is refused with a plain message.
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
+    # How often the board asks the server for what changed, in seconds.
+    board_poll_seconds: float = DEFAULT_BOARD_POLL_SECONDS
     embedding: EmbeddingSettings | None = None
     llm: LanguageModelSettings | None = None
 
@@ -243,6 +247,7 @@ class Settings:
             max_request_bytes=_whole_number(
                 env, "VRUM_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES, 1000
             ),
+            board_poll_seconds=_seconds(env, "VRUM_BOARD_POLL_SECONDS", DEFAULT_BOARD_POLL_SECONDS),
             embedding=EmbeddingSettings.from_env(env),
             llm=LanguageModelSettings.from_env(env),
         )

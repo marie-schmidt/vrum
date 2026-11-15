@@ -14,7 +14,10 @@ uv run mypy
 echo "== unit tests"
 uv run pytest -m "not integration"
 
-echo "== integration tests (real containers, real MCP client)"
+echo "== integration tests (real containers, real MCP client, real headless browser)"
+# The board's tests drive Playwright's Chromium, a development tool that is never in the app image.
+# It is downloaded once and kept in your user cache.
+uv run playwright install chromium
 port="${VRUM_CHECK_PORT:-18000}"
 export COMPOSE_PROJECT_NAME=vrum-check
 # The scripted embedding service and language model the checks use (tests/scripted_embeddings.py,

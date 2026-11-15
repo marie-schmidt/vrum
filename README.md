@@ -1,15 +1,24 @@
 # Vrum
 
+<p align="center">
+  <img src="docs/marketing/website-header.png" alt="Vrum. Keep building. Keep the context. Give your coding agents shared tasks, lasting decisions and clear handoffs." width="720">
+</p>
+
+**Keep building. Keep the context.**
+
+Give your coding agents shared tasks, lasting decisions and clear handoffs. Spend less time
+repeating yourself and more time moving the project forward.
+
 Vrum is a project graph that you run yourself, for AI coding agents and the people who work
 with them. It keeps what a project is made of: epics that hold stories that hold tasks, the rules
 (requirements) each story must meet, the decisions people made and why, and what the team has
 learned. Agents use it over MCP, so that every agent, in every session, starts from what is already
-known instead of from nothing. It is built to be effective and efficient for agents and friendly to
-people: every refusal says what is wrong and what to do next, and every answer is small enough to
-read.
+known instead of from nothing. People see all of it, and steer it, on a board in the browser. It
+is built to be effective and efficient for agents and friendly to people: every refusal says what
+is wrong and what to do next, and every answer is small enough to read.
 
-It is a prototype, built one milestone at a time (see `PROGRESS.md`). Today you use it through an
-agent or a script; a browser board for people comes later.
+It is a prototype, built one milestone at a time (see `PROGRESS.md`). You use it through an agent
+or a script, and through the board (a Kanban board and a graph so far, with more pages to come).
 
 ## Quick start
 
@@ -28,7 +37,8 @@ When that finishes, the server is healthy:
 curl http://127.0.0.1:8000/health      # {"status":"ok"}
 ```
 
-The MCP endpoint is `http://127.0.0.1:8000/mcp` (change the port with `VRUM_PORT` in `.env`).
+The MCP endpoint is `http://127.0.0.1:8000/mcp` and the board is at `http://127.0.0.1:8000/board`
+(change the port with `VRUM_PORT` in `.env`).
 
 - `docker compose down` stops it. Your data stays in a Docker volume and is there when you start
   again.
@@ -149,6 +159,48 @@ Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` chan
 Every tool describes itself: its description says what it does, what it needs and what it refuses,
 and the client lists them all.
 
+## The board
+
+The board is for people. It is at `http://127.0.0.1:8000/board`, served by the same container and
+on the same port as the MCP endpoint, and it shows and changes the very same graph: whatever an
+agent does appears on it within a few seconds with no reload, and whatever you do on it is what an
+agent reads next. It keeps no data of its own, and loads nothing from the internet.
+
+**Signing in.** Type the token (`VRUM_TOKEN` in your `.env`) once for this browser tab. It is sent
+in a header, and is never put in the address or a cookie. Then give it your name: every change you
+make is recorded with it, next to the agents' names. A blank name is refused.
+
+**Board.** One column for each status and one lane for each epic. A card is a story or a task and
+shows who holds it and until when, what it is waiting for, its due date (and whether it is overdue
+or planned to start before something it needs is due), and its progress. Drag a card to another
+column of its own epic to change its status, or use its **Move** menu from the keyboard. *Ready* is
+worked out from the links, so nothing can be dropped there. Open a card to read and change its
+title, details, priority, dates and parent, to add or remove links, and to see its rules, the
+decisions in force, its facts and beliefs (a belief is shown as a suggestion, and every fact and
+belief with where it came from), what the index thinks it may duplicate, and its history. **New
+item** makes an epic, a story or a task, and **Coverage** lists the rules that are in no story and
+the stories that have no rule.
+
+**Graph.** The same work drawn as dots and lines, with a different shape for each kind and a
+different line for each kind of link, so colour is never the only clue. It opens on one epic.
+**Everything** draws every item, until there are more than a thousand dots, and then draws each epic
+as one dot and says so. **Around the chosen item** draws only what is one to three steps away.
+Rules, decisions, facts, beliefs and suggested overlaps are drawn once you switch them on. Drag a
+dot to pin it, zoom and pan, colour by kind, status or epic, and filter by kind, status and kind of
+line. Beside the drawing, a list of the chosen item's neighbours and a list of every item in view
+do everything a click on the drawing does, from the keyboard.
+
+**What it does not do yet.** Rules, decisions, facts and beliefs are shown but not edited on the
+board: an agent still does that. More pages (a table, an outline, a roadmap, memory, search, and
+the rest) come in the next milestones.
+
+**It is the same graph.** A change on the board is the same operation an agent calls, with the same
+checks. If you drop a card where it cannot go, or edit something an agent has changed since you
+read it, the board says what the server says, in the same words, and keeps what you typed. Every
+page has its own address, and what you chose lives in it after the `#` (never the token), so you
+can share a view by copying the link. How often the board asks for news is
+`VRUM_BOARD_POLL_SECONDS` (5 by default).
+
 ## What is in it
 
 - **Work:** epics, stories and tasks, in an exact hierarchy, with priority, status, a start and a
@@ -218,6 +270,7 @@ what it does. The ones you are likely to want:
 | `VRUM_PORT` | The port on this machine. 8000 by default. |
 | `VRUM_BIND_ADDRESS` | The address the port is published on. `127.0.0.1` by default: this machine only. |
 | `VRUM_MAX_REQUEST_BYTES` | The most one request may hold. 4 MiB by default. |
+| `VRUM_BOARD_POLL_SECONDS` | How often the board asks the server what changed. 5 by default. |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` | An embedding service, for search by meaning. |
 | `LLM_BASE_URL`, `LLM_MODEL` | A language model, for the four tools that need one. |
 
@@ -227,14 +280,18 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
 `.env`: each builds its own throwaway stack with a random token and removes it afterwards.
 
 - `./check.sh` is for developers, before a commit: lint, strict types, unit tests, and hundreds of
-  integration tests against real containers with a real MCP client.
+  integration tests against real containers, with a real MCP client and a real headless browser
+  for the board. The browser is Playwright's Chromium, a development tool that is never in the
+  image; `uv` downloads it the first time (about 100 MB).
 - `./acceptance.sh` is the shorter story to read and trust. From a clean clone it starts Vrum,
-  and walks one scenario through a real MCP client: it arrives and is turned away without the
-  token, plans, works with ten agents at once, decides, remembers, finds, asks a model for help, is
-  careful with secrets, and finally backs up, destroys its own database, restores it, and loads an
-  export into a fresh server. Every line it prints is one proof that holds. It uses a scripted
-  stand-in for the embedding service and the language model, so nothing is downloaded and the
-  answers are the same every run. `./acceptance.sh finding model` runs only those chapters.
+  and walks one scenario through a real MCP client and a headless browser: it arrives and is turned
+  away without the token, plans, works with ten agents at once, decides, remembers, finds, asks a
+  model for help, is careful with secrets, shows the board to a person (what agents do appears on
+  it, what a person does is in the graph, refusals read the same), and finally backs up, destroys
+  its own database, restores it, and loads an export into a fresh server. Every line it prints is
+  one proof that holds. It uses a scripted stand-in for the embedding service and the language
+  model, so nothing is downloaded and the answers are the same every run.
+  `./acceptance.sh finding model` runs only those chapters.
 
 ## Where things are
 
@@ -242,3 +299,6 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
 - `PROGRESS.md` says how far it has got, with the proof as it was run.
 - `DECISIONS.md` lists every choice the specification left open, so that you can overrule any.
 - `AGENTS.md` tells whoever works on the code how to run it and where things are.
+- `src/vrum/board/` holds the board: its server side and its page files (plain HTML, CSS and
+  JavaScript, with no build step), and the logo and icons in `src/vrum/board/static/brand/`.
+- `docs/marketing/` holds the website header and the social sharing image.

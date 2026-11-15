@@ -9,7 +9,8 @@
 # It needs Docker with compose, uv and openssl, and nothing else: run it in a fresh clone to know
 # that what is committed works. ./check.sh is the check to run before a commit (lint, types and
 # hundreds of cases); this is the shorter story a person can read and trust. It uses the scripted
-# embedding service and language model of compose.check.yaml, so no model is downloaded.
+# embedding service and language model of compose.check.yaml, so no model is downloaded. (The
+# board chapter drives Playwright's Chromium, which uv downloads the first time, about 100 MB.)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -31,10 +32,16 @@ export VRUM_PORT="$port"
 export VRUM_NO_MODEL_PORT=$((port + 1))
 export VRUM_MODEL_SCRIPT_PORT=$((port + 2))
 export VRUM_BIND_ADDRESS=127.0.0.1
+# The board chapter makes a second, empty copy of Vrum (compose project vrum-restore) for the one
+# proof that needs a graph of a known size. It removes it itself; the trap below does too.
+export VRUM_RESTORE_TEST_PORT=$((port + 3))
 
 # Whatever happens, leave nothing behind: no containers, no volumes, no images of this stack.
-trap 'docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1' EXIT
+trap 'docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1; COMPOSE_PROJECT_NAME=vrum-restore COMPOSE_FILE=compose.yaml docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1' EXIT
 docker compose down --volumes --remove-orphans > /dev/null 2>&1 || true
+
+echo "== the browser the board chapter uses (Playwright's Chromium, a development tool only)"
+uv run playwright install chromium
 
 echo "== docker compose up: a fresh database and server, built from this folder"
 docker compose up --detach --build --wait --wait-timeout 240

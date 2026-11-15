@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 from collections import deque
+from collections.abc import Mapping
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -22,7 +23,8 @@ log = logging.getLogger("vrum.access")
 # The JSON-RPC error code that goes with each refusal (the range -32000 to -32099 is for servers).
 _CODES = {401: -32001, 413: -32002}
 
-# Paths that need no token, with the one method each answers. They say nothing about the data.
+# Paths that need no token, with the one method each answers. They say nothing about the data. The
+# board's page files are added to these when the application is built (see vrum.board).
 OPEN_PATHS = {"/health": "GET"}
 
 NO_TOKEN = (
@@ -48,17 +50,25 @@ def too_large(size: int | None, limit: int) -> str:
 
 
 class AccessGuard:
-    def __init__(self, app: ASGIApp, *, token: str, max_request_bytes: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        token: str,
+        max_request_bytes: int,
+        open_paths: Mapping[str, str] = OPEN_PATHS,
+    ) -> None:
         self.app = app
         self._token = token.encode()
         self._limit = max_request_bytes
+        self._open_paths = open_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         path, method = scope["path"], scope["method"]
-        if OPEN_PATHS.get(path) == method:
+        if self._open_paths.get(path) == method:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from vrum.board import add_board
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
 from vrum.common import Refusal, clean_actor, parse_day
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
@@ -1812,4 +1813,5 @@ def create_server(settings: Settings) -> GuardedServer:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
+    add_board(mcp, settings=settings, searcher=searcher)
     return mcp

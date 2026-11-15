@@ -60,6 +60,14 @@ def test_every_tool_the_readme_names_is_a_tool_the_server_has() -> None:
     assert not missing, f"the README names tools that do not exist: {missing}"
 
 
+def test_every_image_and_link_to_a_file_in_the_readme_points_at_a_file_that_exists() -> None:
+    targets = re.findall(r"!?\[[^\]]*\]\((?!https?:|#)([^)\s]+)\)", README)
+    targets += re.findall(r'<img src="(?!https?:)([^"]+)"', README)
+    assert "docs/marketing/website-header.png" in targets
+    for target in targets:
+        assert (ROOT / target).is_file(), f"the README points at {target}, which is missing"
+
+
 def test_the_example_configurations_are_valid_json_and_point_at_the_mcp_endpoint() -> None:
     blocks = re.findall(r"```json\n(.*?)\n```", README, re.DOTALL)
     assert len(blocks) == 2

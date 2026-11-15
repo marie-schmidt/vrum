@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C and M9 done; M8 skipped; next is M10)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C, M9 and M10 done; M8 skipped; next is M11)
 
 ## Inputs (from the loop file)
 
@@ -27,7 +27,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M7. Export, import, backup, restore (attempts: 1) (2026-11-15, commit 6990609)
 - [x] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs) (2026-11-15, no commit: nothing was built)
 - [x] M9. Docs and acceptance (attempts: 1) (2026-11-15, commit 723bd30)
-- [ ] M10. Board for humans: Kanban and graph (attempts: 0)
+- [x] M10. Board for humans: Kanban and graph (attempts: 1) (2026-11-15, commit COMMIT)
 - [ ] M11. More views of the work (attempts: 0)
 - [ ] M12. Rules and memory on the board (attempts: 0)
 - [ ] M13. Find and connect (attempts: 0)
@@ -80,6 +80,7 @@ Full wording is in `DECISIONS.md`.
 - M7: `scripts/backup.sh` is a consistent `pg_dump` archive of the whole database (index included), readable only by its owner, not encrypted, checked to be readable before it is kept, to `backups/` unless given a file. `scripts/restore.sh` restores into a new database and swaps it in only when whole; into a database that holds data it refuses unless `--replace`. It renumbers the transactions of the restored event log (without that the change feed hides everything written after a restore).
 - M7: the tests that destroy or load a database run on a second, separate copy of Vrum (compose project `vrum-restore`, port `VRUM_CHECK_PORT` + 3), which `check.sh` also removes if a test dies. The scripts put `src` on the path themselves, because on this machine Python skips the editable install.
 - M9: `./acceptance.sh` is one story told through a real MCP client in nine chapters, one line for each proof; it is not a second test suite. It runs in the checkout it is in (clone, then run it there), on its own throwaway stack with the check stack's scripted stand-ins. Proofs about the source stay in `./check.sh`. The README's agent guide is a copy of the server's instructions, kept equal by a test; only its Python example was run, the other client configurations follow the vendors' documentation.
+- M10: the board's pages call the MCP tools themselves through `POST /board/api/tool/<name>` (only the tools in `READ_TOOLS` and `WRITE_TOOLS`), so every board action has an agent's checks and its refusals in the same words. The page files are open (no data in them) with a strict content security policy; everything under `/board/api` needs the token, which lives only in the tab's session storage. Stories and tasks are cards in the lane of their epic; a drag only changes the status, within the lane; ready cannot be dropped on; a card is never replaced while someone is typing in it. Progress is tasks done out of tasks not dropped (an epic counts the tasks of its stories that are not dropped), worked out by the database and in `get_node` and `list_nodes`. The graph is SVG with its own force layout; the local graph is everything within 1 to 3 steps along the lines that are switched on; Everything draws one dot for each epic above 1,000 dots; "rule of" and "rests on" lines were added to the ones the spec names. The board polls `changes_since` every `VRUM_BOARD_POLL_SECONDS` (5). Playwright (a development dependency only) drives Chromium headless; `./check.sh` and `./acceptance.sh` download it once. The marketing images are in `docs/marketing/` and the logo and icons in `src/vrum/board/static/brand/`; the images themselves were not changed.
 
 ## M0 proof, as run
 

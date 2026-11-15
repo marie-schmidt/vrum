@@ -170,6 +170,28 @@ async def test_the_health_check_needs_no_token_and_nothing_else_is_open(
     assert inner.reached == 1
 
 
+async def test_paths_given_to_the_guard_as_open_are_open_for_their_method_only(
+    inner: Recorder,
+) -> None:
+    guard = AccessGuard(
+        inner,
+        token=TOKEN,
+        max_request_bytes=LIMIT,
+        open_paths={**OPEN_PATHS, "/board": "GET", "/board/app.js": "GET"},
+    )
+    for path in ("/health", "/board", "/board/app.js"):
+        assert (await ask(guard, method="GET", path=path, chunks=[])).status == 200
+    assert inner.reached == 3
+    for method, path in (
+        ("POST", "/board"),
+        ("GET", "/board/api/info"),
+        ("GET", "/board/other.js"),
+        ("POST", "/board/api/tool/list_nodes"),
+    ):
+        assert (await ask(guard, method=method, path=path, chunks=[])).status == 401
+    assert inner.reached == 3
+
+
 async def test_a_request_that_says_it_is_too_big_is_refused_before_its_body_is_read(
     guard: AccessGuard, inner: Recorder
 ) -> None:

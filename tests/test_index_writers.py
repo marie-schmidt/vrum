@@ -13,10 +13,12 @@ WRITES = re.compile(
 
 
 def test_no_code_but_the_reindex_job_writes_to_the_index() -> None:
+    # Everything that is served or run, the board's endpoints and pages included.
     writers = {
         path.name
-        for path in SOURCE.iterdir()
-        if path.suffix in (".py", ".sql") and WRITES.search(path.read_text(encoding="utf-8"))
+        for path in SOURCE.rglob("*")
+        if path.suffix in (".py", ".sql", ".js", ".html")
+        and WRITES.search(path.read_text(encoding="utf-8"))
     }
     assert writers == {"indexing.py"}
 

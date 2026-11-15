@@ -10,7 +10,8 @@ import uvicorn
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
-from vrum.access import AccessGuard
+from vrum.access import OPEN_PATHS, AccessGuard
+from vrum.board import open_paths as board_open_paths
 from vrum.config import ConfigError, Settings
 from vrum.db import SchemaOutOfDate, prepare_schema
 from vrum.logs import configure_logging, event
@@ -36,7 +37,10 @@ def build_app(settings: Settings) -> Starlette:
         max_request_body_size=settings.max_request_bytes,
     )
     app.add_middleware(
-        AccessGuard, token=settings.token, max_request_bytes=settings.max_request_bytes
+        AccessGuard,
+        token=settings.token,
+        max_request_bytes=settings.max_request_bytes,
+        open_paths={**OPEN_PATHS, **board_open_paths()},
     )
     return app
 
