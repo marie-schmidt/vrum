@@ -28,6 +28,11 @@ CREATE TABLE nodes (
     version     integer NOT NULL DEFAULT 1,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
+    -- What exact-words search reads. Worked out by the database from the title and body, so it is
+    -- current the moment a change is saved.
+    search      tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B')
+    ) STORED,
     CONSTRAINT node_kind_is_known CHECK (kind IN ('epic', 'story', 'task')),
     CONSTRAINT node_title_is_not_blank CHECK (btrim(title) <> ''),
     CONSTRAINT node_status_is_known
@@ -43,6 +48,7 @@ CREATE TABLE nodes (
 );
 
 CREATE INDEX nodes_parent_idx ON nodes (parent_id);
+CREATE INDEX nodes_search_idx ON nodes USING gin (search);
 
 CREATE FUNCTION nodes_guard_update() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -210,6 +216,9 @@ CREATE TABLE rules (
     version    integer NOT NULL DEFAULT 1,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    search     tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B')
+    ) STORED,
     CONSTRAINT rule_title_is_not_blank CHECK (btrim(title) <> ''),
     CONSTRAINT rule_status_is_known CHECK (status IN ('held', 'settled', 'dropped')),
     CONSTRAINT rule_version_starts_at_one CHECK (version >= 1),
@@ -218,6 +227,7 @@ CREATE TABLE rules (
 );
 
 CREATE INDEX rules_story_idx ON rules (story_id);
+CREATE INDEX rules_search_idx ON rules USING gin (search);
 
 CREATE FUNCTION rules_guard_update() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -262,6 +272,11 @@ CREATE TABLE memories (
     -- Beliefs only: the person who has looked at it, and when.
     confirmed_by     text,
     confirmed_at     timestamptz,
+    -- A fact's source is searchable too, a little less than what it says.
+    search           tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', text), 'A')
+        || setweight(to_tsvector('english', coalesce(source, '')), 'B')
+    ) STORED,
     CONSTRAINT memory_type_is_known CHECK (type IN ('fact', 'belief')),
     CONSTRAINT memory_kind_is_known CHECK (kind IN ('world', 'experience')),
     CONSTRAINT memory_origin_is_known CHECK (origin IN ('stated', 'extracted', 'derived')),
@@ -299,6 +314,7 @@ CREATE TABLE memories (
 );
 
 CREATE INDEX memories_superseded_by_idx ON memories (superseded_by_id);
+CREATE INDEX memories_search_idx ON memories USING gin (search);
 
 CREATE FUNCTION memories_are_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -352,6 +368,10 @@ CREATE TABLE decisions (
     promoted_from_id bigint,
     promoted_from_type text GENERATED ALWAYS AS (CASE WHEN promoted_from_id IS NOT NULL THEN 'belief' END) STORED,
     recorded_at      timestamptz NOT NULL DEFAULT now(),
+    search           tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', title), 'A')
+        || setweight(to_tsvector('english', text || ' ' || reason), 'B')
+    ) STORED,
     CONSTRAINT decision_kind_is_known CHECK (kind IN ('decision', 'principle')),
     CONSTRAINT decision_status_is_known CHECK (status IN ('active', 'superseded')),
     CONSTRAINT decision_title_is_not_blank CHECK (btrim(title) <> ''),
@@ -368,6 +388,7 @@ CREATE TABLE decisions (
 );
 
 CREATE INDEX decisions_superseded_by_idx ON decisions (superseded_by_id);
+CREATE INDEX decisions_search_idx ON decisions USING gin (search);
 CREATE INDEX decisions_promoted_from_idx ON decisions (promoted_from_id) WHERE promoted_from_id IS NOT NULL;
 
 CREATE FUNCTION decisions_are_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -606,6 +627,37 @@ SELECT m.id, m.type, m.kind, m.text, m.source, m.happened_on, m.origin, m.record
        coalesce((SELECT array_agg(d.id ORDER BY d.id) FROM decisions d
                  WHERE d.promoted_from_id = m.id), ARRAY[]::bigint[]) AS promoted_decision_ids
 FROM memories m;
+
+-- Exact-words search and the semantic index ---------------------------------------------------
+
+-- Every thing a person can search for: the id and its search column. The type is the one a person
+-- sees: a decision's own kind (decision or principle) and a memory's own type (fact or belief).
+CREATE VIEW search_documents AS
+SELECT n.kind AS item_type, n.id, n.search FROM nodes n
+UNION ALL
+SELECT 'rule', r.id, r.search FROM rules r
+UNION ALL
+SELECT d.kind, d.id, d.search FROM decisions d
+UNION ALL
+SELECT m.type, m.id, m.search FROM memories m;
+
+-- What the semantic index embeds, and a hash of it, so that an item whose text changed is known
+-- to be waiting to be indexed. Epics, stories, rules, decisions, principles, facts and beliefs are
+-- embedded. Tasks are found by exact words only: there are many of them and they are short. The
+-- index tables themselves are not in this file: they are derived, and the reindex job builds them
+-- (see vrum/indexing.py).
+CREATE VIEW index_source AS
+SELECT s.item_type, s.id, s.content, md5(s.content) AS content_hash
+FROM (
+    SELECT n.kind AS item_type, n.id, btrim(n.title || E'\n' || n.body) AS content
+    FROM nodes n WHERE n.kind <> 'task'
+    UNION ALL
+    SELECT 'rule', r.id, btrim(r.title || E'\n' || r.body) FROM rules r
+    UNION ALL
+    SELECT d.kind, d.id, btrim(d.title || E'\n' || d.text || E'\n' || d.reason) FROM decisions d
+    UNION ALL
+    SELECT m.type, m.id, btrim(m.text) FROM memories m
+) s;
 
 -- The event log ----------------------------------------------------------------------------
 

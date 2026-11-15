@@ -10,6 +10,7 @@ from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size, 
 from vrum.db import Database
 from vrum.decisions import LINK_TABLES, Decision, count_decisions, page_decisions
 from vrum.memories import MEMORY_COLUMNS, Memory, to_memory
+from vrum.search import IndexNote, Searcher, SearchResult
 
 RECALL_LISTS = (
     "all",
@@ -52,6 +53,15 @@ class MemorySection(BaseModel):
     )
 
 
+class SimilarSection(BaseModel):
+    items: list[SearchResult] = Field(
+        description="Active decisions, facts and beliefs that are alike in meaning but not linked "
+        "to this item. Suggestions only: nothing here was linked by anyone."
+    )
+    count: int = Field(description="How many there are in all.")
+    index: IndexNote
+
+
 class Recall(BaseModel):
     active_decisions: DecisionSection = Field(
         description="Active decisions linked to this item. Only what is linked, nothing inferred."
@@ -75,6 +85,10 @@ class Recall(BaseModel):
     past_memories: MemorySection = Field(
         description="Facts and beliefs linked to this item that were superseded or retracted, with "
         "what replaced them or why they were wrong."
+    )
+    similar: SimilarSection | None = Field(
+        description="Only when you ask for it with with_similar: what is alike in meaning but "
+        "not linked. Everything else here is exact links only."
     )
 
 
@@ -119,8 +133,9 @@ async def _page_memories(
 
 
 class Recaller:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, searcher: Searcher) -> None:
         self._database = database
+        self._searcher = searcher
 
     async def recall(
         self,
@@ -130,8 +145,9 @@ class Recaller:
         show: str,
         limit: int,
         after_id: int | None,
+        with_similar: bool,
     ) -> Recall:
-        """What is known about one node or rule, by exact links only."""
+        """What is known about one node or rule, by exact links, and, if asked, what is alike."""
         limit = page_size(limit)
         check_choice("show", show, RECALL_LISTS)
         if (node_id is None) == (rule_id is None):
@@ -212,6 +228,27 @@ class Recaller:
                     count=await _count_memories(conn, where, params),
                     next_after_id=next_memory_id,
                 )
+            exclude: set[tuple[str, int]] = set()
+            if with_similar:
+                # Whatever is linked or already shown is not "similar": it is known.
+                for row in await fetch_all(
+                    conn, f"SELECT kind, id FROM decision_state WHERE {linked_decision}", params
+                ):
+                    exclude.add((row["kind"], row["id"]))
+                for row in await fetch_all(
+                    conn, f"SELECT type, id FROM memory_state WHERE {relevant}", params
+                ):
+                    exclude.add((row["type"], row["id"]))
+        similar: SimilarSection | None = None
+        if with_similar:
+            similar_items, count, note = await self._searcher.similar(
+                node_id=node_id,
+                rule_id=rule_id,
+                wanted_types=["decision", "fact", "belief"],
+                exclude=exclude,
+                limit=limit,
+            )
+            similar = SimilarSection(items=similar_items, count=count, index=note)
         return Recall(
             active_decisions=decisions["active_decisions"],
             active_principles=decisions["active_principles"],
@@ -220,4 +257,5 @@ class Recaller:
             stale_beliefs=memories["stale_beliefs"],
             superseded_decisions=decisions["superseded_decisions"],
             past_memories=memories["past_memories"],
+            similar=similar,
         )

@@ -28,6 +28,15 @@ services:
       VRUM_PORT: ${VRUM_PORT:-8000}
       VRUM_DB_HOST: db
       VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+      # The embedding service, if any: see .env.example. Without these, search works by exact
+      # words only.
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-}
+      EMBEDDING_MIN_SIMILARITY: ${EMBEDDING_MIN_SIMILARITY:-}
+      EMBEDDING_OVERLAP_THRESHOLD: ${EMBEDDING_OVERLAP_THRESHOLD:-}
+      EMBEDDING_REINDEX_SECONDS: ${EMBEDDING_REINDEX_SECONDS:-}
     ports:
       # The same port inside and outside, because the server only accepts requests addressed to
       # localhost on that port. Bound to this machine only unless VRUM_BIND_ADDRESS says otherwise.
@@ -39,5 +48,35 @@ services:
       start_period: 15s
       retries: 5
 
+  # An embedding service that runs on this machine, for meaning-based search. Off unless asked for:
+  #   docker compose --profile local-embeddings up -d --build --wait
+  # with EMBEDDING_BASE_URL=http://ollama:11434/v1 and EMBEDDING_MODEL=all-minilm in .env. The
+  # first start downloads the model (about 50 MB) from the internet; after that it runs offline.
+  ollama:
+    profiles: ["local-embeddings"]
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-minilm}
+    volumes:
+      - vrum-models:/root/.ollama
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        trap 'kill $$pid' TERM INT
+        ollama serve &
+        pid=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$EMBEDDING_MODEL"
+        wait $$pid
+    healthcheck:
+      # Healthy once the model has been downloaded.
+      test: ["CMD-SHELL", "ollama list | grep -q \"$$EMBEDDING_MODEL\""]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+
 volumes:
   vrum-data:
+  vrum-models:

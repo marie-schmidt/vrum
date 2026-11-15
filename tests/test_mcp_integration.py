@@ -52,6 +52,10 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "get_memory",
         "list_memories",
         "memory_history",
+        "search",
+        "similar_items",
+        "find_overlaps",
+        "reindex",
     }
     assert all(tool.description for tool in tools)
 

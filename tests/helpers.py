@@ -2,7 +2,10 @@
 straight to the database."""
 
 import os
+import random
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -253,3 +256,29 @@ async def make_belief(
         "evidence_fact_ids": [fact["id"] for fact in evidence],
     }
     return await ok(client, "record_belief", **{**fields, **arguments})
+
+
+def unique_word() -> str:
+    """A made-up word that appears nowhere else, so a search for it finds only what a test made.
+    Consonants only, so that neither the stemmer nor the tokenizer can change it."""
+    return "zq" + "".join(random.choices("bcdfghjklmnpqrtvwxz", k=10))
+
+
+@contextmanager
+def embeddings_stopped() -> Iterator[None]:
+    """The scripted embedding service is stopped inside the block and started again after it."""
+    stopped = compose("stop", "scripted-embeddings")
+    assert stopped.returncode == 0, stopped.stderr
+    try:
+        yield
+    finally:
+        started = compose("up", "--detach", "--wait", "scripted-embeddings")
+        assert started.returncode == 0, started.stderr
+
+
+async def reindexed(client: Client) -> dict[str, Any]:
+    """Run the reindex job now, and check that nothing is left waiting."""
+    report = await ok(client, "reindex")
+    assert report["error"] is None and report["failed"] == [], report
+    assert report["waiting_after"] == 0, report
+    return report

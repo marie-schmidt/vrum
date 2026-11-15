@@ -1056,7 +1056,7 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_entry_is
     past = {entry["memory"]["id"]: entry["why"] for entry in result["past_memories"]["items"]}
     assert past[replaced["id"]].startswith("linked directly to this node; replaced by fact ")
     assert past[retracted["id"]] == "linked directly to this node; retracted: It was wrong"
-    counts = {name: result[name]["count"] for name in result}
+    counts = {name: section["count"] for name, section in result.items() if section}
     assert counts["facts"] == 1 and counts["beliefs"] == 3 and counts["stale_beliefs"] == 1
     assert counts["past_memories"] == 2 and counts["superseded_decisions"] == 0
 

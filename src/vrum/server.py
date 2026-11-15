@@ -1,7 +1,8 @@
 """The MCP server: its tools, its health check, and how it is wired to the database."""
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import date
 from importlib.metadata import version
 from typing import Annotated
@@ -14,15 +15,18 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
-from vrum.common import parse_day
-from vrum.config import Settings
+from vrum.common import Refusal, parse_day
+from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
 from vrum.db import Database
 from vrum.decisions import Decision, DecisionPage, Decisions
+from vrum.embeddings import EmbeddingUnavailable
 from vrum.graph import EventPage, Graph, Node, NodePage
+from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
 from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
+from vrum.search import OverlapPage, Searcher, SearchPage
 
 _Actor = Annotated[str, Field(description="Your name: the person or agent making this change.")]
 _Version = Annotated[
@@ -114,14 +118,29 @@ def create_server(settings: Settings) -> MCPServer[Database]:
     rules = Rules(database)
     decisions = Decisions(database)
     memories = Memories(database)
-    recaller = Recaller(database)
+    indexer = Indexer(database, settings.embedding)
+    embedding = settings.embedding
+    searcher = Searcher(
+        database,
+        indexer,
+        embedding.min_similarity if embedding else DEFAULT_MIN_SIMILARITY,
+        embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
+    )
+    recaller = Recaller(database, searcher)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
         await database.open()
+        # The reindex job keeps the semantic index up to date. It only runs when an embedding
+        # service is set up.
+        job = asyncio.create_task(indexer.run_forever()) if embedding else None
         try:
             yield database
         finally:
+            if job is not None:
+                job.cancel()
+                with suppress(asyncio.CancelledError):
+                    await job
             await database.close()
 
     mcp = MCPServer[Database]("vrum", version=version("vrum"), lifespan=lifespan)
@@ -728,6 +747,13 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             int | None,
             Field(description="With show set to one section: pass its next_after_id."),
         ] = None,
+        with_similar: Annotated[
+            bool,
+            Field(
+                description="True: also return decisions, facts and beliefs that are alike in "
+                "meaning but not linked, as suggestions in a section of their own."
+            ),
+        ] = False,
     ) -> Recall:
         """Recall everything known that matters for one node or rule, in separate sections.
 
@@ -737,11 +763,17 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         changed, and past memories were replaced or found wrong; neither is in force. Every entry
         says why it is there. Only exact links are followed: nothing is inferred, and what is
         linked to the parent or children of this item is not included, so recall those too if
-        they matter. Call this before starting work.
+        they matter. With with_similar, a last section adds what is alike in meaning but not
+        linked, as suggestions. Call this before starting work.
         """
         with _database_errors():
             return await recaller.recall(
-                node_id=node_id, rule_id=rule_id, show=show, limit=limit, after_id=after_id
+                node_id=node_id,
+                rule_id=rule_id,
+                show=show,
+                limit=limit,
+                after_id=after_id,
+                with_similar=with_similar,
             )
 
     @mcp.tool()
@@ -1095,6 +1127,170 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             return await decisions.decision_history(
                 decision_id=decision_id, limit=limit, after_id=after_id
             )
+
+    @mcp.tool()
+    async def search(
+        query: Annotated[
+            str,
+            Field(
+                description="What to look for. Words are matched as whole words, so every word "
+                "must be in the text (plurals and endings are matched). Put a phrase in double "
+                "quotes, write or between alternatives, and put - before a word to leave it out. "
+                "Any characters are allowed."
+            ),
+        ],
+        mode: Annotated[
+            str,
+            Field(
+                description="both (the default: exact words and meaning, fused by rank), words "
+                "(exact words only) or meaning (similar meaning only)."
+            ),
+        ] = "both",
+        types: Annotated[
+            list[str] | None,
+            Field(
+                description="Only these types: epic, story, task, rule, decision, principle, "
+                "fact, belief."
+            ),
+        ] = None,
+        statuses: Annotated[
+            list[str] | None,
+            Field(description="Only these statuses, such as ready, done, active or retracted."),
+        ] = None,
+        min_similarity: Annotated[
+            float | None,
+            Field(
+                description="How alike in meaning, from 0 to 1, an item must be to match by "
+                "meaning. Leave empty for the server's setting."
+            ),
+        ] = None,
+        limit: Annotated[int, Field(description="How many results to return, from 1 to 200.")] = 20,
+        offset: Annotated[
+            int, Field(description="How many results to skip. Pass next_offset for the next page.")
+        ] = 0,
+    ) -> SearchPage:
+        """Search epics, stories, tasks, rules, decisions, principles, facts and beliefs.
+
+        Each result says how it matched (words, meaning or both), why, and shows a snippet with
+        the matched words between « and ». Matches by meaning alone are suggestions, and a belief
+        or a fact a model wrote is always labelled so. The answer counts the matches by type and
+        by status. Exact words are found the moment something is saved, and keep working when the
+        embedding service is down; the answer says when meaning could not be used. Tasks are
+        found by exact words only.
+        """
+        with _database_errors():
+            return await searcher.search(
+                query=query,
+                mode=mode,
+                types=types,
+                statuses=statuses,
+                min_similarity=min_similarity,
+                limit=limit,
+                offset=offset,
+            )
+
+    @mcp.tool()
+    async def similar_items(
+        node_id: Annotated[int | None, Field(description="An epic, story or task.")] = None,
+        rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
+        decision_id: Annotated[int | None, Field(description="Or a decision or principle.")] = None,
+        memory_id: Annotated[int | None, Field(description="Or a fact or belief.")] = None,
+        text: Annotated[str | None, Field(description="Or a piece of text.")] = None,
+        types: Annotated[
+            list[str] | None,
+            Field(description="Only these types, such as decision, fact or belief."),
+        ] = None,
+        min_similarity: Annotated[
+            float | None,
+            Field(description="How alike, from 0 to 1. Leave empty for the server's setting."),
+        ] = None,
+        limit: Annotated[int, Field(description="How many results to return, from 1 to 200.")] = 20,
+        offset: Annotated[
+            int, Field(description="How many results to skip. Pass next_offset for the next page.")
+        ] = 0,
+    ) -> SearchPage:
+        """Find items that are alike in meaning to one item or one piece of text, nearest first.
+
+        Give exactly one of node_id, rule_id, decision_id, memory_id or text. The item itself is
+        left out. Every result is a suggestion. It needs the embedding service and the index; if
+        either is not ready it says so and changes nothing.
+        """
+        with _database_errors():
+            return await searcher.similar_items(
+                node_id=node_id,
+                rule_id=rule_id,
+                decision_id=decision_id,
+                memory_id=memory_id,
+                text=text,
+                types=types,
+                min_similarity=min_similarity,
+                limit=limit,
+                offset=offset,
+            )
+
+    @mcp.tool()
+    async def find_overlaps(
+        item_type: Annotated[
+            str, Field(description="story (the default), epic or rule: what to compare.")
+        ] = "story",
+        epic_ids: Annotated[
+            list[int] | None,
+            Field(
+                description="Only pairs where at least one of the two is in one of these epics. "
+                "Leave empty to look at everything."
+            ),
+        ] = None,
+        min_similarity: Annotated[
+            float | None,
+            Field(
+                description="How alike, from 0 to 1, a pair must be to be reported. Leave empty "
+                "for the server's setting."
+            ),
+        ] = None,
+        include_dropped: Annotated[
+            bool, Field(description="True: also compare dropped stories, epics and rules.")
+        ] = False,
+        limit: Annotated[int, Field(description="How many pairs to return, from 1 to 200.")] = 20,
+        offset: Annotated[
+            int, Field(description="How many pairs to skip. Pass next_offset for the next page.")
+        ] = 0,
+    ) -> OverlapPage:
+        """Find pairs of stories, epics or rules in different epics that look like the same thing.
+
+        Pairs are listed most alike first, with their scores, and say which links already exist
+        between them. This only reports: it never merges, links or changes anything. A person or
+        an agent decides, for example by linking two stories as duplicates. It uses the index, so
+        items that are new or changed and not yet indexed are not compared yet; the answer counts
+        them.
+        """
+        with _database_errors():
+            return await searcher.find_overlaps(
+                item_type=item_type,
+                epic_ids=epic_ids,
+                min_similarity=min_similarity,
+                include_dropped=include_dropped,
+                limit=limit,
+                offset=offset,
+            )
+
+    @mcp.tool()
+    async def reindex() -> IndexReport:
+        """Bring the semantic index up to date now: build it if it does not exist, then embed
+        every epic, story, rule, decision, principle, fact and belief that is new or changed.
+
+        The server also does this by itself within seconds, so you rarely need it. This is the only
+        thing that writes to the index, which holds nothing that is not in the graph and can be
+        dropped and rebuilt at any time. If the embedding service cannot be reached, nothing is
+        changed and exact-words search still works.
+        """
+        with _database_errors():
+            try:
+                return await indexer.reindex()
+            except EmbeddingUnavailable as error:
+                raise Refusal(
+                    f"{error} Nothing was indexed. Exact-words search still works; try again "
+                    "when the service is back."
+                ) from error
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:

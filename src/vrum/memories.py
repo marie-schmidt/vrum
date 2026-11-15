@@ -153,7 +153,7 @@ class MemoryChange(BaseModel):
     )
 
 
-def _label(row: dict[str, Any]) -> str:
+def memory_label(row: dict[str, Any]) -> str:
     if row["type"] == "belief":
         by = "drawn up by a language model" if row["origin"] == "derived" else "stated"
         return (
@@ -185,7 +185,7 @@ def _stale_because(row: dict[str, Any]) -> list[str]:
 
 def to_memory(row: dict[str, Any]) -> Memory:
     return Memory.model_validate(
-        {**row, "label": _label(row), "stale_because": _stale_because(row)}
+        {**row, "label": memory_label(row), "stale_because": _stale_because(row)}
     )
 
 

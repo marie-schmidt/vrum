@@ -5,6 +5,16 @@ from dataclasses import dataclass, field
 
 from psycopg.conninfo import make_conninfo
 
+# How alike (0 to 1, cosine) two texts must be to be found by meaning, and to be reported as
+# overlapping. Scores depend on the model, so these are measured for the local model that
+# compose.yaml offers (all-minilm), on reworded requirements: duplicates scored 0.54 to 0.87,
+# related but different ones 0.30 to 0.49, and unrelated ones 0.35 at most; short questions scored
+# 0.36 to 0.66 against the story they were about. They are a starting point, small samples, and
+# differ by model: for another model, measure and set EMBEDDING_MIN_SIMILARITY and
+# EMBEDDING_OVERLAP_THRESHOLD.
+DEFAULT_MIN_SIMILARITY = 0.35
+DEFAULT_OVERLAP_THRESHOLD = 0.55
+
 
 class ConfigError(Exception):
     """The environment is missing something or holds a value that cannot be used."""
@@ -26,6 +36,109 @@ def _port(env: Mapping[str, str], name: str, default: int) -> int:
     return int(raw)
 
 
+def _whole_number(env: Mapping[str, str], name: str, default: int, smallest: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    if not raw.isdecimal() or int(raw) < smallest:
+        raise ConfigError(
+            f"{name} must be a whole number of {smallest} or more, but it is {raw!r}."
+        )
+    return int(raw)
+
+
+def _fraction(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not 0.0 <= value <= 1.0:
+        raise ConfigError(f"{name} must be a number from 0 to 1, but it is {raw!r}.")
+    return value
+
+
+def _seconds(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value < 0.5:
+        raise ConfigError(f"{name} must be a number of seconds, 0.5 or more, but it is {raw!r}.")
+    return value
+
+
+def _secret(env: Mapping[str, str], name: str) -> str | None:
+    """A secret given directly in NAME, or in the file that NAME_FILE names. Never both."""
+    direct = env.get(name, "").strip()
+    path = env.get(f"{name}_FILE", "").strip()
+    if direct and path:
+        raise ConfigError(f"Set only one of {name} and {name}_FILE, not both.")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = handle.read().strip()
+        except OSError as error:
+            raise ConfigError(
+                f"{name}_FILE is {path!r}, which cannot be read ({error})."
+            ) from error
+        if not value:
+            raise ConfigError(f"{name}_FILE is {path!r}, which is empty.")
+        return value
+    return direct or None
+
+
+@dataclass(frozen=True)
+class EmbeddingSettings:
+    """The embedding service: any OpenAI-compatible one, local or not. Without it, exact-words
+    search works and everything that needs meaning says so."""
+
+    base_url: str
+    model: str
+    api_key: str | None = field(repr=False)
+    # The longest text sent to the model for one item. Longer text is cut, the title first.
+    max_chars: int
+    # How alike two texts must be (0 to 1, cosine) to be found by meaning.
+    min_similarity: float
+    # How alike two items must be to be reported as overlapping.
+    overlap_threshold: float
+    # How often the background job looks for items that are waiting to be indexed.
+    reindex_seconds: float
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> "EmbeddingSettings | None":
+        base_url = env.get("EMBEDDING_BASE_URL", "").strip()
+        model = env.get("EMBEDDING_MODEL", "").strip()
+        if not base_url and not model:
+            return None
+        if not base_url or not model:
+            missing = "EMBEDDING_BASE_URL" if not base_url else "EMBEDDING_MODEL"
+            raise ConfigError(
+                f"{missing} is not set. EMBEDDING_BASE_URL and EMBEDDING_MODEL go together: set "
+                "both to use an embedding service, or neither to go without one."
+            )
+        if not base_url.startswith(("http://", "https://")):
+            raise ConfigError(
+                f"EMBEDDING_BASE_URL must start with http:// or https://, but it is {base_url!r}."
+            )
+        return cls(
+            base_url=base_url.rstrip("/"),
+            model=model,
+            api_key=_secret(env, "EMBEDDING_API_KEY"),
+            max_chars=_whole_number(env, "EMBEDDING_MAX_CHARS", 2000, 100),
+            min_similarity=_fraction(env, "EMBEDDING_MIN_SIMILARITY", DEFAULT_MIN_SIMILARITY),
+            overlap_threshold=_fraction(
+                env, "EMBEDDING_OVERLAP_THRESHOLD", DEFAULT_OVERLAP_THRESHOLD
+            ),
+            reindex_seconds=_seconds(env, "EMBEDDING_REINDEX_SECONDS", 5.0),
+        )
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str
@@ -35,6 +148,7 @@ class Settings:
     db_name: str
     db_user: str
     db_password: str = field(repr=False)
+    embedding: EmbeddingSettings | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -52,6 +166,7 @@ class Settings:
                 "VRUM_DB_PASSWORD",
                 "There is no default password; run ./scripts/init-env.sh to create one in .env.",
             ),
+            embedding=EmbeddingSettings.from_env(env),
         )
 
     def database_conninfo(self) -> str:

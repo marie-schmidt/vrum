@@ -17,6 +17,8 @@ uv run pytest -m "not integration"
 echo "== integration tests (real containers, real MCP client)"
 port="${VRUM_CHECK_PORT:-18000}"
 export COMPOSE_PROJECT_NAME=vrum-check
+# The scripted embedding service the checks use (tests/scripted_embeddings.py) comes from this file.
+export COMPOSE_FILE=compose.yaml:compose.check.yaml
 export VRUM_DB_PASSWORD="$(openssl rand -hex 16)"
 export VRUM_PORT="$port"
 export VRUM_BIND_ADDRESS=127.0.0.1
