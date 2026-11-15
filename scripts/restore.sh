@@ -26,7 +26,10 @@ replace="${2:-}"
 psql_db() { docker compose exec -T db psql -U vrum -v ON_ERROR_STOP=1 -tA "$@"; }
 
 echo "Starting the database..."
-docker compose up --detach --wait db
+if ! docker compose up --detach --wait db > /dev/null 2>&1; then
+  echo "The database did not start. Look at its log: docker compose logs db" >&2
+  exit 1
+fi
 
 if ! docker compose exec -T db pg_restore --list < "$file" > /dev/null; then
   echo "$file is not a backup this database can read, so nothing was changed." >&2
