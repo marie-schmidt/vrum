@@ -734,7 +734,9 @@ async def test_contradictions_are_proposals_with_checked_quotes_and_change_nothi
     assert f"[belief:{elsewhere['id']}]" not in sent["user"] and statement in sent["user"]
     (call,) = await model_calls(client, actor)
     assert call["after"]["tool"] == "find_contradictions"
-    assert call["after"]["used"] == [{"type": "belief", "id": b["id"]} for b in (one, two, three)]
+    # In the order they were found, which is how alike they are: not the order they were made in.
+    used = sorted(call["after"]["used"], key=lambda item: item["id"])
+    assert used == [{"type": "belief", "id": b["id"]} for b in (one, two, three)]
     assert call["after"]["result"]["proposed"] == [one["id"]]
     # Applying a proposal is a call of the person's or agent's own: here, a replacement.
     replaced = await ok(
