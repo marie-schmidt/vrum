@@ -1,0 +1,43 @@
+name: vrum
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vrum
+      POSTGRES_DB: vrum
+      POSTGRES_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+    volumes:
+      - vrum-data:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP on purpose: during first-time setup the database only listens on its socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U vrum -d vrum"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      VRUM_HOST: 0.0.0.0
+      VRUM_PORT: ${VRUM_PORT:-8000}
+      VRUM_DB_HOST: db
+      VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+    ports:
+      # The same port inside and outside, because the server only accepts requests addressed to
+      # localhost on that port. Bound to this machine only unless VRUM_BIND_ADDRESS says otherwise.
+      - "${VRUM_BIND_ADDRESS:-127.0.0.1}:${VRUM_PORT:-8000}:${VRUM_PORT:-8000}"
+    healthcheck:
+      test: ["CMD", "python", "-m", "vrum.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+volumes:
+  vrum-data:
