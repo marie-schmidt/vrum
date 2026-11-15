@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B and M5C done; M8 skipped; M9 being finished; next is M10)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C and M9 done; M8 skipped; next is M10)
 
 ## Inputs (from the loop file)
 
@@ -26,7 +26,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M6. Hardening (attempts: 1) (2026-11-15, commit d5a0dc2)
 - [x] M7. Export, import, backup, restore (attempts: 1) (2026-11-15, commit 6990609)
 - [x] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs) (2026-11-15, no commit: nothing was built)
-- [ ] M9. Docs and acceptance (attempts: 0)
+- [x] M9. Docs and acceptance (attempts: 1) (2026-11-15, commit 723bd30)
 - [ ] M10. Board for humans: Kanban and graph (attempts: 0)
 - [ ] M11. More views of the work (attempts: 0)
 - [ ] M12. Rules and memory on the board (attempts: 0)
@@ -240,6 +240,20 @@ Full wording is in `DECISIONS.md`.
 ## M8: skipped
 
 - M8 is "only if `{{LEDGER_PATH}}` is given". No ledger path was given (see Inputs), so nothing was built, as the Inputs say to do. The `{{LEDGER_PATH}}` and `{{DECISIONS_PATH}}` placeholders in SPEC.md are left as they were. No Deelio repository or Taiga project was opened, read or written. If you want the trial, give the path of the ledger (and of the decisions file, if there is one) and it becomes a milestone of its own, which needs the proof in SPEC.md: counts after import equal counts in the source, and a report of the top overlap candidates.
+
+## M9 proof, as run
+
+- `./check.sh`: lint, strict types, 137 unit tests and 233 integration tests pass on a database built from scratch (5 more unit tests, all in `tests/test_readme.py`: the README's agent guide is the server's `INSTRUCTIONS` word for word, every script and file it names exists, every setting it names is a real one, every tool it names is a tool the server has, and its JSON examples parse and point at the MCP endpoint). `ruff format` also checks the Python example in the README.
+- From a clean clone of the commit (`723bd30`: no `.venv`, no `.env`, no `Logo/`), `./acceptance.sh` printed **ACCEPTANCE PASSED: 106 proofs in 111 seconds (M0 4, M1 6, M1A 8, M2 4, M3 5, M4 3, M4A 17, M5 11, M5B 18, M5C 14, M6 11, M7 4, M9 1). M8 is skipped: no ledger path was given.** The whole run, with the image build and the stack coming up, took 2 minutes 20 seconds and exited 0. It started its own stack (`vrum-acceptance`, five containers, all healthy), and removed it, its volumes and its images afterwards. Each chapter shows what its proofs hold:
+  1. **Arriving** (M0, M5B, M6, M9): every container healthy; `/health` open; a real client lists 56 tools and the database and vector versions; the instructions name only tools that exist; no token and a wrong token are refused in plain words (401, and the client is shown the words), and the answer repeats neither; the Python example of the README, run as written, connects and gets an answer.
+  2. **Planning, working together, requirements and decisions, remembering** (M1, M1A, M2, M3, M4, M4A, M5B): hierarchy, dates, links and readiness, ten agents asking for work at once on five ready tasks (five each get a different one, none twice), handoff notes, a plan of 500 items made in one call, the change feed that never skips a late event, rules and coverage, decisions and their supersession, facts and beliefs with evidence, belief staleness, and recall.
+  3. **Finding** (M5, M5B): words, meaning and both; the embedding service stopped and started again; the overlap finder flagging all 8 known duplicate pairs and none of 56 unrelated pairs; drop and reindex; the index unchanged by every reading tool; similar items on create.
+  4. **Asking a model for help** (M5C): all eight proofs, with the scripted model; **being careful** (M6): the oversized request, secrets in four fields and a model-proposed secret, ordinary text kept, JSON logs with no token, password or secret.
+  5. **Moving the data** (M7): a Markdown copy checked at both ends of every connection; backup, destroy the volume, restore, identical export; export, destroy, import, identical export, the next id continues, a second import refused.
+- **Quick start by hand:** in the same clone, following the README as written (`./scripts/init-env.sh`, `docker compose up -d --build --wait`) on a scratch project and port: `curl /health` gave `{"status":"ok"}`, a request with no token gave 401, and the README's Python example, with the generated token, got `server_status` back.
+- **Mutation checks of the acceptance scenario:** with the token compare turned off, `arriving` stopped at "a request with a wrong token is refused"; with the passage check of `extract_facts` turned off, `model` stopped at "a fact whose passage is not in the text is dropped"; with the stale-version check of `update_node` turned off, `planning` stopped at "update_node should have been refused"; with `restore.sh` not renumbering the event log, `moving` stopped at the backup-and-restore proof. Each was put back and the working tree held no change to the product afterwards.
+- **Found along the way:** (1) the model proof read `result["dropped"][0]` before it checked that anything was dropped, so the mutation gave a traceback instead of the plain message; it now says "nothing was dropped". (2) `ruff format` checks Python inside Markdown, which showed up the first time the full check ran with a README. (3) A first draft of the README named a `VRUM_TOKEN_FILE` setting that is not in `.env.example` or `compose.yaml`; the test that checks every setting named in the README found it. (4) Where this milestone would have said "the tests pass" it now says what was seen: the Claude Code, `.mcp.json` and Copilot examples follow each vendor's published documentation and were not run (see `DECISIONS.md`).
+- Scratch stacks, the clone, the quick-start project and scratch scripts are removed; no containers, volumes, networks or `vrum` images are left. A `Logo/` folder in the working tree is not mine and is not in the commit.
 
 ## Notes
 
