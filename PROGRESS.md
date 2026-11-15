@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B and M5C done; next is M8, which is skipped, then M9)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B and M5C done; M8 skipped; next is M9)
 
 ## Inputs (from the loop file)
 
@@ -25,7 +25,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M5C. Extraction and reflection (needs a configured language model) (attempts: 1) (2026-11-15, commit d30ffaf)
 - [x] M6. Hardening (attempts: 1) (2026-11-15, commit d5a0dc2)
 - [x] M7. Export, import, backup, restore (attempts: 1) (2026-11-15, commit 6990609)
-- [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
+- [x] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs) (2026-11-15, no commit: nothing was built)
 - [ ] M9. Docs and acceptance (attempts: 0)
 - [ ] M10. Board for humans: Kanban and graph (attempts: 0)
 - [ ] M11. More views of the work (attempts: 0)
@@ -235,6 +235,10 @@ Full wording is in `DECISIONS.md`.
 - **Mutation checks:** with the empty-server check off, the import test failed; with the id sequences not carried on, it failed; with confirmations not applied, it failed; with `ready` stored as it is, it failed; with the secret check off, the unit test failed. With `restore.sh` not renumbering the event log, the restore test failed twice over (once on the transaction count, once, with that check loosened, on the change feed, which answered `[]` where it expected the new node); with its refusal to overwrite off, the restore test failed. In the Markdown copy: with the references at one end left out, with rule placements left out, with belief evidence left out, with decision links left out, and with one node left out of the files, the integration test failed (and the unit test for the first). Each was put back.
 - **Found along the way:** (1) The change feed (`changes_since`) hides every event written after a plain restore into a fresh database: it orders events by the transaction number that wrote them, and those numbers mean nothing in another database. This was found by the restore check and is why `restore.sh` renumbers them. (2) Python in this checkout skips the editable install (macOS marks `.venv` files hidden), so a script that imports `vrum` failed; scripts now put `src` on the path. (3) An earlier test (M5C's `find_contradictions`) failed once in a clean-clone run: it compared the order the related beliefs were shown in with the order they were made in, but they are shown by how alike they are, which depends on the random words the test uses. It now compares the set (commit `aad50f4`). (4) `restore.sh` printed docker's progress lines where its own refusal should be first; they are now kept out (commit `2329722`).
 - Scratch stacks, the clone, the backups and exports the proof wrote, and the scratch scripts are removed; no containers, volumes, networks or `vrum` images are left. A `Logo/` folder in the working tree is not mine and is not in the commit.
+
+## M8: skipped
+
+- M8 is "only if `{{LEDGER_PATH}}` is given". No ledger path was given (see Inputs), so nothing was built, as the Inputs say to do. The `{{LEDGER_PATH}}` and `{{DECISIONS_PATH}}` placeholders in SPEC.md are left as they were. No Deelio repository or Taiga project was opened, read or written. If you want the trial, give the path of the ledger (and of the decisions file, if there is one) and it becomes a milestone of its own, which needs the proof in SPEC.md: counts after import equal counts in the source, and a report of the top overlap candidates.
 
 ## Notes
 
