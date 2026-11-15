@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0, M1 and M2 done; next milestone is M3)
+Status: IN PROGRESS (M0, M1, M2 and M3 done; next milestone is M4)
 
 ## Inputs (from the loop file)
 
@@ -16,7 +16,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M0. Bootstrap (attempts: 1) (2026-11-14, commit a44cad8)
 - [x] M1. Graph core (attempts: 1) (2026-11-15, commit ad4f5f7)
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
-- [ ] M3. Rules and coverage (attempts: 0)
+- [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
 - [ ] M4. Decisions and principles (attempts: 0)
 - [ ] M5. Semantic index (attempts: 0)
 - [ ] M6. Hardening (attempts: 0)
@@ -44,6 +44,10 @@ Full wording is in `DECISIONS.md`.
 
 - Owner's decision, 2026-11-15: no migrations. The whole database is `src/vrum/schema.sql`; a schema change means rebuilding the database from scratch. The server refuses to start on a database built from a different version of the schema, in plain words. The loop's other findings about production habits, including a recommendation about M7's backup and restore, are in `DECISIONS.md`.
 
+- M3: rules have their own ids, a title and body, and a status of `held` (the default), `settled` or `dropped`, which can change freely. A rule is created unplaced or in a story. `place_rule` puts an unplaced rule in a story and refuses one that is already placed; `move_rule` moves a placed rule. Both, and every other change to a rule, need the version last read.
+- M3: a rule event shows in the history of the rule and of each story it touches (the story it is in, and the one it left); a rule's own history is `rule_history`.
+- M3: the coverage report leaves out dropped rules (they are not unplaced) and dropped stories (they need no rules), and a story whose only rules are dropped counts as having none. Each of its two lists is paged on its own with `show`.
+
 ## M0 proof, as run
 
 - `./check.sh`: lint, strict types, 9 unit tests and 3 integration tests (real containers, real MCP client) pass.
@@ -69,7 +73,18 @@ Full wording is in `DECISIONS.md`.
 - Race check: with the lock in the cycle trigger removed, the parallel-links test fails every time, so it does guard the behaviour. Eight edits, ten claims and five pairs of opposite links added at the same moment each had exactly one winner.
 - Restarting the stack kept the data and did not re-apply either migration.
 
+## M3 proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 52 integration tests pass on a database built from scratch from `schema.sql`. Every earlier proof is still covered by them.
+- From a clean clone, started as the separate compose project `vrum-proof` on its own port: the 52 integration tests pass, and a separate script showed each proof statement:
+  - A rule placed in one story cannot be placed in a second: the refusal says it belongs to at most one story and points to `move_rule`, and the rule is still only in the first story.
+  - A move into an epic is refused and leaves the rule where it was. Two movers at once gave one winner, and the history reads created, placed, moved with each step's before and after and version; the move shows in the histories of both stories.
+  - The coverage report lists the unplaced rule and the stories with no rule, and leaves out the story that holds one.
+- The database refuses bad rules on its own (tests run SQL directly): a rule in an epic, a task or a story that does not exist, a blank title, an unknown status, a move into a task, a change without a new version, and events that name no rule, a rule and a node action mixed, or nothing at all. No table pairs rules with stories.
+- Race check: with the row lock removed from `move_rule` and `place_rule`, both parallel tests fail on every run (six rounds each), so they guard the behaviour.
+- The schema guard: a database whose stored schema marker is wrong, or missing, makes a second server refuse to start, saying to rebuild with `docker compose down --volumes`.
+
 ## Notes
 
-- Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py`, the second migration and seven more tools).
+- Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py` and seven more tools). M3 added rules and coverage (`rules.py` and eight more tools) and, on the owner's instruction, replaced the migrations with the single `schema.sql`.
 - M10 was added to `SPEC.md` by the owner after M0. It is the last milestone, after M9.
