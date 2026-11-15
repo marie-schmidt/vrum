@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from datetime import date
 from importlib.metadata import version
 from typing import Annotated
 
@@ -15,6 +16,7 @@ from starlette.responses import JSONResponse, Response
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
 from vrum.config import Settings
 from vrum.db import Database
+from vrum.decisions import Decision, DecisionPage, Decisions, Recall
 from vrum.graph import EventPage, Graph, Node, NodePage
 from vrum.links import Link, LinkPage, Links
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
@@ -29,6 +31,14 @@ _Lease = Annotated[
         description="How long the claim lasts before it lapses on its own, in seconds, from 1 to "
         "86400 (24 hours). Renew it to keep it longer."
     ),
+]
+_NodeIds = Annotated[
+    list[int] | None, Field(description="Ids of the epics, stories or tasks it affects.")
+]
+_RuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it affects.")]
+_DecidedOn = Annotated[
+    date | None,
+    Field(description="The day it was decided, as YYYY-MM-DD. Leave empty for today."),
 ]
 _Limit = Annotated[int, Field(description="How many items to return, from 1 to 200.")]
 _After = Annotated[
@@ -61,6 +71,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
     links = Links(database)
     claims = Claims(database)
     rules = Rules(database)
+    decisions = Decisions(database)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -467,6 +478,183 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 limit=limit,
                 unplaced_after_id=unplaced_after_id,
                 stories_after_id=stories_after_id,
+            )
+
+    @mcp.tool()
+    async def record_decision(
+        actor: _Actor,
+        title: str,
+        text: Annotated[str, Field(description="What was decided.")],
+        reason: Annotated[str, Field(description="Why it was decided.")],
+        decided_by: Annotated[
+            str,
+            Field(
+                description="The name of the person who made the decision. This is not you: "
+                "your own name goes in actor."
+            ),
+        ],
+        kind: Annotated[
+            str,
+            Field(
+                description="decision: something decided about this work. principle: a standing "
+                "guideline that applies everywhere."
+            ),
+        ] = "decision",
+        decided_on: _DecidedOn = None,
+        node_ids: _NodeIds = None,
+        rule_ids: _RuleIds = None,
+    ) -> Decision:
+        """Record a decision or a principle, and the epics, stories, tasks and rules it affects.
+
+        Decisions are a record and are never edited. To change one, supersede it. Link a decision
+        to what it affects so that recall_decisions finds it for those items. A principle applies
+        everywhere, so every recall also returns every active principle.
+        """
+        with _database_errors():
+            return await decisions.record_decision(
+                actor=actor,
+                kind=kind,
+                title=title,
+                text=text,
+                reason=reason,
+                decided_by=decided_by,
+                decided_on=decided_on,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+            )
+
+    @mcp.tool()
+    async def get_decision(decision_id: int) -> Decision:
+        """Read one decision, with its status, what replaced it or what it replaced, and the nodes
+        and rules it is linked to."""
+        with _database_errors():
+            return await decisions.get_decision(decision_id)
+
+    @mcp.tool()
+    async def list_decisions(
+        kind: Annotated[str | None, Field(description="Only decision or principle.")] = None,
+        status: Annotated[str | None, Field(description="Only active or superseded.")] = None,
+        limit: _Limit = 50,
+        after_id: _After = None,
+    ) -> DecisionPage:
+        """List decisions and principles, oldest first, a page at a time. Every filter is optional.
+        For the principles in force, ask for kind=principle and status=active."""
+        with _database_errors():
+            return await decisions.list_decisions(
+                kind=kind, status=status, limit=limit, after_id=after_id
+            )
+
+    @mcp.tool()
+    async def link_decision(
+        actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
+    ) -> Decision:
+        """Say that an active decision also affects more nodes or rules. Nothing is changed if any
+        id is wrong or already linked. A superseded decision keeps the links it had."""
+        with _database_errors():
+            return await decisions.link_decision(
+                actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
+            )
+
+    @mcp.tool()
+    async def unlink_decision(
+        actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
+    ) -> Decision:
+        """Say that an active decision no longer affects some nodes or rules. Nothing is changed if
+        any of them is not linked. A superseded decision keeps the links it had."""
+        with _database_errors():
+            return await decisions.unlink_decision(
+                actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
+            )
+
+    @mcp.tool()
+    async def supersede_decision(
+        actor: _Actor,
+        decision_id: Annotated[int, Field(description="The active decision being replaced.")],
+        title: str,
+        text: Annotated[str, Field(description="What is decided now.")],
+        reason: Annotated[str, Field(description="Why it changed.")],
+        decided_by: Annotated[
+            str, Field(description="The person who made the new decision. Not you: that is actor.")
+        ],
+        kind: Annotated[
+            str | None,
+            Field(description="decision or principle. Leave empty to keep the old one's kind."),
+        ] = None,
+        decided_on: _DecidedOn = None,
+        keep_links: Annotated[
+            bool,
+            Field(
+                description="True: the new decision affects what the old one did. False: it starts "
+                "with only the ids you give."
+            ),
+        ] = True,
+        node_ids: _NodeIds = None,
+        rule_ids: _RuleIds = None,
+    ) -> Decision:
+        """Replace an active decision with a new one, in one step.
+
+        The old decision is kept, marked superseded, and points to the new one, so nothing is lost
+        or overwritten. Recall shows the old one as superseded, never as active. Returns the new
+        decision. A decision that is already superseded cannot be superseded again: supersede its
+        replacement instead.
+        """
+        with _database_errors():
+            return await decisions.supersede_decision(
+                actor=actor,
+                decision_id=decision_id,
+                kind=kind,
+                title=title,
+                text=text,
+                reason=reason,
+                decided_by=decided_by,
+                decided_on=decided_on,
+                keep_links=keep_links,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+            )
+
+    @mcp.tool()
+    async def recall_decisions(
+        node_id: Annotated[
+            int | None, Field(description="The epic, story or task to recall decisions for.")
+        ] = None,
+        rule_id: Annotated[
+            int | None, Field(description="Or the rule to recall decisions for.")
+        ] = None,
+        show: Annotated[
+            str,
+            Field(
+                description="all, or one of active_decisions, active_principles or "
+                "superseded_decisions to page through just that list."
+            ),
+        ] = "all",
+        limit: Annotated[int, Field(description="How many of each list, from 1 to 200.")] = 50,
+        after_id: Annotated[
+            int | None,
+            Field(description="With show set to one list: pass its next_..._after_id."),
+        ] = None,
+    ) -> Recall:
+        """Recall what has been decided that matters for one node or rule.
+
+        Returns its linked active decisions, every active principle, and the linked decisions that
+        have since been superseded (shown as superseded, with what replaced them). Only what is
+        linked is returned: nothing is inferred, and decisions linked to its parent or children
+        are not included, so recall those too if they matter. Call this before starting work.
+        """
+        with _database_errors():
+            return await decisions.recall_decisions(
+                node_id=node_id, rule_id=rule_id, show=show, limit=limit, after_id=after_id
+            )
+
+    @mcp.tool()
+    async def decision_history(
+        decision_id: int, limit: _Limit = 50, after_id: _After = None
+    ) -> EventPage:
+        """Read everything that was ever done to one decision, oldest first, a page at a time: who
+        recorded, linked, unlinked or superseded it, and when."""
+        with _database_errors():
+            return await decisions.decision_history(
+                decision_id=decision_id, limit=limit, after_id=after_id
             )
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]

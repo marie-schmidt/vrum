@@ -33,6 +33,14 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "move_rule",
         "rule_history",
         "coverage_report",
+        "record_decision",
+        "get_decision",
+        "list_decisions",
+        "link_decision",
+        "unlink_decision",
+        "supersede_decision",
+        "recall_decisions",
+        "decision_history",
     }
     assert all(tool.description for tool in tools)
 

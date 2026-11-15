@@ -1,7 +1,7 @@
 """Pieces shared by the graph, links and claims modules: plain refusals, checks on what a caller
 sent, and the small helpers for talking to the database."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -68,9 +68,9 @@ async def fetch_all(conn: AsyncConnection, sql: str, params: Any = None) -> list
 
 
 def snapshot(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
-    """The named fields of a row, ready to be stored in an event (times become text)."""
+    """The named fields of a row, ready to be stored in an event (dates and times become text)."""
     return {
-        field: row[field].isoformat() if isinstance(row[field], datetime) else row[field]
+        field: row[field].isoformat() if isinstance(row[field], date) else row[field]
         for field in fields
     }
 
@@ -102,16 +102,18 @@ async def record_event(
     node_id: int | None = None,
     other_node_id: int | None = None,
     rule_id: int | None = None,
+    decision_id: int | None = None,
 ) -> None:
-    """Append to the event log. It shows in the history of every node it names: `other_node_id`
-    is the second node of a link, or the story a rule has just left."""
+    """Append to the event log. It shows in the history of every node, rule and decision it
+    names: `other_node_id` is the second node of a link, or the story a rule has just left."""
     await conn.execute(
-        "INSERT INTO events (node_id, other_node_id, rule_id, action, actor, before, after) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, action, actor, "
+        "before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             node_id,
             other_node_id,
             rule_id,
+            decision_id,
             action,
             actor,
             None if before is None else Jsonb(before),

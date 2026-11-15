@@ -183,16 +183,125 @@ $$;
 CREATE TRIGGER rules_guard_update BEFORE UPDATE ON rules
     FOR EACH ROW EXECUTE FUNCTION rules_guard_update();
 
+-- Decisions and principles --------------------------------------------------------------------
+
+-- A decision is a record: it is never edited. A change of mind is a new decision that supersedes
+-- the old one, and the old one stays, marked as superseded and pointing at its replacement.
+CREATE TABLE decisions (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind             text NOT NULL DEFAULT 'decision',
+    title            text NOT NULL,
+    text             text NOT NULL,
+    reason           text NOT NULL,
+    -- The person who made the decision. Whoever recorded it is in the event log.
+    decided_by       text NOT NULL,
+    decided_on       date NOT NULL,
+    status           text NOT NULL DEFAULT 'active',
+    superseded_by_id bigint REFERENCES decisions (id),
+    recorded_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT decision_kind_is_known CHECK (kind IN ('decision', 'principle')),
+    CONSTRAINT decision_status_is_known CHECK (status IN ('active', 'superseded')),
+    CONSTRAINT decision_title_is_not_blank CHECK (btrim(title) <> ''),
+    CONSTRAINT decision_text_is_not_blank CHECK (btrim(text) <> ''),
+    CONSTRAINT decision_reason_is_not_blank CHECK (btrim(reason) <> ''),
+    CONSTRAINT decision_decided_by_is_not_blank CHECK (btrim(decided_by) <> ''),
+    CONSTRAINT decision_is_superseded_exactly_when_replaced
+        CHECK ((status = 'superseded') = (superseded_by_id IS NOT NULL)),
+    -- A replacement is always recorded after what it replaces, so replacements cannot form a circle.
+    CONSTRAINT decision_is_replaced_by_a_later_one
+        CHECK (superseded_by_id IS NULL OR superseded_by_id > id)
+);
+
+CREATE INDEX decisions_superseded_by_idx ON decisions (superseded_by_id);
+
+CREATE FUNCTION decisions_are_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'A decision is a record and cannot be deleted. Supersede it with a new decision instead.';
+    END IF;
+    IF OLD.status = 'superseded' THEN
+        RAISE EXCEPTION 'A superseded decision cannot change again.';
+    END IF;
+    IF (NEW.kind, NEW.title, NEW.text, NEW.reason, NEW.decided_by, NEW.decided_on, NEW.recorded_at)
+       IS DISTINCT FROM
+       (OLD.kind, OLD.title, OLD.text, OLD.reason, OLD.decided_by, OLD.decided_on, OLD.recorded_at)
+    THEN
+        RAISE EXCEPTION 'A decision cannot be edited. Supersede it with a new decision instead.';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER decisions_are_a_record BEFORE UPDATE OR DELETE ON decisions
+    FOR EACH ROW EXECUTE FUNCTION decisions_are_a_record();
+
+-- What a decision affects: zero or more nodes and zero or more rules.
+CREATE TABLE decision_nodes (
+    decision_id bigint NOT NULL REFERENCES decisions (id),
+    node_id     bigint NOT NULL REFERENCES nodes (id),
+    PRIMARY KEY (decision_id, node_id)
+);
+
+CREATE TABLE decision_rules (
+    decision_id bigint NOT NULL REFERENCES decisions (id),
+    rule_id     bigint NOT NULL REFERENCES rules (id),
+    PRIMARY KEY (decision_id, rule_id)
+);
+
+CREATE INDEX decision_nodes_node_idx ON decision_nodes (node_id);
+CREATE INDEX decision_rules_rule_idx ON decision_rules (rule_id);
+
+-- A superseded decision keeps the links it had, as a record of what it once applied to.
+CREATE FUNCTION decision_links_are_frozen_once_superseded() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    the_decision bigint;
+    the_status text;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        the_decision := OLD.decision_id;
+    ELSE
+        the_decision := NEW.decision_id;
+    END IF;
+    SELECT status INTO the_status FROM decisions WHERE id = the_decision;
+    IF the_status = 'superseded' THEN
+        RAISE EXCEPTION 'A superseded decision keeps the links it had. Link or unlink the decision that replaced it instead.';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER decision_nodes_are_frozen_once_superseded BEFORE INSERT OR DELETE ON decision_nodes
+    FOR EACH ROW EXECUTE FUNCTION decision_links_are_frozen_once_superseded();
+CREATE TRIGGER decision_rules_are_frozen_once_superseded BEFORE INSERT OR DELETE ON decision_rules
+    FOR EACH ROW EXECUTE FUNCTION decision_links_are_frozen_once_superseded();
+
+-- A decision as it is read: what it replaced and what it affects.
+CREATE VIEW decision_state AS
+SELECT d.id, d.kind, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.status,
+       d.superseded_by_id, d.recorded_at,
+       coalesce((SELECT array_agg(s.id ORDER BY s.id) FROM decisions s
+                 WHERE s.superseded_by_id = d.id), ARRAY[]::bigint[]) AS supersedes_ids,
+       coalesce((SELECT array_agg(l.node_id ORDER BY l.node_id) FROM decision_nodes l
+                 WHERE l.decision_id = d.id), ARRAY[]::bigint[]) AS node_ids,
+       coalesce((SELECT array_agg(l.rule_id ORDER BY l.rule_id) FROM decision_rules l
+                 WHERE l.decision_id = d.id), ARRAY[]::bigint[]) AS rule_ids
+FROM decisions d;
+
 -- The event log ----------------------------------------------------------------------------
 
--- An event shows in the history of every node it names. For a link, node_id is where it starts
--- and other_node_id where it ends. For a rule, node_id is the story the rule is in after the
--- event and other_node_id the story it was in before, when that was a different one.
+-- An event shows in the history of every node and rule it names. For a link, node_id is where it
+-- starts and other_node_id where it ends. For a rule, node_id is the story the rule is in after the
+-- event and other_node_id the story it was in before, when that was a different one. A decision
+-- event names the decision, and also the node or rule when the event is about a link to it.
 CREATE TABLE events (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     node_id       bigint REFERENCES nodes (id),
     other_node_id bigint REFERENCES nodes (id),
     rule_id       bigint REFERENCES rules (id),
+    decision_id   bigint REFERENCES decisions (id),
     action        text NOT NULL,
     actor         text NOT NULL,
     at            timestamptz NOT NULL DEFAULT now(),
@@ -203,18 +312,23 @@ CREATE TABLE events (
         'create', 'update', 'move',
         'link_added', 'link_removed',
         'claimed', 'claim_renewed', 'claim_released',
-        'rule_created', 'rule_updated', 'rule_placed', 'rule_moved'
+        'rule_created', 'rule_updated', 'rule_placed', 'rule_moved',
+        'decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked'
     )),
     CONSTRAINT event_actor_is_not_blank CHECK (btrim(actor) <> ''),
-    CONSTRAINT event_is_about_a_node_or_a_rule CHECK (
-        starts_with(action, 'rule_') = (rule_id IS NOT NULL)
-        AND (rule_id IS NOT NULL OR node_id IS NOT NULL)
+    CONSTRAINT event_names_what_it_is_about CHECK (
+        CASE
+            WHEN starts_with(action, 'rule_') THEN rule_id IS NOT NULL AND decision_id IS NULL
+            WHEN starts_with(action, 'decision_') THEN decision_id IS NOT NULL
+            ELSE node_id IS NOT NULL AND rule_id IS NULL AND decision_id IS NULL
+        END
     )
 );
 
 CREATE INDEX events_node_idx ON events (node_id, id);
 CREATE INDEX events_other_node_idx ON events (other_node_id, id) WHERE other_node_id IS NOT NULL;
 CREATE INDEX events_rule_idx ON events (rule_id, id) WHERE rule_id IS NOT NULL;
+CREATE INDEX events_decision_idx ON events (decision_id, id) WHERE decision_id IS NOT NULL;
 
 CREATE FUNCTION events_refuse_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

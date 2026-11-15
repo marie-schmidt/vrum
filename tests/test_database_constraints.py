@@ -8,6 +8,7 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
+    make_decision,
     make_rule,
     make_stories,
     make_tasks,
@@ -232,16 +233,16 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
         "a rule event that names no rule": (
             f"INSERT INTO events (node_id, action, actor, after) "
             f"VALUES ({story['id']}, 'rule_moved', 'x', '{{}}')",
-            "event_is_about_a_node_or_a_rule",
+            "event_names_what_it_is_about",
         ),
         "a node event that names a rule": (
             f"INSERT INTO events (node_id, rule_id, action, actor, after) "
             f"VALUES ({story['id']}, {rule['id']}, 'update', 'x', '{{}}')",
-            "event_is_about_a_node_or_a_rule",
+            "event_names_what_it_is_about",
         ),
         "an event about nothing": (
             "INSERT INTO events (action, actor, after) VALUES ('update', 'x', '{}')",
-            "event_is_about_a_node_or_a_rule",
+            "event_names_what_it_is_about",
         ),
     }
     for what, (sql, expected) in attempts.items():
@@ -256,16 +257,14 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
         1,
     )
 
-    # One column says where a rule is. No table pairs rules with stories, so a rule cannot be in
-    # two stories at once.
+    # One column says which story owns a rule, and it is on the rules table itself. No other table
+    # names a story together with a rule, so a rule cannot be in two stories at once.
     result = run_sql(
-        "SELECT string_agg(table_name || '.' || column_name, ', ') FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND column_name IN ('rule_id', 'story_id') "
-        "AND table_name NOT IN ('rules', 'events')"
+        "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND column_name = 'story_id'",
+        plain=True,
     )
-    assert result.returncode == 0 and "." not in result.stdout.replace("-", "").replace(
-        "(1 row)", ""
-    )
+    assert result.returncode == 0 and result.stdout.strip() == "rules"
 
 
 async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
@@ -278,4 +277,126 @@ async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
     assert (
         "violates foreign key constraint"
         in run_sql(f"DELETE FROM rules WHERE id = {rule['id']}").stderr
+    )
+
+
+async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
+    (story,) = await make_stories(client, 1)
+    old = await make_decision(client, "Old", node_ids=[story["id"]])
+    new = await ok(
+        client,
+        "supersede_decision",
+        actor="a",
+        decision_id=old["id"],
+        title="New",
+        text="t",
+        reason="r",
+        decided_by="Ann",
+    )
+    other = await make_decision(client, "Standing")
+
+    def new_decision(**changes: str) -> str:
+        fields = {
+            "kind": "decision",
+            "title": "x",
+            "text": "x",
+            "reason": "x",
+            "decided_by": "x",
+            "status": "active",
+        }
+        fields.update(changes)
+        columns = ", ".join(fields)
+        values = ", ".join(f"'{value}'" for value in fields.values())
+        return f"INSERT INTO decisions ({columns}, decided_on) VALUES ({values}, current_date)"
+
+    attempts = {
+        "an unknown kind": (new_decision(kind="rule"), "decision_kind_is_known"),
+        "an unknown status": (new_decision(status="open"), "decision_status_is_known"),
+        "a blank title": (new_decision(title=" "), "decision_title_is_not_blank"),
+        "blank text": (new_decision(text=" "), "decision_text_is_not_blank"),
+        "a blank reason": (new_decision(reason=" "), "decision_reason_is_not_blank"),
+        "nobody who decided it": (new_decision(decided_by=" "), "decision_decided_by_is_not_blank"),
+        "superseded by nothing": (
+            new_decision(status="superseded"),
+            "decision_is_superseded_exactly_when_replaced",
+        ),
+        "replaced while still marked active": (
+            f"UPDATE decisions SET superseded_by_id = {other['id']} WHERE id = {new['id']}",
+            "decision_is_superseded_exactly_when_replaced",
+        ),
+        "replaced by an earlier decision": (
+            f"UPDATE decisions SET status = 'superseded', superseded_by_id = {old['id']} "
+            f"WHERE id = {new['id']}",
+            "decision_is_replaced_by_a_later_one",
+        ),
+        "an edit to what was decided": (
+            f"UPDATE decisions SET text = 'something else' WHERE id = {other['id']}",
+            "A decision cannot be edited",
+        ),
+        "an edit to who decided it": (
+            f"UPDATE decisions SET decided_by = 'someone else' WHERE id = {other['id']}",
+            "A decision cannot be edited",
+        ),
+        "bringing a superseded decision back": (
+            f"UPDATE decisions SET status = 'active', superseded_by_id = NULL "
+            f"WHERE id = {old['id']}",
+            "A superseded decision cannot change again",
+        ),
+        "pointing a superseded decision at another replacement": (
+            f"UPDATE decisions SET superseded_by_id = {other['id']} WHERE id = {old['id']}",
+            "A superseded decision cannot change again",
+        ),
+        "deleting a decision": (
+            f"DELETE FROM decisions WHERE id = {other['id']}",
+            "cannot be deleted",
+        ),
+        "a link to a node that does not exist": (
+            f"INSERT INTO decision_nodes VALUES ({other['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "a link to a rule that does not exist": (
+            f"INSERT INTO decision_rules VALUES ({other['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "the same link twice": (
+            f"INSERT INTO decision_nodes VALUES ({new['id']}, {story['id']})",
+            "decision_nodes_pkey",
+        ),
+        "a new link on a superseded decision": (
+            f"INSERT INTO decision_nodes VALUES ({old['id']}, {story['parent_id']})",
+            "keeps the links it had",
+        ),
+        "removing a link from a superseded decision": (
+            f"DELETE FROM decision_nodes WHERE decision_id = {old['id']}",
+            "keeps the links it had",
+        ),
+        "a decision event that names no decision": (
+            "INSERT INTO events (action, actor, after) VALUES ('decision_recorded', 'x', '{}')",
+            "event_names_what_it_is_about",
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    kept = await ok(client, "get_decision", decision_id=old["id"])
+    assert (kept["status"], kept["superseded_by_id"], kept["node_ids"]) == (
+        "superseded",
+        new["id"],
+        [story["id"]],
+    )
+    assert (await ok(client, "get_decision", decision_id=other["id"]))["text"] == other["text"]
+
+
+async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> None:
+    decision = await make_decision(client, "Logged")
+    assert (
+        "append-only"
+        in run_sql(
+            f"UPDATE events SET actor = 'someone' WHERE decision_id = {decision['id']}"
+        ).stderr
+    )
+    assert (
+        "append-only" in run_sql(f"DELETE FROM events WHERE decision_id = {decision['id']}").stderr
     )

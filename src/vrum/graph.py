@@ -36,7 +36,7 @@ _STORED_COLUMNS = (
     "id, kind, parent_id, title, body, status, priority, version, created_at, updated_at"
 )
 STATE_COLUMNS = _STORED_COLUMNS + ", waiting_on, claimed_by, claim_expires_at"
-EVENT_COLUMNS = "id, node_id, other_node_id, rule_id, action, actor, at, before, after"
+EVENT_COLUMNS = "id, node_id, other_node_id, rule_id, decision_id, action, actor, at, before, after"
 
 
 class Node(BaseModel):
@@ -87,9 +87,13 @@ class Event(BaseModel):
         "left. The event shows in the history of both nodes."
     )
     rule_id: int | None = Field(description="The rule the event is about, if it is about a rule.")
+    decision_id: int | None = Field(
+        description="The decision the event is about, if it is about a decision."
+    )
     action: str = Field(
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
-        "claim_released, rule_created, rule_updated, rule_placed or rule_moved."
+        "claim_released, rule_created, rule_updated, rule_placed, rule_moved, decision_recorded, "
+        "decision_superseded, decision_linked or decision_unlinked."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime

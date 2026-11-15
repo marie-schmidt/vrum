@@ -73,7 +73,7 @@ class CoverageReport(BaseModel):
     )
 
 
-async def _require_rule(
+async def require_rule(
     conn: AsyncConnection, rule_id: int, *, lock: bool = False
 ) -> dict[str, Any]:
     row = await fetch_one(
@@ -148,7 +148,7 @@ class Rules:
 
     async def get_rule(self, rule_id: int) -> Rule:
         async with self._database.transaction() as conn:
-            return Rule.model_validate(await _require_rule(conn, rule_id))
+            return Rule.model_validate(await require_rule(conn, rule_id))
 
     async def list_rules(
         self,
@@ -205,7 +205,7 @@ class Rules:
         if status is not None:
             check_choice("status", status, RULE_STATUSES)
         async with self._database.transaction() as conn:
-            current = await _require_rule(conn, rule_id, lock=True)
+            current = await require_rule(conn, rule_id, lock=True)
             if current["version"] != expected_version:
                 raise stale_version(
                     "Rule", "get_rule", rule_id, current["version"], expected_version
@@ -238,7 +238,7 @@ class Rules:
     ) -> Rule:
         actor = clean_actor(actor)
         async with self._database.transaction() as conn:
-            current = await _require_rule(conn, rule_id, lock=True)
+            current = await require_rule(conn, rule_id, lock=True)
             if current["version"] != expected_version:
                 raise stale_version(
                     "Rule", "get_rule", rule_id, current["version"], expected_version
@@ -269,7 +269,7 @@ class Rules:
         stories, and never in none, along the way."""
         actor = clean_actor(actor)
         async with self._database.transaction() as conn:
-            current = await _require_rule(conn, rule_id, lock=True)
+            current = await require_rule(conn, rule_id, lock=True)
             if current["version"] != expected_version:
                 raise stale_version(
                     "Rule", "get_rule", rule_id, current["version"], expected_version
@@ -301,7 +301,7 @@ class Rules:
     async def rule_history(self, *, rule_id: int, limit: int, after_id: int | None) -> EventPage:
         limit = page_size(limit)
         async with self._database.transaction() as conn:
-            await _require_rule(conn, rule_id)
+            await require_rule(conn, rule_id)
             rows = await fetch_all(
                 conn,
                 f"SELECT {EVENT_COLUMNS} FROM events "

@@ -13,3 +13,7 @@ dist/
 !.env.example
 *.secret
 secrets/
+
+# macOS and sync tools leave stale copies named "file 2.ext" when a file is replaced; never commit them
+* 2
+* 2.*

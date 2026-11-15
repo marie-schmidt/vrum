@@ -10,6 +10,18 @@ from tests.helpers import make_tasks, make_tree, needs_first, ok, refused, set_s
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
+async def all_ready_ids(client: Client) -> list[int]:
+    """Every id ready_work offers, following the pages."""
+    found: list[int] = []
+    after_id = None
+    while True:
+        page = await ok(client, "ready_work", limit=200, after_id=after_id)
+        found.extend(node["id"] for node in page["items"])
+        after_id = page["next_after_id"]
+        if after_id is None:
+            return found
+
+
 async def waiting_on(client: Client, node: dict[str, object]) -> list[int]:
     return list((await ok(client, "get_node", node_id=node["id"]))["waiting_on"])
 
@@ -233,14 +245,14 @@ async def test_finishing_a_prerequisite_makes_its_dependent_ready(client: Client
     # Only done counts.
     await set_status(client, prerequisite, "in_progress")
     assert (await ok(client, "get_node", node_id=dependent["id"]))["status"] == "new"
-    ready_ids = [n["id"] for n in (await ok(client, "ready_work", limit=200))["items"]]
+    ready_ids = await all_ready_ids(client)
     assert dependent["id"] not in ready_ids
 
     await set_status(client, prerequisite, "done")
     now_ready = await ok(client, "get_node", node_id=dependent["id"])
     assert (now_ready["status"], now_ready["waiting_on"]) == ("ready", [])
     assert now_ready["version"] == dependent["version"]
-    ready_ids = [n["id"] for n in (await ok(client, "ready_work", limit=200))["items"]]
+    ready_ids = await all_ready_ids(client)
     assert dependent["id"] in ready_ids and prerequisite["id"] not in ready_ids
 
 
@@ -360,7 +372,7 @@ async def test_an_expired_lease_can_be_claimed_by_another_actor(client: Client) 
 
     lapsed = await ok(client, "get_node", node_id=task["id"])
     assert (lapsed["claimed_by"], lapsed["claim_expires_at"]) == (None, None)
-    assert task["id"] in [n["id"] for n in (await ok(client, "ready_work", limit=200))["items"]]
+    assert task["id"] in await all_ready_ids(client)
     assert "lapsed" in await refused(client, "renew_claim", actor="ann", node_id=task["id"])
 
     second = await ok(client, "claim_node", actor="bob", node_id=task["id"], lease_seconds=60)

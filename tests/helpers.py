@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from mcp import Client
 from mcp.types import CallToolResult, TextContent
@@ -187,3 +188,37 @@ def run_sql(sql: str, *, plain: bool = False) -> subprocess.CompletedProcess[str
         "-c",
         sql,
     )
+
+
+async def race_results(
+    client: Client, tool: str, calls: list[dict[str, Any]]
+) -> list[tuple[bool, str]]:
+    """Make all the calls at the same moment. For each: was it accepted, and what did it say."""
+    results: list[tuple[bool, str]] = []
+
+    async def call(arguments: dict[str, Any]) -> None:
+        result = await client.call_tool(tool, arguments)
+        results.append((not result.is_error, _text(result)))
+
+    async with anyio.create_task_group() as group:
+        for arguments in calls:
+            group.start_soon(call, arguments)
+    return results
+
+
+async def race(client: Client, tool: str, calls: list[dict[str, Any]]) -> list[bool]:
+    """Make all the calls at the same moment and say which of them were accepted."""
+    return [accepted for accepted, _ in await race_results(client, tool, calls)]
+
+
+async def make_decision(
+    client: Client, title: str = "A decision", **arguments: Any
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "actor": "agent-1",
+        "title": title,
+        "text": f"{title}: what was decided",
+        "reason": "Because",
+        "decided_by": "Marie",
+    }
+    return await ok(client, "record_decision", **{**fields, **arguments})

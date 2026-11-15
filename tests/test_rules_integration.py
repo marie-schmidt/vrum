@@ -3,7 +3,6 @@
 
 from typing import Any
 
-import anyio
 import pytest
 from mcp import Client
 
@@ -12,6 +11,7 @@ from tests.helpers import (
     make_stories,
     make_tree,
     ok,
+    race,
     refused,
     whole_coverage_report,
 )
@@ -181,19 +181,6 @@ async def test_a_move_that_cannot_happen_changes_nothing_and_logs_nothing(client
     assert await rules_in(client, other) == []
     assert [event["action"] for event in await history(client, rule)] == ["rule_created"]
     assert [event["action"] for event in await history(client, loose)] == ["rule_created"]
-
-
-async def race(client: Client, tool: str, calls: list[dict[str, Any]]) -> list[bool]:
-    """Make all the calls at the same moment and say which of them were accepted."""
-    accepted: list[bool] = []
-
-    async def call(arguments: dict[str, Any]) -> None:
-        accepted.append(not (await client.call_tool(tool, arguments)).is_error)
-
-    async with anyio.create_task_group() as group:
-        for arguments in calls:
-            group.start_soon(call, arguments)
-    return accepted
 
 
 async def test_moves_made_together_have_one_winner_and_a_history_that_adds_up(
