@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 and M1 done; next milestone is M2)
+Status: IN PROGRESS (M0, M1 and M2 done; next milestone is M3)
 
 ## Inputs (from the loop file)
 
@@ -15,7 +15,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 
 - [x] M0. Bootstrap (attempts: 1) (2026-11-14, commit a44cad8)
 - [x] M1. Graph core (attempts: 1) (2026-11-15, commit ad4f5f7)
-- [ ] M2. Links, readiness and claims (attempts: 0)
+- [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [ ] M3. Rules and coverage (attempts: 0)
 - [ ] M4. Decisions and principles (attempts: 0)
 - [ ] M5. Semantic index (attempts: 0)
@@ -38,6 +38,10 @@ Full wording is in `DECISIONS.md`.
 - M1: ids are whole numbers from the database; priority is `low`, `normal`, `high` or `urgent`; stored status is `new`, `in_progress`, `blocked`, `done` or `dropped` (`ready` is computed from M2 on and never stored); `update_node` accepts `parent_id` only to refuse a second parent and point to `move_node`.
 - M1: history lists the changed fields before and after with versions; there is no delete (use `dropped`); every list takes `limit` (1 to 200, default 50) and `after_id`; schema changes are numbered SQL files in `src/vrum/migrations/`.
 
+- M2: a node nobody has started shows as `ready` when everything it needs first is done (so a new node that needs nothing is `ready`, and `new` means "waiting for something it needs first"); only `done` counts, so a dropped or blocked prerequisite keeps dependents waiting; `waiting_on` lists what a node waits for.
+- M2: links work between any two nodes; `duplicates` and `relates_to` work both ways; `supersedes`, `duplicates` and `relates_to` are records only; `list_links` was added so links can be read.
+- M2: claims are for stories and tasks that are ready or in progress with nothing open that they need first; a claim does not change status or stop others editing; leases are 1 second to 24 hours, default 15 minutes, lapse on their own, and only the holder renews or releases; `ready_work` lists free stories and tasks oldest first (priority is shown, not used for order).
+
 ## M0 proof, as run
 
 - `./check.sh`: lint, strict types, 9 unit tests and 3 integration tests (real containers, real MCP client) pass.
@@ -51,7 +55,19 @@ Full wording is in `DECISIONS.md`.
 - The database refuses bad data on its own: tests run SQL directly in the database container for a story with no parent, a task under an epic, an epic with a parent, a story under a story, an unknown kind, a blank title, the stored status `ready`, a kind change, a change without a new version, rewriting or deleting an event, and deleting a node that has history.
 - Eight parallel edits from the same version gave exactly one winner. Restarting the stack kept the data and did not re-apply the migration.
 
+## M2 proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 36 integration tests pass (real containers, real MCP client). Every earlier proof is still covered by them.
+- From a clean clone with plain `docker compose up -d`: the 36 integration tests pass, and a separate script showed each proof statement:
+  - A cycle (A needs B needs C needs A) is refused with a message that names the whole circle.
+  - B waits for A and shows `new` with `waiting_on [A]`; once A is done B shows `ready` with nothing it waits for.
+  - Ten parallel claimers on one ready task gave exactly one winner (agent-0), and the other nine were told who holds it.
+  - After a 3 second lease lapsed, nobody held the task and another actor claimed it; the history shows both claims.
+- The database refuses bad links and claims on its own (tests run SQL directly): a link to the same node, an unknown type, a missing node, a circle, a repeated link, a two-way link repeated the other way round, a claim on an epic, a claim naming the wrong kind, a claim with no holder or no time, and a second holder of one task.
+- Race check: with the lock in the cycle trigger removed, the parallel-links test fails every time, so it does guard the behaviour. Eight edits, ten claims and five pairs of opposite links added at the same moment each had exactly one winner.
+- Restarting the stack kept the data and did not re-apply either migration.
+
 ## Notes
 
-- Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools).
+- Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py`, the second migration and seven more tools).
 - M10 was added to `SPEC.md` by the owner after M0. It is the last milestone, after M9.
