@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size
 from vrum.db import Database
-from vrum.embeddings import EmbeddingRejected, EmbeddingUnavailable, vector_literal
+from vrum.embeddings import BATCH_SIZE, EmbeddingRejected, EmbeddingUnavailable, vector_literal
 from vrum.indexing import Indexer, IndexSnapshot, snapshot
 from vrum.memories import memory_label
 
@@ -41,6 +41,9 @@ OVERLAP_TYPES = ("story", "epic", "rule")
 _FUSION_K = 60
 _HIGHLIGHT = "StartSel=«, StopSel=», MaxWords=28, MinWords=10, MaxFragments=1, ShortWord=2"
 _NODE_TYPES = ("epic", "story", "task")
+# How long creating something waits for the embedding service before it goes ahead without the
+# check for similar items.
+_CREATE_TIMEOUT_SECONDS = 5.0
 
 
 class IndexNote(BaseModel):
@@ -226,7 +229,7 @@ class Searcher:
         return IndexNote(meaning=meaning, note=text, waiting_to_index=state.waiting)
 
     async def _vector(
-        self, state: IndexSnapshot, text: str, *, wanted: bool
+        self, state: IndexSnapshot, text: str, *, wanted: bool, timeout: float | None = None
     ) -> tuple[str | None, str, str | None]:
         """The vector for a text, or why there is none: (vector, state of meaning, detail)."""
         client = self._indexer.client
@@ -238,7 +241,7 @@ class Searcher:
             return None, "index_not_ready", None
         max_chars = self._indexer.max_chars
         try:
-            (vector,) = await client.embed([text[:max_chars]])
+            (vector,) = await client.embed([text[:max_chars]], timeout=timeout)
         except EmbeddingUnavailable as error:
             return None, "service_unreachable", f"{error} Only exact words were searched."
         except EmbeddingRejected as error:
@@ -387,9 +390,11 @@ class Searcher:
         wanted_types: list[str],
         exclude: set[tuple[str, int]],
         limit: int,
+        timeout: float | None = None,
     ) -> tuple[list[SearchResult], int, IndexNote]:
-        """Active items like a node or rule, for a recall: what `recall` shows apart from its
-        exact links. Never refuses: when meaning is not possible, the note says so."""
+        """Active items like a node or rule, for a recall or the context of work: what is alike
+        apart from the exact links. Never refuses: when meaning is not possible, the note says
+        so. `timeout` is how long to wait for the embedding service."""
         found = await self._similar(
             node_id=node_id,
             rule_id=rule_id,
@@ -401,6 +406,7 @@ class Searcher:
             exclude=exclude,
             active_only=True,
             required=False,
+            timeout=timeout,
         )
         candidates, details, _, note = found
         return (
@@ -422,6 +428,7 @@ class Searcher:
         exclude: set[tuple[str, int]],
         active_only: bool,
         required: bool,
+        timeout: float | None = None,
     ) -> tuple[
         list[_Candidate],
         dict[tuple[str, int], dict[str, Any]],
@@ -441,7 +448,9 @@ class Searcher:
         if stored is not None:
             vector, meaning, detail = stored, "used", None
         else:
-            vector, meaning, detail = await self._vector(state, source.text, wanted=True)
+            vector, meaning, detail = await self._vector(
+                state, source.text, wanted=True, timeout=timeout
+            )
         if vector is None:
             note = self._index_note(state, meaning, detail)
             if required:
@@ -465,6 +474,70 @@ class Searcher:
             statuses_of = await _statuses(conn, pairs)
             details = await _details(conn, pairs, None)
         return candidates, details, statuses_of, self._index_note(state, "used")
+
+    # -- before creating ----------------------------------------------------------------------
+
+    async def possible_duplicates(
+        self,
+        texts: list[str],
+        *,
+        types: list[str],
+        exclude: set[tuple[str, int]] | None = None,
+        limit: int = 3,
+    ) -> tuple[list[list[SearchResult]], IndexNote]:
+        """For each text, the existing items of these types that look like the same thing (at
+        least as alike as the overlap threshold), nearest first, as suggestions, leaving out
+        `exclude` and dropped items. It is a check before or after creating, so it never waits
+        long for the embedding service and never refuses: when meaning cannot be used the note
+        says so and every list is empty."""
+        left_out = exclude or set()
+        client = self._indexer.client
+        model = client.model if client else None
+        async with self._database.transaction() as conn:
+            state = await snapshot(conn, model)
+        empty: list[list[SearchResult]] = [[] for _ in texts]
+        if client is None:
+            return empty, self._index_note(state, "not_configured")
+        if not state.usable_with(client.model):
+            return empty, self._index_note(state, "index_not_ready")
+        if not texts:
+            return empty, self._index_note(state, "used")
+        vectors: list[list[float]] = []
+        try:
+            for start in range(0, len(texts), BATCH_SIZE):
+                batch = [
+                    text[: self._indexer.max_chars] for text in texts[start : start + BATCH_SIZE]
+                ]
+                vectors.extend(await client.embed(batch, timeout=_CREATE_TIMEOUT_SECONDS))
+        except (EmbeddingUnavailable, EmbeddingRejected) as error:
+            return empty, self._index_note(
+                state, "service_unreachable", f"{error} The check for similar items was skipped."
+            )
+        if any(len(vector) != state.dimensions for vector in vectors):
+            return empty, self._index_note(state, "index_not_ready")
+        async with self._database.transaction() as conn:
+            neighbours = await _neighbours_many(
+                conn, [vector_literal(vector) for vector in vectors], self._overlap_threshold, types
+            )
+            found = [
+                [
+                    _Candidate(kind, item_id, meaning_rank=rank, similarity=similarity)
+                    for rank, (kind, item_id, similarity) in enumerate(nearest, start=1)
+                    if (kind, item_id) not in left_out
+                ][:25]
+                for nearest in neighbours
+            ]
+            pairs = sorted({(c.item_type, c.id) for candidates in found for c in candidates})
+            details = await _details(conn, pairs, None)
+        results = [
+            [
+                _result(details[(c.item_type, c.id)], c)
+                for c in candidates
+                if details[(c.item_type, c.id)]["status"] != "dropped"
+            ][:limit]
+            for candidates in found
+        ]
+        return results, self._index_note(state, "used")
 
     # -- overlaps -----------------------------------------------------------------------------
 
@@ -579,6 +652,32 @@ async def _neighbours(
         {"v": vector, "max_distance": 1.0 - floor, "types": wanted_types},
     )
     return [(row["item_type"], row["item_id"], float(row["similarity"])) for row in rows]
+
+
+async def _neighbours_many(
+    conn: AsyncConnection, vectors: list[str], floor: float, wanted_types: list[str]
+) -> list[list[tuple[str, int, float]]]:
+    """For each vector, the indexed items of these types at least `floor` like it, nearest
+    first. One statement for all of them, so that what is current in the index is worked out
+    once and not once per vector."""
+    rows = await fetch_all(
+        conn,
+        "WITH current AS MATERIALIZED (SELECT i.item_type, i.item_id, i.embedding "
+        "FROM semantic_index i JOIN index_source s ON s.item_type = i.item_type "
+        "AND s.id = i.item_id AND s.content_hash = i.content_hash "
+        "WHERE i.item_type = ANY(%(types)s)) "
+        "SELECT q.n, c.item_type, c.item_id, 1 - (c.embedding <=> q.v::vector) AS similarity "
+        "FROM unnest(%(vectors)s::text[]) WITH ORDINALITY AS q(v, n) "
+        "CROSS JOIN current c WHERE (c.embedding <=> q.v::vector) <= %(max_distance)s "
+        "ORDER BY q.n, c.embedding <=> q.v::vector, c.item_type, c.item_id",
+        {"types": wanted_types, "vectors": vectors, "max_distance": 1.0 - floor},
+    )
+    found: list[list[tuple[str, int, float]]] = [[] for _ in vectors]
+    for row in rows:
+        found[int(row["n"]) - 1].append(
+            (row["item_type"], row["item_id"], float(row["similarity"]))
+        )
+    return found
 
 
 def _fuse(

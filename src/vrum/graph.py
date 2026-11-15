@@ -38,9 +38,23 @@ _STORED_COLUMNS = (
 )
 STATE_COLUMNS = (
     _STORED_COLUMNS
-    + ", waiting_on, schedule_conflicts, overdue, span_start, span_end, span_worked_out, "
-    "claimed_by, claim_expires_at"
+    + ", body_chars, waiting_on, schedule_conflicts, overdue, span_start, span_end, "
+    "span_worked_out, claimed_by, claim_expires_at, lapsed_claim_by, lapsed_claim_at"
 )
+# How much of a body a compact list shows.
+BODY_PREVIEW_CHARS = 120
+
+
+def list_columns(detail: bool) -> str:
+    """The columns of a list of nodes. Without `detail` the body is left out (the database does
+    not even send it), and a short preview and its full length are given instead."""
+    if detail:
+        return STATE_COLUMNS
+    return STATE_COLUMNS.replace(
+        " body,", f" NULL::text AS body, left(body, {BODY_PREVIEW_CHARS}) AS body_preview,", 1
+    )
+
+
 EVENT_COLUMNS = (
     "id, node_id, other_node_id, rule_id, decision_id, memory_id, action, actor, at, before, after"
 )
@@ -54,7 +68,15 @@ class Node(BaseModel):
         "epic."
     )
     title: str
-    body: str = Field(description="Plain text or Markdown.")
+    body: str | None = Field(
+        description="Plain text or Markdown. Empty in a list that left bodies out: see "
+        "body_preview, and ask for detail or use get_node to read it."
+    )
+    body_chars: int = Field(description="How many characters the body has.")
+    body_preview: str | None = Field(
+        default=None,
+        description="Only in a list that left bodies out: the first characters of the body.",
+    )
     status: str = Field(
         description="new, ready, in_progress, blocked, done or dropped. A node nobody has started "
         "shows as ready when everything it needs first is done (or it needs nothing), and as new "
@@ -103,12 +125,37 @@ class Node(BaseModel):
     claim_expires_at: datetime | None = Field(
         description="When that claim lapses on its own unless it is renewed."
     )
+    lapsed_claim_by: str | None = Field(
+        description="Set when someone's claim ran out without being renewed, released or taken "
+        "over: they left it with no handoff note, so ask what state it is in."
+    )
+    lapsed_claim_at: datetime | None = Field(description="When that claim ran out.")
+
+
+class Handoff(BaseModel):
+    id: int = Field(description="The id of the event that recorded it.")
+    actor: str = Field(description="Who left the work.")
+    at: datetime
+    outcome: str = Field(description="done, blocked, dropped or released.")
+    note: str = Field(description="What was done, and what the next person must know.")
+
+
+class NodeDetail(Node):
+    handoff_count: int = Field(description="How many handoff notes the node has in its history.")
+    last_handoff: Handoff | None = Field(
+        description="The latest handoff note, in full. node_history has all of them."
+    )
 
 
 class NodePage(BaseModel):
     items: list[Node]
+    total: int = Field(description="How many nodes match in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
+    )
+    left_out: str | None = Field(
+        description="Says what the list left out: bodies, unless you asked for detail. Empty when "
+        "nothing was left out."
     )
 
 
@@ -131,10 +178,10 @@ class Event(BaseModel):
     )
     action: str = Field(
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
-        "claim_released, rule_created, rule_updated, rule_placed, rule_moved, decision_recorded, "
-        "decision_superseded, decision_linked, decision_unlinked, memory_recorded, "
-        "memory_superseded, memory_retracted, memory_linked, memory_unlinked, memory_confirmed "
-        "or memory_promoted."
+        "claim_released, handoff, rule_created, rule_updated, rule_placed, rule_moved, "
+        "decision_recorded, decision_superseded, decision_linked, decision_unlinked, "
+        "memory_recorded, memory_superseded, memory_retracted, memory_linked, memory_unlinked, "
+        "memory_confirmed or memory_promoted."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime
@@ -158,14 +205,14 @@ def _a(kind: str) -> str:
     return f"an {kind}" if kind == "epic" else f"a {kind}"
 
 
-def _clean_title(title: str) -> str:
+def clean_title(title: str) -> str:
     cleaned = title.strip()
     if not cleaned:
         raise Refusal("A node needs a title: title cannot be empty.")
     return cleaned
 
 
-def _check_dates(start_on: date | None, target_on: date | None) -> None:
+def check_dates(start_on: date | None, target_on: date | None) -> None:
     if start_on is not None and target_on is not None and start_on > target_on:
         raise Refusal(
             f"The start date {start_on} is after the target date {target_on}. Work cannot start "
@@ -199,6 +246,49 @@ async def node_state(conn: AsyncConnection, node_id: int) -> Node:
     return Node.model_validate(row)
 
 
+async def handoffs_of(
+    conn: AsyncConnection, node_id: int, *, newest_first: bool = False
+) -> list[Handoff]:
+    """Every handoff note a node has, oldest first (or newest first)."""
+    rows = await fetch_all(
+        conn,
+        "SELECT id, actor, at, after->>'outcome' AS outcome, after->>'note' AS note FROM events "
+        "WHERE node_id = %s AND action = 'handoff' "
+        f"ORDER BY id {'DESC' if newest_first else 'ASC'}",
+        (node_id,),
+    )
+    return [Handoff.model_validate(row) for row in rows]
+
+
+def bodies_left_out(nodes_or_rules: list[Any]) -> str | None:
+    """What a compact list says it left out: bodies. Nothing, if it left out nothing."""
+    chars = sum(item.body_chars for item in nodes_or_rules if item.body_chars)
+    count = sum(1 for item in nodes_or_rules if item.body_chars)
+    if not nodes_or_rules or not count:
+        return None
+    return (
+        f"Bodies are left out ({count} of them, {chars:,} characters): each item has body_chars "
+        f"and a body_preview. Ask for detail to include them."
+    )
+
+
+async def change_status(
+    conn: AsyncConnection, actor: str, current: dict[str, Any], status: str
+) -> dict[str, Any]:
+    """Save a new stored status on a node the caller has locked and read, and record it as an
+    update in the history. Returns the stored row."""
+    row = await save_changes(conn, "nodes", current["id"], {"status": status}, _STORED_COLUMNS)
+    await record_event(
+        conn,
+        node_id=current["id"],
+        action="update",
+        actor=actor,
+        before={"status": current["status"], "version": current["version"]},
+        after={"status": row["status"], "version": row["version"]},
+    )
+    return row
+
+
 async def _require_parent(conn: AsyncConnection, kind: str, parent_id: int | None) -> None:
     """Refuse a parent that would break the hierarchy, in words that say how to fix it."""
     if kind == "epic":
@@ -225,6 +315,81 @@ async def _require_parent(conn: AsyncConnection, kind: str, parent_id: int | Non
         )
 
 
+async def insert_node(
+    conn: AsyncConnection,
+    *,
+    actor: str,
+    kind: str,
+    title: str,
+    parent_id: int | None,
+    body: str,
+    priority: str,
+    start_on: date | None,
+    target_on: date | None,
+) -> dict[str, Any]:
+    """Insert a node whose fields and parent have been checked, and record it. The database
+    still refuses anything that breaks the hierarchy. Returns the stored row."""
+    row = await fetch_one(
+        conn,
+        "INSERT INTO nodes (kind, parent_id, title, body, priority, start_on, target_on) "
+        f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {_STORED_COLUMNS}",
+        (kind, parent_id, title, body, priority, start_on, target_on),
+    )
+    assert row is not None
+    await record_event(
+        conn,
+        node_id=row["id"],
+        action="create",
+        actor=actor,
+        before=None,
+        after=snapshot(
+            row,
+            (
+                "kind",
+                "parent_id",
+                "title",
+                "body",
+                "status",
+                "priority",
+                "start_on",
+                "target_on",
+                "version",
+            ),
+        ),
+    )
+    return row
+
+
+async def _node_page(
+    conn: AsyncConnection,
+    where: str,
+    params: dict[str, Any],
+    detail: bool,
+    limit: int,
+    after_id: int | None,
+) -> NodePage:
+    """One page of nodes matching `where` (written by the code, never by a caller), with how many
+    match in all and what the page left out."""
+    counted = await fetch_one(
+        conn, f"SELECT count(*) AS total FROM node_state WHERE {where}", params
+    )
+    assert counted is not None
+    rows = await fetch_all(
+        conn,
+        f"SELECT {list_columns(detail)} FROM node_state WHERE {where} AND id > %(after_id)s "
+        "ORDER BY id LIMIT %(fetch)s",
+        {**params, "after_id": after_id or 0, "fetch": limit + 1},
+    )
+    page, next_after_id = split_page(rows, limit)
+    items = [Node.model_validate(row) for row in page]
+    return NodePage(
+        items=items,
+        total=int(counted["total"]),
+        next_after_id=next_after_id,
+        left_out=None if detail else bodies_left_out(items),
+    )
+
+
 class Graph:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -243,44 +408,33 @@ class Graph:
     ) -> Node:
         actor = clean_actor(actor)
         check_choice("kind", kind, KINDS)
-        title = _clean_title(title)
+        title = clean_title(title)
         check_choice("priority", priority, PRIORITIES)
-        _check_dates(start_on, target_on)
+        check_dates(start_on, target_on)
         async with self._database.transaction() as conn:
             await _require_parent(conn, kind, parent_id)
-            row = await fetch_one(
+            row = await insert_node(
                 conn,
-                "INSERT INTO nodes (kind, parent_id, title, body, priority, start_on, target_on) "
-                f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {_STORED_COLUMNS}",
-                (kind, parent_id, title, body, priority, start_on, target_on),
-            )
-            assert row is not None
-            await record_event(
-                conn,
-                node_id=row["id"],
-                action="create",
                 actor=actor,
-                before=None,
-                after=snapshot(
-                    row,
-                    (
-                        "kind",
-                        "parent_id",
-                        "title",
-                        "body",
-                        "status",
-                        "priority",
-                        "start_on",
-                        "target_on",
-                        "version",
-                    ),
-                ),
+                kind=kind,
+                title=title,
+                parent_id=parent_id,
+                body=body,
+                priority=priority,
+                start_on=start_on,
+                target_on=target_on,
             )
             return await node_state(conn, row["id"])
 
-    async def get_node(self, node_id: int) -> Node:
+    async def get_node(self, node_id: int) -> NodeDetail:
         async with self._database.transaction() as conn:
-            return await node_state(conn, node_id)
+            node = await node_state(conn, node_id)
+            notes = await handoffs_of(conn, node_id, newest_first=True)
+        return NodeDetail(
+            **node.model_dump(),
+            handoff_count=len(notes),
+            last_handoff=notes[0] if notes else None,
+        )
 
     async def list_nodes(
         self,
@@ -293,6 +447,7 @@ class Graph:
         target_from: date | None,
         target_to: date | None,
         overdue: bool | None,
+        detail: bool,
         limit: int,
         after_id: int | None,
     ) -> NodePage:
@@ -301,40 +456,34 @@ class Graph:
             check_choice("kind", kind, KINDS)
         if status is not None:
             check_choice("status", status, SHOWN_STATUSES)
+        where = (
+            "(%(kind)s::text IS NULL OR kind = %(kind)s) "
+            "AND (%(parent_id)s::bigint IS NULL OR parent_id = %(parent_id)s) "
+            "AND (%(status)s::text IS NULL OR status = %(status)s) "
+            "AND (%(start_from)s::date IS NULL OR start_on >= %(start_from)s) "
+            "AND (%(start_to)s::date IS NULL OR start_on <= %(start_to)s) "
+            "AND (%(target_from)s::date IS NULL OR target_on >= %(target_from)s) "
+            "AND (%(target_to)s::date IS NULL OR target_on <= %(target_to)s) "
+            "AND (%(overdue)s::boolean IS NULL OR overdue = %(overdue)s)"
+        )
+        params = {
+            "kind": kind,
+            "parent_id": parent_id,
+            "status": status,
+            "start_from": start_from,
+            "start_to": start_to,
+            "target_from": target_from,
+            "target_to": target_to,
+            "overdue": overdue,
+        }
         async with self._database.transaction() as conn:
             if parent_id is not None:
                 await require_node(conn, parent_id)
-            rows = await fetch_all(
-                conn,
-                f"SELECT {STATE_COLUMNS} FROM node_state "
-                "WHERE (%(kind)s::text IS NULL OR kind = %(kind)s) "
-                "AND (%(parent_id)s::bigint IS NULL OR parent_id = %(parent_id)s) "
-                "AND (%(status)s::text IS NULL OR status = %(status)s) "
-                "AND (%(start_from)s::date IS NULL OR start_on >= %(start_from)s) "
-                "AND (%(start_to)s::date IS NULL OR start_on <= %(start_to)s) "
-                "AND (%(target_from)s::date IS NULL OR target_on >= %(target_from)s) "
-                "AND (%(target_to)s::date IS NULL OR target_on <= %(target_to)s) "
-                "AND (%(overdue)s::boolean IS NULL OR overdue = %(overdue)s) "
-                "AND id > %(after_id)s ORDER BY id LIMIT %(fetch)s",
-                {
-                    "kind": kind,
-                    "parent_id": parent_id,
-                    "status": status,
-                    "start_from": start_from,
-                    "start_to": start_to,
-                    "target_from": target_from,
-                    "target_to": target_to,
-                    "overdue": overdue,
-                    "after_id": after_id or 0,
-                    "fetch": limit + 1,
-                },
-            )
-        page, next_after_id = split_page(rows, limit)
-        return NodePage(
-            items=[Node.model_validate(row) for row in page], next_after_id=next_after_id
-        )
+            return await _node_page(conn, where, params, detail, limit, after_id)
 
-    async def ready_work(self, *, kind: str | None, limit: int, after_id: int | None) -> NodePage:
+    async def ready_work(
+        self, *, kind: str | None, detail: bool, limit: int, after_id: int | None
+    ) -> NodePage:
         """Stories and tasks (or the one kind asked for) that can be started now and that nobody
         holds a claim on."""
         limit = page_size(limit)
@@ -342,17 +491,14 @@ class Graph:
             check_choice("kind", kind, KINDS)
         kinds = list(WORKABLE_KINDS) if kind is None else [kind]
         async with self._database.transaction() as conn:
-            rows = await fetch_all(
+            return await _node_page(
                 conn,
-                f"SELECT {STATE_COLUMNS} FROM node_state "
-                "WHERE status = 'ready' AND claimed_by IS NULL AND kind = ANY(%s) "
-                "AND id > %s ORDER BY id LIMIT %s",
-                (kinds, after_id or 0, limit + 1),
+                "status = 'ready' AND claimed_by IS NULL AND kind = ANY(%(kinds)s)",
+                {"kinds": kinds},
+                detail,
+                limit,
+                after_id,
             )
-        page, next_after_id = split_page(rows, limit)
-        return NodePage(
-            items=[Node.model_validate(row) for row in page], next_after_id=next_after_id
-        )
 
     async def update_node(
         self,
@@ -372,7 +518,7 @@ class Graph:
     ) -> Node:
         actor = clean_actor(actor)
         if title is not None:
-            title = _clean_title(title)
+            title = clean_title(title)
         if status is not None:
             check_choice(
                 "status",
@@ -429,7 +575,7 @@ class Graph:
                     "gave none. Give at least one of title, body, status, priority, start_on or "
                     "target_on with a new value, or ask for a date to be cleared."
                 )
-            _check_dates(
+            check_dates(
                 changes.get("start_on", current["start_on"]),
                 changes.get("target_on", current["target_on"]),
             )

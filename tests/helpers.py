@@ -37,6 +37,15 @@ async def refused(client: Client, tool: str, **arguments: Any) -> str:
     return _text(result)
 
 
+_NODE_EXTRAS = {"similar", "similar_checked", "similar_note", "handoff_count", "last_handoff"}
+
+
+def node_core(node: dict[str, Any]) -> dict[str, Any]:
+    """A node without what only some tools add (the similar items of a new one, the handoff notes
+    of a read one), so that what create_node and get_node say about it can be compared."""
+    return {name: value for name, value in node.items() if name not in _NODE_EXTRAS}
+
+
 async def all_nodes(client: Client, **filters: Any) -> list[dict[str, Any]]:
     """Every node matching the filters, following the pages."""
     found: list[dict[str, Any]] = []

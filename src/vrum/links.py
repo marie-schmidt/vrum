@@ -1,8 +1,10 @@
 """Links between nodes. This module owns adding, removing and reading them."""
 
 from datetime import datetime
+from typing import Any
 
 import psycopg
+from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
 from vrum.common import (
@@ -41,9 +43,34 @@ class Link(BaseModel):
 
 class LinkPage(BaseModel):
     items: list[Link]
+    total: int = Field(description="How many links match in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
     )
+
+
+async def insert_link(
+    conn: AsyncConnection, *, actor: str, source_id: int, target_id: int, link_type: str
+) -> dict[str, Any]:
+    """Insert a link that has been checked, and record it in the history of both nodes. The
+    database refuses a circle of waiting and a repeat. Returns the stored row."""
+    row = await fetch_one(
+        conn,
+        "INSERT INTO links (source_id, target_id, link_type) VALUES (%s, %s, %s) "
+        f"RETURNING {_LINK_COLUMNS}",
+        (source_id, target_id, link_type),
+    )
+    assert row is not None
+    await record_event(
+        conn,
+        node_id=source_id,
+        other_node_id=target_id,
+        action="link_added",
+        actor=actor,
+        before=None,
+        after=snapshot(row, _LINK_FIELDS),
+    )
+    return row
 
 
 class Links:
@@ -79,21 +106,8 @@ class Links:
                         f"Node {existing['source_id']} is already linked to node "
                         f"{existing['target_id']} with {link_type}, so nothing was added."
                     )
-                row = await fetch_one(
-                    conn,
-                    "INSERT INTO links (source_id, target_id, link_type) VALUES (%s, %s, %s) "
-                    f"RETURNING {_LINK_COLUMNS}",
-                    (source_id, target_id, link_type),
-                )
-                assert row is not None
-                await record_event(
-                    conn,
-                    node_id=source_id,
-                    other_node_id=target_id,
-                    action="link_added",
-                    actor=actor,
-                    before=None,
-                    after=snapshot(row, _LINK_FIELDS),
+                row = await insert_link(
+                    conn, actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
                 )
         except psycopg.errors.RaiseException as error:
             # The database's own plain refusal, such as a circle of waiting.
@@ -148,15 +162,25 @@ class Links:
             check_choice("link_type", link_type, LINK_TYPES)
         async with self._database.transaction() as conn:
             await require_node(conn, node_id)
+            where = (
+                "(source_id = %(node)s OR target_id = %(node)s) "
+                "AND (%(type)s::text IS NULL OR link_type = %(type)s)"
+            )
+            counted = await fetch_one(
+                conn,
+                f"SELECT count(*) AS total FROM links WHERE {where}",
+                {"node": node_id, "type": link_type},
+            )
+            assert counted is not None
             rows = await fetch_all(
                 conn,
-                f"SELECT {_LINK_COLUMNS} FROM links "
-                "WHERE (source_id = %(node)s OR target_id = %(node)s) "
-                "AND (%(type)s::text IS NULL OR link_type = %(type)s) "
+                f"SELECT {_LINK_COLUMNS} FROM links WHERE {where} "
                 "AND id > %(after)s ORDER BY id LIMIT %(fetch)s",
                 {"node": node_id, "type": link_type, "after": after_id or 0, "fetch": limit + 1},
             )
         page, next_after_id = split_page(rows, limit)
         return LinkPage(
-            items=[Link.model_validate(row) for row in page], next_after_id=next_after_id
+            items=[Link.model_validate(row) for row in page],
+            total=int(counted["total"]),
+            next_after_id=next_after_id,
         )

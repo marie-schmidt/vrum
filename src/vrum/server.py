@@ -20,13 +20,58 @@ from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Setti
 from vrum.db import Database
 from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.embeddings import EmbeddingUnavailable
-from vrum.graph import EventPage, Graph, Node, NodePage
+from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
 from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 from vrum.search import OverlapPage, Searcher, SearchPage
+from vrum.workflow import (
+    DEFAULT_CONTEXT_CHARS,
+    ChangesPage,
+    CreatedNode,
+    FinishResult,
+    NextWork,
+    NodeChange,
+    PlanItem,
+    PlanLink,
+    PlanResult,
+    PlanRule,
+    UpdateNodesResult,
+    Workflow,
+)
+
+# What any agent is told when it connects: the working loop, in a few lines. A test checks that it
+# names only tools that exist.
+INSTRUCTIONS = """\
+Vrum is a project graph. Epics hold stories, stories hold tasks, and rules, decisions, facts and \
+beliefs are linked to them. A decision is what a named person decided and is authoritative. A \
+belief is only a suggestion. Every write needs an actor: your own name.
+
+The working loop:
+1. `next_work` takes the most urgent free story or task and returns it with its rules, decisions, \
+principles, facts, earlier handoff notes and similar items, all in one call. Keep the claim with \
+`renew_claim` while you work.
+2. Before you decide something that matters, `recall` what is known about the item. If you do not \
+know where to look, use `search`.
+3. Record what is decided as it happens with `record_decision` (name the person who decided in \
+decided_by), and what you learn with `retain_fact`.
+4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a \
+handoff note for whoever comes next. A blank note is refused.
+
+Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
+`changes_since` shows only what is new since an event, and `ready_work` lists what is free. Lists \
+leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next.
+"""
+
+_Detail = Annotated[
+    bool,
+    Field(
+        description="True: include whole bodies. By default a list leaves them out and gives each "
+        "item's length and the first characters instead, to keep the answer small."
+    ),
+]
 
 _Actor = Annotated[str, Field(description="Your name: the person or agent making this change.")]
 _Version = Annotated[
@@ -127,6 +172,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
     )
     recaller = Recaller(database, searcher)
+    workflow = Workflow(database, graph, searcher)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -143,7 +189,9 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                     await job
             await database.close()
 
-    mcp = MCPServer[Database]("vrum", version=version("vrum"), lifespan=lifespan)
+    mcp = MCPServer[Database](
+        "vrum", version=version("vrum"), lifespan=lifespan, instructions=INSTRUCTIONS
+    )
 
     @mcp.tool()
     async def server_status() -> ServerStatus:
@@ -176,15 +224,18 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         priority: Annotated[str, Field(description="low, normal, high or urgent.")] = "normal",
         start_on: _StartOn = None,
         target_on: _TargetOn = None,
-    ) -> Node:
+    ) -> CreatedNode:
         """Create an epic, a story or a task.
 
         Work is an exact hierarchy: an epic has no parent, a story belongs to one epic, and a task
         belongs to one story. Any other shape is refused. A new node starts with status new and
         version 1. Dates are optional; a start date after the target date is refused.
+
+        For an epic or a story it also says which existing ones look like the same thing
+        (similar). It is created anyway: decide yourself whether it is a duplicate.
         """
         with _database_errors():
-            return await graph.create_node(
+            return await workflow.create_node(
                 actor=actor,
                 kind=kind,
                 title=title,
@@ -196,8 +247,9 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             )
 
     @mcp.tool()
-    async def get_node(node_id: int) -> Node:
-        """Read one epic, story or task, including the version you need to change it."""
+    async def get_node(node_id: int) -> NodeDetail:
+        """Read one epic, story or task in full, including the version you need to change it, how
+        many handoff notes it has and the latest one."""
         with _database_errors():
             return await graph.get_node(node_id)
 
@@ -234,6 +286,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 "dropped. False: only the others."
             ),
         ] = None,
+        detail: _Detail = False,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> NodePage:
@@ -241,6 +294,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
 
         status can also be ready: a node nobody has started whose prerequisites are all done. The
         date filters look at each node's own dates, so a node without a date never matches one.
+        Bodies are left out unless you ask for detail: see body_preview, or use get_node.
         """
         with _database_errors():
             return await graph.list_nodes(
@@ -252,6 +306,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 target_from=parse_day("target_from", target_from),
                 target_to=parse_day("target_to", target_to),
                 overdue=overdue,
+                detail=detail,
                 limit=limit,
                 after_id=after_id,
             )
@@ -407,13 +462,15 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             str | None,
             Field(description="Only epic, story or task. Leave empty for stories and tasks."),
         ] = None,
+        detail: _Detail = False,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> NodePage:
         """List work that can be started now: not started, everything it needs first is done, and
-        nobody holds a claim on it. Oldest first, a page at a time. Take one with claim_node."""
+        nobody holds a claim on it. Oldest first, a page at a time. To be handed the most urgent
+        piece with everything you need to know, use next_work; claim_node takes a specific one."""
         with _database_errors():
-            return await graph.ready_work(kind=kind, limit=limit, after_id=after_id)
+            return await graph.ready_work(kind=kind, detail=detail, limit=limit, after_id=after_id)
 
     @mcp.tool()
     async def claim_node(
@@ -443,10 +500,179 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             )
 
     @mcp.tool()
-    async def release_claim(actor: _Actor, node_id: int) -> Claim:
-        """Give up your claim so someone else can take the work. Only the holder can release."""
+    async def release_claim(
+        actor: _Actor,
+        node_id: int,
+        note: Annotated[
+            str,
+            Field(
+                description="What the next person must know: how far you got, what is left, what "
+                "you found. A blank note is refused."
+            ),
+        ],
+    ) -> Claim:
+        """Give up your claim so someone else can take the work, and leave a handoff note.
+
+        Only the holder can release. Work that was in progress goes back to not started, so it is
+        free again; use finish_work to mark it done, blocked or dropped instead.
+        """
         with _database_errors():
-            return await claims.release_claim(actor=actor, node_id=node_id)
+            return await claims.release_claim(actor=actor, node_id=node_id, note=note)
+
+    @mcp.tool()
+    async def next_work(
+        actor: _Actor,
+        within_node_id: Annotated[
+            int | None,
+            Field(description="Only work inside this epic or story. Leave empty for anywhere."),
+        ] = None,
+        peek: Annotated[
+            bool, Field(description="True: look at what you would get, without claiming it.")
+        ] = False,
+        lease_seconds: _Lease = DEFAULT_LEASE_SECONDS,
+        context_chars: Annotated[
+            int,
+            Field(
+                description="How much context to return at most, in characters, from 1000 to "
+                "1000000. What does not fit is counted in left_out, never silently dropped."
+            ),
+        ] = DEFAULT_CONTEXT_CHARS,
+    ) -> NextWork:
+        """Take the most urgent free story or task, and get everything you need to do it.
+
+        Free work is a story or task that nobody holds, that is not waiting for anything, and that
+        is ready (or whose earlier holder let their claim run out). A story whose tasks are still
+        open is worked through its tasks. Urgent comes first, then the earliest target date, then
+        the oldest. It is claimed for you in the same step, and exactly one actor gets each item
+        however many ask at once.
+
+        The context holds its epic and story, the rules of its story, the decisions linked to it
+        or its parents (and replaced ones, kept apart), every principle, facts and beliefs, notes
+        left by earlier holders, what it waits for, what waits for it, and similar items that are
+        only suggestions. When nothing is free this is not an error: found is false and message
+        says how much work is held, waiting or blocked.
+        """
+        with _database_errors():
+            return await workflow.next_work(
+                actor=actor,
+                within_node_id=within_node_id,
+                peek=peek,
+                lease_seconds=lease_seconds,
+                context_chars=context_chars,
+            )
+
+    @mcp.tool()
+    async def finish_work(
+        actor: _Actor,
+        node_id: int,
+        outcome: Annotated[
+            str,
+            Field(
+                description="done, blocked, dropped or released (back to not started, for someone "
+                "else to take)."
+            ),
+        ],
+        note: Annotated[
+            str,
+            Field(
+                description="The handoff: what you did, what you found, what the next person must "
+                "know. A blank note is refused."
+            ),
+        ],
+    ) -> FinishResult:
+        """End your work on a story or task: set where it stands and leave a handoff note.
+
+        Only the holder of the claim can finish. The claim is released and the note is kept with
+        the item, and shown to whoever works on it, or on what waited for it, next. unblocked
+        lists the work that became ready because of this.
+        """
+        with _database_errors():
+            return await workflow.finish_work(
+                actor=actor, node_id=node_id, outcome=outcome, note=note
+            )
+
+    @mcp.tool()
+    async def create_plan(
+        actor: _Actor,
+        items: Annotated[
+            list[PlanItem],
+            Field(
+                description="The epics, stories and tasks to create. Each has a key (a name only "
+                "this plan uses) so that parents, links and rules can refer to it."
+            ),
+        ],
+        links: Annotated[
+            list[PlanLink] | None,
+            Field(description="Links between items, by key or by the id of an existing node."),
+        ] = None,
+        rules: Annotated[
+            list[PlanRule] | None,
+            Field(description="Rules to record, each in a story by key or by existing id."),
+        ] = None,
+    ) -> PlanResult:
+        """Create a whole plan at once: epics, stories, tasks, links and rules, or nothing.
+
+        It is all checked first. If anything is wrong, nothing is created and every problem is
+        listed, each naming its item. There is no limit on how many items a plan has. For each
+        new epic or story that looks like something that already exists, similar says so; it was
+        created anyway.
+        """
+        with _database_errors():
+            return await workflow.create_plan(
+                actor=actor, items=items, links=links or [], rules=rules or []
+            )
+
+    @mcp.tool()
+    async def update_nodes(
+        actor: _Actor,
+        changes: Annotated[
+            list[NodeChange],
+            Field(description="The changes. Each names its node and the version you last read."),
+        ],
+    ) -> UpdateNodesResult:
+        """Change many nodes in one call. Each change is checked and applied on its own, like
+        update_node, so one stale or refused change never stops the others. The result says, for
+        every change, whether it was applied or why not."""
+        with _database_errors():
+            return await workflow.update_nodes(actor=actor, changes=changes)
+
+    @mcp.tool()
+    async def changes_since(
+        after_event_id: Annotated[
+            int,
+            Field(description="Pass 0 for the beginning, then the latest_event_id you got last."),
+        ] = 0,
+        actor: Annotated[
+            str | None, Field(description="Only changes made by this person or agent.")
+        ] = None,
+        node_id: Annotated[int | None, Field(description="Only changes to this node.")] = None,
+        rule_id: Annotated[int | None, Field(description="Only changes to this rule.")] = None,
+        decision_id: Annotated[
+            int | None, Field(description="Only changes to this decision or principle.")
+        ] = None,
+        memory_id: Annotated[
+            int | None, Field(description="Only changes to this fact or belief.")
+        ] = None,
+        limit: _Limit = 100,
+    ) -> ChangesPage:
+        """Show what changed after an event, oldest first, so you read only what is new.
+
+        Keep latest_event_id and pass it next time (page with next_after_id until it is empty).
+        Every event after the one you give is shown, in order, and none is skipped even when
+        another change was still being written. Events are ordered by when their change began,
+        which for two changes at the very same moment can differ from their ids. Give at most
+        one of node_id, rule_id, decision_id and memory_id.
+        """
+        with _database_errors():
+            return await workflow.changes_since(
+                after_event_id=after_event_id,
+                actor=actor,
+                node_id=node_id,
+                rule_id=rule_id,
+                decision_id=decision_id,
+                memory_id=memory_id,
+                limit=limit,
+            )
 
     @mcp.tool()
     async def create_rule(
@@ -484,13 +710,20 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             bool, Field(description="Only the rules that are in no story yet.")
         ] = False,
         status: Annotated[str | None, Field(description="Only held, settled or dropped.")] = None,
+        detail: _Detail = False,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> RulePage:
-        """List rules, oldest first, a page at a time. Every filter is optional."""
+        """List rules, oldest first, a page at a time. Every filter is optional. Bodies are left
+        out unless you ask for detail: see body_preview, or use get_rule."""
         with _database_errors():
             return await rules.list_rules(
-                story_id=story_id, unplaced=unplaced, status=status, limit=limit, after_id=after_id
+                story_id=story_id,
+                unplaced=unplaced,
+                status=status,
+                detail=detail,
+                limit=limit,
+                after_id=after_id,
             )
 
     @mcp.tool()
@@ -581,13 +814,16 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             int | None,
             Field(description="Leave empty for the first page of stories without rules."),
         ] = None,
+        detail: _Detail = False,
     ) -> CoverageReport:
         """Show what is not matched up yet: the rules that are in no story, and the stories that
         have no rule. Dropped rules and dropped stories are left out. Each list is a page; the
-        counts cover all of it. A list you did not ask for comes back empty."""
+        counts cover all of it. A list you did not ask for comes back empty. Bodies are left out
+        unless you ask for detail."""
         with _database_errors():
             return await rules.coverage_report(
                 show=show,
+                detail=detail,
                 limit=limit,
                 unplaced_after_id=unplaced_after_id,
                 stories_after_id=stories_after_id,

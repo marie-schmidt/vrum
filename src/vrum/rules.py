@@ -21,10 +21,32 @@ from vrum.common import (
     stale_version,
 )
 from vrum.db import Database
-from vrum.graph import EVENT_COLUMNS, STATE_COLUMNS, Event, EventPage, Node
+from vrum.graph import (
+    BODY_PREVIEW_CHARS,
+    EVENT_COLUMNS,
+    Event,
+    EventPage,
+    Node,
+    bodies_left_out,
+    list_columns,
+)
 
 RULE_STATUSES = ("held", "settled", "dropped")
-_RULE_COLUMNS = "id, story_id, title, body, status, version, created_at, updated_at"
+_RULE_COLUMNS = (
+    "id, story_id, title, body, length(body) AS body_chars, status, version, created_at, updated_at"
+)
+
+
+def _rule_list_columns(detail: bool) -> str:
+    """The columns of a list of rules. Without `detail` the body is left out, and a short preview
+    and its full length are given instead."""
+    if detail:
+        return _RULE_COLUMNS
+    return _RULE_COLUMNS.replace(
+        " body,", f" NULL::text AS body, left(body, {BODY_PREVIEW_CHARS}) AS body_preview,", 1
+    )
+
+
 COVERAGE_LISTS = ("both", "unplaced_rules", "stories_without_rules")
 _STORY_WITHOUT_RULES = (
     "kind = 'story' AND status <> 'dropped' AND NOT EXISTS ("
@@ -38,7 +60,15 @@ class Rule(BaseModel):
         description="The one story that owns this rule. Empty while the rule is unplaced."
     )
     title: str = Field(description="The rule, stated briefly.")
-    body: str = Field(description="Plain text or Markdown: the detail, or where it came from.")
+    body: str | None = Field(
+        description="Plain text or Markdown: the detail, or where it came from. Empty in a list "
+        "that left bodies out: see body_preview, and ask for detail or use get_rule."
+    )
+    body_chars: int = Field(description="How many characters the body has.")
+    body_preview: str | None = Field(
+        default=None,
+        description="Only in a list that left bodies out: the first characters of the body.",
+    )
     status: str = Field(description="held, settled or dropped.")
     version: int = Field(
         description="Starts at 1 and rises by one with every change. Send it back as "
@@ -50,8 +80,13 @@ class Rule(BaseModel):
 
 class RulePage(BaseModel):
     items: list[Rule]
+    total: int = Field(description="How many rules match in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
+    )
+    left_out: str | None = Field(
+        description="Says what the list left out: bodies, unless you asked for detail. Empty when "
+        "nothing was left out."
     )
 
 
@@ -70,6 +105,10 @@ class CoverageReport(BaseModel):
     stories_without_rules: list[Node] = Field(description="One page of them, oldest first.")
     next_stories_after_id: int | None = Field(
         description="Pass this as stories_after_id for the next page of stories."
+    )
+    left_out: str | None = Field(
+        description="Says what the lists left out: bodies, unless you asked for detail. Empty "
+        "when nothing was left out."
     )
 
 
@@ -115,6 +154,35 @@ def _event_nodes(story_id: int | None, left: int | None = None) -> dict[str, Any
     return {"node_id": story_id, "other_node_id": left if left != story_id else None}
 
 
+async def insert_rule(
+    conn: AsyncConnection,
+    *,
+    actor: str,
+    title: str,
+    body: str,
+    status: str,
+    story_id: int | None,
+) -> dict[str, Any]:
+    """Insert a rule that has been checked, and record it. Returns the stored row."""
+    row = await fetch_one(
+        conn,
+        "INSERT INTO rules (story_id, title, body, status) VALUES (%s, %s, %s, %s) "
+        f"RETURNING {_RULE_COLUMNS}",
+        (story_id, title, body, status),
+    )
+    assert row is not None
+    await record_event(
+        conn,
+        rule_id=row["id"],
+        action="rule_created",
+        actor=actor,
+        before=None,
+        after=snapshot(row, ("story_id", "title", "body", "status", "version")),
+        **_event_nodes(story_id),
+    )
+    return row
+
+
 class Rules:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -128,21 +196,8 @@ class Rules:
         async with self._database.transaction() as conn:
             if story_id is not None:
                 await _require_story(conn, story_id)
-            row = await fetch_one(
-                conn,
-                "INSERT INTO rules (story_id, title, body, status) VALUES (%s, %s, %s, %s) "
-                f"RETURNING {_RULE_COLUMNS}",
-                (story_id, title, body, status),
-            )
-            assert row is not None
-            await record_event(
-                conn,
-                rule_id=row["id"],
-                action="rule_created",
-                actor=actor,
-                before=None,
-                after=snapshot(row, ("story_id", "title", "body", "status", "version")),
-                **_event_nodes(story_id),
+            row = await insert_rule(
+                conn, actor=actor, title=title, body=body, status=status, story_id=story_id
             )
         return Rule.model_validate(row)
 
@@ -156,6 +211,7 @@ class Rules:
         story_id: int | None,
         unplaced: bool,
         status: str | None,
+        detail: bool,
         limit: int,
         after_id: int | None,
     ) -> RulePage:
@@ -166,27 +222,32 @@ class Rules:
             raise Refusal(
                 "Give story_id or unplaced, not both: a rule that is in a story is not unplaced."
             )
+        where = (
+            "(%(story)s::bigint IS NULL OR story_id = %(story)s) "
+            "AND (NOT %(unplaced)s OR story_id IS NULL) "
+            "AND (%(status)s::text IS NULL OR status = %(status)s)"
+        )
+        params = {"story": story_id, "unplaced": unplaced, "status": status}
         async with self._database.transaction() as conn:
             if story_id is not None:
                 await _require_story(conn, story_id)
+            counted = await fetch_one(
+                conn, f"SELECT count(*) AS total FROM rules WHERE {where}", params
+            )
+            assert counted is not None
             rows = await fetch_all(
                 conn,
-                f"SELECT {_RULE_COLUMNS} FROM rules "
-                "WHERE (%(story)s::bigint IS NULL OR story_id = %(story)s) "
-                "AND (NOT %(unplaced)s OR story_id IS NULL) "
-                "AND (%(status)s::text IS NULL OR status = %(status)s) "
-                "AND id > %(after)s ORDER BY id LIMIT %(fetch)s",
-                {
-                    "story": story_id,
-                    "unplaced": unplaced,
-                    "status": status,
-                    "after": after_id or 0,
-                    "fetch": limit + 1,
-                },
+                f"SELECT {_rule_list_columns(detail)} FROM rules "
+                f"WHERE {where} AND id > %(after)s ORDER BY id LIMIT %(fetch)s",
+                {**params, "after": after_id or 0, "fetch": limit + 1},
             )
         page, next_after_id = split_page(rows, limit)
+        items = [Rule.model_validate(row) for row in page]
         return RulePage(
-            items=[Rule.model_validate(row) for row in page], next_after_id=next_after_id
+            items=items,
+            total=int(counted["total"]),
+            next_after_id=next_after_id,
+            left_out=None if detail else bodies_left_out(items),
         )
 
     async def update_rule(
@@ -314,7 +375,13 @@ class Rules:
         )
 
     async def coverage_report(
-        self, *, show: str, limit: int, unplaced_after_id: int | None, stories_after_id: int | None
+        self,
+        *,
+        show: str,
+        detail: bool,
+        limit: int,
+        unplaced_after_id: int | None,
+        stories_after_id: int | None,
     ) -> CoverageReport:
         """Which rules are in no story, and which stories have no rule. A dropped rule is no
         longer a requirement, so it is not unplaced and does not cover a story; a dropped story
@@ -328,7 +395,7 @@ class Rules:
             if show in ("both", "unplaced_rules"):
                 rows = await fetch_all(
                     conn,
-                    f"SELECT {_RULE_COLUMNS} FROM rules "
+                    f"SELECT {_rule_list_columns(detail)} FROM rules "
                     "WHERE story_id IS NULL AND status <> 'dropped' AND id > %s "
                     "ORDER BY id LIMIT %s",
                     (unplaced_after_id or 0, limit + 1),
@@ -337,7 +404,7 @@ class Rules:
             if show in ("both", "stories_without_rules"):
                 rows = await fetch_all(
                     conn,
-                    f"SELECT {STATE_COLUMNS} FROM node_state "
+                    f"SELECT {list_columns(detail)} FROM node_state "
                     f"WHERE {_STORY_WITHOUT_RULES} AND id > %s ORDER BY id LIMIT %s",
                     (stories_after_id or 0, limit + 1),
                 )
@@ -351,11 +418,14 @@ class Rules:
                 conn, f"SELECT count(*) AS total FROM node_state WHERE {_STORY_WITHOUT_RULES}"
             )
         assert unplaced_total is not None and stories_total is not None
+        unplaced_rules = [Rule.model_validate(row) for row in unplaced_page]
+        stories = [Node.model_validate(row) for row in stories_page]
         return CoverageReport(
             unplaced_rule_count=unplaced_total["total"],
-            unplaced_rules=[Rule.model_validate(row) for row in unplaced_page],
+            unplaced_rules=unplaced_rules,
             next_unplaced_after_id=next_unplaced,
             story_without_rules_count=stories_total["total"],
-            stories_without_rules=[Node.model_validate(row) for row in stories_page],
+            stories_without_rules=stories,
             next_stories_after_id=next_stories,
+            left_out=None if detail else bodies_left_out([*unplaced_rules, *stories]),
         )

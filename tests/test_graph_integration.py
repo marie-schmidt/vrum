@@ -4,7 +4,7 @@ import anyio
 import pytest
 from mcp import Client
 
-from tests.helpers import all_nodes, make_tree, ok, refused
+from tests.helpers import all_nodes, make_tree, node_core, ok, refused
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -22,7 +22,7 @@ async def test_a_valid_epic_story_and_task_are_created_and_their_history_is_read
     )
     assert (story["kind"], story["parent_id"]) == ("story", epic["id"])
     assert (task["kind"], task["parent_id"], task["priority"]) == ("task", story["id"], "normal")
-    assert await ok(client, "get_node", node_id=task["id"]) == task
+    assert node_core(await ok(client, "get_node", node_id=task["id"])) == node_core(task)
 
     changed = await ok(
         client,

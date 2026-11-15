@@ -147,8 +147,13 @@ CREATE TABLE claims (
 --   span_start/end:     the dates the roadmap draws. Its own when it has any. Otherwise, for an epic
 --                       or story, the span of what is under it (dropped work does not count), and
 --                       span_worked_out says so.
+--   lapsed_claim_*:     a claim that ran out and was neither renewed, released nor taken over. It
+--                       stays in its row until then, so it shows as work someone left with no
+--                       handoff note.
+--   body_chars:         how long the body is, so a list can leave the body out and still say how
+--                       much there is.
 CREATE VIEW node_state AS
-SELECT n.id, n.kind, n.parent_id, n.title, n.body,
+SELECT n.id, n.kind, n.parent_id, n.title, n.body, length(n.body) AS body_chars,
        CASE WHEN n.status = 'new' AND cardinality(w.ids) = 0 THEN 'ready' ELSE n.status END
            AS status,
        n.priority, n.start_on, n.target_on, n.version, n.created_at, n.updated_at,
@@ -161,7 +166,9 @@ SELECT n.id, n.kind, n.parent_id, n.title, n.body,
        (n.start_on IS NULL AND n.target_on IS NULL
         AND (sp.span_start IS NOT NULL OR sp.span_end IS NOT NULL)) AS span_worked_out,
        c.actor AS claimed_by,
-       c.expires_at AS claim_expires_at
+       c.expires_at AS claim_expires_at,
+       lc.actor AS lapsed_claim_by,
+       lc.expires_at AS lapsed_claim_at
 FROM nodes n
 CROSS JOIN LATERAL (
     SELECT coalesce(array_agg(t.id ORDER BY t.id), ARRAY[]::bigint[]) AS ids,
@@ -199,7 +206,8 @@ CROSS JOIN LATERAL (
                    FROM nodes s WHERE s.parent_id = n.id AND s.status <> 'dropped')
            END AS span_end
 ) sp
-LEFT JOIN claims c ON c.node_id = n.id AND c.expires_at > clock_timestamp();
+LEFT JOIN claims c ON c.node_id = n.id AND c.expires_at > clock_timestamp()
+LEFT JOIN claims lc ON lc.node_id = n.id AND lc.expires_at <= clock_timestamp();
 
 -- Rules (requirements) ----------------------------------------------------------------------
 
@@ -680,16 +688,28 @@ CREATE TABLE events (
     -- The fields that changed, as they were and as they became. `before` is empty for a create.
     before        jsonb,
     after         jsonb NOT NULL,
+    -- The transaction that wrote it. A feed of changes reads only events from transactions that
+    -- have all finished, so an event that commits late (with a lower id than one that committed
+    -- earlier) is never skipped by someone following the feed.
+    xid           xid8 NOT NULL DEFAULT pg_current_xact_id(),
     CONSTRAINT event_action_is_known CHECK (action IN (
         'create', 'update', 'move',
         'link_added', 'link_removed',
-        'claimed', 'claim_renewed', 'claim_released',
+        'claimed', 'claim_renewed', 'claim_released', 'handoff',
         'rule_created', 'rule_updated', 'rule_placed', 'rule_moved',
         'decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked',
         'memory_recorded', 'memory_superseded', 'memory_retracted', 'memory_linked',
         'memory_unlinked', 'memory_confirmed', 'memory_promoted'
     )),
     CONSTRAINT event_actor_is_not_blank CHECK (btrim(actor) <> ''),
+    -- A handoff says how the holder left the work and what the next person must know. A blank
+    -- note is refused here too, whatever the tools check.
+    CONSTRAINT handoff_has_an_outcome_and_a_note CHECK (
+        action <> 'handoff' OR (
+            coalesce(after->>'outcome', '') IN ('done', 'blocked', 'dropped', 'released')
+            AND btrim(coalesce(after->>'note', '')) <> ''
+        )
+    ),
     CONSTRAINT event_names_what_it_is_about CHECK (
         CASE
             WHEN starts_with(action, 'rule_')
@@ -707,6 +727,7 @@ CREATE INDEX events_other_node_idx ON events (other_node_id, id) WHERE other_nod
 CREATE INDEX events_rule_idx ON events (rule_id, id) WHERE rule_id IS NOT NULL;
 CREATE INDEX events_decision_idx ON events (decision_id, id) WHERE decision_id IS NOT NULL;
 CREATE INDEX events_memory_idx ON events (memory_id, id) WHERE memory_id IS NOT NULL;
+CREATE INDEX events_feed_idx ON events (xid, id);
 
 CREATE FUNCTION events_refuse_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

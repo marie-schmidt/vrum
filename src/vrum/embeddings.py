@@ -37,13 +37,16 @@ class EmbeddingClient:
     def model(self) -> str:
         return self._settings.model
 
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """One vector per text, in order. Raises EmbeddingUnavailable or EmbeddingRejected."""
+    async def embed(
+        self, texts: Sequence[str], *, timeout: float | None = None
+    ) -> list[list[float]]:
+        """One vector per text, in order. Raises EmbeddingUnavailable or EmbeddingRejected.
+        `timeout` is how many seconds to wait for the service, if the caller cannot wait long."""
         if not texts:
             return []
-        return await asyncio.to_thread(self._embed_now, list(texts))
+        return await asyncio.to_thread(self._embed_now, list(texts), timeout or _TIMEOUT_SECONDS)
 
-    def _embed_now(self, texts: list[str]) -> list[list[float]]:
+    def _embed_now(self, texts: list[str], timeout: float) -> list[list[float]]:
         headers = {"Content-Type": "application/json"}
         if self._settings.api_key:
             headers["Authorization"] = f"Bearer {self._settings.api_key}"
@@ -54,7 +57,7 @@ class EmbeddingClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as error:
             detail = _detail(error)

@@ -398,7 +398,7 @@ async def test_the_holder_can_renew_and_release_and_nobody_else_can(client: Clie
         client, "renew_claim", actor="bob", node_id=task["id"]
     )
     assert "claimed by ann, not by you" in await refused(
-        client, "release_claim", actor="bob", node_id=task["id"]
+        client, "release_claim", actor="bob", node_id=task["id"], note="Not mine to release."
     )
 
     renewed = await ok(client, "renew_claim", actor="ann", node_id=task["id"], lease_seconds=3600)
@@ -407,10 +407,16 @@ async def test_the_holder_can_renew_and_release_and_nobody_else_can(client: Clie
         "expires_at"
     ]
 
-    await ok(client, "release_claim", actor="ann", node_id=task["id"])
+    await ok(
+        client,
+        "release_claim",
+        actor="ann",
+        node_id=task["id"],
+        note="Paused: back to the pool.",
+    )
     assert (await ok(client, "get_node", node_id=task["id"]))["claimed_by"] is None
     assert "nothing to release" in await refused(
-        client, "release_claim", actor="ann", node_id=task["id"]
+        client, "release_claim", actor="ann", node_id=task["id"], note="Again."
     )
     assert "do not hold a claim" in await refused(
         client, "renew_claim", actor="ann", node_id=task["id"]
@@ -421,6 +427,7 @@ async def test_the_holder_can_renew_and_release_and_nobody_else_can(client: Clie
     assert [(e["action"], e["actor"]) for e in history if e["action"] != "create"] == [
         ("claimed", "ann"),
         ("claim_renewed", "ann"),
+        ("handoff", "ann"),
         ("claim_released", "ann"),
         ("claimed", "bob"),
     ]

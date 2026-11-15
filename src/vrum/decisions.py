@@ -66,6 +66,7 @@ class Decision(BaseModel):
 
 class DecisionPage(BaseModel):
     items: list[Decision]
+    total: int = Field(description="How many decisions match in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
     )
@@ -269,15 +270,14 @@ class Decisions:
         if status is not None:
             check_choice("status", status, DECISION_STATUSES)
         async with self._database.transaction() as conn:
-            page, next_after_id = await page_decisions(
-                conn,
+            where = (
                 "(%(kind)s::text IS NULL OR kind = %(kind)s) "
-                "AND (%(status)s::text IS NULL OR status = %(status)s)",
-                {"kind": kind, "status": status},
-                limit,
-                after_id,
+                "AND (%(status)s::text IS NULL OR status = %(status)s)"
             )
-        return DecisionPage(items=page, next_after_id=next_after_id)
+            params = {"kind": kind, "status": status}
+            page, next_after_id = await page_decisions(conn, where, params, limit, after_id)
+            total = await count_decisions(conn, where, params)
+        return DecisionPage(items=page, total=total, next_after_id=next_after_id)
 
     async def link_decision(
         self,

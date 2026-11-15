@@ -11,6 +11,7 @@ from tests.helpers import (
     make_stories,
     make_tree,
     needs_first,
+    node_core,
     ok,
     refused,
     set_status,
@@ -55,7 +56,7 @@ async def test_dates_are_set_changed_cleared_and_logged_with_before_and_after(
     (story,) = await make_stories(client, 1)
     task = await dated_task(client, story, "Dated", start_on=day(2), target_on=day(10))
     assert (task["start_on"], task["target_on"]) == (day(2), day(10))
-    assert await get(client, task) == task
+    assert node_core(await get(client, task)) == node_core(task)
 
     moved = await ok(
         client,
