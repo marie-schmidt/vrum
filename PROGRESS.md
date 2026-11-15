@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0, M1, M2 and M3 done; next milestone is M4)
+Status: IN PROGRESS (M0 to M4 done; next milestone is M5)
 
 ## Inputs (from the loop file)
 
@@ -17,7 +17,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M1. Graph core (attempts: 1) (2026-11-15, commit ad4f5f7)
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
-- [ ] M4. Decisions and principles (attempts: 0)
+- [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
 - [ ] M5. Semantic index (attempts: 0)
 - [ ] M6. Hardening (attempts: 0)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
@@ -47,6 +47,10 @@ Full wording is in `DECISIONS.md`.
 - M3: rules have their own ids, a title and body, and a status of `held` (the default), `settled` or `dropped`, which can change freely. A rule is created unplaced or in a story. `place_rule` puts an unplaced rule in a story and refuses one that is already placed; `move_rule` moves a placed rule. Both, and every other change to a rule, need the version last read.
 - M3: a rule event shows in the history of the rule and of each story it touches (the story it is in, and the one it left); a rule's own history is `rule_history`.
 - M3: the coverage report leaves out dropped rules (they are not unplaced) and dropped stories (they need no rules), and a story whose only rules are dropped counts as having none. Each of its two lists is paged on its own with `show`.
+
+- M4: a decision is a record and is never edited; a change of mind is `supersede_decision`, which records a new decision and marks the old one superseded in one step. `decided_by` (the person) is separate from `actor` (who recorded it); title, text, reason and `decided_by` are required.
+- M4: a replacement carries over what the old decision affected unless `keep_links` is false; the old one keeps its links as a record and they cannot be changed. A decision can be superseded once, and a replacement may be of the other kind.
+- M4: `recall_decisions` works by exact link only (a node or a rule): its active decisions, every active principle, and its linked decisions that were superseded; nothing is inferred from parents or children. There is no separate principles tool: `list_decisions` with `kind=principle` and `status=active`.
 
 ## M0 proof, as run
 
@@ -84,7 +88,21 @@ Full wording is in `DECISIONS.md`.
 - Race check: with the row lock removed from `move_rule` and `place_rule`, both parallel tests fail on every run (six rounds each), so they guard the behaviour.
 - The schema guard: a database whose stored schema marker is wrong, or missing, makes a second server refuse to start, saying to rebuild with `docker compose down --volumes`.
 
+## M4 proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 66 integration tests pass on a database built from scratch. Every earlier proof is still covered by them.
+- From a clean clone of the commit, started as the separate compose project `vrum-proof` on its own port: the 66 integration tests pass, and a separate script showed each proof statement:
+  - Recalling a story returned its two linked active decisions and the active principles (the linked one and one linked to nothing), and left out a decision linked to another story and a decision linked to nothing.
+  - A decision replaced by a newer one was shown under superseded, with the id of what replaced it, and was not listed as active anywhere. Its title, text and reason were exactly as recorded, and its history reads recorded, linked, superseded.
+  - A story with no decisions got no decisions back, only the principles: nothing is invented.
+  - Superseding the same decision again is refused in plain words and points to its replacement.
+- The database keeps decisions as a record on its own (tests run SQL directly): it refuses a blank title, text, reason or decider, an unknown kind or status, a decision marked superseded without a replacement (or the reverse), a replacement recorded earlier than what it replaces, an edit to what was decided or who decided it, bringing a superseded decision back, pointing it at another replacement, deleting a decision, links to nodes or rules that do not exist, a repeated link, and any change to the links of a superseded decision.
+- Race check: with the row lock removed from `supersede_decision`, the test of six agents superseding one decision at once fails on every run. It first passed without the lock, because the database's own trigger stops the second one; the test now also requires the loser to get the plain message, not a database error, and that is what catches it.
+- Housekeeping found along the way: tests that read `ready_work` now read every page (they broke once the shared test database held more than 200 ready items); a test that guessed at table names was replaced by the precise rule (the only table with a `story_id` is `rules`).
+
 ## Notes
 
+- A GitHub repository was created on the owner's request: https://github.com/marie-schmidt/vrum (private).
+- macOS or a sync tool left stale copies named like `AGENTS 2.md`, `db 2.py` and a git ref `main 2`. They were deleted and `.gitignore` now ignores `* 2` and `* 2.*`. Existing files are now changed with edits instead of replacing them by renaming a new file over them.
 - Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py` and seven more tools). M3 added rules and coverage (`rules.py` and eight more tools) and, on the owner's instruction, replaced the migrations with the single `schema.sql`.
 - M10 was added to `SPEC.md` by the owner after M0. It is the last milestone, after M9.
