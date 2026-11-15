@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M4 and M1A done; next is the retro-fix M4A (facts and beliefs), then M5)
+Status: IN PROGRESS (M0 to M4, M1A and M4A done; next is M5)
 
 ## Inputs (from the loop file)
 
@@ -19,7 +19,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
 - [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
-- [ ] M4A. Facts and beliefs (retro-fix of M4, run before M5) (attempts: 0)
+- [x] M4A. Facts and beliefs (retro-fix of M4) (attempts: 1) (2026-11-15, commit 0183530)
 - [ ] M5. Search and the semantic index (attempts: 0)
 - [ ] M5B. Agent workflow (attempts: 0)
 - [ ] M5C. Extraction and reflection (needs a configured language model) (attempts: 0)
@@ -61,6 +61,7 @@ Full wording is in `DECISIONS.md`.
 - M4: `recall_decisions` works by exact link only (a node or a rule): its active decisions, every active principle, and its linked decisions that were superseded; nothing is inferred from parents or children. There is no separate principles tool: `list_decisions` with `kind=principle` and `status=active`.
 
 - M1A: dates are plain days written YYYY-MM-DD, read by the server and refused in plain words when badly written; a date is removed only by asking (`clear_start_on`, `clear_target_on`); the start may equal the target. Overdue, the worked-out span (own dates win; otherwise the span of what is under it, leaving out dropped work) and schedule conflicts (a warning, never a refusal; a done or undated prerequisite does not conflict) are computed in the `node_state` view. `list_nodes` gained inclusive date filters and `overdue`.
+- M4A: facts and beliefs share one table and one id set (`type` fact or belief, `kind` world or experience for facts); the database refuses edits, deletes, a belief with no evidence and evidence that is a belief. A stale belief (active, with evidence that is no longer active) cannot be confirmed or promoted. A confirmation is once only. Replacements carry links over (`keep_links`) and a replacing fact needs a new source. `supersede_memory` and `retract_memory` answer with ids of what went stale and of decisions promoted from a replaced belief. `recall` replaces `recall_decisions` and has seven sections, each with a count, a next page and a `why` on every entry. `within_node_id` takes the item, what is under it and the rules in those stories.
 
 ## M0 proof, as run
 
@@ -122,6 +123,25 @@ Full wording is in `DECISIONS.md`.
 - The database keeps decisions as a record on its own (tests run SQL directly): it refuses a blank title, text, reason or decider, an unknown kind or status, a decision marked superseded without a replacement (or the reverse), a replacement recorded earlier than what it replaces, an edit to what was decided or who decided it, bringing a superseded decision back, pointing it at another replacement, deleting a decision, links to nodes or rules that do not exist, a repeated link, and any change to the links of a superseded decision.
 - Race check: with the row lock removed from `supersede_decision`, the test of six agents superseding one decision at once fails on every run. It first passed without the lock, because the database's own trigger stops the second one; the test now also requires the loser to get the plain message, not a database error, and that is what catches it.
 - Housekeeping found along the way: tests that read `ready_work` now read every page (they broke once the shared test database held more than 200 ready items); a test that guessed at table names was replaced by the precise rule (the only table with a `story_id` is `rules`).
+
+## M4A proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 110 integration tests pass on a database built from scratch. M4's tests now call `recall` in place of `recall_decisions` and still pass, as do every earlier milestone's.
+- From a clean clone of the commit, started as the separate compose project `vrum-proof` on its own port: the 110 integration tests pass, and a separate script showed each proof statement through a real MCP client:
+  - A fact retained against a story is recalled under facts with its source, origin, recorder and both dates, and never under decisions.
+  - A belief with two facts as evidence reports two pieces of evidence, is under beliefs and is labelled a suggestion.
+  - Retracting a fact makes its belief stale, shown apart and never as active, with the reason; superseding a fact does the same.
+  - A belief with no evidence, with evidence that does not exist, or with a belief as evidence is refused in plain words; so is a blank source.
+  - Confirming records who and when. Promoting records a decision by that person that links back to the belief.
+  - A superseded fact shows as superseded with its replacement. The recall holds exactly what the exact links give: nothing for a story with no links, and nothing from a story for its epic.
+  - One new belief replaces two of three in one `supersede_memory` call and the third is untouched. A call that names an already retracted belief is refused and changes nothing. One call replaces 30 beliefs.
+  - 60 facts walked in pages of 25 come back once each, with a count that matches; `within_node_id` returns only what is in that area.
+  - Retracting a fact reports the beliefs resting on it; `rests_on_memory_id` lists them; `with_dependent_beliefs` retracts them with the same reason and leaves a belief on other evidence alone.
+  - A confirmed belief cannot be replaced or retracted without `said_by` and `quote`; with them it works, and the history shows both the agent and the person. An agent alone retracts a suggestion nobody confirmed.
+  - Replacing a belief that was promoted reports the decision, which stays active and unchanged.
+- The database refuses, on its own (tests run SQL directly): 40 kinds of bad data, among them a fact without a source or kind, a belief with no evidence (checked when the change is saved), evidence that is a belief or not active, any edit or delete of a fact, belief or evidence, a fact replaced by a belief or by an earlier item, a new link on an ended item, a belief that concerns a decision, and a decision promoted from a fact. Facts and beliefs have an append-only history too.
+- Race checks: with the lock removed from `supersede_memory`, the test of two agents replacing the same fact fails (the loser gets a raw database error, not the plain message). With the second look for new dependent beliefs removed from `retract_memory`, the test of a retraction racing three new beliefs on the same fact fails on both of two runs, leaving a live belief resting on a retracted fact. Both locks were put back and the checks pass.
+- Two things found while writing the tests: Postgres checks `CHECK` constraints in alphabetical order, so one constraint was renamed so that the test of an unknown origin and an unknown type each reach their own constraint; and `capitalize()` lowers the rest of a sentence, which would have turned a retraction reason into lower case in refusals, so the messages now capitalise only the first word.
 
 ## Notes
 
