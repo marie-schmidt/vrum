@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M4 done; next are the two retro-fix milestones M1A (dates) and M4A (facts and beliefs), then M5)
+Status: IN PROGRESS (M0 to M4 and M1A done; next is the retro-fix M4A (facts and beliefs), then M5)
 
 ## Inputs (from the loop file)
 
@@ -15,7 +15,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 
 - [x] M0. Bootstrap (attempts: 1) (2026-11-14, commit a44cad8)
 - [x] M1. Graph core (attempts: 1) (2026-11-15, commit ad4f5f7)
-- [ ] M1A. Dates (retro-fix of M1, run first) (attempts: 0)
+- [x] M1A. Dates (retro-fix of M1) (attempts: 1) (2026-11-15, commit d85ff0b)
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
 - [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
@@ -60,6 +60,8 @@ Full wording is in `DECISIONS.md`.
 - M4: a replacement carries over what the old decision affected unless `keep_links` is false; the old one keeps its links as a record and they cannot be changed. A decision can be superseded once, and a replacement may be of the other kind.
 - M4: `recall_decisions` works by exact link only (a node or a rule): its active decisions, every active principle, and its linked decisions that were superseded; nothing is inferred from parents or children. There is no separate principles tool: `list_decisions` with `kind=principle` and `status=active`.
 
+- M1A: dates are plain days written YYYY-MM-DD, read by the server and refused in plain words when badly written; a date is removed only by asking (`clear_start_on`, `clear_target_on`); the start may equal the target. Overdue, the worked-out span (own dates win; otherwise the span of what is under it, leaving out dropped work) and schedule conflicts (a warning, never a refusal; a done or undated prerequisite does not conflict) are computed in the `node_state` view. `list_nodes` gained inclusive date filters and `overdue`.
+
 ## M0 proof, as run
 
 - `./check.sh`: lint, strict types, 9 unit tests and 3 integration tests (real containers, real MCP client) pass.
@@ -72,6 +74,19 @@ Full wording is in `DECISIONS.md`.
 - From a clean clone with plain `docker compose up -d`: the 19 integration tests pass against that stack, and a separate script showed each refusal as an agent reads it: a story without an epic, a task under an epic, a second parent, and a stale version. A valid epic, story and task were created and the story's history was read (create by marie, update by ann, with before and after and versions).
 - The database refuses bad data on its own: tests run SQL directly in the database container for a story with no parent, a task under an epic, an epic with a parent, a story under a story, an unknown kind, a blank title, the stored status `ready`, a kind change, a change without a new version, rewriting or deleting an event, and deleting a node that has history.
 - Eight parallel edits from the same version gave exactly one winner. Restarting the stack kept the data and did not re-apply the migration.
+
+## M1A proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 85 integration tests pass on a database built from scratch. Every earlier proof is still covered by them.
+- From a clean clone of the commit, started as the separate compose project `vrum-proof` on its own port: the 85 integration tests pass, and a separate script showed each proof statement:
+  - A start date after the target date is refused, on create and on update, with a plain message; the database also refuses it on its own (SQL test).
+  - Dates set and cleared are shown by `get_node`, and the history lists exactly the dates that changed, with before and after and the actor.
+  - A target date that has passed makes a node overdue until it is marked done.
+  - A story and an epic with no dates report the span of what is under them, marked as worked out; given dates of their own they report those.
+  - A schedule conflict shows on a node that starts before something it needs is due, and goes away when either date changes (and when the prerequisite is done).
+  - A stale version is still refused for a date change.
+- The test suite also covers: clearing and its refusals, loosely written dates (seven kinds, each with the plain message), same-day start and target, dropped work left out of spans, a task that never works a span out, dates that survive a move and a claim, and the date filters.
+- One fix found along the way: the new `overdue` column was empty for nodes with no target date, and the model refused it; it is now false there.
 
 ## M2 proof, as run
 
