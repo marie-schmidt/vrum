@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M5B, M1A and M4A done; next is M5C)
+Status: IN PROGRESS (M0 to M5C, M1A and M4A done; next is M6)
 
 ## Inputs (from the loop file)
 
@@ -22,7 +22,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M4A. Facts and beliefs (retro-fix of M4) (attempts: 1) (2026-11-15, commit 0183530)
 - [x] M5. Search and the semantic index (attempts: 1) (2026-11-15, commit 0b62d76)
 - [x] M5B. Agent workflow (attempts: 1) (2026-11-15, commit 366c14e)
-- [ ] M5C. Extraction and reflection (needs a configured language model) (attempts: 0)
+- [x] M5C. Extraction and reflection (needs a configured language model) (attempts: 1) (2026-11-15, commit d30ffaf)
 - [ ] M6. Hardening (attempts: 0)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
 - [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
@@ -186,6 +186,23 @@ Full wording is in `DECISIONS.md`.
 - **Found along the way (all fixed, each with a test):** the handoff check in the database let a note through with no outcome (a NULL slipped through the comparison); work released by `release_claim` stayed in progress and could never be taken again; the "nothing is free" message said "no open work" while other agents were mid-claim; `changes_since` read its page and its latest id in separate snapshots, so a change finishing in between could be skipped by a follower (it now reads both in one); and the context cut kept small items after a large one was cut, instead of cutting the end.
 - Scratch stacks, the clone and scratch scripts are removed; no containers, volumes or `vrum` images are left.
 - The implementation commit `366c14e` is titled "Save uncommitted changes": the app saved and pushed my working tree on its own before I committed. I did not rewrite pushed history.
+
+## M5C proof, as run
+
+- `./check.sh`: lint, strict types, 77 unit tests and 188 integration tests pass on a database built from scratch (25 integration and 36 unit tests are new: `tests/test_reflection_integration.py`, `test_llm_client.py`, `test_secret_formats.py` and the model settings in `test_config.py`). Every earlier proof is still covered by them. One earlier test changed only in the list of tools.
+- From a clean clone of the commit (`d30ffaf`), `./check.sh` gave the same 77 and 188. Then the clone was started as the separate compose project `vrum-proof` on its own ports (the server, a second server with no model, and the scripted model), and a separate script printed each proof through a real MCP client:
+  1. **No model:** on the second server, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` each said "No language model is set up on this server, so ... cannot run", while the same server stored a fact and searched. `server_status` showed `None` there and `scripted-model` on the other.
+  2. **extract_facts:** of three scripted facts, two were kept and the one whose passage is not in the text was dropped, with the reason; nothing was stored (no fact with that passage in the database, memories and decisions unchanged, one more event: the log of the call). With the store option both were kept with origin `extracted`, recorded by the caller, the passage as source.
+  3. **consolidate_memory:** the scripted belief was recorded with origin `derived` and evidence facts 4 and 5; one naming fact 999999999 was dropped ("which it was not given"). Retracting one fact made it stale; a revised belief (origin `derived`, not stale) superseded it.
+  4. **reflect:** the scripted answer came back labelled as generated, with `decision:1` and `fact:9` as what it relied on, and memories and decisions were unchanged. A scripted answer citing `fact:999999999` was refused ("which was not one of the 2 items it was given").
+  5. **find_contradictions:** of four scripted answers, two were kept (one for a belief a person had confirmed, shown as such); one whose belief quote is not in the belief and one naming a belief that was not shown were dropped. "Looked at 3 of 4 active beliefs"; nothing changed. `supersede_memory` with the returned id replaced it; for the confirmed belief it was refused until `said_by` and `quote` were given.
+  6. **Scope all:** 45 beliefs, batch 10: five calls showing 10, 10, 10, 10 and 6 beliefs; `remaining` 35, 25, 15, 5, 0, with `looked_at` plus `remaining` equal to the active beliefs each time. A belief recorded after the fourth call was reached by the fifth. The scripted service was shown 46 beliefs, 46 different, each once; the scripted contradiction in the last batch was found and was the only proposal.
+  7. **Secret:** a text with a GitHub-token-shaped string was refused ("contains what looks like a GitHub token, so it was not sent to the language model"), the refusal did not repeat it, the scripted service received no request with that text, and nothing was written.
+  8. **Model stopped:** each of the four tools said "The language model at http://scripted-model:8080/v1 cannot be reached"; memories, decisions and events were unchanged. The log held `model_call` events for all four tools, each about no one item, with what was asked and which items were used.
+- **Mutation checks:** with the passage check turned off, a fact whose passage is not in the text was kept and stored; with the evidence check off, a belief resting on an item it was not given got as far as the database, which refused it (the checks are in two places); with the quote check off, a belief quote that is not there became a proposal; with the citation check off, an answer citing an item that was not shown was accepted; with the secret check off, text with a token was sent. Each failed its test, and all were put back.
+- **A real model:** `scripts/real_model_check.py` against Ollama on this machine with `llama3.2` (3 billion parameters), nothing leaving it, from a stack started with only `compose.yaml`: 14 facts from 4 notes, none dropped (some were not really facts); 5 beliefs from 7 facts, some only restating a fact; 3 of 4 statements judged right; 1 of 3 questions answered, the other two refused by the server (a decision cited that was not among the items shown, and an unanswerable question answered with no citation). Calls took 1 to 4 seconds. A larger model was not tried. This also showed the default input limit had to be lower: Ollama gives a model 4,096 tokens and cuts the rest, so `LLM_MAX_INPUT_CHARS` is 12,000, not 30,000.
+- **Found along the way:** the tests found no bug in the product on their first full run (24 of 25 passed; the one failure was my own count of what `reflect` retrieves, which forgot the decision that replaced another). The real model changed one default, the input limit (above). In the printed run, a call with nothing to compare against rightly does not ask the model, which is why proof 8 needed a belief to compare against.
+- Scratch stacks, the clone, scratch scripts and the real-model stack are removed; no containers, volumes or `vrum` images are left. The Ollama models on this machine were only used, not changed. A `Logo/` folder that appeared in the working tree was not mine and is not in the commit.
 
 ## Notes
 
