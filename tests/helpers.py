@@ -6,8 +6,8 @@ import os
 import random
 import subprocess
 import urllib.request
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +15,28 @@ from typing import Any
 import anyio
 import pytest
 from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import CallToolResult, TextContent
+
+
+@asynccontextmanager
+async def connect(url: str, token: str | None) -> AsyncIterator[Client]:
+    """A client of the server at `url` that sends this token (or none)."""
+    headers = None if token is None else {"Authorization": f"Bearer {token}"}
+    async with (
+        create_mcp_http_client(headers=headers) as http,
+        Client(streamable_http_client(url, http_client=http)) as client,
+    ):
+        yield client
+
+
+def the_token() -> str:
+    """The token of the stack ./check.sh started."""
+    token = os.environ.get("VRUM_TOKEN")
+    if not token:
+        pytest.fail("VRUM_TOKEN is not set. Run the integration tests through ./check.sh.")
+    return token
 
 
 def _text(result: CallToolResult) -> str:

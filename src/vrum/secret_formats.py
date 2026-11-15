@@ -39,3 +39,30 @@ def find_secret(text: str) -> str | None:
         if pattern.search(text):
             return name
     return None
+
+
+def find_secret_in(value: object, where: str = "") -> tuple[str, str] | None:
+    """The first well-known secret in a text, or anywhere inside lists and objects of texts, as
+    (the path to the field that holds it, what kind it is). The path reads like `items[2].body`.
+    The secret itself is never part of the answer."""
+    if isinstance(value, str):
+        found = find_secret(value)
+        return (where, found) if found else None
+    if isinstance(value, dict):
+        children = [(f"{where}.{key}" if where else str(key), item) for key, item in value.items()]
+    elif isinstance(value, list | tuple):
+        children = [(f"{where}[{number}]", item) for number, item in enumerate(value)]
+    else:
+        return None
+    for path, item in children:
+        found_in = find_secret_in(item, path)
+        if found_in:
+            return found_in
+    return None
+
+
+def redact_secrets(text: str) -> str:
+    """The text with every well-known secret in it replaced by a note of what was removed."""
+    for name, pattern in _FORMATS:
+        text = pattern.sub(f"[{name} removed]", text)
+    return text

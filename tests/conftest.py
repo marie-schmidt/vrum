@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 import pytest
 from mcp import Client
 
-from tests.helpers import ScriptedModel
+from tests.helpers import ScriptedModel, connect, the_token
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def server_url() -> str:
 
 @pytest.fixture
 async def client(server_url: str) -> AsyncIterator[Client]:
-    async with Client(server_url) as connected:
+    async with connect(server_url, the_token()) as connected:
         yield connected
 
 
@@ -41,5 +41,5 @@ async def no_model_client() -> AsyncIterator[Client]:
         pytest.fail(
             "VRUM_NO_MODEL_TEST_URL is not set. Run the integration tests through ./check.sh."
         )
-    async with Client(url) as connected:
+    async with connect(url, the_token()) as connected:
         yield connected

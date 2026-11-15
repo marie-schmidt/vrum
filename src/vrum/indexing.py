@@ -88,14 +88,20 @@ class FailedItem(BaseModel):
     reason: str
 
 
+# How many of the items the embedding service refused one reindex report lists.
+MOST_FAILED_SHOWN = 50
+
+
 class IndexReport(BaseModel):
     model: str = Field(description="The embedding model the index is built with.")
     dimensions: int = Field(description="The size of its vectors, read from the model.")
     embedded: int = Field(description="How many items were embedded in this run.")
     failed: list[FailedItem] = Field(
-        description="Items the service refused (for example, text it cannot take). The rest were "
-        "still indexed. A failed item stays waiting until its text changes."
+        description="Items the service refused (for example, text it cannot take), the first "
+        f"{MOST_FAILED_SHOWN} of them. The rest were still indexed. A failed item stays waiting "
+        "until its text changes."
     )
+    failed_total: int = Field(description="How many items the service refused in this run.")
     waiting_after: int = Field(description="How many items are still waiting to be indexed.")
     indexed_total: int = Field(description="How many items are in the index now.")
     rebuilt_because: str | None = Field(
@@ -159,7 +165,8 @@ class Indexer:
             model=client.model,
             dimensions=dimensions,
             embedded=embedded,
-            failed=failed,
+            failed=failed[:MOST_FAILED_SHOWN],
+            failed_total=len(failed),
             waiting_after=state.waiting,
             indexed_total=int(total["total"]),
             rebuilt_because=rebuilt_because,
@@ -272,7 +279,7 @@ class Indexer:
                     waiting = (await snapshot(conn, self._client.model)).waiting
                 if waiting:
                     report = await self.reindex()
-                    if report.error or report.failed:
+                    if report.error or report.failed_total:
                         delay = after_trouble
                     else:
                         in_outage = False

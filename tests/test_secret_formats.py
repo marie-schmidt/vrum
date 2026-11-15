@@ -2,7 +2,7 @@
 
 import pytest
 
-from vrum.secret_formats import find_secret
+from vrum.secret_formats import find_secret, find_secret_in, redact_secrets
 
 
 # Written out in pieces so that no real-looking secret is stored in this file.
@@ -51,3 +51,33 @@ def test_what_is_said_about_it_never_contains_the_secret() -> None:
 )
 def test_ordinary_text_that_merely_talks_about_secrets_is_not_one(text: str) -> None:
     assert find_secret(text) is None
+
+
+GITHUB = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5"
+
+
+def test_a_secret_is_found_anywhere_inside_lists_and_objects_and_the_field_is_named() -> None:
+    items = [{"title": "fine"}, {"title": "fine", "body": f"the key is {GITHUB}"}]
+
+    assert find_secret_in({"actor": "ann", "items": items}) == ("items[1].body", "a GitHub token")
+    assert find_secret_in({"nested": {"deeper": [["x", GITHUB]]}}) == (
+        "nested.deeper[0][1]",
+        "a GitHub token",
+    )
+    assert find_secret_in(GITHUB) == ("", "a GitHub token")
+    assert find_secret_in({"a": 1, "b": None, "c": [2.5, True], "d": "plain"}) is None
+    assert find_secret_in({}) is None
+
+
+def test_the_answer_names_the_field_and_the_kind_and_never_the_secret() -> None:
+    path, kind = find_secret_in({"body": f"x {GITHUB} y"}) or ("", "")
+    assert GITHUB not in path + kind
+
+
+def test_redaction_replaces_every_secret_in_a_text_with_a_note_of_what_it_was() -> None:
+    text = f"first {GITHUB}, then AKIAABCDEFGHIJKLMNOP, and nothing else"
+
+    assert redact_secrets(text) == (
+        "first [a GitHub token removed], then [an AWS access key id removed], and nothing else"
+    )
+    assert redact_secrets("an ordinary line") == "an ordinary line"

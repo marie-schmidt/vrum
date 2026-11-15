@@ -28,6 +28,10 @@ services:
       VRUM_PORT: ${VRUM_PORT:-8000}
       VRUM_DB_HOST: db
       VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+      # Every request to the server has to carry this token, as "Authorization: Bearer <token>".
+      # There is no default.
+      VRUM_TOKEN: ${VRUM_TOKEN:?VRUM_TOKEN is not set. Run ./scripts/init-env.sh to create .env with a random token.}
+      VRUM_MAX_REQUEST_BYTES: ${VRUM_MAX_REQUEST_BYTES:-}
       # The embedding service, if any: see .env.example. Without these, search works by exact
       # words only.
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}

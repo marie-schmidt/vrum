@@ -1,6 +1,6 @@
 """Try a running Vrum with a real embedding model and print what it does.
 
-    uv run python scripts/real_embeddings_check.py http://127.0.0.1:8000/mcp
+    VRUM_TOKEN=<the token in .env> uv run python scripts/real_embeddings_check.py http://127.0.0.1:8000/mcp
 
 It adds a small, clearly named set of epics and stories (reworded requirements, related but
 different ones, and unrelated ones) to the graph it is pointed at, waits for the server's own job
@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mcp import Client
+from vrum_client import connect
 
-# The same requirement written two ways by two people.
 DUPLICATES = [
     (
         (
@@ -129,7 +129,7 @@ async def story(client: Client, epic: int, text: tuple[str, str]) -> int:
 
 async def main(url: str) -> None:
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    async with Client(url) as client:
+    async with connect(url) as client:
         report = await call(client, "reindex")
         print(f"model {report['model']}, vectors of {report['dimensions']} numbers")
         epic_a = await call(

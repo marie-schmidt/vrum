@@ -21,6 +21,7 @@ from vrum.db import Database
 from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.embeddings import EmbeddingUnavailable
 from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
+from vrum.guard import GuardedServer
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
 from vrum.llm import LanguageModel
@@ -71,6 +72,8 @@ handoff note for whoever comes next. A blank note is refused.
 Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
 `changes_since` shows only what is new since an event, and `ready_work` lists what is free. Lists \
 leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. \
+Anything holding a well-known secret format (an access token, a private key) is refused in every \
+field and never stored: leave secrets out of what you write. \
 If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` \
 and `reflect` use it on the memory; what they return is proposed or generated, and is not a \
 record until you record it.
@@ -161,17 +164,31 @@ class ServerStatus(BaseModel):
 
 @contextmanager
 def _database_errors() -> Iterator[None]:
-    """Say so in plain words when the database cannot be reached, instead of a driver message."""
+    """Say so in plain words when the database cannot be reached, or will not take what was sent,
+    instead of a driver message."""
     try:
         yield
+    except psycopg.errors.ProgramLimitExceeded as error:
+        # PostgreSQL keeps what can be searched in a text in at most about 1 MB: a huge text of
+        # mostly different words does not fit. Nothing was saved, as every write is one step.
+        raise ToolError(
+            "A text in this request is too long to be searched: PostgreSQL cannot index more "
+            "than about 1 MB of different words in one item. Nothing was changed. Split the text "
+            "into several items, or shorten it."
+        ) from error
     except psycopg.OperationalError as error:
+        if error.sqlstate is not None:
+            raise ToolError(
+                "The database refused this request and nothing was changed. Try again; if it "
+                "keeps happening, look at the database container's log."
+            ) from error
         raise ToolError(
             "The server is running but cannot reach its database. "
             "Check that the database container is healthy, then try again."
         ) from error
 
 
-def create_server(settings: Settings) -> MCPServer[Database]:
+def create_server(settings: Settings) -> GuardedServer:
     database = Database(settings.database_conninfo())
     graph = Graph(database)
     links = Links(database)
@@ -213,7 +230,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                     await job
             await database.close()
 
-    mcp = MCPServer[Database](
+    mcp = GuardedServer(
         "vrum", version=version("vrum"), lifespan=lifespan, instructions=INSTRUCTIONS
     )
 

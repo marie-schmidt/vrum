@@ -1,6 +1,6 @@
 """Try a running Vrum with a real language model and print what it does.
 
-    uv run python scripts/real_model_check.py http://127.0.0.1:8000/mcp
+    VRUM_TOKEN=<the token in .env> uv run python scripts/real_model_check.py http://127.0.0.1:8000/mcp
 
 The server has to be started with LLM_BASE_URL and LLM_MODEL pointing at the model (see
 .env.example). The script adds a small, clearly named set of notes, facts, beliefs and decisions to
@@ -20,6 +20,7 @@ from collections import Counter
 from typing import Any
 
 from mcp import Client
+from vrum_client import connect
 
 ACTOR = "real-model-check"
 PERSON = "Marie"
@@ -89,7 +90,7 @@ def short(text: str, length: int = 100) -> str:
 
 
 async def main(url: str) -> None:
-    async with Client(url) as client:
+    async with connect(url) as client:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         epic = await ok(
             client,

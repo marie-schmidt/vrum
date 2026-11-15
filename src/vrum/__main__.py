@@ -1,15 +1,44 @@
 """Start the server: `python -m vrum`."""
 
 import asyncio
+import logging
 import os
 import sys
 
 import psycopg
+import uvicorn
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 
+from vrum.access import AccessGuard
 from vrum.config import ConfigError, Settings
 from vrum.db import SchemaOutOfDate, prepare_schema
+from vrum.logs import configure_logging, event
 from vrum.server import create_server
+
+
+def build_app(settings: Settings) -> Starlette:
+    """The web application: the MCP endpoint and the health check, behind the access guard."""
+    # The server listens on every address inside its container, so the SDK's automatic
+    # localhost-only check is off; allow only requests addressed to localhost explicitly.
+    local_hosts = [
+        f"localhost:{settings.port}",
+        f"127.0.0.1:{settings.port}",
+        f"[::1]:{settings.port}",
+    ]
+    security = TransportSecuritySettings(
+        allowed_hosts=local_hosts,
+        allowed_origins=[f"http://{host}" for host in local_hosts],
+    )
+    app = create_server(settings).streamable_http_app(
+        transport_security=security,
+        host=settings.host,
+        max_request_body_size=settings.max_request_bytes,
+    )
+    app.add_middleware(
+        AccessGuard, token=settings.token, max_request_bytes=settings.max_request_bytes
+    )
+    return app
 
 
 def main() -> int:
@@ -28,23 +57,23 @@ def main() -> int:
         print(f"vrum cannot start: it cannot reach its database ({error}).", file=sys.stderr)
         return 1
 
-    # The server listens on every address inside its container, so the SDK's automatic
-    # localhost-only check is off; allow only requests addressed to localhost explicitly.
-    local_hosts = [
-        f"localhost:{settings.port}",
-        f"127.0.0.1:{settings.port}",
-        f"[::1]:{settings.port}",
-    ]
-    security = TransportSecuritySettings(
-        allowed_hosts=local_hosts,
-        allowed_origins=[f"http://{host}" for host in local_hosts],
-    )
-    create_server(settings).run(
-        "streamable-http",
+    app = build_app(settings)
+    configure_logging(settings.secrets())
+    event(
+        logging.getLogger("vrum"),
+        logging.INFO,
+        "server_started",
         host=settings.host,
         port=settings.port,
-        transport_security=security,
+        max_request_bytes=settings.max_request_bytes,
+        embedding_model=settings.embedding.model if settings.embedding else None,
+        language_model=settings.llm.model if settings.llm else None,
     )
+    # The server writes its own log lines (see logs.py), so the web server's are off.
+    config = uvicorn.Config(
+        app, host=settings.host, port=settings.port, log_config=None, access_log=False
+    )
+    asyncio.run(uvicorn.Server(config).serve())
     return 0
 
 

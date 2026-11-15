@@ -10,11 +10,28 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from vrum.secret_formats import find_secret_in
+
 MAX_PAGE_SIZE = 200
 
 
 class Refusal(ToolError):
     """A request that will not be carried out. The message says what was wrong and what to do."""
+
+
+def refuse_secrets(value: object) -> None:
+    """Refuse text that holds a secret in a well-known format, anywhere inside `value` (a text, or
+    a dictionary or list of them). The refusal names the field and the kind of secret, never the
+    secret itself, so it can be shown and logged."""
+    found = find_secret_in(value)
+    if found is not None:
+        path, kind = found
+        field = f"The {path} field" if path else "The text"
+        raise Refusal(
+            f"{field} contains what looks like {kind}, so it was not stored, was not sent to "
+            "the language model or any other service, and nothing was changed. Take the secret "
+            "out and try again."
+        )
 
 
 def clean_actor(actor: str) -> str:
@@ -158,7 +175,12 @@ async def record_event(
 ) -> None:
     """Append to the event log. It shows in the history of every node, rule, decision, fact and
     belief it names: `other_node_id` is the second node of a link, or the story a rule has just
-    left."""
+    left.
+
+    Every write records an event with the text it wrote, so this is where text with a secret in a
+    well-known format is refused whatever path it came by (a model's proposal, for one). The
+    refusal rolls the whole write back."""
+    refuse_secrets({"actor": actor, **after})
     await conn.execute(
         "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, memory_id, action, "
         "actor, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
