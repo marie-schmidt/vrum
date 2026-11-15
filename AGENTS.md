@@ -27,7 +27,7 @@ The MCP endpoint is `http://127.0.0.1:8000/mcp` (or `VRUM_PORT`). `GET /health` 
 - `src/vrum/config.py`: settings from the environment (the only place that reads it).
 - `src/vrum/db.py`: the PostgreSQL pool, transactions, and `prepare_schema`, which builds an empty database from `schema.sql` and refuses one built from any other version of it.
 - `src/vrum/schema.sql`: the whole database in one file: tables, constraints, triggers and the `node_state` view.
-- `src/vrum/common.py`: what the modules below share: `Refusal` (the plain-English refusals), argument checks, paging, and database helpers.
+- `src/vrum/common.py`: what the modules below share: `Refusal` (the plain-English refusals), argument checks (including `parse_day` for dates), paging, and database helpers.
 - `src/vrum/graph.py`: the one owner of epics, stories and tasks (`Graph`), and of how a node is read (`node_state`, backed by the `node_state` view that decides what `ready` means).
 - `src/vrum/links.py`: the one owner of links. `src/vrum/claims.py`: the one owner of claims and leases.
 - `src/vrum/rules.py`: the one owner of rules and the coverage report. `src/vrum/decisions.py`: the one owner of decisions and principles, their links, supersession and recall.

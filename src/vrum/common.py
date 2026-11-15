@@ -1,6 +1,7 @@
 """Pieces shared by the graph, links and claims modules: plain refusals, checks on what a caller
 sent, and the small helpers for talking to the database."""
 
+import re
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -53,6 +54,22 @@ def stale_version(label: str, reader: str, item_id: int, current: int, expected:
 
 def when(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def parse_day(label: str, value: str | None) -> date | None:
+    """A day written as YYYY-MM-DD, or nothing. Anything else is refused in plain words, because
+    an agent is as likely to write 'next tuesday' or a time as a proper date."""
+    if value is None:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise Refusal(
+        f"{label} must be a day written as YYYY-MM-DD, such as 2026-11-30 (no time of day), "
+        f"but it is {value!r}."
+    )
 
 
 async def fetch_one(conn: AsyncConnection, sql: str, params: Any = None) -> dict[str, Any] | None:

@@ -1,7 +1,7 @@
 """The epics, stories and tasks. This module owns every question and change on nodes; the MCP
 tools only call it."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -33,9 +33,14 @@ WORKABLE_KINDS = ("story", "task")
 
 _PARENT_KIND = {"story": "epic", "task": "story"}
 _STORED_COLUMNS = (
-    "id, kind, parent_id, title, body, status, priority, version, created_at, updated_at"
+    "id, kind, parent_id, title, body, status, priority, start_on, target_on, version, "
+    "created_at, updated_at"
 )
-STATE_COLUMNS = _STORED_COLUMNS + ", waiting_on, claimed_by, claim_expires_at"
+STATE_COLUMNS = (
+    _STORED_COLUMNS
+    + ", waiting_on, schedule_conflicts, overdue, span_start, span_end, span_worked_out, "
+    "claimed_by, claim_expires_at"
+)
 EVENT_COLUMNS = "id, node_id, other_node_id, rule_id, decision_id, action, actor, at, before, after"
 
 
@@ -54,6 +59,13 @@ class Node(BaseModel):
         "while something it needs first is still open. ready is worked out, never set."
     )
     priority: str = Field(description="low, normal, high or urgent.")
+    start_on: date | None = Field(
+        description="The day work on it is planned to start, as YYYY-MM-DD. Empty when not set."
+    )
+    target_on: date | None = Field(
+        description="The day it is planned to be done by, as YYYY-MM-DD. Empty when not set. "
+        "The start is never after the target."
+    )
     version: int = Field(
         description="Starts at 1 and rises by one with every change. Send it back as "
         "expected_version when you change the node."
@@ -63,6 +75,27 @@ class Node(BaseModel):
     waiting_on: list[int] = Field(
         description="The ids of the nodes it needs first (needs_first links) that are not done "
         "yet. While there are any, it cannot be started."
+    )
+    schedule_conflicts: list[int] = Field(
+        description="The ids of the nodes it needs first, still not done, whose target date is "
+        "later than this node's own start date: it is planned to start before what it needs is "
+        "due. A warning only: nothing is refused."
+    )
+    overdue: bool = Field(
+        description="True when its own target date has passed and it is not done or dropped."
+    )
+    span_start: date | None = Field(
+        description="The first day to draw on a roadmap: its own start date, or for an epic or "
+        "story with no dates of its own, the earliest start among what is under it."
+    )
+    span_end: date | None = Field(
+        description="The last day to draw on a roadmap: its own target date, or for an epic or "
+        "story with no dates of its own, the latest target among what is under it. Dropped work "
+        "does not count."
+    )
+    span_worked_out: bool = Field(
+        description="True when span_start and span_end were worked out from what is under the "
+        "node because it has no dates of its own."
     )
     claimed_by: str | None = Field(description="Who holds a claim on it right now, if anyone.")
     claim_expires_at: datetime | None = Field(
@@ -122,6 +155,14 @@ def _clean_title(title: str) -> str:
     if not cleaned:
         raise Refusal("A node needs a title: title cannot be empty.")
     return cleaned
+
+
+def _check_dates(start_on: date | None, target_on: date | None) -> None:
+    if start_on is not None and target_on is not None and start_on > target_on:
+        raise Refusal(
+            f"The start date {start_on} is after the target date {target_on}. Work cannot start "
+            "after it is due: move the start earlier or the target later."
+        )
 
 
 async def require_node(
@@ -189,18 +230,21 @@ class Graph:
         parent_id: int | None,
         body: str,
         priority: str,
+        start_on: date | None,
+        target_on: date | None,
     ) -> Node:
         actor = clean_actor(actor)
         check_choice("kind", kind, KINDS)
         title = _clean_title(title)
         check_choice("priority", priority, PRIORITIES)
+        _check_dates(start_on, target_on)
         async with self._database.transaction() as conn:
             await _require_parent(conn, kind, parent_id)
             row = await fetch_one(
                 conn,
-                "INSERT INTO nodes (kind, parent_id, title, body, priority) "
-                f"VALUES (%s, %s, %s, %s, %s) RETURNING {_STORED_COLUMNS}",
-                (kind, parent_id, title, body, priority),
+                "INSERT INTO nodes (kind, parent_id, title, body, priority, start_on, target_on) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {_STORED_COLUMNS}",
+                (kind, parent_id, title, body, priority, start_on, target_on),
             )
             assert row is not None
             await record_event(
@@ -210,7 +254,18 @@ class Graph:
                 actor=actor,
                 before=None,
                 after=snapshot(
-                    row, ("kind", "parent_id", "title", "body", "status", "priority", "version")
+                    row,
+                    (
+                        "kind",
+                        "parent_id",
+                        "title",
+                        "body",
+                        "status",
+                        "priority",
+                        "start_on",
+                        "target_on",
+                        "version",
+                    ),
                 ),
             )
             return await node_state(conn, row["id"])
@@ -225,6 +280,11 @@ class Graph:
         kind: str | None,
         parent_id: int | None,
         status: str | None,
+        start_from: date | None,
+        start_to: date | None,
+        target_from: date | None,
+        target_to: date | None,
+        overdue: bool | None,
         limit: int,
         after_id: int | None,
     ) -> NodePage:
@@ -242,11 +302,21 @@ class Graph:
                 "WHERE (%(kind)s::text IS NULL OR kind = %(kind)s) "
                 "AND (%(parent_id)s::bigint IS NULL OR parent_id = %(parent_id)s) "
                 "AND (%(status)s::text IS NULL OR status = %(status)s) "
+                "AND (%(start_from)s::date IS NULL OR start_on >= %(start_from)s) "
+                "AND (%(start_to)s::date IS NULL OR start_on <= %(start_to)s) "
+                "AND (%(target_from)s::date IS NULL OR target_on >= %(target_from)s) "
+                "AND (%(target_to)s::date IS NULL OR target_on <= %(target_to)s) "
+                "AND (%(overdue)s::boolean IS NULL OR overdue = %(overdue)s) "
                 "AND id > %(after_id)s ORDER BY id LIMIT %(fetch)s",
                 {
                     "kind": kind,
                     "parent_id": parent_id,
                     "status": status,
+                    "start_from": start_from,
+                    "start_to": start_to,
+                    "target_from": target_from,
+                    "target_to": target_to,
+                    "overdue": overdue,
                     "after_id": after_id or 0,
                     "fetch": limit + 1,
                 },
@@ -287,6 +357,10 @@ class Graph:
         status: str | None,
         priority: str | None,
         parent_id: int | None,
+        start_on: date | None,
+        target_on: date | None,
+        clear_start_on: bool,
+        clear_target_on: bool,
     ) -> Node:
         actor = clean_actor(actor)
         if title is not None:
@@ -302,6 +376,14 @@ class Graph:
             )
         if priority is not None:
             check_choice("priority", priority, PRIORITIES)
+        for given, clear, name in (
+            (start_on, clear_start_on, "start_on"),
+            (target_on, clear_target_on, "target_on"),
+        ):
+            if given is not None and clear:
+                raise Refusal(
+                    f"Give a new {name} or ask for it to be cleared (clear_{name}), not both."
+                )
         async with self._database.transaction() as conn:
             current = await require_node(conn, node_id, lock=True)
             if current["version"] != expected_version:
@@ -317,18 +399,32 @@ class Graph:
                         f"node has exactly one parent. To put it under node {parent_id} instead, "
                         "use move_node."
                     )
-            wanted = {"title": title, "body": body, "status": status, "priority": priority}
+            wanted: dict[str, Any] = {
+                "title": title,
+                "body": body,
+                "status": status,
+                "priority": priority,
+                "start_on": start_on,
+                "target_on": target_on,
+            }
             changes = {
                 field: value
                 for field, value in wanted.items()
                 if value is not None and value != current[field]
             }
+            for field, clear in (("start_on", clear_start_on), ("target_on", clear_target_on)):
+                if clear and current[field] is not None:
+                    changes[field] = None
             if not changes:
                 raise Refusal(
                     f"Nothing to change: node {node_id} already has the values you gave, or you "
-                    "gave none. Give at least one of title, body, status or priority with a new "
-                    "value."
+                    "gave none. Give at least one of title, body, status, priority, start_on or "
+                    "target_on with a new value, or ask for a date to be cleared."
                 )
+            _check_dates(
+                changes.get("start_on", current["start_on"]),
+                changes.get("target_on", current["target_on"]),
+            )
             row = await save_changes(conn, "nodes", node_id, changes, _STORED_COLUMNS)
             await record_event(
                 conn,
@@ -336,7 +432,7 @@ class Graph:
                 action="update",
                 actor=actor,
                 before={**snapshot(current, tuple(changes)), "version": current["version"]},
-                after={**changes, "version": row["version"]},
+                after={**snapshot(row, tuple(changes)), "version": row["version"]},
             )
             return await node_state(conn, node_id)
 

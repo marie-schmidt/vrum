@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
+from vrum.common import parse_day
 from vrum.config import Settings
 from vrum.db import Database
 from vrum.decisions import Decision, DecisionPage, Decisions, Recall
@@ -39,6 +40,14 @@ _RuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it af
 _DecidedOn = Annotated[
     date | None,
     Field(description="The day it was decided, as YYYY-MM-DD. Leave empty for today."),
+]
+_StartOn = Annotated[
+    str | None,
+    Field(description="The day work is planned to start, as YYYY-MM-DD. Never after target_on."),
+]
+_TargetOn = Annotated[
+    str | None,
+    Field(description="The day it is planned to be done by, as YYYY-MM-DD."),
 ]
 _Limit = Annotated[int, Field(description="How many items to return, from 1 to 200.")]
 _After = Annotated[
@@ -112,12 +121,14 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         ] = None,
         body: Annotated[str, Field(description="Plain text or Markdown.")] = "",
         priority: Annotated[str, Field(description="low, normal, high or urgent.")] = "normal",
+        start_on: _StartOn = None,
+        target_on: _TargetOn = None,
     ) -> Node:
         """Create an epic, a story or a task.
 
         Work is an exact hierarchy: an epic has no parent, a story belongs to one epic, and a task
         belongs to one story. Any other shape is refused. A new node starts with status new and
-        version 1.
+        version 1. Dates are optional; a start date after the target date is refused.
         """
         with _database_errors():
             return await graph.create_node(
@@ -127,6 +138,8 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 parent_id=parent_id,
                 body=body,
                 priority=priority,
+                start_on=parse_day("start_on", start_on),
+                target_on=parse_day("target_on", target_on),
             )
 
     @mcp.tool()
@@ -145,16 +158,49 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             str | None,
             Field(description="Only new, ready, in_progress, blocked, done or dropped."),
         ] = None,
+        start_from: Annotated[
+            str | None,
+            Field(description="Only nodes whose start_on is on or after this day (YYYY-MM-DD)."),
+        ] = None,
+        start_to: Annotated[
+            str | None,
+            Field(description="Only nodes whose start_on is on or before this day (YYYY-MM-DD)."),
+        ] = None,
+        target_from: Annotated[
+            str | None,
+            Field(description="Only nodes whose target_on is on or after this day (YYYY-MM-DD)."),
+        ] = None,
+        target_to: Annotated[
+            str | None,
+            Field(description="Only nodes whose target_on is on or before this day (YYYY-MM-DD)."),
+        ] = None,
+        overdue: Annotated[
+            bool | None,
+            Field(
+                description="True: only nodes whose target date has passed and are not done or "
+                "dropped. False: only the others."
+            ),
+        ] = None,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> NodePage:
         """List nodes, oldest first, a page at a time. Every filter is optional and they combine.
 
-        status can also be ready: a node nobody has started whose prerequisites are all done.
+        status can also be ready: a node nobody has started whose prerequisites are all done. The
+        date filters look at each node's own dates, so a node without a date never matches one.
         """
         with _database_errors():
             return await graph.list_nodes(
-                kind=kind, parent_id=parent_id, status=status, limit=limit, after_id=after_id
+                kind=kind,
+                parent_id=parent_id,
+                status=status,
+                start_from=parse_day("start_from", start_from),
+                start_to=parse_day("start_to", start_to),
+                target_from=parse_day("target_from", target_from),
+                target_to=parse_day("target_to", target_to),
+                overdue=overdue,
+                limit=limit,
+                after_id=after_id,
             )
 
     @mcp.tool()
@@ -175,13 +221,23 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 "and move_node changes it."
             ),
         ] = None,
+        start_on: _StartOn = None,
+        target_on: _TargetOn = None,
+        clear_start_on: Annotated[
+            bool, Field(description="True to remove the start date. Do not also give start_on.")
+        ] = False,
+        clear_target_on: Annotated[
+            bool, Field(description="True to remove the target date. Do not also give target_on.")
+        ] = False,
     ) -> Node:
-        """Change a node's title, body, status or priority. Leave out what should stay as it is.
+        """Change a node's title, body, status, priority or dates. Leave out what should stay.
 
         You must send the version you last read. If someone else changed the node since, the change
         is refused so nothing is overwritten silently: read the node again and repeat the change.
         Whether a node is ready is worked out by the server, so you cannot set it: new here means
-        "not started", and the node shows as ready when everything it needs first is done.
+        "not started", and the node shows as ready when everything it needs first is done. A date
+        is removed only by asking for it (clear_start_on, clear_target_on), and a start date after
+        the target date is refused.
         """
         with _database_errors():
             return await graph.update_node(
@@ -193,6 +249,10 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                 status=status,
                 priority=priority,
                 parent_id=parent_id,
+                start_on=parse_day("start_on", start_on),
+                target_on=parse_day("target_on", target_on),
+                clear_start_on=clear_start_on,
+                clear_target_on=clear_target_on,
             )
 
     @mcp.tool()

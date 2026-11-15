@@ -153,3 +153,16 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 
 - **Should a belief that a model drew up count toward `next_work`'s context?** Default: yes, labelled as a suggestion, but only if it is not stale. Say if you would rather they appeared only after a person confirms them.
 - **Auto-extract facts from every handoff note.** Hindsight does something like this. Default: no, because it adds noise and cost; an agent or person calls `extract_facts` when they want it.
+
+## 2026-11-15: choices made while building M1A (dates)
+
+These fill gaps the spec leaves open. None changes a spec default. The owner may veto any of them.
+
+- **Dates are plain days, written YYYY-MM-DD.** The server reads them itself and refuses anything else in plain words ("next tuesday", a time of day, `30/11/2026`, a day that does not exist), instead of passing on the raw validation error. The same check is used for the list filters. The decision date on a decision (`decided_on`) still uses the SDK's own date check, so a badly written one gives the raw error; it is a one-line change to give it the same wording if the owner wants it.
+- **Clearing a date is a request of its own** (`clear_start_on`, `clear_target_on`), never an empty value, so that leaving a field out always means "leave it as it is". Giving a date and clearing the same one is refused, and clearing a date that is already empty counts as nothing to change.
+- **The start may equal the target.** A one-day job starts and ends on one day. Only a start after the target is refused, by the tool in plain words and by the database as the last line of defence.
+- **Overdue** uses the node's own target date and the stored status: a past target is overdue until the node is `done` or `dropped`. It is judged against the current day in UTC, which is the database's own clock.
+- **The worked-out span** (for the roadmap). A node with any date of its own reports its own start and target as they are, even when what is under it reaches further. A story with none reports the earliest start and latest target of its tasks. An epic with none reports the same over its stories, where a story contributes its own dates if it has any and its tasks' span if not. Dropped stories and tasks do not count; done ones do (they are history). A task never works a span out, and `span_worked_out` is true only when the dates were worked out.
+- **Schedule conflicts** are listed for a node that has its own start date and needs something first that is not done and has a target date after that start. A prerequisite that is done no longer conflicts, and neither does one with no target date. It is a list of prerequisite ids on the node, a warning only, and nothing is refused.
+- **Filters on `list_nodes`:** `start_from`, `start_to`, `target_from`, `target_to` (inclusive, on a node's own dates, so a node without a date never matches) and `overdue`. The one filter language of M11 will cover the same ground in a single text; `undated` is `no:` there and was not added here.
+- **History:** a date change is an ordinary update event listing only the dates that changed, as text, with before and after.

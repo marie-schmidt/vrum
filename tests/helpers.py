@@ -3,6 +3,7 @@ straight to the database."""
 
 import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -222,3 +223,8 @@ async def make_decision(
         "decided_by": "Marie",
     }
     return await ok(client, "record_decision", **{**fields, **arguments})
+
+
+def day(offset: int = 0) -> str:
+    """A day written as YYYY-MM-DD, `offset` days from today (UTC, as the database counts it)."""
+    return (datetime.now(UTC).date() + timedelta(days=offset)).isoformat()

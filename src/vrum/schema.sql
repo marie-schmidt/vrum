@@ -22,6 +22,9 @@ CREATE TABLE nodes (
     -- `ready` is never stored: it is worked out from the links (see node_state below).
     status      text NOT NULL DEFAULT 'new',
     priority    text NOT NULL DEFAULT 'normal',
+    -- Plain dates with no time of day. What the roadmap draws; see node_state for what is worked out.
+    start_on    date,
+    target_on   date,
     version     integer NOT NULL DEFAULT 1,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
@@ -30,6 +33,8 @@ CREATE TABLE nodes (
     CONSTRAINT node_status_is_known
         CHECK (status IN ('new', 'in_progress', 'blocked', 'done', 'dropped')),
     CONSTRAINT node_priority_is_known CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+    CONSTRAINT node_start_is_not_after_target
+        CHECK (start_on IS NULL OR target_on IS NULL OR start_on <= target_on),
     CONSTRAINT node_version_starts_at_one CHECK (version >= 1),
     CONSTRAINT node_has_a_parent_unless_epic CHECK ((kind = 'epic') = (parent_id IS NULL)),
     CONSTRAINT node_id_and_kind_are_unique UNIQUE (id, kind),
@@ -127,22 +132,67 @@ CREATE TABLE claims (
     CONSTRAINT claim_is_on_a_real_node FOREIGN KEY (node_id, node_kind) REFERENCES nodes (id, kind)
 );
 
--- A node as it is read: its status with `ready` worked out, what it still waits for, and who
--- holds a claim on it right now. This is the one place that decides what `ready` means.
+-- A node as it is read: its status with `ready` worked out, what it still waits for, who holds a
+-- claim on it right now, and what its dates add up to. This is the one place that decides what
+-- `ready`, overdue, a span and a schedule conflict mean.
+--   waiting_on:         the nodes it needs first that are not done.
+--   schedule_conflicts: those of them that are due after this node's own start date. A warning only.
+--   overdue:            its own target date has passed and it is not done or dropped.
+--   span_start/end:     the dates the roadmap draws. Its own when it has any. Otherwise, for an epic
+--                       or story, the span of what is under it (dropped work does not count), and
+--                       span_worked_out says so.
 CREATE VIEW node_state AS
 SELECT n.id, n.kind, n.parent_id, n.title, n.body,
        CASE WHEN n.status = 'new' AND cardinality(w.ids) = 0 THEN 'ready' ELSE n.status END
            AS status,
-       n.priority, n.version, n.created_at, n.updated_at,
+       n.priority, n.start_on, n.target_on, n.version, n.created_at, n.updated_at,
        w.ids AS waiting_on,
+       w.conflicts AS schedule_conflicts,
+       coalesce(n.target_on < current_date AND n.status NOT IN ('done', 'dropped'), false)
+           AS overdue,
+       sp.span_start,
+       sp.span_end,
+       (n.start_on IS NULL AND n.target_on IS NULL
+        AND (sp.span_start IS NOT NULL OR sp.span_end IS NOT NULL)) AS span_worked_out,
        c.actor AS claimed_by,
        c.expires_at AS claim_expires_at
 FROM nodes n
 CROSS JOIN LATERAL (
-    SELECT coalesce(array_agg(t.id ORDER BY t.id), ARRAY[]::bigint[]) AS ids
+    SELECT coalesce(array_agg(t.id ORDER BY t.id), ARRAY[]::bigint[]) AS ids,
+           coalesce(array_agg(t.id ORDER BY t.id)
+                    FILTER (WHERE n.start_on IS NOT NULL AND t.target_on > n.start_on),
+                    ARRAY[]::bigint[]) AS conflicts
     FROM links l JOIN nodes t ON t.id = l.target_id
     WHERE l.source_id = n.id AND l.link_type = 'needs_first' AND t.status <> 'done'
 ) w
+CROSS JOIN LATERAL (
+    SELECT CASE
+               WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.start_on
+               WHEN n.kind = 'story' THEN (
+                   SELECT min(t.start_on) FROM nodes t
+                   WHERE t.parent_id = n.id AND t.status <> 'dropped')
+               WHEN n.kind = 'epic' THEN (
+                   SELECT min(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
+                                   THEN s.start_on
+                                   ELSE (SELECT min(t.start_on) FROM nodes t
+                                         WHERE t.parent_id = s.id AND t.status <> 'dropped')
+                              END)
+                   FROM nodes s WHERE s.parent_id = n.id AND s.status <> 'dropped')
+           END AS span_start,
+           CASE
+               WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.target_on
+               WHEN n.kind = 'story' THEN (
+                   SELECT max(t.target_on) FROM nodes t
+                   WHERE t.parent_id = n.id AND t.status <> 'dropped')
+               WHEN n.kind = 'epic' THEN (
+                   SELECT max(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
+                                   THEN s.target_on
+                                   ELSE (SELECT max(t.target_on) FROM nodes t
+                                         WHERE t.parent_id = s.id AND t.status <> 'dropped')
+                              END)
+                   FROM nodes s WHERE s.parent_id = n.id AND s.status <> 'dropped')
+           END AS span_end
+) sp
 LEFT JOIN claims c ON c.node_id = n.id AND c.expires_at > clock_timestamp();
 
 -- Rules (requirements) ----------------------------------------------------------------------

@@ -8,6 +8,7 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
+    day,
     make_decision,
     make_rule,
     make_stories,
@@ -116,6 +117,48 @@ async def test_the_event_log_cannot_be_rewritten_and_nodes_with_history_cannot_b
 
     history = (await ok(client, "node_history", node_id=story["id"]))["items"]
     assert [event["actor"] for event in history] == ["marie"]
+
+
+async def test_the_database_refuses_a_start_date_after_the_target_date_on_its_own(
+    client: Client,
+) -> None:
+    (story,) = await make_stories(client, 1)
+    task = await ok(
+        client,
+        "create_node",
+        actor="marie",
+        kind="task",
+        title="Dated",
+        parent_id=story["id"],
+        start_on=day(2),
+        target_on=day(10),
+    )
+    attempts = {
+        "a new node that starts after its target": (
+            "INSERT INTO nodes (kind, parent_id, title, start_on, target_on) VALUES "
+            f"('task', {story['id']}, 'x', '{day(9)}', '{day(3)}')"
+        ),
+        "a start moved past the target": (
+            f"UPDATE nodes SET start_on = '{day(30)}', version = version + 1 "
+            f"WHERE id = {task['id']}"
+        ),
+        "a target moved before the start": (
+            f"UPDATE nodes SET target_on = '{day(1)}', version = version + 1 "
+            f"WHERE id = {task['id']}"
+        ),
+    }
+    for what, sql in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert "node_start_is_not_after_target" in result.stderr, f"{what}: {result.stderr}"
+
+    # Either date alone, or none, is fine, and the same day for both.
+    fine = run_sql(
+        f"UPDATE nodes SET start_on = NULL, version = version + 1 WHERE id = {task['id']}"
+    )
+    assert fine.returncode == 0, fine.stderr
+    unchanged = await ok(client, "get_node", node_id=task["id"])
+    assert (unchanged["start_on"], unchanged["target_on"]) == (None, day(10))
 
 
 async def test_the_database_refuses_bad_links(client: Client) -> None:
