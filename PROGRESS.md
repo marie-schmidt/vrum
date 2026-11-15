@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (iteration 0 done; next milestone is M0)
+Status: IN PROGRESS (M0 done; next milestone is M1)
 
 ## Inputs (from the loop file)
 
@@ -13,7 +13,7 @@ Status: IN PROGRESS (iteration 0 done; next milestone is M0)
 
 Tick in order. Each tick records the date and the commit. Each milestone keeps an attempts line; after 3 failed attempts, write BLOCKED.md.
 
-- [ ] M0. Bootstrap (attempts: 0)
+- [x] M0. Bootstrap (attempts: 1) (2026-11-14, commit a44cad8)
 - [ ] M1. Graph core (attempts: 0)
 - [ ] M2. Links, readiness and claims (attempts: 0)
 - [ ] M3. Rules and coverage (attempts: 0)
@@ -26,8 +26,20 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 
 ## Defaults taken (for owner's veto)
 
-None yet.
+Full wording is in `DECISIONS.md`.
+
+- M0: MCP SDK 2.x (`>=2.3,<3`), `uv` + `ruff` + `mypy --strict` + `pytest`, image `pgvector/pgvector:pg17`, `psycopg` 3 with its async pool.
+- M0: no authentication until M6; the server is reachable only from this machine (compose binds `127.0.0.1`). `GET /health` is unauthenticated and says only `ok` or `unavailable`.
+- M0: the database password comes from `VRUM_DB_PASSWORD` with no default (`./scripts/init-env.sh` writes a random one to the git-ignored `.env`); the database port is not published.
+- M0: the server listens on `VRUM_PORT` (default 8000) and compose publishes the same port number.
+- M0: the only tool is `server_status` (server, PostgreSQL and pgvector versions), so the client has something real to list; M1 adds the graph tools.
+
+## M0 proof, as run
+
+- `./check.sh`: lint, strict types, 9 unit tests and 3 integration tests (real containers, real MCP client) pass.
+- From a clean clone: `./scripts/init-env.sh`, then `docker compose up -d`; both services reached `healthy` and a separate MCP client listed `server_status` and called it (PostgreSQL 17.12, pgvector 0.8.7).
+- Also seen working: compose refuses to start without a password, a wrong `Host` header gets 421, `/health` returns 503 and `server_status` gives a plain refusal while the database is stopped, and both recover when it restarts.
 
 ## Notes
 
-- Iteration 0 only created the repository, SPEC.md, PROGRESS.md and AGENTS.md. No application code exists yet.
+- Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them).
