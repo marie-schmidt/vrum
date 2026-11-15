@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from mcp import Client
 
-from tests.helpers import make_tree, ok
+from tests.helpers import make_tasks, make_tree, needs_first, ok
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -89,7 +89,7 @@ async def test_the_database_refuses_a_hierarchy_that_is_not_epic_story_task(clie
         assert expected in result.stderr, f"{what}: {result.stderr}"
 
     after = await ok(client, "get_node", node_id=story["id"])
-    assert (after["status"], after["parent_id"], after["version"]) == ("new", epic["id"], 1)
+    assert (after["status"], after["parent_id"], after["version"]) == ("ready", epic["id"], 1)
 
 
 async def test_the_database_refuses_a_kind_change_and_a_change_without_a_new_version(
@@ -128,3 +128,85 @@ async def test_the_event_log_cannot_be_rewritten_and_nodes_with_history_cannot_b
 
     history = (await ok(client, "node_history", node_id=story["id"]))["items"]
     assert [event["actor"] for event in history] == ["marie"]
+
+
+async def test_the_database_refuses_bad_links(client: Client) -> None:
+    first, second = await make_tasks(client, 2)
+    a, b = first["id"], second["id"]
+    await needs_first(client, first, second)
+    await ok(client, "add_link", actor="marie", source_id=a, target_id=b, link_type="relates_to")
+
+    def link(source: int, target: int, link_type: str) -> str:
+        return (
+            "INSERT INTO links (source_id, target_id, link_type) "
+            f"VALUES ({source}, {target}, '{link_type}')"
+        )
+
+    attempts = {
+        "a link to the same node": (link(a, a, "relates_to"), "link_is_not_to_the_same_node"),
+        "waiting for the same node": (link(a, a, "needs_first"), "link_is_not_to_the_same_node"),
+        "an unknown link type": (link(a, b, "blocks"), "link_type_is_known"),
+        "a link to a node that does not exist": (
+            link(a, 987654321, "needs_first"),
+            "violates foreign key constraint",
+        ),
+        "a circle of waiting": (link(b, a, "needs_first"), "circle of waiting"),
+        "the same link twice": (link(a, b, "needs_first"), "link_is_not_repeated"),
+        "a two-way link again in the other direction": (
+            link(b, a, "relates_to"),
+            "link_two_way_is_not_repeated",
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    links = (await ok(client, "list_links", node_id=a))["items"]
+    assert sorted(link["link_type"] for link in links) == ["needs_first", "relates_to"]
+
+
+async def test_the_database_refuses_bad_claims_and_a_second_holder(client: Client) -> None:
+    epic, story, task = await make_tree(client)
+    await ok(client, "claim_node", actor="ann", node_id=task["id"])
+
+    def claim(node: int, kind: str, actor: str, expires: str) -> str:
+        return (
+            "INSERT INTO claims (node_id, node_kind, actor, expires_at) "
+            f"VALUES ({node}, '{kind}', '{actor}', now() + interval '{expires}')"
+        )
+
+    attempts = {
+        "a claim on an epic": (
+            claim(epic["id"], "epic", "bob", "1 hour"),
+            "claim_is_for_a_story_or_task",
+        ),
+        "a claim that names the wrong kind": (
+            claim(story["id"], "task", "bob", "1 hour"),
+            "claim_is_on_a_real_node",
+        ),
+        "a claim with no holder": (
+            claim(story["id"], "story", " ", "1 hour"),
+            "claim_actor_is_not_blank",
+        ),
+        "a claim that is over before it starts": (
+            claim(story["id"], "story", "bob", "-1 hour"),
+            "claim_lease_is_in_the_future",
+        ),
+        "a second holder of one task": (
+            claim(task["id"], "task", "bob", "1 hour"),
+            'duplicate key value violates unique constraint "claims_pkey"',
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    assert (await ok(client, "get_node", node_id=task["id"]))["claimed_by"] == "ann"
+    assert (await ok(client, "get_node", node_id=story["id"]))["claimed_by"] is None
+    result = run_sql(
+        "INSERT INTO events (node_id, action, actor, after) "
+        f"VALUES ({task['id']}, 'delete', 'x', '{{}}')"
+    )
+    assert "event_action_is_known" in result.stderr

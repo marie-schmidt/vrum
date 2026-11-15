@@ -49,3 +49,45 @@ async def make_tree(client: Client) -> tuple[dict[str, Any], dict[str, Any], dic
         client, "create_node", actor="agent-1", kind="task", title="A task", parent_id=story["id"]
     )
     return epic, story, task
+
+
+async def make_tasks(client: Client, count: int) -> list[dict[str, Any]]:
+    """`count` tasks under one new story, so each test works on nodes of its own."""
+    epic = await ok(client, "create_node", actor="marie", kind="epic", title="An epic")
+    story = await ok(
+        client, "create_node", actor="marie", kind="story", title="A story", parent_id=epic["id"]
+    )
+    return [
+        await ok(
+            client,
+            "create_node",
+            actor="marie",
+            kind="task",
+            title=f"Task {number}",
+            parent_id=story["id"],
+        )
+        for number in range(count)
+    ]
+
+
+async def needs_first(client: Client, waiting: dict[str, Any], first: dict[str, Any]) -> None:
+    await ok(
+        client,
+        "add_link",
+        actor="marie",
+        source_id=waiting["id"],
+        target_id=first["id"],
+        link_type="needs_first",
+    )
+
+
+async def set_status(client: Client, node: dict[str, Any], status: str) -> dict[str, Any]:
+    current = await ok(client, "get_node", node_id=node["id"])
+    return await ok(
+        client,
+        "update_node",
+        actor="marie",
+        node_id=node["id"],
+        expected_version=current["version"],
+        status=status,
+    )

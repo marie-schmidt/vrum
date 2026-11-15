@@ -39,3 +39,16 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **Paging:** every list takes `limit` (1 to 200, default 50) and `after_id`, and returns `next_after_id` until the last page. Items come in id order.
 - **Titles and actors:** a title or actor that is blank is refused; surrounding spaces are trimmed. Actors are free text, with no list of known actors.
 - **Schema changes:** numbered SQL files in `src/vrum/migrations/`, applied once each when the server starts, under a database lock so that two servers starting together cannot clash. An applied file is never edited; a change is a new file.
+
+## 2026-11-15: choices made while building M2
+
+These fill gaps the spec leaves open. None changes a spec default. The owner may veto any of them.
+
+- **What `ready` shows:** the spec's rule is followed to the letter. A node nobody has started shows as `ready` when everything it needs first is done, and that includes a brand-new node that needs nothing. So the status `new` now means "not started, and waiting for something it needs first". What can be set is unchanged (`new`, `in_progress`, `blocked`, `done`, `dropped`); `ready` is only ever worked out, by the database view `node_state`, and `waiting_on` lists what a node still waits for.
+- **Only `done` counts:** a prerequisite that is `dropped` or `blocked` keeps its dependents waiting. If a prerequisite no longer applies, remove the `needs_first` link.
+- **Links:** allowed between any two nodes, whatever their kinds. `duplicates` and `relates_to` work both ways, so A to B is the same link as B to A. `supersedes`, `duplicates` and `relates_to` are records only: they change nothing else, such as a status. `list_links` was added so that what is written can be read.
+- **Circles of waiting:** refused by the database, which takes a lock so that two links added at the same moment cannot each look fine and together make a circle. The refusal names the whole circle.
+- **Claims:** only stories and tasks. A node can be claimed when it is `ready` or `in_progress` and nothing it needs first is open; done, dropped and blocked work and epics are refused with a reason. A claim does not change the node's status and does not stop other people editing the node: it says "I am working on this".
+- **Leases:** `lease_seconds` is 1 to 86400 (24 hours), default 900 (15 minutes). A claim lapses on its own with no action. Only the holder can renew (and only before it lapses) or release. Another actor can take over a lapsed claim, and the history records who held it before.
+- **`ready_work`:** stories and tasks that are ready and not claimed (`kind` can ask for epics instead), oldest first. Priority is shown on each item but does not change the order, so that paging stays simple.
+- **History:** a link event shows in the history of both nodes. Claims and releases are events; a claim lapsing is not, because nothing happens at that moment.

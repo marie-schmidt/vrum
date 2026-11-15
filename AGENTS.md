@@ -27,10 +27,12 @@ The MCP endpoint is `http://127.0.0.1:8000/mcp` (or `VRUM_PORT`). `GET /health` 
 - `src/vrum/config.py`: settings from the environment (the only place that reads it).
 - `src/vrum/db.py`: the PostgreSQL pool, transactions, and applying `src/vrum/migrations/*.sql` at start.
 - `src/vrum/migrations/`: numbered SQL files, applied once each, in order. Never edit an applied file; add a new one.
-- `src/vrum/graph.py`: the one owner of epics, stories and tasks: every question and change goes through `Graph`, and it refuses with plain `Refusal` messages.
+- `src/vrum/common.py`: what the modules below share: `Refusal` (the plain-English refusals), argument checks, paging, and database helpers.
+- `src/vrum/graph.py`: the one owner of epics, stories and tasks (`Graph`), and of how a node is read (`node_state`, backed by the `node_state` view that decides what `ready` means).
+- `src/vrum/links.py`: the one owner of links. `src/vrum/claims.py`: the one owner of claims and leases.
 - `src/vrum/server.py`: the MCP tools (thin: they call `Graph`) and the health route.
 - `src/vrum/__main__.py`: starts the server. `src/vrum/healthcheck.py`: the container health probe.
-- `tests/`: unit tests, plus the integration tests (marked `integration`, driven by `./check.sh`): `test_mcp_integration.py` and `test_graph_integration.py` go through a real MCP client; `test_database_constraints.py` runs SQL inside the real database container to prove the database refuses bad data on its own. `helpers.py` holds the small shared test helpers.
+- `tests/`: unit tests, plus the integration tests (marked `integration`, driven by `./check.sh`): `test_mcp_integration.py`, `test_graph_integration.py` and `test_links_and_claims_integration.py` go through a real MCP client; `test_database_constraints.py` runs SQL inside the real database container to prove the database refuses bad data on its own. `helpers.py` holds the small shared test helpers.
 
 ## Working rules
 

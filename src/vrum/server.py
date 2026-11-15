@@ -12,13 +12,22 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
 from vrum.config import Settings
 from vrum.db import Database
 from vrum.graph import EventPage, Graph, Node, NodePage
+from vrum.links import Link, LinkPage, Links
 
 _Actor = Annotated[str, Field(description="Your name: the person or agent making this change.")]
 _Version = Annotated[
     int, Field(description="The version you last read (from get_node or the last change).")
+]
+_Lease = Annotated[
+    int,
+    Field(
+        description="How long the claim lasts before it lapses on its own, in seconds, from 1 to "
+        "86400 (24 hours). Renew it to keep it longer."
+    ),
 ]
 _Limit = Annotated[int, Field(description="How many items to return, from 1 to 200.")]
 _After = Annotated[
@@ -48,6 +57,8 @@ def _database_errors() -> Iterator[None]:
 def create_server(settings: Settings) -> MCPServer[Database]:
     database = Database(settings.database_conninfo())
     graph = Graph(database)
+    links = Links(database)
+    claims = Claims(database)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -118,12 +129,16 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             int | None, Field(description="Only the direct children of this node.")
         ] = None,
         status: Annotated[
-            str | None, Field(description="Only new, in_progress, blocked, done or dropped.")
+            str | None,
+            Field(description="Only new, ready, in_progress, blocked, done or dropped."),
         ] = None,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> NodePage:
-        """List nodes, oldest first, a page at a time. Every filter is optional and they combine."""
+        """List nodes, oldest first, a page at a time. Every filter is optional and they combine.
+
+        status can also be ready: a node nobody has started whose prerequisites are all done.
+        """
         with _database_errors():
             return await graph.list_nodes(
                 kind=kind, parent_id=parent_id, status=status, limit=limit, after_id=after_id
@@ -152,7 +167,8 @@ def create_server(settings: Settings) -> MCPServer[Database]:
 
         You must send the version you last read. If someone else changed the node since, the change
         is refused so nothing is overwritten silently: read the node again and repeat the change.
-        Whether a node is ready is worked out by the server, so you cannot set it.
+        Whether a node is ready is worked out by the server, so you cannot set it: new here means
+        "not started", and the node shows as ready when everything it needs first is done.
         """
         with _database_errors():
             return await graph.update_node(
@@ -197,6 +213,114 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         """
         with _database_errors():
             return await graph.node_history(node_id=node_id, limit=limit, after_id=after_id)
+
+    @mcp.tool()
+    async def add_link(
+        actor: _Actor,
+        source_id: Annotated[int, Field(description="The node the link starts from.")],
+        target_id: Annotated[int, Field(description="The node the link points to.")],
+        link_type: Annotated[
+            str,
+            Field(
+                description="needs_first: the source cannot start before the target is done. "
+                "supersedes: the source replaces the target. duplicates: the two are the same "
+                "work. relates_to: the two are connected."
+            ),
+        ],
+    ) -> Link:
+        """Link two nodes.
+
+        needs_first is how order is expressed: while the target is not done, the source is not
+        ready and cannot be claimed. A needs_first link that would make nodes wait on each other in
+        a circle is refused. A node cannot be linked to itself. duplicates and relates_to work in
+        both directions.
+        """
+        with _database_errors():
+            return await links.add_link(
+                actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
+            )
+
+    @mcp.tool()
+    async def remove_link(
+        actor: _Actor,
+        source_id: int,
+        target_id: int,
+        link_type: Annotated[
+            str, Field(description="needs_first, supersedes, duplicates or relates_to.")
+        ],
+    ) -> Link:
+        """Remove one link, for example when what it said no longer applies. The removal is
+        recorded in the history of both nodes."""
+        with _database_errors():
+            return await links.remove_link(
+                actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
+            )
+
+    @mcp.tool()
+    async def list_links(
+        node_id: int,
+        link_type: Annotated[
+            str | None, Field(description="Only needs_first, supersedes, duplicates or relates_to.")
+        ] = None,
+        limit: _Limit = 50,
+        after_id: _After = None,
+    ) -> LinkPage:
+        """List every link that starts or ends at a node, a page at a time.
+
+        For a needs_first link, source_id is the node that waits and target_id is the node it
+        waits for.
+        """
+        with _database_errors():
+            return await links.list_links(
+                node_id=node_id, link_type=link_type, limit=limit, after_id=after_id
+            )
+
+    @mcp.tool()
+    async def ready_work(
+        kind: Annotated[
+            str | None,
+            Field(description="Only epic, story or task. Leave empty for stories and tasks."),
+        ] = None,
+        limit: _Limit = 50,
+        after_id: _After = None,
+    ) -> NodePage:
+        """List work that can be started now: not started, everything it needs first is done, and
+        nobody holds a claim on it. Oldest first, a page at a time. Take one with claim_node."""
+        with _database_errors():
+            return await graph.ready_work(kind=kind, limit=limit, after_id=after_id)
+
+    @mcp.tool()
+    async def claim_node(
+        actor: _Actor, node_id: int, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
+    ) -> Claim:
+        """Say you are working on a story or task, so that nobody else picks it up.
+
+        Only one actor can hold a claim at a time, and exactly one wins if several ask together.
+        The claim lapses on its own after lease_seconds, so work that is abandoned becomes free
+        again; renew it with renew_claim to keep it. Work that is not ready, done, dropped or
+        blocked cannot be claimed.
+        """
+        with _database_errors():
+            return await claims.claim_node(
+                actor=actor, node_id=node_id, lease_seconds=lease_seconds
+            )
+
+    @mcp.tool()
+    async def renew_claim(
+        actor: _Actor, node_id: int, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
+    ) -> Claim:
+        """Keep your claim: it now lasts lease_seconds from now. Only the holder can renew, and
+        only while the claim has not lapsed."""
+        with _database_errors():
+            return await claims.renew_claim(
+                actor=actor, node_id=node_id, lease_seconds=lease_seconds
+            )
+
+    @mcp.tool()
+    async def release_claim(actor: _Actor, node_id: int) -> Claim:
+        """Give up your claim so someone else can take the work. Only the holder can release."""
+        with _database_errors():
+            return await claims.release_claim(actor=actor, node_id=node_id)
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:

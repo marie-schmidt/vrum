@@ -18,6 +18,13 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "update_node",
         "move_node",
         "node_history",
+        "add_link",
+        "remove_link",
+        "list_links",
+        "ready_work",
+        "claim_node",
+        "renew_claim",
+        "release_claim",
     }
     assert all(tool.description for tool in tools)
 

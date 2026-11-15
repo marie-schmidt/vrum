@@ -17,7 +17,7 @@ async def test_a_valid_epic_story_and_task_are_created_and_their_history_is_read
     assert (epic["kind"], epic["parent_id"], epic["status"], epic["version"]) == (
         "epic",
         None,
-        "new",
+        "ready",
         1,
     )
     assert (story["kind"], story["parent_id"]) == ("story", epic["id"])
