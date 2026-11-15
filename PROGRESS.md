@@ -23,6 +23,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [ ] M7. Export, import, backup, restore (attempts: 0)
 - [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
 - [ ] M9. Docs and acceptance (attempts: 0)
+- [ ] M10. Board for humans (attempts: 0)
 
 ## Defaults taken (for owner's veto)
 
