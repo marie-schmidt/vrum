@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M5, M1A and M4A done; next is M5B)
+Status: IN PROGRESS (M0 to M5B, M1A and M4A done; next is M5C)
 
 ## Inputs (from the loop file)
 
@@ -21,7 +21,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
 - [x] M4A. Facts and beliefs (retro-fix of M4) (attempts: 1) (2026-11-15, commit 0183530)
 - [x] M5. Search and the semantic index (attempts: 1) (2026-11-15, commit 0b62d76)
-- [ ] M5B. Agent workflow (attempts: 0)
+- [x] M5B. Agent workflow (attempts: 1) (2026-11-15, commit 366c14e)
 - [ ] M5C. Extraction and reflection (needs a configured language model) (attempts: 0)
 - [ ] M6. Hardening (attempts: 0)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
@@ -63,6 +63,10 @@ Full wording is in `DECISIONS.md`.
 - M1A: dates are plain days written YYYY-MM-DD, read by the server and refused in plain words when badly written; a date is removed only by asking (`clear_start_on`, `clear_target_on`); the start may equal the target. Overdue, the worked-out span (own dates win; otherwise the span of what is under it, leaving out dropped work) and schedule conflicts (a warning, never a refusal; a done or undated prerequisite does not conflict) are computed in the `node_state` view. `list_nodes` gained inclusive date filters and `overdue`.
 - M4A: facts and beliefs share one table and one id set (`type` fact or belief, `kind` world or experience for facts); the database refuses edits, deletes, a belief with no evidence and evidence that is a belief. A stale belief (active, with evidence that is no longer active) cannot be confirmed or promoted. A confirmation is once only. Replacements carry links over (`keep_links`) and a replacing fact needs a new source. `supersede_memory` and `retract_memory` answer with ids of what went stale and of decisions promoted from a replaced belief. `recall` replaces `recall_decisions` and has seven sections, each with a count, a next page and a `why` on every entry. `within_node_id` takes the item, what is under it and the rules in those stories.
 - M5: exact words are PostgreSQL full-text search on generated `search` columns (English, so endings match; all words must be present, quotes for a phrase, `or`, `-`); tasks are found by words only and everything else is also embedded; fusing is by rank; the index tables are built and owned by the reindex code, with the vector size read from the model, and an item is "waiting" when no vector exists for its current text (no triggers). A background task in the server indexes what is waiting every few seconds. No approximate index, text cut at 2000 characters. Overlaps compare stories, epics or rules in different epics. **Thresholds are measured with the real local model** (`all-minilm` through Ollama): overlap 0.55, meaning floor 0.35; my first guesses of 0.8 and 0.6 would have missed most real duplicates. The check stack uses a scripted stand-in embedding service (`tests/scripted_embeddings.py`). Details and the open question about weighting titles are in `DECISIONS.md`.
+- M5B: a handoff note is an event (`handoff`, then `claim_released`), and the database refuses one with a blank note or no outcome. `release_claim` needs a note and puts work that was in progress back to not started, so released work can be taken again. `finish_work` outcomes are done, blocked, dropped or released; only the holder finishes, even after the claim ran out if nobody took over.
+- M5B: `next_work` hands out free stories and tasks (ready, or in progress with a lapsed claim), by priority, then earliest target date, then oldest; a story with open tasks is worked through its tasks. It takes `within_node_id` (my addition), `peek`, `lease_seconds` and `context_chars` (default 10,000; what does not fit is cut from the end and counted). Nothing free is an answer, not an error.
+- M5B: `create_plan` and `update_nodes` have no size limit; a plan reports every problem at once and creates nothing; each change in `update_nodes` stands alone, and a refused change leaves no history entry. `create_node` checks epics and stories (not tasks) for similar items after saving, at the overlap threshold, waiting 5 seconds at most.
+- M5B: `changes_since` shows an event only once every earlier-started change has finished, in the order changes began, so a slow writer's event is never skipped; it can lag briefly behind a long write. Lists leave `body` empty by default (with `body_chars`, a 120-character `body_preview`, and `left_out`); `detail` brings bodies back; the five-times rule holds for bodies of about a page (4.2 times at 2,200 characters).
 
 ## M0 proof, as run
 
@@ -161,6 +165,24 @@ Full wording is in `DECISIONS.md`.
 - **Mutation checks:** with the rule that two stories must be in different epics removed, with the fallback that finds the one item the service refuses removed, and with the check that an index built with another model is not used removed, the overlap test, the refused-item test and the model-change test each failed. The code was put back.
 - **Found along the way:** the first thresholds (0.8 and 0.6, picked before any measuring) were wrong for real text, hence the measurements above. The stand-in's first vectors (256 numbers) collided often enough to make one test borderline, so they are 1024 numbers now and the paraphrase tests have a margin. The real-model script first labelled a genuinely related pair (Password login and Email password reset links) as unrelated, and read only the top five results while the stack held copies of the fixture from earlier runs; both are fixed in the script. The Hugging Face text-embeddings-inference image does not run on Apple silicon (amd64 only), so the local profile uses Ollama.
 - Scratch stacks, the clone, scratch scripts and the Ollama image I pulled are removed; no containers, volumes or `vrum` images are left.
+
+## M5B proof, as run
+
+- `./check.sh`: lint, strict types, 41 unit tests and 163 integration tests pass on a database built from scratch (30 of them are new, in `tests/test_workflow_integration.py`). Every earlier proof is still covered by them. Two earlier tests were changed because the answers changed shape (a created node and a read node now differ by the similar-items and handoff fields), and one because release needs a note.
+- From a clean clone of the commit (`366c14e`), `./check.sh` gave the same 41 and 163. Then the clone was started as the separate compose project `vrum-proof` on its own port (with the stand-in embedding service), and a separate script printed each proof through a real MCP client:
+  1. **Ten agents, five ready tasks:** five agents got five different tasks (3, 4, 5, 6, 7), none twice; the other five were told "Nothing is free right now ... The open work is 1 being worked on by someone, 4 being picked up by someone else this very moment." The context held the epic and story, the one rule, the two active decisions (the old one replaced by "Invoices are HTML" appeared only under superseded decisions) and all active principles.
+  2. **Handoff:** a blank note was refused ("A handoff note is needed: note cannot be empty...") and the node was identical afterwards. With a note the task was done, the dependent showed as ready, and the next agent's `next_work` showed the note and who left it. A claim left to lapse showed `claimed_by=None`, `lapsed_claim_by=cy` and no handoffs.
+  3. **Plan:** 1 epic, 3 stories, 8 tasks, 5 links and 4 rules in one call. An invalid plan was refused with every problem named and nothing created (the counts of nodes, links and rules were the same before and after); so was a circle ("the key 'a' needs the key 'b', which needs the key 'a'"). A plan of **500 items and 392 links was created in one call in 0.33 seconds**.
+  4. **Several changes:** five changes with one stale: 4 applied, 1 refused with the stale-version message and no history entry; each applied change is in its task's history under the actor. 120 changes reported all 120 (108 applied, 12 refused).
+  5. **What changed:** at page sizes 1, 4 and 200 the feed returned exactly the 7 events the database held after the starting event, in order, with nothing before and nothing missing.
+  6. **Small answers:** 50 stories with 4,950-character bodies: **32,533 characters by default, 273,905 with detail, 8.4 times smaller**; the list says what it left out.
+  7. **Similar on create:** a story with the same title as an existing one was created and the answer named the existing one (similarity 1.0); with the embedding service stopped it was created and the answer said the check was skipped and why.
+  8. **Instructions:** 208 words that name 11 tools, all of which exist.
+- **The late event:** two writers in the real database. One begins first, writes its event late and finishes first, so it gets the higher id. The other begins second, writes its event first and finishes last, so it gets the lower id. A feed that went by id alone shows the first and never the second; this feed showed the first at once and the second as soon as it finished. A test does this on every run.
+- **Mutation checks:** with the feed going by id alone, the late-event test fails (the late event is skipped); with the row lock removed from `next_work`, the ten-agent race fails (agents collide).
+- **Found along the way (all fixed, each with a test):** the handoff check in the database let a note through with no outcome (a NULL slipped through the comparison); work released by `release_claim` stayed in progress and could never be taken again; the "nothing is free" message said "no open work" while other agents were mid-claim; `changes_since` read its page and its latest id in separate snapshots, so a change finishing in between could be skipped by a follower (it now reads both in one); and the context cut kept small items after a large one was cut, instead of cutting the end.
+- Scratch stacks, the clone and scratch scripts are removed; no containers, volumes or `vrum` images are left.
+- The implementation commit `366c14e` is titled "Save uncommitted changes": the app saved and pushed my working tree on its own before I committed. I did not rewrite pushed history.
 
 ## Notes
 
