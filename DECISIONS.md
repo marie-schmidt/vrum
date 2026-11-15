@@ -121,3 +121,35 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **Acceptance criteria checked before "done".** Recommendation: not now. Rules already are the requirements, and `finish_work` requires a handoff note saying what was verified.
 - **Issues as a kind, a wiki entity, attachments, custom fields.** Taiga has them. Recommendation: none. Bodies, `[[references]]` and "Mentioned in" cover most of what a wiki is for; an issue is a task with a title that says so.
 - **M7 backup and restore** (from the earlier decision): still recommended to drop the scripts and keep export and import.
+
+## 2026-11-15: owner's three changes after the research (global graph, facts and beliefs, roadmap)
+
+- **What the owner decided:** (1) the whole graph, as in Obsidian, should exist as one of the views, though not as the main way to navigate; (2) facts and beliefs as in Hindsight should be included; (3) there should be roadmaps like GitHub Projects'. The owner also asked for the earlier milestones M0 to M4 to be fixed retroactively where needed, with milestones named M0A, M1A and so on, or one special phase run before M5.
+- **This entry replaces** the parts of the previous entry that said the whole graph is left out, that facts and beliefs written by a language model are left out, that there is no roadmap, and the milestone numbers M11 to M13 (see the new list below). Everything else in that entry stands.
+- **Decided by:** the owner for the three changes. Everything below is the loop's choice, open to veto.
+
+**Milestone changes**
+
+- **Retro-fixes, as two small milestones rather than one phase.** Each has its own proof, and both run before M5. They are listed in `PROGRESS.md` where they belong (M1A after M1, M4A after M4), so the loop picks M1A first. They change the already-built M1 and M4, and under the prototype stance the database is rebuilt, with no upgrade step.
+    - **M1A, dates:** an optional start date and target date on every node, with the database refusing a start after the target; overdue, the worked-out span for an epic or story without dates, and schedule conflicts are all computed.
+    - **M4A, facts and beliefs:** the explicit memory layer, plus one `recall` that replaces `recall_decisions` and returns everything known about an item in separate labelled sections.
+- **M5C, extraction and reflection**, new, after M5B: the parts of Hindsight that need a language model. It is separate from M4A on purpose, so that the explicit layer is finished and proven first and the model part rests on it.
+- **UI milestones renumbered** (they were only written a few hours earlier): M10 Kanban and graph, M11 Table, Outline and Roadmap, M12 Rules and memory, M13 Find and connect, M14 Run and see it all. M12 is new: facts and beliefs would have made the old M11 too big to review.
+- **M5, M5B, M6, M7, M10 and M13** pick up the new data: facts and beliefs are indexed and searched with their origin, appear in `next_work`'s context (beliefs as suggestions, stale ones left out), are covered by the secret check, are exported, are cards and graph layers, and get `[[fact:5]]` and `[[belief:2]]` references. `next_work` now breaks priority ties by the earliest target date.
+
+**Choices and defaults taken, open to veto**
+
+- **Why facts and beliefs are safe here.** In Hindsight a model writes the memory and nobody can say who is accountable for it. Vrum keeps its rule, "memory suggests, the graph decides", with guard rails: a fact needs a plain-words source; a belief must list its evidence, which can only be facts and decisions (never other beliefs, so a conclusion is one step from what it rests on); a belief goes stale automatically when its evidence changes; a belief is a suggestion until a named person confirms it, and only a named person can promote it to a decision; nothing is ever edited, only superseded or retracted; and what a model proposes is checked against its quoted passage or its evidence, and labelled, before it is kept.
+- **An agent is already a model.** Agents can record facts and beliefs themselves through M4A with no server-side model at all. M5C adds the model on the server for people who want extraction and reflection to run without an agent in the loop, and it is off unless `LLM_BASE_URL` is set.
+- **Fact kinds:** `world` and `experience`, as in Hindsight. Hindsight's "observations" are called beliefs here. Its "mental models" and pages (answers a model rewrites on a schedule) are not built: they are the most costly part, and the least checkable.
+- **Two dates on a fact:** when it was true or happened (optional) and when it was recorded, as Hindsight does.
+- **Extraction stores nothing unless asked.** `extract_facts` returns proposals with their quoted passages, and only the store option keeps them. `consolidate_memory` and `reflect` run only when called, never on a schedule, so there is no hidden cost.
+- **Testing a model without a real one.** The proof uses a small scripted OpenAI-compatible test service, so it proves what Vrum does with a model's output (dropping unchecked proposals, refusing uncited answers, never sending secrets), not how good a model is. A real model is tried by hand through the optional configuration.
+- **Whole graph:** a dot limit of 1,000, above which each epic collapses into one dot that opens on its own, because Obsidian's graph is reported to become unusable at very large sizes.
+- **Roadmap:** start and target dates only, no iterations, because sprints remain out of scope. Dates have no time of day. An epic or story with no dates shows its children's span, marked as worked out. A schedule conflict is a warning, never a refusal, because plans change and a refusal would make agents guess dates.
+- **Where Hindsight's benefits come from:** recall saying why each entry is there (M4A), exact links plus words plus meaning (M5), and a briefing at the start of work (M5B's `next_work`).
+
+**Questions for the owner, not built, each with a recommendation**
+
+- **Should a belief that a model drew up count toward `next_work`'s context?** Default: yes, labelled as a suggestion, but only if it is not stale. Say if you would rather they appeared only after a person confirms them.
+- **Auto-extract facts from every handoff note.** Hindsight does something like this. Default: no, because it adds noise and cost; an agent or person calls `extract_facts` when they want it.

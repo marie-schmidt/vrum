@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M4 done; next milestone is M5)
+Status: IN PROGRESS (M0 to M4 done; next are the two retro-fix milestones M1A (dates) and M4A (facts and beliefs), then M5)
 
 ## Inputs (from the loop file)
 
@@ -15,19 +15,23 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 
 - [x] M0. Bootstrap (attempts: 1) (2026-11-14, commit a44cad8)
 - [x] M1. Graph core (attempts: 1) (2026-11-15, commit ad4f5f7)
+- [ ] M1A. Dates (retro-fix of M1, run first) (attempts: 0)
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
 - [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
+- [ ] M4A. Facts and beliefs (retro-fix of M4, run before M5) (attempts: 0)
 - [ ] M5. Search and the semantic index (attempts: 0)
 - [ ] M5B. Agent workflow (attempts: 0)
+- [ ] M5C. Extraction and reflection (needs a configured language model) (attempts: 0)
 - [ ] M6. Hardening (attempts: 0)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
 - [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
 - [ ] M9. Docs and acceptance (attempts: 0)
 - [ ] M10. Board for humans: Kanban and graph (attempts: 0)
-- [ ] M11. More views of the work, with rules and decisions (attempts: 0)
-- [ ] M12. Find and connect (attempts: 0)
-- [ ] M13. Run and see it all (attempts: 0)
+- [ ] M11. More views of the work (attempts: 0)
+- [ ] M12. Rules and memory on the board (attempts: 0)
+- [ ] M13. Find and connect (attempts: 0)
+- [ ] M14. Run and see it all (attempts: 0)
 
 ## Defaults taken (for owner's veto)
 
@@ -108,6 +112,8 @@ Full wording is in `DECISIONS.md`.
 
 - A GitHub repository was created on the owner's request: https://github.com/marie-schmidt/vrum (private).
 - macOS or a sync tool left stale copies named like `AGENTS 2.md`, `db 2.py` and a git ref `main 2`. They were deleted and `.gitignore` now ignores `* 2` and `* 2.*`. Existing files are now changed with edits instead of replacing them by renaming a new file over them.
-- Spec change on the owner's request (2026-11-15), after research on GitHub Projects, Obsidian, Hindsight, Elasticsearch, Taiga and agent task tools: new goal statement and section 10 ("Product shape"); M5 now also does exact-words search; new M5B (agent workflow) after M5; M6 refuses pasted secrets; M7 adds a Markdown export; M9 adds an agent guide; M10 gains the graph view; new M11 to M13 (more views, find and connect, run and see it all). Every choice is in `DECISIONS.md` and open to the owner's veto. Part of the work is a gap list: the pages in section 10 that do not exist yet.
+- Spec change on the owner's request (2026-11-15), after research on GitHub Projects, Obsidian, Hindsight, Elasticsearch, Taiga and agent task tools: new goal statement and section 10 ("Product shape"); M5 now also does exact-words search; new M5B (agent workflow) after M5; M6 refuses pasted secrets; M7 adds a Markdown export; M9 adds an agent guide; M10 gains the graph view.
+- Second spec change on the owner's request (2026-11-15): (1) the whole graph is now one of the views, not the main navigation; (2) facts and beliefs like Hindsight's are in, as the retro-fix M4A (explicit facts and beliefs with evidence, one recall) and M5C (a model, if configured, proposes facts, draws up beliefs and answers questions, all labelled and checked); (3) a roadmap like GitHub Projects' is in, which needs dates on nodes, as the retro-fix M1A. The UI milestones are now M10 (Kanban and graph), M11 (Table, Outline, Roadmap), M12 (Rules and memory), M13 (Find and connect) and M14 (Run and see it all). M1A and M4A change the already-built M1 and M4 (the database is rebuilt, with no upgrade step) and are listed where they belong so that they run first.
+- Every choice is in `DECISIONS.md` and open to the owner's veto.
 - Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py` and seven more tools). M3 added rules and coverage (`rules.py` and eight more tools) and, on the owner's instruction, replaced the migrations with the single `schema.sql`.
 - M10 was added to `SPEC.md` by the owner after M0. It is the last milestone, after M9.
