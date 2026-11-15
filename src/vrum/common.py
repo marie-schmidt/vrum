@@ -32,6 +32,17 @@ def check_choice(label: str, value: str, allowed: tuple[str, ...], extra: str = 
     return value
 
 
+def required_text(value: str, refusal: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise Refusal(refusal)
+    return cleaned
+
+
+def unique_ids(ids: list[int] | None) -> list[int]:
+    return list(dict.fromkeys(ids or []))
+
+
 def page_size(limit: int) -> int:
     if not 1 <= limit <= MAX_PAGE_SIZE:
         raise Refusal(f"limit must be a whole number from 1 to {MAX_PAGE_SIZE}, but it is {limit}.")
@@ -92,6 +103,29 @@ def snapshot(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+async def require_link_targets(
+    conn: AsyncConnection, node_ids: list[int], rule_ids: list[int], subject: str
+) -> None:
+    """Refuse in plain words unless every node and rule exists, so that `subject` (such as "the
+    decision") can be linked to them."""
+    for what, table, ids, finder in (
+        ("node", "nodes", node_ids, "list_nodes"),
+        ("rule", "rules", rule_ids, "list_rules"),
+    ):
+        if not ids:
+            continue
+        found = {
+            row["id"]
+            for row in await fetch_all(conn, f"SELECT id FROM {table} WHERE id = ANY(%s)", (ids,))
+        }
+        missing = [str(item) for item in ids if item not in found]
+        if missing:
+            raise Refusal(
+                f"There is no {what} with id {', '.join(missing)}, so {subject} cannot be "
+                f"linked to it. Use {finder} to find the id you want."
+            )
+
+
 async def save_changes(
     conn: AsyncConnection, table: str, row_id: int, changes: dict[str, Any], columns: str
 ) -> dict[str, Any]:
@@ -120,17 +154,20 @@ async def record_event(
     other_node_id: int | None = None,
     rule_id: int | None = None,
     decision_id: int | None = None,
+    memory_id: int | None = None,
 ) -> None:
-    """Append to the event log. It shows in the history of every node, rule and decision it
-    names: `other_node_id` is the second node of a link, or the story a rule has just left."""
+    """Append to the event log. It shows in the history of every node, rule, decision, fact and
+    belief it names: `other_node_id` is the second node of a link, or the story a rule has just
+    left."""
     await conn.execute(
-        "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, action, actor, "
-        "before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, memory_id, action, "
+        "actor, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             node_id,
             other_node_id,
             rule_id,
             decision_id,
+            memory_id,
             action,
             actor,
             None if before is None else Jsonb(before),

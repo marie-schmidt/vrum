@@ -39,8 +39,19 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "link_decision",
         "unlink_decision",
         "supersede_decision",
-        "recall_decisions",
+        "recall",
         "decision_history",
+        "retain_fact",
+        "record_belief",
+        "supersede_memory",
+        "retract_memory",
+        "confirm_belief",
+        "promote_belief",
+        "link_memory",
+        "unlink_memory",
+        "get_memory",
+        "list_memories",
+        "memory_history",
     }
     assert all(tool.description for tool in tools)
 

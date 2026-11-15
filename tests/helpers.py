@@ -228,3 +228,20 @@ async def make_decision(
 def day(offset: int = 0) -> str:
     """A day written as YYYY-MM-DD, `offset` days from today (UTC, as the database counts it)."""
     return (datetime.now(UTC).date() + timedelta(days=offset)).isoformat()
+
+
+async def make_fact(client: Client, text: str = "A fact", **arguments: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {"actor": "agent-1", "text": text, "source": "The team call"}
+    return await ok(client, "retain_fact", **{**fields, **arguments})
+
+
+async def make_belief(
+    client: Client, evidence: list[dict[str, Any]], text: str = "A belief", **arguments: Any
+) -> dict[str, Any]:
+    """A belief resting on the given facts."""
+    fields: dict[str, Any] = {
+        "actor": "agent-1",
+        "text": text,
+        "evidence_fact_ids": [fact["id"] for fact in evidence],
+    }
+    return await ok(client, "record_belief", **{**fields, **arguments})

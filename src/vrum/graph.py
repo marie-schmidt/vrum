@@ -41,7 +41,9 @@ STATE_COLUMNS = (
     + ", waiting_on, schedule_conflicts, overdue, span_start, span_end, span_worked_out, "
     "claimed_by, claim_expires_at"
 )
-EVENT_COLUMNS = "id, node_id, other_node_id, rule_id, decision_id, action, actor, at, before, after"
+EVENT_COLUMNS = (
+    "id, node_id, other_node_id, rule_id, decision_id, memory_id, action, actor, at, before, after"
+)
 
 
 class Node(BaseModel):
@@ -121,12 +123,18 @@ class Event(BaseModel):
     )
     rule_id: int | None = Field(description="The rule the event is about, if it is about a rule.")
     decision_id: int | None = Field(
-        description="The decision the event is about, if it is about a decision."
+        description="The decision the event is about, if it is about a decision, or the decision "
+        "a fact concerns or a belief was promoted to."
+    )
+    memory_id: int | None = Field(
+        description="The fact or belief the event is about, if it is about one."
     )
     action: str = Field(
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
         "claim_released, rule_created, rule_updated, rule_placed, rule_moved, decision_recorded, "
-        "decision_superseded, decision_linked or decision_unlinked."
+        "decision_superseded, decision_linked, decision_unlinked, memory_recorded, "
+        "memory_superseded, memory_retracted, memory_linked, memory_unlinked, memory_confirmed "
+        "or memory_promoted."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime

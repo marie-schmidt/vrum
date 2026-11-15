@@ -20,7 +20,20 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
 async def recall(client: Client, **arguments: Any) -> dict[str, Any]:
-    return await ok(client, "recall_decisions", **arguments)
+    """What `recall` says about decisions, in the flat shape these tests read: each section's
+    decisions, with its count and its next page."""
+    result = await ok(client, "recall", **arguments)
+    flat: dict[str, Any] = {}
+    for name, singular in (
+        ("active_decisions", "active_decision"),
+        ("active_principles", "active_principle"),
+        ("superseded_decisions", "superseded_decision"),
+    ):
+        section = result[name]
+        flat[name] = [entry["decision"] for entry in section["items"]]
+        flat[f"{singular}_count"] = section["count"]
+        flat[f"next_{name}_after_id"] = section["next_after_id"]
+    return flat
 
 
 def ids(decisions: list[dict[str, Any]]) -> list[int]:
@@ -398,7 +411,7 @@ async def test_decisions_can_be_recalled_for_a_rule(client: Client) -> None:
     assert ids(result["active_decisions"]) == [about_rule["id"]]
     assert about_story["id"] not in ids(result["active_decisions"])
     assert "There is no rule with id 987654321" in await refused(
-        client, "recall_decisions", rule_id=987654321
+        client, "recall", rule_id=987654321
     )
 
 
@@ -431,20 +444,20 @@ async def test_each_recall_list_can_be_paged_on_its_own(client: Client) -> None:
     assert principles["next_active_principles_after_id"] is not None
 
     assert "after_id only works for one list" in await refused(
-        client, "recall_decisions", node_id=story["id"], after_id=1
+        client, "recall", node_id=story["id"], after_id=1
     )
     assert "show must be one of all, active_decisions" in await refused(
-        client, "recall_decisions", node_id=story["id"], show="everything"
+        client, "recall", node_id=story["id"], show="everything"
     )
-    assert "Give exactly one of node_id or rule_id" in await refused(client, "recall_decisions")
+    assert "Give exactly one of node_id or rule_id" in await refused(client, "recall")
     assert "Give exactly one of node_id or rule_id" in await refused(
-        client, "recall_decisions", node_id=story["id"], rule_id=1
+        client, "recall", node_id=story["id"], rule_id=1
     )
     assert "There is no node with id 987654321" in await refused(
-        client, "recall_decisions", node_id=987654321
+        client, "recall", node_id=987654321
     )
     assert "limit must be a whole number" in await refused(
-        client, "recall_decisions", node_id=story["id"], limit=0
+        client, "recall", node_id=story["id"], limit=0
     )
 
 

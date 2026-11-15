@@ -17,9 +17,11 @@ from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
 from vrum.common import parse_day
 from vrum.config import Settings
 from vrum.db import Database
-from vrum.decisions import Decision, DecisionPage, Decisions, Recall
+from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.graph import EventPage, Graph, Node, NodePage
 from vrum.links import Link, LinkPage, Links
+from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
+from vrum.recall import Recall, Recaller
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 
 _Actor = Annotated[str, Field(description="Your name: the person or agent making this change.")]
@@ -37,6 +39,36 @@ _NodeIds = Annotated[
     list[int] | None, Field(description="Ids of the epics, stories or tasks it affects.")
 ]
 _RuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it affects.")]
+_ConcernedNodeIds = Annotated[
+    list[int] | None, Field(description="Ids of the epics, stories or tasks it concerns.")
+]
+_ConcernedRuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it concerns.")]
+_ConcernedDecisionIds = Annotated[
+    list[int] | None, Field(description="Ids of the decisions it concerns.")
+]
+_EvidenceFactIds = Annotated[
+    list[int] | None,
+    Field(description="Ids of the active facts it rests on. Only facts, never other beliefs."),
+]
+_EvidenceDecisionIds = Annotated[
+    list[int] | None, Field(description="Ids of the active decisions it rests on.")
+]
+_SaidBy = Annotated[
+    str | None,
+    Field(
+        description="The person who changed their mind. Needed, with quote, to change a belief a "
+        "person has confirmed. If you are passing on what a person told you, give their name here "
+        "and your own in actor."
+    ),
+]
+_Quote = Annotated[
+    str | None,
+    Field(description="What that person said, or where they said it. Needed with said_by."),
+]
+_HappenedOn = Annotated[
+    str | None,
+    Field(description="The day it was true or happened, as YYYY-MM-DD, if known."),
+]
 _DecidedOn = Annotated[
     date | None,
     Field(description="The day it was decided, as YYYY-MM-DD. Leave empty for today."),
@@ -81,6 +113,8 @@ def create_server(settings: Settings) -> MCPServer[Database]:
     claims = Claims(database)
     rules = Rules(database)
     decisions = Decisions(database)
+    memories = Memories(database)
+    recaller = Recaller(database)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -567,7 +601,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         """Record a decision or a principle, and the epics, stories, tasks and rules it affects.
 
         Decisions are a record and are never edited. To change one, supersede it. Link a decision
-        to what it affects so that recall_decisions finds it for those items. A principle applies
+        to what it affects so that recall finds it for those items. A principle applies
         everywhere, so every recall also returns every active principle.
         """
         with _database_errors():
@@ -674,36 +708,381 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             )
 
     @mcp.tool()
-    async def recall_decisions(
+    async def recall(
         node_id: Annotated[
-            int | None, Field(description="The epic, story or task to recall decisions for.")
+            int | None, Field(description="The epic, story or task to recall what is known for.")
         ] = None,
         rule_id: Annotated[
-            int | None, Field(description="Or the rule to recall decisions for.")
+            int | None, Field(description="Or the rule to recall what is known for.")
         ] = None,
         show: Annotated[
             str,
             Field(
-                description="all, or one of active_decisions, active_principles or "
-                "superseded_decisions to page through just that list."
+                description="all, or one of active_decisions, active_principles, facts, beliefs, "
+                "stale_beliefs, superseded_decisions or past_memories to page through just that "
+                "section."
             ),
         ] = "all",
-        limit: Annotated[int, Field(description="How many of each list, from 1 to 200.")] = 50,
+        limit: Annotated[int, Field(description="How many of each section, from 1 to 200.")] = 50,
         after_id: Annotated[
             int | None,
-            Field(description="With show set to one list: pass its next_..._after_id."),
+            Field(description="With show set to one section: pass its next_after_id."),
         ] = None,
     ) -> Recall:
-        """Recall what has been decided that matters for one node or rule.
+        """Recall everything known that matters for one node or rule, in separate sections.
 
-        Returns its linked active decisions, every active principle, and the linked decisions that
-        have since been superseded (shown as superseded, with what replaced them). Only what is
-        linked is returned: nothing is inferred, and decisions linked to its parent or children
-        are not included, so recall those too if they matter. Call this before starting work.
+        Decisions are what people decided, and are authoritative. Principles apply everywhere.
+        Facts say where they came from. Beliefs are conclusions drawn from evidence and are only
+        suggestions: weigh them, do not obey them. Stale beliefs rest on evidence that has since
+        changed, and past memories were replaced or found wrong; neither is in force. Every entry
+        says why it is there. Only exact links are followed: nothing is inferred, and what is
+        linked to the parent or children of this item is not included, so recall those too if
+        they matter. Call this before starting work.
         """
         with _database_errors():
-            return await decisions.recall_decisions(
+            return await recaller.recall(
                 node_id=node_id, rule_id=rule_id, show=show, limit=limit, after_id=after_id
+            )
+
+    @mcp.tool()
+    async def retain_fact(
+        actor: _Actor,
+        text: Annotated[str, Field(description="What is known, in plain words.")],
+        source: Annotated[
+            str,
+            Field(
+                description="Where it came from, in plain words: who said it, which document, "
+                "what was observed. Never blank."
+            ),
+        ],
+        kind: Annotated[
+            str,
+            Field(
+                description="world: true about the project, its tools or its domain. experience: "
+                "something that was done or observed."
+            ),
+        ] = "world",
+        happened_on: _HappenedOn = None,
+        node_ids: _ConcernedNodeIds = None,
+        rule_ids: _ConcernedRuleIds = None,
+        decision_ids: _ConcernedDecisionIds = None,
+    ) -> Memory:
+        """Record a fact, with where it came from and what it concerns.
+
+        A fact is a record and is never edited. When it changes, replace it with supersede_memory;
+        when it was wrong, retract it with retract_memory. A fact is not a decision. Link it to
+        what it concerns so that recall finds it for those items.
+        """
+        with _database_errors():
+            return await memories.retain_fact(
+                actor=actor,
+                text=text,
+                source=source,
+                kind=kind,
+                happened_on=parse_day("happened_on", happened_on),
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+                decision_ids=decision_ids,
+            )
+
+    @mcp.tool()
+    async def record_belief(
+        actor: _Actor,
+        text: Annotated[str, Field(description="The conclusion, in plain words.")],
+        evidence_fact_ids: _EvidenceFactIds = None,
+        evidence_decision_ids: _EvidenceDecisionIds = None,
+        node_ids: _ConcernedNodeIds = None,
+        rule_ids: _ConcernedRuleIds = None,
+    ) -> Memory:
+        """Record a belief: a conclusion drawn from evidence.
+
+        Give at least one active fact or decision it rests on, and never another belief. A belief
+        is only ever a suggestion: it is not a decision and changes nothing in the graph. It goes
+        stale on its own when any of its evidence stops being active. It is never edited: replace
+        it with supersede_memory or retract it with retract_memory.
+        """
+        with _database_errors():
+            return await memories.record_belief(
+                actor=actor,
+                text=text,
+                evidence_fact_ids=evidence_fact_ids,
+                evidence_decision_ids=evidence_decision_ids,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+            )
+
+    @mcp.tool()
+    async def supersede_memory(
+        actor: _Actor,
+        replaces: Annotated[
+            list[int],
+            Field(
+                description="The ids of the active facts, or the active beliefs, that the new "
+                "item replaces. Any number, all of one type."
+            ),
+        ],
+        reason: Annotated[str, Field(description="Why they are being replaced.")],
+        text: Annotated[str, Field(description="The new fact or belief.")],
+        source: Annotated[
+            str | None, Field(description="For a new fact: where it came from. Never blank.")
+        ] = None,
+        kind: Annotated[
+            str | None,
+            Field(
+                description="For a new fact: world or experience. Leave empty to keep the old kind."
+            ),
+        ] = None,
+        happened_on: _HappenedOn = None,
+        evidence_fact_ids: _EvidenceFactIds = None,
+        evidence_decision_ids: _EvidenceDecisionIds = None,
+        keep_links: Annotated[
+            bool,
+            Field(
+                description="True: the new item concerns what the old ones did. False: it starts "
+                "with only the ids you give."
+            ),
+        ] = True,
+        node_ids: _ConcernedNodeIds = None,
+        rule_ids: _ConcernedRuleIds = None,
+        decision_ids: _ConcernedDecisionIds = None,
+        said_by: _SaidBy = None,
+        quote: _Quote = None,
+    ) -> MemoryChange:
+        """Replace one or more facts, or one or more beliefs, with a newer one, in one step.
+
+        Use this when something is no longer true, for example when a person shares a belief that
+        contradicts older ones: list them all in replaces. The old ones are kept, marked
+        superseded, and point to the new one. If any of them does not exist or is not active,
+        nothing is changed. A new belief still needs its own evidence, and a new fact its source.
+        The answer lists the beliefs that went stale because of the change and the decisions that
+        were made from a belief you replaced; neither is changed. A belief a person has confirmed
+        can be replaced only with said_by and quote.
+        """
+        with _database_errors():
+            return await memories.supersede_memory(
+                actor=actor,
+                replaces=replaces,
+                reason=reason,
+                text=text,
+                source=source,
+                kind=kind,
+                happened_on=parse_day("happened_on", happened_on),
+                evidence_fact_ids=evidence_fact_ids,
+                evidence_decision_ids=evidence_decision_ids,
+                keep_links=keep_links,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+                decision_ids=decision_ids,
+                said_by=said_by,
+                quote=quote,
+            )
+
+    @mcp.tool()
+    async def retract_memory(
+        actor: _Actor,
+        memory_ids: Annotated[
+            list[int], Field(description="The ids of the active facts or beliefs that are wrong.")
+        ],
+        reason: Annotated[str, Field(description="Why they are wrong.")],
+        with_dependent_beliefs: Annotated[
+            bool,
+            Field(
+                description="True: also retract every active belief that rests on a fact you are "
+                "retracting, with the same reason. False: those beliefs are only shown as stale, "
+                "because a belief with other evidence may still hold."
+            ),
+        ] = False,
+        said_by: _SaidBy = None,
+        quote: _Quote = None,
+    ) -> MemoryChange:
+        """Mark one or more facts or beliefs as wrong, in one step. Nothing is deleted.
+
+        If any of them does not exist or is not active, nothing is changed. The answer lists the
+        beliefs that went stale because of it and the decisions that were made from a belief you
+        retracted; neither is changed. A belief a person has confirmed can be retracted only with
+        said_by and quote.
+        """
+        with _database_errors():
+            return await memories.retract_memory(
+                actor=actor,
+                memory_ids=memory_ids,
+                reason=reason,
+                with_dependent_beliefs=with_dependent_beliefs,
+                said_by=said_by,
+                quote=quote,
+            )
+
+    @mcp.tool()
+    async def confirm_belief(
+        actor: _Actor,
+        memory_id: Annotated[int, Field(description="The active belief that was looked at.")],
+        confirmed_by: Annotated[
+            str,
+            Field(
+                description="The person who looked at the belief. Not you: your name goes in actor."
+            ),
+        ],
+    ) -> Memory:
+        """Record that a named person has looked at a belief. It stays a suggestion.
+
+        A stale belief cannot be confirmed. A belief that is already confirmed stays as it is.
+        """
+        with _database_errors():
+            return await memories.confirm_belief(
+                actor=actor, memory_id=memory_id, confirmed_by=confirmed_by
+            )
+
+    @mcp.tool()
+    async def promote_belief(
+        actor: _Actor,
+        memory_id: Annotated[int, Field(description="The active belief to turn into a decision.")],
+        title: str,
+        reason: Annotated[str, Field(description="Why the person decided this.")],
+        decided_by: Annotated[
+            str,
+            Field(
+                description="The person who made the decision. Not you: your name goes in actor."
+            ),
+        ],
+        text: Annotated[
+            str | None, Field(description="What is decided. Leave empty to use the belief's text.")
+        ] = None,
+        kind: Annotated[
+            str, Field(description="decision, or principle for a standing guideline.")
+        ] = "decision",
+        decided_on: _DecidedOn = None,
+    ) -> Decision:
+        """Turn an active belief into a decision made by a named person.
+
+        The new decision concerns what the belief concerned and keeps a link back to it. The belief
+        itself is not changed. A stale belief cannot be promoted.
+        """
+        with _database_errors():
+            return await memories.promote_belief(
+                actor=actor,
+                memory_id=memory_id,
+                decided_by=decided_by,
+                title=title,
+                reason=reason,
+                text=text,
+                kind=kind,
+                decided_on=decided_on,
+            )
+
+    @mcp.tool()
+    async def link_memory(
+        actor: _Actor,
+        memory_id: int,
+        node_ids: _ConcernedNodeIds = None,
+        rule_ids: _ConcernedRuleIds = None,
+        decision_ids: _ConcernedDecisionIds = None,
+    ) -> Memory:
+        """Say that an active fact or belief also concerns more nodes or rules (a fact also
+        decisions). Nothing is changed if any id is wrong or already linked."""
+        with _database_errors():
+            return await memories.link_memory(
+                actor=actor,
+                memory_id=memory_id,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+                decision_ids=decision_ids,
+            )
+
+    @mcp.tool()
+    async def unlink_memory(
+        actor: _Actor,
+        memory_id: int,
+        node_ids: _ConcernedNodeIds = None,
+        rule_ids: _ConcernedRuleIds = None,
+        decision_ids: _ConcernedDecisionIds = None,
+    ) -> Memory:
+        """Say that an active fact or belief no longer concerns some nodes, rules or decisions.
+        Nothing is changed if any of them is not linked."""
+        with _database_errors():
+            return await memories.unlink_memory(
+                actor=actor,
+                memory_id=memory_id,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+                decision_ids=decision_ids,
+            )
+
+    @mcp.tool()
+    async def get_memory(memory_id: int) -> Memory:
+        """Read one fact or belief: its source or evidence, its status, who recorded and confirmed
+        it, what replaced it, and what it concerns."""
+        with _database_errors():
+            return await memories.get_memory(memory_id)
+
+    @mcp.tool()
+    async def list_memories(
+        type: Annotated[str | None, Field(description="Only fact or belief.")] = None,
+        kind: Annotated[
+            str | None, Field(description="Only world or experience (facts have one).")
+        ] = None,
+        status: Annotated[
+            str | None, Field(description="Only active, superseded or retracted.")
+        ] = None,
+        origin: Annotated[
+            str | None, Field(description="Only stated, extracted or derived.")
+        ] = None,
+        stale: Annotated[
+            bool | None,
+            Field(description="True: only beliefs that are stale. False: only those that are not."),
+        ] = None,
+        node_id: Annotated[
+            int | None, Field(description="Only what concerns exactly this node.")
+        ] = None,
+        rule_id: Annotated[
+            int | None, Field(description="Only what concerns exactly this rule.")
+        ] = None,
+        within_node_id: Annotated[
+            int | None,
+            Field(
+                description="Only what concerns this epic, story or task, or anything under it, "
+                "or a rule in one of those stories. One walk over a whole area."
+            ),
+        ] = None,
+        rests_on_memory_id: Annotated[
+            int | None, Field(description="Only beliefs that rest on this fact.")
+        ] = None,
+        rests_on_decision_id: Annotated[
+            int | None, Field(description="Only beliefs that rest on this decision.")
+        ] = None,
+        limit: _Limit = 50,
+        after_id: _After = None,
+    ) -> MemoryPage:
+        """List facts and beliefs, oldest first, a page at a time. Every filter is optional.
+
+        The answer says how many match in all, so you can walk every page and check that none was
+        skipped. For one area of the project, use within_node_id.
+        """
+        with _database_errors():
+            return await memories.list_memories(
+                memory_type=type,
+                kind=kind,
+                status=status,
+                origin=origin,
+                stale=stale,
+                node_id=node_id,
+                rule_id=rule_id,
+                within_node_id=within_node_id,
+                rests_on_memory_id=rests_on_memory_id,
+                rests_on_decision_id=rests_on_decision_id,
+                limit=limit,
+                after_id=after_id,
+            )
+
+    @mcp.tool()
+    async def memory_history(
+        memory_id: int, limit: _Limit = 50, after_id: _After = None
+    ) -> EventPage:
+        """Read everything that was ever done to one fact or belief, oldest first, a page at a
+        time: who recorded, linked, confirmed, replaced or retracted it, and when. A person who
+        changed their mind, and the agent that passed it on, are both in it."""
+        with _database_errors():
+            return await memories.memory_history(
+                memory_id=memory_id, limit=limit, after_id=after_id
             )
 
     @mcp.tool()

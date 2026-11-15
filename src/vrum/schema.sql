@@ -233,6 +233,105 @@ $$;
 CREATE TRIGGER rules_guard_update BEFORE UPDATE ON rules
     FOR EACH ROW EXECUTE FUNCTION rules_guard_update();
 
+-- Facts and beliefs ---------------------------------------------------------------------------
+
+-- One table for both, because they share what matters: where each came from, who recorded it, and
+-- that neither is ever edited. A fact is something known, with its source. A belief is a
+-- conclusion drawn from evidence (see belief_evidence); it is only ever a suggestion. A change is a
+-- newer item that supersedes the old one, or a retraction, never an edit.
+CREATE TABLE memories (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    type             text NOT NULL,
+    -- Facts only. world: true about the project, its tools or its domain. experience: something that
+    -- was done or observed.
+    kind             text,
+    text             text NOT NULL,
+    -- Facts only: where it came from, in plain words.
+    source           text,
+    -- Facts only: the day it was true or happened, when that is known.
+    happened_on      date,
+    -- stated: a person or agent wrote it. extracted: a language model proposed it from a quoted
+    -- passage (a fact). derived: a language model drew it up from evidence (a belief).
+    origin           text NOT NULL DEFAULT 'stated',
+    recorded_by      text NOT NULL,
+    recorded_at      timestamptz NOT NULL DEFAULT now(),
+    status           text NOT NULL DEFAULT 'active',
+    superseded_by_id bigint,
+    -- Why it was superseded or retracted. Present exactly when it is no longer active.
+    status_reason    text,
+    -- Beliefs only: the person who has looked at it, and when.
+    confirmed_by     text,
+    confirmed_at     timestamptz,
+    CONSTRAINT memory_type_is_known CHECK (type IN ('fact', 'belief')),
+    CONSTRAINT memory_kind_is_known CHECK (kind IN ('world', 'experience')),
+    CONSTRAINT memory_origin_is_known CHECK (origin IN ('stated', 'extracted', 'derived')),
+    CONSTRAINT memory_status_is_known CHECK (status IN ('active', 'superseded', 'retracted')),
+    CONSTRAINT memory_text_is_not_blank CHECK (btrim(text) <> ''),
+    CONSTRAINT memory_recorded_by_is_not_blank CHECK (btrim(recorded_by) <> ''),
+    CONSTRAINT fact_has_a_kind_and_a_source
+        CHECK (type <> 'fact' OR (kind IS NOT NULL AND source IS NOT NULL AND btrim(source) <> '')),
+    CONSTRAINT belief_has_no_fact_fields
+        CHECK (type <> 'belief' OR (kind IS NULL AND source IS NULL AND happened_on IS NULL)),
+    CONSTRAINT memory_origin_fits_its_type CHECK (
+        (type = 'fact' AND origin IN ('stated', 'extracted'))
+        OR (type = 'belief' AND origin IN ('stated', 'derived'))
+    ),
+    CONSTRAINT only_a_belief_is_confirmed
+        CHECK (type = 'belief' OR (confirmed_by IS NULL AND confirmed_at IS NULL)),
+    CONSTRAINT confirmation_names_a_person_and_a_time CHECK (
+        (confirmed_by IS NULL) = (confirmed_at IS NULL)
+        AND (confirmed_by IS NULL OR btrim(confirmed_by) <> '')
+    ),
+    CONSTRAINT memory_is_superseded_exactly_when_replaced
+        CHECK ((status = 'superseded') = (superseded_by_id IS NOT NULL)),
+    -- A replacement is always recorded after what it replaces, so replacements cannot form a circle.
+    CONSTRAINT memory_is_replaced_by_a_later_one
+        CHECK (superseded_by_id IS NULL OR superseded_by_id > id),
+    CONSTRAINT memory_has_a_reason_once_it_has_ended CHECK (
+        (status = 'active') = (status_reason IS NULL)
+        AND (status_reason IS NULL OR btrim(status_reason) <> '')
+    ),
+    CONSTRAINT memory_id_and_type_are_unique UNIQUE (id, type),
+    -- A fact is replaced by a fact and a belief by a belief.
+    CONSTRAINT memory_is_replaced_by_its_own_type
+        FOREIGN KEY (superseded_by_id, type) REFERENCES memories (id, type)
+);
+
+CREATE INDEX memories_superseded_by_idx ON memories (superseded_by_id);
+
+CREATE FUNCTION memories_are_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'A fact or belief is a record and cannot be deleted. Retract it or supersede it instead.';
+    END IF;
+    IF OLD.status <> 'active' THEN
+        RAISE EXCEPTION 'A superseded or retracted fact or belief cannot change again.';
+    END IF;
+    IF (NEW.type, NEW.kind, NEW.text, NEW.source, NEW.happened_on, NEW.origin, NEW.recorded_by,
+        NEW.recorded_at)
+       IS DISTINCT FROM
+       (OLD.type, OLD.kind, OLD.text, OLD.source, OLD.happened_on, OLD.origin, OLD.recorded_by,
+        OLD.recorded_at)
+    THEN
+        RAISE EXCEPTION 'A fact or belief cannot be edited. Supersede it with a newer one, or retract it.';
+    END IF;
+    IF OLD.confirmed_by IS NOT NULL
+       AND (NEW.confirmed_by, NEW.confirmed_at) IS DISTINCT FROM (OLD.confirmed_by, OLD.confirmed_at)
+    THEN
+        RAISE EXCEPTION 'A confirmation cannot be changed.';
+    END IF;
+    IF NEW.status <> OLD.status
+       AND (NEW.confirmed_by, NEW.confirmed_at) IS DISTINCT FROM (OLD.confirmed_by, OLD.confirmed_at)
+    THEN
+        RAISE EXCEPTION 'A belief cannot be confirmed in the same step that ends it.';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER memories_are_a_record BEFORE UPDATE OR DELETE ON memories
+    FOR EACH ROW EXECUTE FUNCTION memories_are_a_record();
+
 -- Decisions and principles --------------------------------------------------------------------
 
 -- A decision is a record: it is never edited. A change of mind is a new decision that supersedes
@@ -248,6 +347,9 @@ CREATE TABLE decisions (
     decided_on       date NOT NULL,
     status           text NOT NULL DEFAULT 'active',
     superseded_by_id bigint REFERENCES decisions (id),
+    -- The belief a person promoted to this decision, if it began as one. Only a belief can be.
+    promoted_from_id bigint,
+    promoted_from_type text GENERATED ALWAYS AS (CASE WHEN promoted_from_id IS NOT NULL THEN 'belief' END) STORED,
     recorded_at      timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT decision_kind_is_known CHECK (kind IN ('decision', 'principle')),
     CONSTRAINT decision_status_is_known CHECK (status IN ('active', 'superseded')),
@@ -259,10 +361,13 @@ CREATE TABLE decisions (
         CHECK ((status = 'superseded') = (superseded_by_id IS NOT NULL)),
     -- A replacement is always recorded after what it replaces, so replacements cannot form a circle.
     CONSTRAINT decision_is_replaced_by_a_later_one
-        CHECK (superseded_by_id IS NULL OR superseded_by_id > id)
+        CHECK (superseded_by_id IS NULL OR superseded_by_id > id),
+    CONSTRAINT decision_is_promoted_from_a_belief
+        FOREIGN KEY (promoted_from_id, promoted_from_type) REFERENCES memories (id, type)
 );
 
 CREATE INDEX decisions_superseded_by_idx ON decisions (superseded_by_id);
+CREATE INDEX decisions_promoted_from_idx ON decisions (promoted_from_id) WHERE promoted_from_id IS NOT NULL;
 
 CREATE FUNCTION decisions_are_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -272,9 +377,11 @@ BEGIN
     IF OLD.status = 'superseded' THEN
         RAISE EXCEPTION 'A superseded decision cannot change again.';
     END IF;
-    IF (NEW.kind, NEW.title, NEW.text, NEW.reason, NEW.decided_by, NEW.decided_on, NEW.recorded_at)
+    IF (NEW.kind, NEW.title, NEW.text, NEW.reason, NEW.decided_by, NEW.decided_on,
+        NEW.promoted_from_id, NEW.recorded_at)
        IS DISTINCT FROM
-       (OLD.kind, OLD.title, OLD.text, OLD.reason, OLD.decided_by, OLD.decided_on, OLD.recorded_at)
+       (OLD.kind, OLD.title, OLD.text, OLD.reason, OLD.decided_by, OLD.decided_on,
+        OLD.promoted_from_id, OLD.recorded_at)
     THEN
         RAISE EXCEPTION 'A decision cannot be edited. Supersede it with a new decision instead.';
     END IF;
@@ -331,7 +438,7 @@ CREATE TRIGGER decision_rules_are_frozen_once_superseded BEFORE INSERT OR DELETE
 -- A decision as it is read: what it replaced and what it affects.
 CREATE VIEW decision_state AS
 SELECT d.id, d.kind, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.status,
-       d.superseded_by_id, d.recorded_at,
+       d.superseded_by_id, d.promoted_from_id, d.recorded_at,
        coalesce((SELECT array_agg(s.id ORDER BY s.id) FROM decisions s
                  WHERE s.superseded_by_id = d.id), ARRAY[]::bigint[]) AS supersedes_ids,
        coalesce((SELECT array_agg(l.node_id ORDER BY l.node_id) FROM decision_nodes l
@@ -340,18 +447,180 @@ SELECT d.id, d.kind, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.st
                  WHERE l.decision_id = d.id), ARRAY[]::bigint[]) AS rule_ids
 FROM decisions d;
 
+-- What a fact or belief concerns ---------------------------------------------------------------
+
+-- Zero or more nodes and zero or more rules, for a fact or a belief. Only a fact can also concern
+-- decisions: a belief's decisions are its evidence, below.
+CREATE TABLE memory_nodes (
+    memory_id bigint NOT NULL REFERENCES memories (id),
+    node_id   bigint NOT NULL REFERENCES nodes (id),
+    PRIMARY KEY (memory_id, node_id)
+);
+
+CREATE TABLE memory_rules (
+    memory_id bigint NOT NULL REFERENCES memories (id),
+    rule_id   bigint NOT NULL REFERENCES rules (id),
+    PRIMARY KEY (memory_id, rule_id)
+);
+
+CREATE TABLE memory_decisions (
+    memory_id   bigint NOT NULL,
+    memory_type text GENERATED ALWAYS AS ('fact') STORED,
+    decision_id bigint NOT NULL REFERENCES decisions (id),
+    PRIMARY KEY (memory_id, decision_id),
+    CONSTRAINT only_a_fact_concerns_a_decision
+        FOREIGN KEY (memory_id, memory_type) REFERENCES memories (id, type)
+);
+
+CREATE INDEX memory_nodes_node_idx ON memory_nodes (node_id);
+CREATE INDEX memory_rules_rule_idx ON memory_rules (rule_id);
+CREATE INDEX memory_decisions_decision_idx ON memory_decisions (decision_id);
+
+-- A fact or belief that has been superseded or retracted keeps the links it had.
+CREATE FUNCTION memory_links_are_frozen_once_ended() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    the_memory bigint;
+    the_status text;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        the_memory := OLD.memory_id;
+    ELSE
+        the_memory := NEW.memory_id;
+    END IF;
+    SELECT status INTO the_status FROM memories WHERE id = the_memory;
+    IF the_status <> 'active' THEN
+        RAISE EXCEPTION 'A superseded or retracted fact or belief keeps the links it had.';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER memory_nodes_are_frozen_once_ended BEFORE INSERT OR DELETE ON memory_nodes
+    FOR EACH ROW EXECUTE FUNCTION memory_links_are_frozen_once_ended();
+CREATE TRIGGER memory_rules_are_frozen_once_ended BEFORE INSERT OR DELETE ON memory_rules
+    FOR EACH ROW EXECUTE FUNCTION memory_links_are_frozen_once_ended();
+CREATE TRIGGER memory_decisions_are_frozen_once_ended BEFORE INSERT OR DELETE ON memory_decisions
+    FOR EACH ROW EXECUTE FUNCTION memory_links_are_frozen_once_ended();
+
+-- What a belief rests on ------------------------------------------------------------------------
+
+-- Each row is one piece of evidence: a fact or a decision, never another belief, so a conclusion is
+-- always one step from what it rests on. The generated types make the foreign keys accept nothing
+-- but a belief on one side and a fact on the other.
+CREATE TABLE belief_evidence (
+    belief_id   bigint NOT NULL,
+    belief_type text GENERATED ALWAYS AS ('belief') STORED,
+    fact_id     bigint,
+    fact_type   text GENERATED ALWAYS AS (CASE WHEN fact_id IS NOT NULL THEN 'fact' END) STORED,
+    decision_id bigint REFERENCES decisions (id),
+    CONSTRAINT evidence_is_a_fact_or_a_decision CHECK ((fact_id IS NULL) <> (decision_id IS NULL)),
+    CONSTRAINT evidence_belongs_to_a_belief
+        FOREIGN KEY (belief_id, belief_type) REFERENCES memories (id, type),
+    CONSTRAINT evidence_is_never_a_belief
+        FOREIGN KEY (fact_id, fact_type) REFERENCES memories (id, type)
+);
+
+CREATE UNIQUE INDEX belief_evidence_fact_idx ON belief_evidence (belief_id, fact_id)
+    WHERE fact_id IS NOT NULL;
+CREATE UNIQUE INDEX belief_evidence_decision_idx ON belief_evidence (belief_id, decision_id)
+    WHERE decision_id IS NOT NULL;
+CREATE INDEX belief_evidence_by_fact_idx ON belief_evidence (fact_id) WHERE fact_id IS NOT NULL;
+CREATE INDEX belief_evidence_by_decision_idx
+    ON belief_evidence (decision_id) WHERE decision_id IS NOT NULL;
+
+CREATE FUNCTION belief_evidence_is_a_record() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    the_status text;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'The evidence of a belief cannot be changed or removed. Supersede the belief with a revised one instead.';
+    END IF;
+    IF NEW.fact_id IS NOT NULL THEN
+        SELECT status INTO the_status FROM memories WHERE id = NEW.fact_id;
+    ELSE
+        SELECT status INTO the_status FROM decisions WHERE id = NEW.decision_id;
+    END IF;
+    IF the_status IS DISTINCT FROM 'active' THEN
+        RAISE EXCEPTION 'Evidence for a new belief must be an active fact or decision.';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER belief_evidence_is_a_record BEFORE INSERT OR UPDATE OR DELETE ON belief_evidence
+    FOR EACH ROW EXECUTE FUNCTION belief_evidence_is_a_record();
+
+-- Checked when the transaction commits, because the evidence is added right after the belief.
+CREATE FUNCTION a_belief_needs_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type = 'belief'
+       AND NOT EXISTS (SELECT 1 FROM belief_evidence WHERE belief_id = NEW.id)
+    THEN
+        RAISE EXCEPTION 'A belief needs evidence: at least one fact or decision it rests on.';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER a_belief_needs_evidence AFTER INSERT ON memories
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION a_belief_needs_evidence();
+
+-- A fact or belief as it is read: what it replaced, what it concerns, what a belief rests on,
+-- whether that belief is stale, and the decisions made from it.
+CREATE VIEW memory_state AS
+SELECT m.id, m.type, m.kind, m.text, m.source, m.happened_on, m.origin, m.recorded_by,
+       m.recorded_at, m.status, m.superseded_by_id, m.status_reason, m.confirmed_by,
+       m.confirmed_at,
+       coalesce((SELECT array_agg(s.id ORDER BY s.id) FROM memories s
+                 WHERE s.superseded_by_id = m.id), ARRAY[]::bigint[]) AS supersedes_ids,
+       coalesce((SELECT array_agg(l.node_id ORDER BY l.node_id) FROM memory_nodes l
+                 WHERE l.memory_id = m.id), ARRAY[]::bigint[]) AS node_ids,
+       coalesce((SELECT array_agg(l.rule_id ORDER BY l.rule_id) FROM memory_rules l
+                 WHERE l.memory_id = m.id), ARRAY[]::bigint[]) AS rule_ids,
+       coalesce((SELECT array_agg(l.decision_id ORDER BY l.decision_id) FROM memory_decisions l
+                 WHERE l.memory_id = m.id), ARRAY[]::bigint[]) AS decision_ids,
+       coalesce((SELECT jsonb_agg(e.item ORDER BY e.sort_group, e.sort_id)
+                 FROM (SELECT jsonb_build_object('type', 'fact', 'id', f.id, 'status', f.status,
+                              'replaced_by_id', f.superseded_by_id,
+                              'reason', f.status_reason) AS item, 0 AS sort_group, f.id AS sort_id
+                       FROM belief_evidence be JOIN memories f ON f.id = be.fact_id
+                       WHERE be.belief_id = m.id
+                       UNION ALL
+                       SELECT jsonb_build_object('type', 'decision', 'id', d.id,
+                              'status', d.status, 'replaced_by_id', d.superseded_by_id,
+                              'reason', NULL), 1, d.id
+                       FROM belief_evidence be JOIN decisions d ON d.id = be.decision_id
+                       WHERE be.belief_id = m.id) e), '[]'::jsonb) AS evidence,
+       (SELECT count(*) FROM belief_evidence be WHERE be.belief_id = m.id)::integer
+           AS evidence_count,
+       (m.type = 'belief' AND m.status = 'active' AND EXISTS (
+           SELECT 1 FROM belief_evidence be
+           LEFT JOIN memories f ON f.id = be.fact_id
+           LEFT JOIN decisions d ON d.id = be.decision_id
+           WHERE be.belief_id = m.id AND coalesce(f.status, d.status) <> 'active'
+       )) AS stale,
+       coalesce((SELECT array_agg(d.id ORDER BY d.id) FROM decisions d
+                 WHERE d.promoted_from_id = m.id), ARRAY[]::bigint[]) AS promoted_decision_ids
+FROM memories m;
+
 -- The event log ----------------------------------------------------------------------------
 
 -- An event shows in the history of every node and rule it names. For a link, node_id is where it
 -- starts and other_node_id where it ends. For a rule, node_id is the story the rule is in after the
 -- event and other_node_id the story it was in before, when that was a different one. A decision
--- event names the decision, and also the node or rule when the event is about a link to it.
+-- event names the decision, and also the node or rule when the event is about a link to it. A fact
+-- or belief event names the memory, and also the node, rule or decision it concerns when the event is
+-- about a link to it, so it shows in the history of each of them.
 CREATE TABLE events (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     node_id       bigint REFERENCES nodes (id),
     other_node_id bigint REFERENCES nodes (id),
     rule_id       bigint REFERENCES rules (id),
     decision_id   bigint REFERENCES decisions (id),
+    memory_id     bigint REFERENCES memories (id),
     action        text NOT NULL,
     actor         text NOT NULL,
     at            timestamptz NOT NULL DEFAULT now(),
@@ -363,14 +632,19 @@ CREATE TABLE events (
         'link_added', 'link_removed',
         'claimed', 'claim_renewed', 'claim_released',
         'rule_created', 'rule_updated', 'rule_placed', 'rule_moved',
-        'decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked'
+        'decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked',
+        'memory_recorded', 'memory_superseded', 'memory_retracted', 'memory_linked',
+        'memory_unlinked', 'memory_confirmed', 'memory_promoted'
     )),
     CONSTRAINT event_actor_is_not_blank CHECK (btrim(actor) <> ''),
     CONSTRAINT event_names_what_it_is_about CHECK (
         CASE
-            WHEN starts_with(action, 'rule_') THEN rule_id IS NOT NULL AND decision_id IS NULL
-            WHEN starts_with(action, 'decision_') THEN decision_id IS NOT NULL
+            WHEN starts_with(action, 'rule_')
+                THEN rule_id IS NOT NULL AND decision_id IS NULL AND memory_id IS NULL
+            WHEN starts_with(action, 'decision_') THEN decision_id IS NOT NULL AND memory_id IS NULL
+            WHEN starts_with(action, 'memory_') THEN memory_id IS NOT NULL
             ELSE node_id IS NOT NULL AND rule_id IS NULL AND decision_id IS NULL
+                AND memory_id IS NULL
         END
     )
 );
@@ -379,6 +653,7 @@ CREATE INDEX events_node_idx ON events (node_id, id);
 CREATE INDEX events_other_node_idx ON events (other_node_id, id) WHERE other_node_id IS NOT NULL;
 CREATE INDEX events_rule_idx ON events (rule_id, id) WHERE rule_id IS NOT NULL;
 CREATE INDEX events_decision_idx ON events (decision_id, id) WHERE decision_id IS NOT NULL;
+CREATE INDEX events_memory_idx ON events (memory_id, id) WHERE memory_id IS NOT NULL;
 
 CREATE FUNCTION events_refuse_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
