@@ -15,8 +15,10 @@ from vrum.common import (
     fetch_one,
     page_size,
     record_event,
+    save_changes,
     snapshot,
     split_page,
+    stale_version,
 )
 from vrum.db import Database
 
@@ -33,7 +35,8 @@ _PARENT_KIND = {"story": "epic", "task": "story"}
 _STORED_COLUMNS = (
     "id, kind, parent_id, title, body, status, priority, version, created_at, updated_at"
 )
-_STATE_COLUMNS = _STORED_COLUMNS + ", waiting_on, claimed_by, claim_expires_at"
+STATE_COLUMNS = _STORED_COLUMNS + ", waiting_on, claimed_by, claim_expires_at"
+EVENT_COLUMNS = "id, node_id, other_node_id, rule_id, action, actor, at, before, after"
 
 
 class Node(BaseModel):
@@ -74,15 +77,19 @@ class NodePage(BaseModel):
     )
 
 
-class NodeEvent(BaseModel):
+class Event(BaseModel):
     id: int = Field(description="The event's id. Events are listed oldest first.")
-    node_id: int
-    other_node_id: int | None = Field(
-        description="For a link, the node at its other end. The event shows in both histories."
+    node_id: int | None = Field(
+        description="The node the event is about. For a rule, the story it is in after the event."
     )
+    other_node_id: int | None = Field(
+        description="For a link, the node at its other end. For a rule that moved, the story it "
+        "left. The event shows in the history of both nodes."
+    )
+    rule_id: int | None = Field(description="The rule the event is about, if it is about a rule.")
     action: str = Field(
-        description="create, update, move, link_added, link_removed, claimed, claim_renewed or "
-        "claim_released."
+        description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
+        "claim_released, rule_created, rule_updated, rule_placed or rule_moved."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime
@@ -96,7 +103,7 @@ class NodeEvent(BaseModel):
 
 
 class EventPage(BaseModel):
-    items: list[NodeEvent]
+    items: list[Event]
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
     )
@@ -111,14 +118,6 @@ def _clean_title(title: str) -> str:
     if not cleaned:
         raise Refusal("A node needs a title: title cannot be empty.")
     return cleaned
-
-
-def _stale(node_id: int, current: int, expected: int) -> Refusal:
-    return Refusal(
-        f"Node {node_id} is at version {current}, but you sent version {expected}. "
-        "Someone else changed it after you read it. Read it again with get_node, check that your "
-        f"change still makes sense, then repeat it with expected_version {current}."
-    )
 
 
 async def require_node(
@@ -139,9 +138,7 @@ async def require_node(
 
 async def node_state(conn: AsyncConnection, node_id: int) -> Node:
     """The node as it is read: with `ready` worked out, what it waits for, and who holds it."""
-    row = await fetch_one(
-        conn, f"SELECT {_STATE_COLUMNS} FROM node_state WHERE id = %s", (node_id,)
-    )
+    row = await fetch_one(conn, f"SELECT {STATE_COLUMNS} FROM node_state WHERE id = %s", (node_id,))
     if row is None:
         raise Refusal(
             f"There is no node with id {node_id}. Use list_nodes to find the id you want."
@@ -237,7 +234,7 @@ class Graph:
                 await require_node(conn, parent_id)
             rows = await fetch_all(
                 conn,
-                f"SELECT {_STATE_COLUMNS} FROM node_state "
+                f"SELECT {STATE_COLUMNS} FROM node_state "
                 "WHERE (%(kind)s::text IS NULL OR kind = %(kind)s) "
                 "AND (%(parent_id)s::bigint IS NULL OR parent_id = %(parent_id)s) "
                 "AND (%(status)s::text IS NULL OR status = %(status)s) "
@@ -265,7 +262,7 @@ class Graph:
         async with self._database.transaction() as conn:
             rows = await fetch_all(
                 conn,
-                f"SELECT {_STATE_COLUMNS} FROM node_state "
+                f"SELECT {STATE_COLUMNS} FROM node_state "
                 "WHERE status = 'ready' AND claimed_by IS NULL AND kind = ANY(%s) "
                 "AND id > %s ORDER BY id LIMIT %s",
                 (kinds, after_id or 0, limit + 1),
@@ -304,7 +301,9 @@ class Graph:
         async with self._database.transaction() as conn:
             current = await require_node(conn, node_id, lock=True)
             if current["version"] != expected_version:
-                raise _stale(node_id, current["version"], expected_version)
+                raise stale_version(
+                    "Node", "get_node", node_id, current["version"], expected_version
+                )
             if parent_id is not None:
                 if current["kind"] == "epic":
                     raise Refusal("An epic has no parent. Leave parent_id out.")
@@ -326,7 +325,7 @@ class Graph:
                     "gave none. Give at least one of title, body, status or priority with a new "
                     "value."
                 )
-            row = await self._save(conn, current, changes)
+            row = await save_changes(conn, "nodes", node_id, changes, _STORED_COLUMNS)
             await record_event(
                 conn,
                 node_id=node_id,
@@ -344,7 +343,9 @@ class Graph:
         async with self._database.transaction() as conn:
             current = await require_node(conn, node_id, lock=True)
             if current["version"] != expected_version:
-                raise _stale(node_id, current["version"], expected_version)
+                raise stale_version(
+                    "Node", "get_node", node_id, current["version"], expected_version
+                )
             if current["kind"] == "epic":
                 raise Refusal(
                     f"Node {node_id} is an epic. An epic has no parent, so it cannot be moved."
@@ -354,7 +355,9 @@ class Graph:
                 raise Refusal(
                     f"Node {node_id} is already under node {new_parent_id}, so nothing moved."
                 )
-            row = await self._save(conn, current, {"parent_id": new_parent_id})
+            row = await save_changes(
+                conn, "nodes", node_id, {"parent_id": new_parent_id}, _STORED_COLUMNS
+            )
             await record_event(
                 conn,
                 node_id=node_id,
@@ -371,27 +374,12 @@ class Graph:
             await require_node(conn, node_id)
             rows = await fetch_all(
                 conn,
-                "SELECT id, node_id, other_node_id, action, actor, at, before, after FROM events "
+                f"SELECT {EVENT_COLUMNS} FROM events "
                 "WHERE (node_id = %(node)s OR other_node_id = %(node)s) AND id > %(after)s "
                 "ORDER BY id LIMIT %(fetch)s",
                 {"node": node_id, "after": after_id or 0, "fetch": limit + 1},
             )
         page, next_after_id = split_page(rows, limit)
         return EventPage(
-            items=[NodeEvent.model_validate(row) for row in page], next_after_id=next_after_id
+            items=[Event.model_validate(row) for row in page], next_after_id=next_after_id
         )
-
-    @staticmethod
-    async def _save(
-        conn: AsyncConnection, current: dict[str, Any], changes: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Write the changes and raise the version. The row is locked and its version checked."""
-        assignments = ", ".join(f"{field} = %({field})s" for field in changes)
-        row = await fetch_one(
-            conn,
-            f"UPDATE nodes SET {assignments}, version = version + 1 "
-            f"WHERE id = %(id)s RETURNING {_STORED_COLUMNS}",
-            {**changes, "id": current["id"]},
-        )
-        assert row is not None
-        return row

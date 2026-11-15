@@ -36,11 +36,13 @@ Full wording is in `DECISIONS.md`.
 - M0: the only tool is `server_status` (server, PostgreSQL and pgvector versions), so the client has something real to list; M1 adds the graph tools.
 
 - M1: ids are whole numbers from the database; priority is `low`, `normal`, `high` or `urgent`; stored status is `new`, `in_progress`, `blocked`, `done` or `dropped` (`ready` is computed from M2 on and never stored); `update_node` accepts `parent_id` only to refuse a second parent and point to `move_node`.
-- M1: history lists the changed fields before and after with versions; there is no delete (use `dropped`); every list takes `limit` (1 to 200, default 50) and `after_id`; schema changes are numbered SQL files in `src/vrum/migrations/`.
+- M1: history lists the changed fields before and after with versions; there is no delete (use `dropped`); every list takes `limit` (1 to 200, default 50) and `after_id`; schema changes were numbered SQL files, replaced the same day by the owner's decision: there are no migrations, see below.
 
 - M2: a node nobody has started shows as `ready` when everything it needs first is done (so a new node that needs nothing is `ready`, and `new` means "waiting for something it needs first"); only `done` counts, so a dropped or blocked prerequisite keeps dependents waiting; `waiting_on` lists what a node waits for.
 - M2: links work between any two nodes; `duplicates` and `relates_to` work both ways; `supersedes`, `duplicates` and `relates_to` are records only; `list_links` was added so links can be read.
 - M2: claims are for stories and tasks that are ready or in progress with nothing open that they need first; a claim does not change status or stop others editing; leases are 1 second to 24 hours, default 15 minutes, lapse on their own, and only the holder renews or releases; `ready_work` lists free stories and tasks oldest first (priority is shown, not used for order).
+
+- Owner's decision, 2026-11-15: no migrations. The whole database is `src/vrum/schema.sql`; a schema change means rebuilding the database from scratch. The server refuses to start on a database built from a different version of the schema, in plain words. The loop's other findings about production habits, including a recommendation about M7's backup and restore, are in `DECISIONS.md`.
 
 ## M0 proof, as run
 

@@ -38,7 +38,7 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **No deleting:** there is no delete tool (use status `dropped`). The database also refuses to delete a node that has history, which is every node, and refuses to change or delete an event.
 - **Paging:** every list takes `limit` (1 to 200, default 50) and `after_id`, and returns `next_after_id` until the last page. Items come in id order.
 - **Titles and actors:** a title or actor that is blank is refused; surrounding spaces are trimmed. Actors are free text, with no list of known actors.
-- **Schema changes:** numbered SQL files in `src/vrum/migrations/`, applied once each when the server starts, under a database lock so that two servers starting together cannot clash. An applied file is never edited; a change is a new file.
+- **Schema changes:** ~~numbered SQL files in `src/vrum/migrations/`~~ Replaced the same day by the owner's decision below: there are no migrations.
 
 ## 2026-11-15: choices made while building M2
 
@@ -52,3 +52,20 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **Leases:** `lease_seconds` is 1 to 86400 (24 hours), default 900 (15 minutes). A claim lapses on its own with no action. Only the holder can renew (and only before it lapses) or release. Another actor can take over a lapsed claim, and the history records who held it before.
 - **`ready_work`:** stories and tasks that are ready and not claimed (`kind` can ask for epics instead), oldest first. Priority is shown on each item but does not change the order, so that paging stays simple.
 - **History:** a link event shows in the history of both nodes. Claims and releases are events; a claim lapsing is not, because nothing happens at that moment.
+
+## 2026-11-15: no migrations (owner's decision)
+
+- **What:** the database has no migrations. The whole schema is one file, `src/vrum/schema.sql`, applied to an empty database when the server starts. To change the schema, edit that file and rebuild the database from scratch (`docker compose down --volumes`, then `docker compose up -d --build --wait`). This replaces the numbered migration files and their runner, which were built out of production habit.
+- **Why:** Vrum is a prototype with no customer data. Migrations exist to keep a database that already holds real data alive through a change, and there is none to keep. They cost a runner, a history table and the discipline of never editing an applied file, and they would leave the schema as a pile of patches instead of one readable file.
+- **One small safeguard kept:** the server records which version of the schema built the database, and refuses to start on a database built from a different one, saying in plain words to rebuild it. That replaces a confusing SQL error with one sentence. It is a few lines and can be removed if the owner prefers.
+- **When to reconsider:** when a database holds data someone cares about.
+- **Decided by:** the owner (@marie-schmidt).
+
+## 2026-11-15: other production habits looked for (loop's findings, open to veto)
+
+The owner asked the loop to look for other things done out of production habit. Nothing else in the code protects data or users that do not exist yet. What was found:
+
+- **Removed with the migrations:** the proof step "restart the stack and check the data survived and nothing was applied twice". It only mattered because of the migration runner. A restart check that the data survives stays useful, but is no longer a proof step.
+- **In `SPEC.md`, so the owner's call, not changed by the loop:** M7's backup and restore scripts and its "destroy the volume, restore" proof exist to protect data that does not exist yet. M7's full export and import as JSON is still useful (the Taiga export and the M8 trial need it). Recommendation: keep export and import, drop the backup and restore scripts and their proof until there is data worth saving. M6 hardening (token, size caps, logs without secrets) is spec'd as written and is cheap, so it stays.
+- **Kept on purpose, cheap and asked for by the spec:** the database refusing bad data itself (`SPEC.md` section 1), versions on every edit, the append-only event log, and plain refusals.
+- **Kept, small, and easy to drop if the owner wants:** the container runs as a non-root user, the image build is multi-stage, and strict type checking is on.

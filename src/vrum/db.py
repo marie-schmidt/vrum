@@ -1,6 +1,7 @@
-"""The PostgreSQL connection pool, the schema migrations, and the questions the server asks about
-the database."""
+"""The PostgreSQL connection pool, building the database from its schema, and the questions the
+server asks about the database."""
 
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -12,13 +13,55 @@ from psycopg_pool import AsyncConnectionPool
 
 _QUICK_TIMEOUT_SECONDS = 3.0
 _STARTUP_TIMEOUT_SECONDS = 30.0
-_MIGRATION_LOCK_ID = 7_431_900_001
+_SCHEMA_LOCK_ID = 7_431_900_001
 
 
 @dataclass(frozen=True)
 class DatabaseStatus:
     postgres_version: str
     pgvector_version: str
+
+
+class SchemaOutOfDate(Exception):
+    """The database was built from a different schema than the one in this version of the code."""
+
+
+async def prepare_schema(conninfo: str) -> None:
+    """Build an empty database from `schema.sql`. A database built from any other version of the
+    schema is refused in plain words: there are no migrations, so the fix is to rebuild it."""
+    schema = (files("vrum") / "schema.sql").read_text(encoding="utf-8")
+    digest = hashlib.sha256(schema.encode()).hexdigest()
+    async with (
+        await AsyncConnection.connect(conninfo, autocommit=True) as conn,
+        conn.transaction(),
+    ):
+        # Two servers starting at once must not both build it.
+        await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
+        cursor = await conn.execute(
+            "SELECT to_regclass('schema_info') IS NOT NULL, to_regclass('nodes') IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        has_marker, has_tables = row
+        if has_marker:
+            cursor = await conn.execute("SELECT schema_hash FROM schema_info")
+            stored = await cursor.fetchone()
+            if stored is None or stored[0] != digest:
+                raise SchemaOutOfDate(_REBUILD_ADVICE)
+        elif has_tables:
+            raise SchemaOutOfDate(_REBUILD_ADVICE)
+        else:
+            await conn.execute(schema)
+            await conn.execute("CREATE TABLE schema_info (schema_hash text NOT NULL)")
+            await conn.execute("INSERT INTO schema_info VALUES (%s)", (digest,))
+
+
+_REBUILD_ADVICE = (
+    "The database was built from a different version of the schema (src/vrum/schema.sql). "
+    "Vrum is a prototype and has no migrations: rebuild the database from scratch with "
+    "'docker compose down --volumes' and then 'docker compose up -d --build --wait'. "
+    "That deletes everything in it."
+)
 
 
 class Database:
@@ -34,9 +77,6 @@ class Database:
 
     async def open(self) -> None:
         await self._pool.open(wait=True, timeout=_STARTUP_TIMEOUT_SECONDS)
-        async with self._pool.connection() as conn:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await self._migrate()
 
     async def close(self) -> None:
         await self._pool.close()
@@ -46,31 +86,6 @@ class Database:
         """A connection in one transaction: what is done on it is saved together or not at all."""
         async with self._pool.connection() as conn, conn.transaction():
             yield conn
-
-    async def _migrate(self) -> None:
-        """Apply each numbered file in `migrations/` not yet applied, once, in order."""
-        migrations = sorted(
-            (
-                path
-                for path in (files("vrum") / "migrations").iterdir()
-                if path.name.endswith(".sql")
-            ),
-            key=lambda path: path.name,
-        )
-        async with self.transaction() as conn:
-            # Two servers starting at once must not apply the same migration twice.
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_ID,))
-            await conn.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations ("
-                "name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
-            )
-            cursor = await conn.execute("SELECT name FROM schema_migrations")
-            applied = {row[0] for row in await cursor.fetchall()}
-            for path in migrations:
-                if path.name in applied:
-                    continue
-                await conn.execute(path.read_text(encoding="utf-8"))
-                await conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
 
     async def ping(self) -> None:
         """Return if the database answers within a few seconds; raise otherwise."""

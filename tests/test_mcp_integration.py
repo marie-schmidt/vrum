@@ -25,6 +25,14 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "claim_node",
         "renew_claim",
         "release_claim",
+        "create_rule",
+        "get_rule",
+        "list_rules",
+        "update_rule",
+        "place_rule",
+        "move_rule",
+        "rule_history",
+        "coverage_report",
     }
     assert all(tool.description for tool in tools)
 

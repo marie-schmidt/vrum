@@ -17,6 +17,7 @@ from vrum.config import Settings
 from vrum.db import Database
 from vrum.graph import EventPage, Graph, Node, NodePage
 from vrum.links import Link, LinkPage, Links
+from vrum.rules import CoverageReport, Rule, RulePage, Rules
 
 _Actor = Annotated[str, Field(description="Your name: the person or agent making this change.")]
 _Version = Annotated[
@@ -59,6 +60,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
     graph = Graph(database)
     links = Links(database)
     claims = Claims(database)
+    rules = Rules(database)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -321,6 +323,151 @@ def create_server(settings: Settings) -> MCPServer[Database]:
         """Give up your claim so someone else can take the work. Only the holder can release."""
         with _database_errors():
             return await claims.release_claim(actor=actor, node_id=node_id)
+
+    @mcp.tool()
+    async def create_rule(
+        actor: _Actor,
+        title: Annotated[str, Field(description="The rule, stated briefly.")],
+        body: Annotated[
+            str, Field(description="Plain text or Markdown: the detail, or where it came from.")
+        ] = "",
+        status: Annotated[str, Field(description="held, settled or dropped.")] = "held",
+        story_id: Annotated[
+            int | None,
+            Field(description="The story that owns the rule. Leave empty to place it later."),
+        ] = None,
+    ) -> Rule:
+        """Record a rule (a requirement).
+
+        A rule belongs to at most one story. One with no story is unplaced: the coverage report
+        lists it until someone places it. Rules have their own ids, separate from node ids.
+        """
+        with _database_errors():
+            return await rules.create_rule(
+                actor=actor, title=title, body=body, status=status, story_id=story_id
+            )
+
+    @mcp.tool()
+    async def get_rule(rule_id: int) -> Rule:
+        """Read one rule, including the version you need to change it."""
+        with _database_errors():
+            return await rules.get_rule(rule_id)
+
+    @mcp.tool()
+    async def list_rules(
+        story_id: Annotated[int | None, Field(description="Only the rules in this story.")] = None,
+        unplaced: Annotated[
+            bool, Field(description="Only the rules that are in no story yet.")
+        ] = False,
+        status: Annotated[str | None, Field(description="Only held, settled or dropped.")] = None,
+        limit: _Limit = 50,
+        after_id: _After = None,
+    ) -> RulePage:
+        """List rules, oldest first, a page at a time. Every filter is optional."""
+        with _database_errors():
+            return await rules.list_rules(
+                story_id=story_id, unplaced=unplaced, status=status, limit=limit, after_id=after_id
+            )
+
+    @mcp.tool()
+    async def update_rule(
+        actor: _Actor,
+        rule_id: int,
+        expected_version: _Version,
+        title: str | None = None,
+        body: str | None = None,
+        status: Annotated[str | None, Field(description="held, settled or dropped.")] = None,
+    ) -> Rule:
+        """Change a rule's title, body or status. Leave out what should stay as it is.
+
+        You must send the version you last read, so that nothing is overwritten silently. To change
+        which story a rule is in, use place_rule or move_rule.
+        """
+        with _database_errors():
+            return await rules.update_rule(
+                actor=actor,
+                rule_id=rule_id,
+                expected_version=expected_version,
+                title=title,
+                body=body,
+                status=status,
+            )
+
+    @mcp.tool()
+    async def place_rule(
+        actor: _Actor,
+        rule_id: int,
+        expected_version: _Version,
+        story_id: Annotated[int, Field(description="The story that will own the rule.")],
+    ) -> Rule:
+        """Put an unplaced rule in a story.
+
+        A rule belongs to at most one story, so placing a rule that is already in a story is
+        refused: use move_rule to take it to another one.
+        """
+        with _database_errors():
+            return await rules.place_rule(
+                actor=actor, rule_id=rule_id, expected_version=expected_version, story_id=story_id
+            )
+
+    @mcp.tool()
+    async def move_rule(
+        actor: _Actor,
+        rule_id: int,
+        expected_version: _Version,
+        new_story_id: Annotated[int, Field(description="The story the rule moves to.")],
+    ) -> Rule:
+        """Move a rule from its story to another story, in one step.
+
+        The rule is never in two stories, and never in none, along the way. The move is recorded
+        in the history of the rule and of both stories.
+        """
+        with _database_errors():
+            return await rules.move_rule(
+                actor=actor,
+                rule_id=rule_id,
+                expected_version=expected_version,
+                new_story_id=new_story_id,
+            )
+
+    @mcp.tool()
+    async def rule_history(rule_id: int, limit: _Limit = 50, after_id: _After = None) -> EventPage:
+        """Read everything that was ever done to one rule, oldest first, a page at a time: who did
+        it, when, and the changed fields as they were and as they became."""
+        with _database_errors():
+            return await rules.rule_history(rule_id=rule_id, limit=limit, after_id=after_id)
+
+    @mcp.tool()
+    async def coverage_report(
+        show: Annotated[
+            str,
+            Field(
+                description="both, unplaced_rules or stories_without_rules. To page through one "
+                "list, ask for just that one."
+            ),
+        ] = "both",
+        limit: Annotated[
+            int, Field(description="How many of each list to return, from 1 to 200.")
+        ] = 50,
+        unplaced_after_id: Annotated[
+            int | None,
+            Field(description="Leave empty for the first page of unplaced rules."),
+        ] = None,
+        stories_after_id: Annotated[
+            int | None,
+            Field(description="Leave empty for the first page of stories without rules."),
+        ] = None,
+    ) -> CoverageReport:
+        """Show what is not matched up yet: the rules that are in no story, and the stories that
+        have no rule. Dropped rules and dropped stories are left out. Each list is a page; the
+        counts cover all of it. A list you did not ask for comes back empty."""
+        with _database_errors():
+            return await rules.coverage_report(
+                show=show,
+                limit=limit,
+                unplaced_after_id=unplaced_after_id,
+                stories_after_id=stories_after_id,
+            )
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:

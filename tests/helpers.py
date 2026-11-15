@@ -1,7 +1,12 @@
-"""Small helpers for tests that talk to the running server through a real MCP client."""
+"""Small helpers for tests that talk to the running containers: through a real MCP client, or
+straight to the database."""
 
+import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
+import pytest
 from mcp import Client
 from mcp.types import CallToolResult, TextContent
 
@@ -90,4 +95,95 @@ async def set_status(client: Client, node: dict[str, Any], status: str) -> dict[
         node_id=node["id"],
         expected_version=current["version"],
         status=status,
+    )
+
+
+async def make_stories(client: Client, count: int) -> list[dict[str, Any]]:
+    """`count` stories under one new epic."""
+    epic = await ok(client, "create_node", actor="marie", kind="epic", title="An epic")
+    return [
+        await ok(
+            client,
+            "create_node",
+            actor="marie",
+            kind="story",
+            title=f"Story {number}",
+            parent_id=epic["id"],
+        )
+        for number in range(count)
+    ]
+
+
+async def make_rule(client: Client, title: str = "A rule", **arguments: Any) -> dict[str, Any]:
+    return await ok(client, "create_rule", actor="marie", title=title, **arguments)
+
+
+async def whole_coverage_report(client: Client) -> dict[str, Any]:
+    """The coverage report with both of its lists read to the end."""
+    report = await ok(client, "coverage_report", show="unplaced_rules", limit=200)
+    unplaced = list(report["unplaced_rules"])
+    while report["next_unplaced_after_id"] is not None:
+        report = await ok(
+            client,
+            "coverage_report",
+            show="unplaced_rules",
+            limit=200,
+            unplaced_after_id=report["next_unplaced_after_id"],
+        )
+        unplaced.extend(report["unplaced_rules"])
+    report = await ok(client, "coverage_report", show="stories_without_rules", limit=200)
+    stories = list(report["stories_without_rules"])
+    while report["next_stories_after_id"] is not None:
+        report = await ok(
+            client,
+            "coverage_report",
+            show="stories_without_rules",
+            limit=200,
+            stories_after_id=report["next_stories_after_id"],
+        )
+        stories.extend(report["stories_without_rules"])
+    return {
+        "unplaced_rules": unplaced,
+        "stories_without_rules": stories,
+        "unplaced_rule_count": report["unplaced_rule_count"],
+        "story_without_rules_count": report["story_without_rules_count"],
+    }
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def compose(*arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run docker compose against the stack ./check.sh started (it names the project)."""
+    if not os.environ.get("COMPOSE_PROJECT_NAME"):
+        pytest.fail(
+            "COMPOSE_PROJECT_NAME is not set. Run the integration tests through ./check.sh."
+        )
+    return subprocess.run(
+        ["docker", "compose", *arguments],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+
+
+def run_sql(sql: str, *, plain: bool = False) -> subprocess.CompletedProcess[str]:
+    """Run SQL directly inside the real database. `plain` prints bare values, nothing else."""
+    flags = ["-tA"] if plain else []
+    return compose(
+        "exec",
+        "-T",
+        "db",
+        "psql",
+        "-U",
+        "vrum",
+        "-d",
+        "vrum",
+        "-v",
+        "ON_ERROR_STOP=1",
+        *flags,
+        "-c",
+        sql,
     )

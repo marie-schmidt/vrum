@@ -43,6 +43,14 @@ def split_page(rows: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, A
     return page, page[-1]["id"] if len(rows) > limit else None
 
 
+def stale_version(label: str, reader: str, item_id: int, current: int, expected: int) -> Refusal:
+    return Refusal(
+        f"{label} {item_id} is at version {current}, but you sent version {expected}. "
+        f"Someone else changed it after you read it. Read it again with {reader}, check that your "
+        f"change still makes sense, then repeat it with expected_version {current}."
+    )
+
+
 def when(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -67,24 +75,43 @@ def snapshot(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
+async def save_changes(
+    conn: AsyncConnection, table: str, row_id: int, changes: dict[str, Any], columns: str
+) -> dict[str, Any]:
+    """Write the changes to one row and raise its version by one. The caller holds the row's lock
+    and has checked the version it was read at. `table` and the keys of `changes` come from the
+    code, never from a caller."""
+    assignments = ", ".join(f"{field} = %({field})s" for field in changes)
+    row = await fetch_one(
+        conn,
+        f"UPDATE {table} SET {assignments}, version = version + 1 "
+        f"WHERE id = %(id)s RETURNING {columns}",
+        {**changes, "id": row_id},
+    )
+    assert row is not None
+    return row
+
+
 async def record_event(
     conn: AsyncConnection,
     *,
-    node_id: int,
     action: str,
     actor: str,
     before: dict[str, Any] | None,
     after: dict[str, Any],
+    node_id: int | None = None,
     other_node_id: int | None = None,
+    rule_id: int | None = None,
 ) -> None:
-    """Append to the event log. `other_node_id` is the second node of a link, so the event shows
-    in the history of both."""
+    """Append to the event log. It shows in the history of every node it names: `other_node_id`
+    is the second node of a link, or the story a rule has just left."""
     await conn.execute(
-        "INSERT INTO events (node_id, other_node_id, action, actor, before, after) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
+        "INSERT INTO events (node_id, other_node_id, rule_id, action, actor, before, after) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
         (
             node_id,
             other_node_id,
+            rule_id,
             action,
             actor,
             None if before is None else Jsonb(before),

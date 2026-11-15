@@ -25,8 +25,8 @@ The MCP endpoint is `http://127.0.0.1:8000/mcp` (or `VRUM_PORT`). `GET /health` 
 ## Layout
 
 - `src/vrum/config.py`: settings from the environment (the only place that reads it).
-- `src/vrum/db.py`: the PostgreSQL pool, transactions, and applying `src/vrum/migrations/*.sql` at start.
-- `src/vrum/migrations/`: numbered SQL files, applied once each, in order. Never edit an applied file; add a new one.
+- `src/vrum/db.py`: the PostgreSQL pool, transactions, and `prepare_schema`, which builds an empty database from `schema.sql` and refuses one built from any other version of it.
+- `src/vrum/schema.sql`: the whole database in one file: tables, constraints, triggers and the `node_state` view.
 - `src/vrum/common.py`: what the modules below share: `Refusal` (the plain-English refusals), argument checks, paging, and database helpers.
 - `src/vrum/graph.py`: the one owner of epics, stories and tasks (`Graph`), and of how a node is read (`node_state`, backed by the `node_state` view that decides what `ready` means).
 - `src/vrum/links.py`: the one owner of links. `src/vrum/claims.py`: the one owner of claims and leases.
@@ -40,6 +40,8 @@ The MCP endpoint is `http://127.0.0.1:8000/mcp` (or `VRUM_PORT`). `GET /health` 
 - A milestone is finished only when its "Proof" in `SPEC.md` passes against the real containers and a real MCP client, with every earlier proof still passing.
 - Product decisions that `SPEC.md` does not answer go in `BLOCKED.md` (question, 2 to 3 options, a recommendation, the default you would take). Do not invent answers.
 - Defaults the owner may veto are recorded in `DECISIONS.md` and listed under "Defaults taken" in `PROGRESS.md`.
+- **No migrations.** Vrum is a prototype with no customer data. The whole database is `src/vrum/schema.sql`. To change the schema, edit that file, tidying it as if it had always been this way, then rebuild the database from scratch: `docker compose down --volumes`, then `docker compose up -d --build --wait` (`./check.sh` already builds a fresh one every run). Do not write migration files, `ALTER TABLE` patches or data-preserving upgrade steps. Reconsider only when a database holds data someone cares about. (Owner's decision, see `DECISIONS.md`.)
+- **Prototype stance.** Do not carry production habits that protect data or users that do not exist yet: no backward compatibility, deprecation paths or upgrade steps. When a design changes, change it everywhere and rebuild. Anything `SPEC.md` asks for is still built as written.
 - Never commit a secret. Configuration comes from the environment.
 - Never touch any Deelio repository or the Taiga project.
 - No placeholder or shell code, and no abstraction without a consumer.

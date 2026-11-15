@@ -4,33 +4,20 @@ These run SQL directly inside the real database container (see ./check.sh, which
 project and password through the environment).
 """
 
-import os
-import subprocess
-from pathlib import Path
-
 import pytest
 from mcp import Client
 
-from tests.helpers import make_tasks, make_tree, needs_first, ok
+from tests.helpers import (
+    make_rule,
+    make_stories,
+    make_tasks,
+    make_tree,
+    needs_first,
+    ok,
+    run_sql,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def run_sql(sql: str) -> subprocess.CompletedProcess[str]:
-    if not os.environ.get("COMPOSE_PROJECT_NAME"):
-        pytest.fail(
-            "COMPOSE_PROJECT_NAME is not set. Run the integration tests through ./check.sh."
-        )
-    return subprocess.run(
-        ["docker", "compose", "exec", "-T", "db", "psql", "-U", "vrum", "-d", "vrum"]
-        + ["-v", "ON_ERROR_STOP=1", "-c", sql],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
 
 def test_the_database_can_be_reached_directly() -> None:
@@ -210,3 +197,85 @@ async def test_the_database_refuses_bad_claims_and_a_second_holder(client: Clien
         f"VALUES ({task['id']}, 'delete', 'x', '{{}}')"
     )
     assert "event_action_is_known" in result.stderr
+
+
+async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
+    client: Client,
+) -> None:
+    epic, story, task = await make_tree(client)
+    rule = await make_rule(client, story_id=story["id"])
+
+    def new_rule(story_id: object, title: str = "x", status: str = "held") -> str:
+        return (
+            "INSERT INTO rules (story_id, title, status) "
+            f"VALUES ({story_id}, '{title}', '{status}')"
+        )
+
+    attempts = {
+        "a rule in an epic": (new_rule(epic["id"]), "rule_belongs_to_a_story"),
+        "a rule in a task": (new_rule(task["id"]), "rule_belongs_to_a_story"),
+        "a rule in a story that does not exist": (new_rule(987654321), "rule_belongs_to_a_story"),
+        "a rule with a blank title": (new_rule("NULL", title=" "), "rule_title_is_not_blank"),
+        "a rule with an unknown status": (
+            new_rule("NULL", status="open"),
+            "rule_status_is_known",
+        ),
+        "moving a rule into a task": (
+            f"UPDATE rules SET story_id = {task['id']}, version = version + 1 "
+            f"WHERE id = {rule['id']}",
+            "rule_belongs_to_a_story",
+        ),
+        "a change to a rule without a new version": (
+            f"UPDATE rules SET title = 'quiet edit' WHERE id = {rule['id']}",
+            "raise its version by exactly one",
+        ),
+        "a rule event that names no rule": (
+            f"INSERT INTO events (node_id, action, actor, after) "
+            f"VALUES ({story['id']}, 'rule_moved', 'x', '{{}}')",
+            "event_is_about_a_node_or_a_rule",
+        ),
+        "a node event that names a rule": (
+            f"INSERT INTO events (node_id, rule_id, action, actor, after) "
+            f"VALUES ({story['id']}, {rule['id']}, 'update', 'x', '{{}}')",
+            "event_is_about_a_node_or_a_rule",
+        ),
+        "an event about nothing": (
+            "INSERT INTO events (action, actor, after) VALUES ('update', 'x', '{}')",
+            "event_is_about_a_node_or_a_rule",
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    unchanged = await ok(client, "get_rule", rule_id=rule["id"])
+    assert (unchanged["story_id"], unchanged["title"], unchanged["version"]) == (
+        story["id"],
+        "A rule",
+        1,
+    )
+
+    # One column says where a rule is. No table pairs rules with stories, so a rule cannot be in
+    # two stories at once.
+    result = run_sql(
+        "SELECT string_agg(table_name || '.' || column_name, ', ') FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND column_name IN ('rule_id', 'story_id') "
+        "AND table_name NOT IN ('rules', 'events')"
+    )
+    assert result.returncode == 0 and "." not in result.stdout.replace("-", "").replace(
+        "(1 row)", ""
+    )
+
+
+async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
+    (story,) = await make_stories(client, 1)
+    rule = await make_rule(client, story_id=story["id"])
+    assert (
+        "append-only"
+        in run_sql(f"UPDATE events SET actor = 'someone' WHERE rule_id = {rule['id']}").stderr
+    )
+    assert (
+        "violates foreign key constraint"
+        in run_sql(f"DELETE FROM rules WHERE id = {rule['id']}").stderr
+    )
