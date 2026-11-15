@@ -221,7 +221,8 @@ async def _lock(
 
 
 def _ended(row: dict[str, Any]) -> str:
-    what = f"{row['type']} {row['id']}"
+    """A sentence saying why an item is no longer active, such as 'Fact 4 was retracted (why)'."""
+    what = f"{row['type'].capitalize()} {row['id']}"
     if row["status"] == "retracted":
         return f"{what} was retracted ({row['status_reason']})"
     return (
@@ -252,9 +253,7 @@ async def _require_active(
     for memory_id in memory_ids:
         row = rows[memory_id]
         if row["status"] != "active":
-            raise Refusal(
-                f"{_ended(row).capitalize()}, so it cannot be {verb}. Nothing was changed."
-            )
+            raise Refusal(f"{_ended(row)}, so it cannot be {verb}. Nothing was changed.")
     return [rows[memory_id] for memory_id in memory_ids]
 
 
@@ -313,7 +312,7 @@ async def _require_evidence(
                 "facts or decisions it rests on instead."
             )
         if row["status"] != "active":
-            raise Refusal(f"{_ended(row).capitalize()}, so it is not evidence.")
+            raise Refusal(f"{_ended(row)}, so it is not evidence.")
     for decision_id in decision_ids:
         decision = await require_decision(conn, decision_id)
         if decision["status"] != "active":
@@ -893,7 +892,7 @@ class Memories:
             row = await require_memory(conn, memory_id, lock=True)
             if row["status"] != "active":
                 raise Refusal(
-                    f"{_ended(row).capitalize()}, and it keeps the links it had. Change the links "
+                    f"{_ended(row)}, and it keeps the links it had. Change the links "
                     "of the item that replaced it instead."
                 )
             if decisions and row["type"] == "belief":
@@ -1071,7 +1070,7 @@ def _require_active_belief(row: dict[str, Any], verb: str) -> None:
     if row["type"] != "belief":
         raise Refusal(f"Memory {memory_id} is a fact. Only a belief can be {verb}.")
     if row["status"] != "active":
-        raise Refusal(f"{_ended(row).capitalize()}, so it cannot be {verb}.")
+        raise Refusal(f"{_ended(row)}, so it cannot be {verb}.")
     if row["stale"]:
         raise Refusal(
             f"Belief {memory_id} is stale ({'; '.join(_stale_because(row))}), so it cannot be "

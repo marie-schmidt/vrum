@@ -9,7 +9,9 @@ from mcp import Client
 
 from tests.helpers import (
     day,
+    make_belief,
     make_decision,
+    make_fact,
     make_rule,
     make_stories,
     make_tasks,
@@ -443,3 +445,217 @@ async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> No
     assert (
         "append-only" in run_sql(f"DELETE FROM events WHERE decision_id = {decision['id']}").stderr
     )
+
+
+async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) -> None:
+    (story,) = await make_stories(client, 1)
+    early = await make_fact(client, "Earlier than the rest")
+    fact = await make_fact(client, "Kept", node_ids=[story["id"]])
+    belief = await make_belief(client, [fact], "A belief")
+    confirmed = await make_belief(client, [fact], "A confirmed belief")
+    await ok(client, "confirm_belief", actor="a", memory_id=confirmed["id"], confirmed_by="Marie")
+    decision = await make_decision(client, "A decision")
+    old = await make_fact(client, "Old", node_ids=[story["id"]])
+    change = await ok(
+        client,
+        "supersede_memory",
+        actor="a",
+        replaces=[old["id"]],
+        reason="Changed",
+        text="New",
+        source="s",
+    )
+    new = change["replacement"]
+    retracted = await make_fact(client, "Wrong")
+    await ok(client, "retract_memory", actor="a", memory_ids=[retracted["id"]], reason="Wrong")
+
+    def memory(**changes: str) -> str:
+        fields = {"type": "fact", "kind": "world", "text": "x", "source": "x", "recorded_by": "x"}
+        fields.update(changes)
+        columns = ", ".join(fields)
+        values = ", ".join("NULL" if value == "NULL" else f"'{value}'" for value in fields.values())
+        return f"INSERT INTO memories ({columns}) VALUES ({values})"
+
+    new_belief = (
+        "WITH b AS (INSERT INTO memories (type, text, recorded_by) "
+        "VALUES ('belief', 'x', 'x') RETURNING id) "
+        "INSERT INTO belief_evidence (belief_id, {column}) SELECT id, {value} FROM b"
+    )
+    attempts = {
+        "an unknown type": (memory(type="rumour"), "memory_type_is_known"),
+        "an unknown kind": (memory(kind="rumour"), "memory_kind_is_known"),
+        "a fact with no source": (memory(source="NULL"), "fact_has_a_kind_and_a_source"),
+        "a fact with a blank source": (memory(source=" "), "fact_has_a_kind_and_a_source"),
+        "a fact with no kind": (memory(kind="NULL"), "fact_has_a_kind_and_a_source"),
+        "blank text": (memory(text=" "), "memory_text_is_not_blank"),
+        "nobody who recorded it": (memory(recorded_by=" "), "memory_recorded_by_is_not_blank"),
+        "an unknown origin": (memory(origin="guessed"), "memory_origin_is_known"),
+        "a fact a model drew up as a belief": (
+            memory(origin="derived"),
+            "memory_origin_matches_its_type",
+        ),
+        "a belief with a source": (
+            memory(type="belief", kind="NULL"),
+            "belief_has_no_fact_fields",
+        ),
+        "an active fact with a reason": (
+            memory(status_reason="because"),
+            "memory_has_a_reason_once_it_has_ended",
+        ),
+        "a retracted fact with no reason": (
+            memory(status="retracted"),
+            "memory_has_a_reason_once_it_has_ended",
+        ),
+        "a superseded fact with no replacement": (
+            memory(status="superseded", status_reason="because"),
+            "memory_is_superseded_exactly_when_replaced",
+        ),
+        "a fact confirmed by someone": (
+            f"UPDATE memories SET confirmed_by = 'Ann', confirmed_at = now() "
+            f"WHERE id = {fact['id']}",
+            "only_a_belief_is_confirmed",
+        ),
+        "replaced by an earlier item": (
+            f"UPDATE memories SET status = 'superseded', superseded_by_id = {early['id']}, "
+            f"status_reason = 'r' WHERE id = {fact['id']}",
+            "memory_is_replaced_by_a_later_one",
+        ),
+        "a fact replaced by a belief": (
+            f"UPDATE memories SET status = 'superseded', superseded_by_id = {belief['id']}, "
+            f"status_reason = 'r' WHERE id = {fact['id']}",
+            "memory_is_replaced_by_its_own_type",
+        ),
+        "editing the text": (
+            f"UPDATE memories SET text = 'something else' WHERE id = {fact['id']}",
+            "A fact or belief cannot be edited",
+        ),
+        "editing the source": (
+            f"UPDATE memories SET source = 'someone else' WHERE id = {fact['id']}",
+            "A fact or belief cannot be edited",
+        ),
+        "editing who recorded it": (
+            f"UPDATE memories SET recorded_by = 'someone else' WHERE id = {fact['id']}",
+            "A fact or belief cannot be edited",
+        ),
+        "deleting it": (
+            f"DELETE FROM memories WHERE id = {fact['id']}",
+            "cannot be deleted",
+        ),
+        "bringing a retracted fact back": (
+            f"UPDATE memories SET status = 'active', status_reason = NULL "
+            f"WHERE id = {retracted['id']}",
+            "cannot change again",
+        ),
+        "pointing a superseded fact at another replacement": (
+            f"UPDATE memories SET superseded_by_id = {new['id']} WHERE id = {old['id']}",
+            "cannot change again",
+        ),
+        "changing who confirmed a belief": (
+            f"UPDATE memories SET confirmed_by = 'Bob' WHERE id = {confirmed['id']}",
+            "A confirmation cannot be changed",
+        ),
+        "confirming a belief in the step that retracts it": (
+            f"UPDATE memories SET status = 'retracted', status_reason = 'r', "
+            f"confirmed_by = 'Ann', confirmed_at = now() WHERE id = {belief['id']}",
+            "cannot be confirmed in the same step",
+        ),
+        "a belief with no evidence": (
+            "INSERT INTO memories (type, text, recorded_by) VALUES ('belief', 'x', 'x')",
+            "A belief needs evidence",
+        ),
+        "evidence that is a belief": (
+            new_belief.format(column="fact_id", value=belief["id"]),
+            "evidence_is_never_a_belief",
+        ),
+        "evidence that is a retracted fact": (
+            new_belief.format(column="fact_id", value=retracted["id"]),
+            "must be an active fact or decision",
+        ),
+        "evidence that is a fact and a decision at once": (
+            f"INSERT INTO belief_evidence (belief_id, fact_id, decision_id) "
+            f"VALUES ({belief['id']}, {fact['id']}, {decision['id']})",
+            "evidence_is_a_fact_or_a_decision",
+        ),
+        "evidence that is a decision that does not exist": (
+            new_belief.format(column="decision_id", value=987654321),
+            "must be an active fact or decision",
+        ),
+        "changing the evidence of a belief": (
+            f"UPDATE belief_evidence SET fact_id = {early['id']} WHERE belief_id = {belief['id']}",
+            "cannot be changed or removed",
+        ),
+        "removing the evidence of a belief": (
+            f"DELETE FROM belief_evidence WHERE belief_id = {belief['id']}",
+            "cannot be changed or removed",
+        ),
+        "a belief that concerns a decision": (
+            f"INSERT INTO memory_decisions (memory_id, decision_id) "
+            f"VALUES ({belief['id']}, {decision['id']})",
+            "only_a_fact_concerns_a_decision",
+        ),
+        "a link to a node that does not exist": (
+            f"INSERT INTO memory_nodes VALUES ({fact['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "a link to a rule that does not exist": (
+            f"INSERT INTO memory_rules VALUES ({fact['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "the same link twice": (
+            f"INSERT INTO memory_nodes VALUES ({fact['id']}, {story['id']})",
+            "memory_nodes_pkey",
+        ),
+        "a new link on a superseded fact": (
+            f"INSERT INTO memory_nodes VALUES ({old['id']}, {story['parent_id']})",
+            "keeps the links it had",
+        ),
+        "removing a link from a superseded fact": (
+            f"DELETE FROM memory_nodes WHERE memory_id = {old['id']}",
+            "keeps the links it had",
+        ),
+        "a decision promoted from a fact": (
+            f"INSERT INTO decisions (kind, title, text, reason, decided_by, decided_on, "
+            f"promoted_from_id) VALUES ('decision', 'x', 'x', 'x', 'x', current_date, "
+            f"{fact['id']})",
+            "decision_is_promoted_from_a_belief",
+        ),
+        "changing where a decision came from": (
+            f"UPDATE decisions SET promoted_from_id = {belief['id']} WHERE id = {decision['id']}",
+            "A decision cannot be edited",
+        ),
+        "a fact event that names no fact": (
+            "INSERT INTO events (action, actor, after) VALUES ('memory_recorded', 'x', '{}')",
+            "event_names_what_it_is_about",
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    # None of it changed anything.
+    kept = await ok(client, "get_memory", memory_id=fact["id"])
+    assert (kept["text"], kept["source"], kept["status"], kept["node_ids"]) == (
+        "Kept",
+        "The team call",
+        "active",
+        [story["id"]],
+    )
+    assert (await ok(client, "get_memory", memory_id=belief["id"]))["evidence_count"] == 1
+    assert (await ok(client, "get_memory", memory_id=retracted["id"]))["status"] == "retracted"
+    replaced = await ok(client, "get_memory", memory_id=old["id"])
+    assert (replaced["status"], replaced["superseded_by_id"], replaced["node_ids"]) == (
+        "superseded",
+        new["id"],
+        [story["id"]],
+    )
+    assert (await ok(client, "get_memory", memory_id=confirmed["id"]))["confirmed_by"] == "Marie"
+
+
+async def test_a_fact_or_belief_event_cannot_be_rewritten_either(client: Client) -> None:
+    fact = await make_fact(client, "Logged")
+    assert (
+        "append-only"
+        in run_sql(f"UPDATE events SET actor = 'someone' WHERE memory_id = {fact['id']}").stderr
+    )
+    assert "append-only" in run_sql(f"DELETE FROM events WHERE memory_id = {fact['id']}").stderr

@@ -443,7 +443,7 @@ async def test_each_recall_list_can_be_paged_on_its_own(client: Client) -> None:
     assert len(principles["active_principles"]) == 1 and principles["active_decisions"] == []
     assert principles["next_active_principles_after_id"] is not None
 
-    assert "after_id only works for one list" in await refused(
+    assert "after_id only works for one section" in await refused(
         client, "recall", node_id=story["id"], after_id=1
     )
     assert "show must be one of all, active_decisions" in await refused(

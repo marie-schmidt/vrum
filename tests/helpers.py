@@ -191,20 +191,28 @@ def run_sql(sql: str, *, plain: bool = False) -> subprocess.CompletedProcess[str
     )
 
 
-async def race_results(
-    client: Client, tool: str, calls: list[dict[str, Any]]
+async def race_mixed(
+    client: Client, calls: list[tuple[str, dict[str, Any]]]
 ) -> list[tuple[bool, str]]:
-    """Make all the calls at the same moment. For each: was it accepted, and what did it say."""
+    """Make all the calls, of any tools, at the same moment. For each: was it accepted, and what
+    did it say."""
     results: list[tuple[bool, str]] = []
 
-    async def call(arguments: dict[str, Any]) -> None:
+    async def call(tool: str, arguments: dict[str, Any]) -> None:
         result = await client.call_tool(tool, arguments)
         results.append((not result.is_error, _text(result)))
 
     async with anyio.create_task_group() as group:
-        for arguments in calls:
-            group.start_soon(call, arguments)
+        for tool, arguments in calls:
+            group.start_soon(call, tool, arguments)
     return results
+
+
+async def race_results(
+    client: Client, tool: str, calls: list[dict[str, Any]]
+) -> list[tuple[bool, str]]:
+    """Make all the calls at the same moment. For each: was it accepted, and what did it say."""
+    return await race_mixed(client, [(tool, arguments) for arguments in calls])
 
 
 async def race(client: Client, tool: str, calls: list[dict[str, Any]]) -> list[bool]:

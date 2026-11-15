@@ -15,6 +15,7 @@ from tests.helpers import (
     make_stories,
     make_tree,
     ok,
+    race_mixed,
     race_results,
     refused,
 )
@@ -31,7 +32,7 @@ async def recall(client: Client, **arguments: Any) -> dict[str, Any]:
 
 
 def entries(section: dict[str, Any], what: str) -> list[dict[str, Any]]:
-    """The facts or beliefs (`what` is 'memory') or decisions (`what` is 'decision') in a section."""
+    """The facts or beliefs (`what` is 'memory') or decisions ('decision') in a recall section."""
     return [entry[what] for entry in section["items"]]
 
 
@@ -96,7 +97,7 @@ async def test_a_fact_is_retained_with_its_source_and_what_it_concerns(client: C
 
     assert await get(client, fact) == fact
     by_action = [(event["action"], event["actor"]) for event in await history(client, fact)]
-    assert by_action == [("memory_recorded",) + ("agent-1",)] + [("memory_linked", "agent-1")] * 3
+    assert by_action == [("memory_recorded", "agent-1")] + [("memory_linked", "agent-1")] * 3
 
     # What it concerns shows in the histories of those things.
     for tool, key, thing in (
@@ -235,7 +236,9 @@ async def test_a_belief_goes_stale_when_its_evidence_is_retracted_or_superseded(
     wrong = await make_fact(client, "Turns out wrong")
     outdated = await make_fact(client, "Gets replaced")
     decision = await make_decision(client, "Will change")
-    belief_a = await make_belief(client, [kept, wrong], "Rests on one that is wrong", node_ids=[story["id"]])
+    belief_a = await make_belief(
+        client, [kept, wrong], "Rests on one that is wrong", node_ids=[story["id"]]
+    )
     belief_b = await make_belief(
         client, [kept, outdated], "Rests on one that is replaced", node_ids=[story["id"]]
     )
@@ -301,7 +304,7 @@ async def test_a_belief_goes_stale_when_its_evidence_is_retracted_or_superseded(
     listed, total = await every(client, node_id=story["id"], stale=True)
     assert ids(listed) == [belief_a["id"], belief_b["id"], belief_c["id"]] and total == 3
     listed, _ = await every(client, node_id=story["id"], stale=False)
-    assert ids(listed) == [belief_a["id"], belief_b["id"], belief_c["id"], fine["id"]][-1:]
+    assert ids(listed) == [fine["id"]]
 
 
 async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
@@ -351,21 +354,7 @@ async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
     assert events[-1]["before"] == {"status": "active", "superseded_by_id": None}
     assert events[-1]["after"]["superseded_by_id"] == new["id"] and events[-1]["actor"] == "agent-2"
 
-    # The replacement can start from nothing, and says so when the kinds differ.
-    again = await ok(
-        client,
-        "supersede_memory",
-        actor="a",
-        replaces=[new["id"]],
-        reason="Starting over",
-        text="The limit is 30.",
-        source="The owner",
-        keep_links=False,
-        node_ids=[story["parent_id"]],
-        kind="world",
-        happened_on="2026-11-02",
-    )["replacement"] if False else None
-    assert again is None
+    # The replacement can start from nothing.
     third = (
         await ok(
             client,
@@ -392,10 +381,10 @@ async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
 async def test_one_belief_replaces_several_in_one_step(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     fact = await make_fact(client, "The basis")
-    one, two, three = (
+    one, two, three = [
         await make_belief(client, [fact], f"Belief {number}", node_ids=[story["id"]])
         for number in range(3)
-    )
+    ]
     new_fact = await make_fact(client, "What changed")
 
     change = await ok(
@@ -424,7 +413,10 @@ async def test_one_belief_replaces_several_in_one_step(client: Client) -> None:
     assert ids(entries(result["past_memories"], "memory")) == [one["id"], two["id"]]
 
     # One of them already gone: the whole call is refused, and nothing changes.
-    four, five = await make_belief(client, [fact], "Four"), await make_belief(client, [fact], "Five")
+    four, five = (
+        await make_belief(client, [fact], "Four"),
+        await make_belief(client, [fact], "Five"),
+    )
     await retract(client, five)
     message = await refused(
         client,
@@ -438,7 +430,6 @@ async def test_one_belief_replaces_several_in_one_step(client: Client) -> None:
     assert f"Belief {five['id']} was retracted (It was wrong), so it cannot be replaced" in message
     assert "Nothing was changed" in message
     assert (await get(client, four))["status"] == "active"
-    assert len((await every(client, status="active", type="belief"))[0]) >= 1
 
 
 async def test_a_call_can_replace_thirty_beliefs_at_once(client: Client) -> None:
@@ -565,9 +556,7 @@ async def test_retracting_reports_what_went_stale_and_can_retract_the_beliefs_re
     kept = await make_fact(client, "Not involved")
     resting = await make_belief(client, [wrong2, kept], "Rests on both")
     elsewhere = await make_belief(client, [kept], "Rests only on the other fact")
-    change = await retract(
-        client, wrong2, reason="Never happened", with_dependent_beliefs=True
-    )
+    change = await retract(client, wrong2, reason="Never happened", with_dependent_beliefs=True)
     assert change["retracted_ids"] == [wrong2["id"]]
     assert change["dependent_beliefs_retracted_ids"] == [resting["id"]]
     assert change["stale_belief_ids"] == []
@@ -607,8 +596,12 @@ async def test_retracting_refuses_anything_that_is_not_active_and_changes_nothin
         text="Newer",
         source="s",
     )
-    message = await refused(client, "retract_memory", actor="a", memory_ids=[kept["id"]], reason="r")
-    assert f"Fact {kept['id']} was already superseded by fact {newer['replacement']['id']}" in message
+    message = await refused(
+        client, "retract_memory", actor="a", memory_ids=[kept["id"]], reason="r"
+    )
+    assert (
+        f"Fact {kept['id']} was already superseded by fact {newer['replacement']['id']}" in message
+    )
 
 
 async def test_listing_walks_every_page_once_and_the_count_matches(client: Client) -> None:
@@ -662,7 +655,7 @@ async def test_listing_walks_every_page_once_and_the_count_matches(client: Clien
     assert len(everyone) == total and len(set(ids(everyone))) == total
     assert ids(everyone) == sorted(ids(everyone))
 
-    for arguments, expected in (
+    for arguments, wanted in (
         ({"type": "rumour"}, "type must be one of fact, belief"),
         ({"kind": "rumour"}, "kind must be one of world, experience"),
         ({"status": "gone"}, "status must be one of active, superseded, retracted"),
@@ -675,7 +668,7 @@ async def test_listing_walks_every_page_once_and_the_count_matches(client: Clien
         ({"rests_on_decision_id": 987654321}, "There is no decision with id 987654321"),
         ({"limit": 0}, "limit must be a whole number from 1 to 200"),
     ):
-        assert expected in await refused(client, "list_memories", **arguments)
+        assert wanted in await refused(client, "list_memories", **arguments)
 
 
 async def test_a_belief_a_person_confirmed_can_only_be_changed_with_that_persons_word(
@@ -763,12 +756,16 @@ async def test_retracting_a_fact_with_its_beliefs_needs_a_persons_word_for_a_con
     confirmed = await make_belief(client, [fact], "Confirmed")
     await ok(client, "confirm_belief", actor="a", memory_id=confirmed["id"], confirmed_by="Marie")
 
-    message = await refused(client, "retract_memory", **{
-        "actor": "a",
-        "memory_ids": [fact["id"]],
-        "reason": "Wrong",
-        "with_dependent_beliefs": True,
-    })
+    message = await refused(
+        client,
+        "retract_memory",
+        **{
+            "actor": "a",
+            "memory_ids": [fact["id"]],
+            "reason": "Wrong",
+            "with_dependent_beliefs": True,
+        },
+    )
     assert f"belief {confirmed['id']} (confirmed by Marie)" in message
     assert (await get(client, fact))["status"] == "active"
     assert (await get(client, plain))["status"] == "active"
@@ -963,7 +960,7 @@ async def test_what_a_fact_or_belief_concerns_can_be_changed_while_it_is_active(
     assert [e["action"] for e in await history(client, fact)][-2:] == [
         "memory_linked",
         "memory_unlinked",
-    ] or "memory_unlinked" in [e["action"] for e in await history(client, fact)]
+    ]
     node_events = (await ok(client, "node_history", node_id=first["id"]))["items"]
     assert [e["action"] for e in node_events if e["memory_id"] == fact["id"]] == [
         "memory_linked",
@@ -1039,9 +1036,7 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_entry_is
     assert ids(entries(result["active_decisions"], "decision")) == [decision["id"]]
     assert result["active_decisions"]["items"][0]["why"] == "linked directly to this node"
     assert principle["id"] in ids(entries(result["active_principles"], "decision"))
-    assert (
-        result["active_principles"]["items"][0]["why"] == "a principle, so it applies everywhere"
-    )
+    assert result["active_principles"]["items"][0]["why"] == "a principle, so it applies everywhere"
     assert ids(entries(result["facts"], "memory")) == [fact["id"]]
     assert result["facts"]["items"][0]["why"] == "linked directly to this node"
     beliefs = {entry["memory"]["id"]: entry["why"] for entry in result["beliefs"]["items"]}
@@ -1071,8 +1066,8 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_entry_is
     assert for_rule["active_decisions"]["count"] == 0 and for_rule["beliefs"]["count"] == 0
 
     # An item nothing is linked to gets the principles and nothing else.
-    nothing = await recall(client, node_id=task["id"])
-    assert ids(entries(nothing["facts"], "memory")) == [child_fact["id"]]
+    for_task = await recall(client, node_id=task["id"])
+    assert ids(entries(for_task["facts"], "memory")) == [child_fact["id"]]
     empty_story = (await make_stories(client, 1))[0]
     empty = await recall(client, node_id=empty_story["id"])
     assert all(
@@ -1150,40 +1145,42 @@ async def test_two_replacements_of_the_same_fact_at_once_let_only_one_win(client
         (message,) = [text for accepted, text in results if not accepted]
         assert f"Fact {fact['id']} was already superseded by fact" in message
         assert (await get(client, fact))["status"] == "superseded"
-        listed, _ = await every(client, status="active")
-        assert sum(item["supersedes_ids"] == [fact["id"]] for item in listed) == 1
+        winner, *rest = (await ok(client, "list_memories", after_id=fact["id"], limit=10))["items"]
+        assert winner["supersedes_ids"] == [fact["id"]] and rest == []
 
 
-async def test_a_retraction_and_a_new_belief_on_the_same_fact_never_leave_a_live_belief(
+async def test_a_retraction_and_new_beliefs_on_the_same_fact_never_leave_a_live_belief(
     client: Client,
 ) -> None:
     for _ in range(6):
         fact = await make_fact(client, "About to be retracted")
-        outcomes = await race_results(
+        await race_mixed(
             client,
-            "record_belief",
             [
-                {
-                    "actor": "agent-1",
-                    "text": f"Belief {number}",
-                    "evidence_fact_ids": [fact["id"]],
-                }
+                (
+                    "record_belief",
+                    {
+                        "actor": "agent-1",
+                        "text": f"Belief {number}",
+                        "evidence_fact_ids": [fact["id"]],
+                    },
+                )
                 for number in range(3)
-            ],
-        ) + await race_results(
-            client,
-            "retract_memory",
-            [
-                {
-                    "actor": "agent-2",
-                    "memory_ids": [fact["id"]],
-                    "reason": "Wrong",
-                    "with_dependent_beliefs": True,
-                }
+            ]
+            + [
+                (
+                    "retract_memory",
+                    {
+                        "actor": "agent-2",
+                        "memory_ids": [fact["id"]],
+                        "reason": "Wrong",
+                        "with_dependent_beliefs": True,
+                    },
+                )
             ],
         )
         assert (await get(client, fact))["status"] == "retracted"
-        # Every belief that got in was retracted with it, or was refused; none is left resting on
-        # a fact that is gone while still active and not stale.
-        resting, _ = await every(client, rests_on_memory_id=fact["id"])
-        assert all(item["status"] == "retracted" or item["stale"] for item in resting), outcomes
+        # A belief that got in first was retracted with the fact, and one that came after was
+        # refused: none is left alive on a fact that is gone.
+        resting = (await ok(client, "list_memories", rests_on_memory_id=fact["id"]))["items"]
+        assert all(item["status"] == "retracted" for item in resting), resting

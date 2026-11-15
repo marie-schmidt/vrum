@@ -272,9 +272,10 @@ CREATE TABLE memories (
         CHECK (type <> 'fact' OR (kind IS NOT NULL AND source IS NOT NULL AND btrim(source) <> '')),
     CONSTRAINT belief_has_no_fact_fields
         CHECK (type <> 'belief' OR (kind IS NULL AND source IS NULL AND happened_on IS NULL)),
-    CONSTRAINT memory_origin_fits_its_type CHECK (
-        (type = 'fact' AND origin IN ('stated', 'extracted'))
-        OR (type = 'belief' AND origin IN ('stated', 'derived'))
+    CONSTRAINT memory_origin_matches_its_type CHECK (
+        origin = 'stated'
+        OR (type = 'fact' AND origin = 'extracted')
+        OR (type = 'belief' AND origin = 'derived')
     ),
     CONSTRAINT only_a_belief_is_confirmed
         CHECK (type = 'belief' OR (confirmed_by IS NULL AND confirmed_at IS NULL)),
