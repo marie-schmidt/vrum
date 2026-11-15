@@ -94,7 +94,7 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 
 - **Goal and section 10** added to `SPEC.md`: the goal, a table of what Vrum takes from and deliberately leaves out of each product, the ten capabilities that matter most, and the list of pages.
 - **M5 now also does exact-words search.** Reason: Elasticsearch and Hindsight both show that meaning-only search is weaker than words plus meaning, each labelled; PostgreSQL full-text search is in the one database, is never stale, and keeps working when the embedding service is down. It was going to be in M12; it is cheaper and safer to build it with the index.
-- **New M5B, agent workflow**, placed right after M5 and named M5B so that no milestone is renumbered: `next_work` (claim the next work and get its context in one call), `finish_work` and a required handoff note, `create_plan` (a whole plan, all or nothing), `update_nodes` (up to 50 changes, reported one by one), `changes_since` (what changed after an event), compact lists, a similar-items check on create, and server instructions. This changes M2 (release now needs a note) and the shape of earlier answers (lists leave out bodies by default). Under the prototype stance that is done everywhere and the database is rebuilt.
+- **New M5B, agent workflow**, placed right after M5 and named M5B so that no milestone is renumbered: `next_work` (claim the next work and get its context in one call), `finish_work` and a required handoff note, `create_plan` (a whole plan, all or nothing), `update_nodes` (any number of changes, reported one by one), `changes_since` (what changed after an event), compact lists, a similar-items check on create, and server instructions. This changes M2 (release now needs a note) and the shape of earlier answers (lists leave out bodies by default). Under the prototype stance that is done everywhere and the database is rebuilt.
 - **M6** refuses text containing a well-known secret format (known token prefixes, private key blocks). It refuses instead of quietly rewriting the text, so nothing is changed behind the writer's back; only well-known formats are checked, to avoid false refusals.
 - **M7** adds a read-only Markdown export (one file per item, links as `[[references]]`) next to the JSON export.
 - **M9** adds an agent guide to the README, the same text as the server instructions.
@@ -105,7 +105,7 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 
 - **Order inside the next-work call:** highest priority first, then oldest. `ready_work` keeps its oldest-first order. `next_work` also marks the item in progress, so the board shows it.
 - **Handoff on release:** `release_claim` needs a note. A claim that lapses has none, and says so.
-- **Plan size:** at most 200 items in one `create_plan`, at most 50 in `update_nodes`.
+- **Plan size:** no cap on the number of items in one `create_plan` or `update_nodes` (the first draft said 200 and 50, a production habit; removed on the owner's request, 2026-11-15). Only M6's cap on the size of a whole request applies. The one-transaction cost is small at this scale.
 - **Graph:** drawn by the board's own code, no library, no internet. Pinned dot positions are kept in the browser only.
 - **Views are addresses:** filters and layout live after the `#` in the address. The server stores no views.
 - **Markdown (replaces M10's plain-text default):** M10 still shows plain text. M12 adds a small renderer: no raw HTML, no images, web links open in a new tab.
