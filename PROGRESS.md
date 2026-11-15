@@ -18,12 +18,16 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M2. Links, readiness and claims (attempts: 1) (2026-11-15, commit 33e0fcf)
 - [x] M3. Rules and coverage (attempts: 1) (2026-11-15, commit fc080db)
 - [x] M4. Decisions and principles (attempts: 1) (2026-11-15, commit 720b08b)
-- [ ] M5. Semantic index (attempts: 0)
+- [ ] M5. Search and the semantic index (attempts: 0)
+- [ ] M5B. Agent workflow (attempts: 0)
 - [ ] M6. Hardening (attempts: 0)
 - [ ] M7. Export, import, backup, restore (attempts: 0)
 - [ ] M8. Real-data trial (attempts: 0) (skipped, no ledger path: see Inputs)
 - [ ] M9. Docs and acceptance (attempts: 0)
-- [ ] M10. Board for humans (attempts: 0)
+- [ ] M10. Board for humans: Kanban and graph (attempts: 0)
+- [ ] M11. More views of the work, with rules and decisions (attempts: 0)
+- [ ] M12. Find and connect (attempts: 0)
+- [ ] M13. Run and see it all (attempts: 0)
 
 ## Defaults taken (for owner's veto)
 
@@ -104,5 +108,6 @@ Full wording is in `DECISIONS.md`.
 
 - A GitHub repository was created on the owner's request: https://github.com/marie-schmidt/vrum (private).
 - macOS or a sync tool left stale copies named like `AGENTS 2.md`, `db 2.py` and a git ref `main 2`. They were deleted and `.gitignore` now ignores `* 2` and `* 2.*`. Existing files are now changed with edits instead of replacing them by renaming a new file over them.
+- Spec change on the owner's request (2026-11-15), after research on GitHub Projects, Obsidian, Hindsight, Elasticsearch, Taiga and agent task tools: new goal statement and section 10 ("Product shape"); M5 now also does exact-words search; new M5B (agent workflow) after M5; M6 refuses pasted secrets; M7 adds a Markdown export; M9 adds an agent guide; M10 gains the graph view; new M11 to M13 (more views, find and connect, run and see it all). Every choice is in `DECISIONS.md` and open to the owner's veto. Part of the work is a gap list: the pages in section 10 that do not exist yet.
 - Iteration 0 created the repository, SPEC.md, PROGRESS.md and AGENTS.md. M0 added the code, compose stack and `./check.sh` (see AGENTS.md for how to run them). M1 added the graph core (`src/vrum/graph.py`, the first migration and six MCP tools). M2 added links, readiness and claims (`links.py`, `claims.py`, `common.py` and seven more tools). M3 added rules and coverage (`rules.py` and eight more tools) and, on the owner's instruction, replaced the migrations with the single `schema.sql`.
 - M10 was added to `SPEC.md` by the owner after M0. It is the last milestone, after M9.

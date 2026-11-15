@@ -83,3 +83,41 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **Recall is by exact link and nothing else:** `recall_decisions` takes a node id or a rule id and returns that item's active decisions, every active principle (linked or not), and its linked decisions that have been superseded. Decisions linked to its parent or children are not inferred, so an agent recalls those as well if they matter. A linked principle appears under principles, not under decisions. Each of the three lists is paged on its own with `show` and `after_id`, with counts for all.
 - **Active principles:** there is no separate tool; `list_decisions` with `kind=principle` and `status=active` is the list.
 - **History:** every recording, link, unlink and supersession is an event. A link event also shows in the history of the node or rule it names. A decision's own history is `decision_history`. The old decision's `decision_superseded` event is in its own history only.
+
+## 2026-11-15: the goal, the product shape and the research behind it (owner's request, loop's choices open to veto)
+
+- **What the owner asked for:** a graph view and a Kanban view in M10, an overview of the MCP tools, and the other pages needed to see every part of the product, as a mix of GitHub Projects, Obsidian, Hindsight or Elasticsearch, and Taiga's MCP capabilities, "but better and complete", with the target goal "effective, efficient, agent and human friendly coding project management". The owner asked for each product to be researched so the intended overlap is clear.
+- **Research:** six read-only research threads, each from the product's own documentation: the five products, plus what already works for agents and humans managing work together (Beads, Claude Code task lists, Linear, Task Master, Backlog.md, the Copilot cloud agent). Their conclusions are summarised in `SPEC.md` section 10, with a source for each product. Hindsight and the agent tools gave the clearest lessons: an agent needs one call for the next work with its context, handoff notes, and small answers; and memory must not be written by a language model.
+- **Decided by:** the owner asked for the views and the goal. Everything below is the loop's choice, open to veto.
+
+**What changed in the spec**
+
+- **Goal and section 10** added to `SPEC.md`: the goal, a table of what Vrum takes from and deliberately leaves out of each product, the ten capabilities that matter most, and the list of pages.
+- **M5 now also does exact-words search.** Reason: Elasticsearch and Hindsight both show that meaning-only search is weaker than words plus meaning, each labelled; PostgreSQL full-text search is in the one database, is never stale, and keeps working when the embedding service is down. It was going to be in M12; it is cheaper and safer to build it with the index.
+- **New M5B, agent workflow**, placed right after M5 and named M5B so that no milestone is renumbered: `next_work` (claim the next work and get its context in one call), `finish_work` and a required handoff note, `create_plan` (a whole plan, all or nothing), `update_nodes` (up to 50 changes, reported one by one), `changes_since` (what changed after an event), compact lists, a similar-items check on create, and server instructions. This changes M2 (release now needs a note) and the shape of earlier answers (lists leave out bodies by default). Under the prototype stance that is done everywhere and the database is rebuilt.
+- **M6** refuses text containing a well-known secret format (known token prefixes, private key blocks). It refuses instead of quietly rewriting the text, so nothing is changed behind the writer's back; only well-known formats are checked, to avoid false refusals.
+- **M7** adds a read-only Markdown export (one file per item, links as `[[references]]`) next to the JSON export.
+- **M9** adds an agent guide to the README, the same text as the server instructions.
+- **M10** gains the graph view (global with a cap of 300 items, local at 1 to 3 steps, typed lines, overlap suggestions shown dashed), the page bar and shareable addresses, and progress counts on epics and stories.
+- **New M11 to M13** (the other pages): Table, Outline, Rules and Memory with editing, and one filter language shared by people and agents; Search, Overlaps, Markdown, `[[references]]`, "Mentioned in" and a quick switcher; Home, Activity with "Who is working on what", Tools (generated from the live tool list, with a test that every tool is accounted for) and Status.
+
+**Choices and defaults taken, open to veto**
+
+- **Order inside the next-work call:** highest priority first, then oldest. `ready_work` keeps its oldest-first order. `next_work` also marks the item in progress, so the board shows it.
+- **Handoff on release:** `release_claim` needs a note. A claim that lapses has none, and says so.
+- **Plan size:** at most 200 items in one `create_plan`, at most 50 in `update_nodes`.
+- **Graph:** drawn by the board's own code, no library, no internet. Pinned dot positions are kept in the browser only.
+- **Views are addresses:** filters and layout live after the `#` in the address. The server stores no views.
+- **Markdown (replaces M10's plain-text default):** M10 still shows plain text. M12 adds a small renderer: no raw HTML, no images, web links open in a new tab.
+- **References:** `[[node:12]]`, `[[rule:3]]`, `[[decision:7]]`, exact ids only, no matching by title. They are text only and change no link, readiness or order. "Mentioned in" is worked out when asked and stored nowhere.
+- **People can do what agents can**, except `reindex` and import. A person can claim, renew and release with a typed name. There is no override of someone else's claim: a claim lapses by itself.
+- **The Tools page** has "try it" for tools that only read. Anything that changes data goes through the board's own forms.
+- **Home becomes the landing page in M13.** Until then the board opens on the Kanban page.
+
+**Questions for the owner, not built, each with a recommendation**
+
+- **Taiga export.** The spec says Vrum must be able to export to Taiga later. Taiga imports a project dump that always creates a new project, and has no place for links, claims, rules or decisions. Recommendation: a one-off Taiga dump exporter after M10 that flattens to one epic per story and writes rules and decisions into descriptions; not before there is a reason.
+- **Approval gate for plans.** Task Master and Backlog.md have a point where a person approves a plan before work starts. Recommendation: not now; `create_plan` creates ordinary `new` items that a person sees on the board and can drop. A real draft state can be added if the owner wants it.
+- **Acceptance criteria checked before "done".** Recommendation: not now. Rules already are the requirements, and `finish_work` requires a handoff note saying what was verified.
+- **Issues as a kind, a wiki entity, attachments, custom fields.** Taiga has them. Recommendation: none. Bodies, `[[references]]` and "Mentioned in" cover most of what a wiki is for; an issue is a task with a title that says so.
+- **M7 backup and restore** (from the earlier decision): still recommended to drop the scripts and keep export and import.
