@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B and M5C done; M8 skipped; next is M9)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B and M5C done; M8 skipped; M9 being finished; next is M10)
 
 ## Inputs (from the loop file)
 
@@ -79,6 +79,7 @@ Full wording is in `DECISIONS.md`.
 - M7: the Markdown copy is `scripts/export_markdown.py`, made from the export (`vrum.markdown.render`), not an MCP tool: one file per item named `kind-id-title.md` in `epics/ stories/ tasks/ rules/ decisions/ facts/ beliefs/`, fields as YAML at the top, a `## Links` list of `- label: [[file name]]` with every connection at both ends, and no time of writing in it, so it is the same files for the same graph. It replaces only its own folders, and refuses a folder with other files in it that it did not make.
 - M7: `scripts/backup.sh` is a consistent `pg_dump` archive of the whole database (index included), readable only by its owner, not encrypted, checked to be readable before it is kept, to `backups/` unless given a file. `scripts/restore.sh` restores into a new database and swaps it in only when whole; into a database that holds data it refuses unless `--replace`. It renumbers the transactions of the restored event log (without that the change feed hides everything written after a restore).
 - M7: the tests that destroy or load a database run on a second, separate copy of Vrum (compose project `vrum-restore`, port `VRUM_CHECK_PORT` + 3), which `check.sh` also removes if a test dies. The scripts put `src` on the path themselves, because on this machine Python skips the editable install.
+- M9: `./acceptance.sh` is one story told through a real MCP client in nine chapters, one line for each proof; it is not a second test suite. It runs in the checkout it is in (clone, then run it there), on its own throwaway stack with the check stack's scripted stand-ins. Proofs about the source stay in `./check.sh`. The README's agent guide is a copy of the server's instructions, kept equal by a test; only its Python example was run, the other client configurations follow the vendors' documentation.
 
 ## M0 proof, as run
 
