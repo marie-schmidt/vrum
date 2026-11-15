@@ -1,9 +1,11 @@
 """Small helpers for tests that talk to the running containers: through a real MCP client, or
 straight to the database."""
 
+import json
 import os
 import random
 import subprocess
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -291,3 +293,48 @@ async def reindexed(client: Client) -> dict[str, Any]:
     assert report["error"] is None and report["failed"] == [], report
     assert report["waiting_after"] == 0, report
     return report
+
+
+class ScriptedModel:
+    """The scripted language model of the check stack (tests/scripted_model.py): tells it what to
+    answer, and asks what Vrum sent it. A rule matches any request whose messages contain `when`,
+    so a test uses a made-up word (unique_word) to keep its rules apart from every other test's."""
+
+    def __init__(self) -> None:
+        self._url = os.environ.get("VRUM_TEST_MODEL_URL", "")
+        if not self._url:
+            pytest.fail(
+                "VRUM_TEST_MODEL_URL is not set. Run the integration tests through ./check.sh."
+            )
+
+    def _call(self, path: str, body: Any = None) -> Any:
+        request = urllib.request.Request(
+            f"{self._url}{path}",
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="GET" if body is None else "POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+
+    def script(self, when: str, reply: Any, status: int | None = None) -> None:
+        """Answer requests containing `when` with `reply` (JSON, or text for an answer that is
+        not JSON), or with this HTTP error status."""
+        self._call("/script", {"when": when, "reply": reply, "status": status})
+
+    def received(self, containing: str) -> list[dict[str, Any]]:
+        """Every request so far whose messages contain this text."""
+        found: list[dict[str, Any]] = self._call("/received")
+        return [request for request in found if containing in request["text"]]
+
+
+@contextmanager
+def model_stopped() -> Iterator[None]:
+    """The scripted language model is stopped inside the block and started again after it."""
+    stopped = compose("stop", "scripted-model")
+    assert stopped.returncode == 0, stopped.stderr
+    try:
+        yield
+    finally:
+        started = compose("up", "--detach", "--wait", "scripted-model")
+        assert started.returncode == 0, started.stderr

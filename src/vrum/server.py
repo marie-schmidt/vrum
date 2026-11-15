@@ -23,8 +23,16 @@ from vrum.embeddings import EmbeddingUnavailable
 from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
+from vrum.llm import LanguageModel
 from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
+from vrum.reflection import (
+    ConsolidateResult,
+    ContradictionResult,
+    ExtractResult,
+    Reflector,
+    ReflectResult,
+)
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 from vrum.search import OverlapPage, Searcher, SearchPage
 from vrum.workflow import (
@@ -62,7 +70,10 @@ handoff note for whoever comes next. A blank note is refused.
 
 Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
 `changes_since` shows only what is new since an event, and `ready_work` lists what is free. Lists \
-leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next.
+leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. \
+If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` \
+and `reflect` use it on the memory; what they return is proposed or generated, and is not a \
+record until you record it.
 """
 
 _Detail = Annotated[
@@ -141,6 +152,11 @@ class ServerStatus(BaseModel):
     vrum_version: str = Field(description="The version of this server.")
     postgres_version: str = Field(description="The version of the PostgreSQL database.")
     pgvector_version: str = Field(description="The version of the pgvector extension.")
+    language_model: str | None = Field(
+        description="The language model this server is set up to use for extract_facts, "
+        "consolidate_memory, find_contradictions and reflect. Empty when there is none: those "
+        "four tools then say so, and everything else works."
+    )
 
 
 @contextmanager
@@ -173,6 +189,14 @@ def create_server(settings: Settings) -> MCPServer[Database]:
     )
     recaller = Recaller(database, searcher)
     workflow = Workflow(database, graph, searcher)
+    reflector = Reflector(
+        database,
+        LanguageModel(settings.llm) if settings.llm else None,
+        memories,
+        decisions,
+        searcher,
+        recaller,
+    )
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -206,6 +230,7 @@ def create_server(settings: Settings) -> MCPServer[Database]:
             vrum_version=version("vrum"),
             postgres_version=status.postgres_version,
             pgvector_version=status.pgvector_version,
+            language_model=settings.llm.model if settings.llm else None,
         )
 
     @mcp.tool()
@@ -1527,6 +1552,181 @@ def create_server(settings: Settings) -> MCPServer[Database]:
                     f"{error} Nothing was indexed. Exact-words search still works; try again "
                     "when the service is back."
                 ) from error
+
+    @mcp.tool()
+    async def extract_facts(
+        actor: _Actor,
+        text: Annotated[
+            str,
+            Field(description="The text to find facts in: an item's body, a handoff note, notes."),
+        ],
+        store: Annotated[
+            bool,
+            Field(
+                description="True: keep the facts that pass the checks, as facts with origin "
+                "extracted. False (the default): only show them."
+            ),
+        ] = False,
+        node_ids: Annotated[
+            list[int] | None,
+            Field(description="With store: the epics, stories or tasks the stored facts concern."),
+        ] = None,
+        rule_ids: Annotated[
+            list[int] | None, Field(description="With store: the rules they concern.")
+        ] = None,
+        decision_ids: Annotated[
+            list[int] | None, Field(description="With store: the decisions they concern.")
+        ] = None,
+    ) -> ExtractResult:
+        """Ask the language model for the facts in a text. Needs a language model on the server.
+
+        Each proposed fact comes with the exact passage it was taken from, and the server drops
+        any whose passage is not in the text. By default nothing is stored. With store the facts
+        are kept with origin extracted, the passage as their source and you as the one who
+        recorded them, so they are never mistaken for facts a person wrote. Text that contains a
+        well-known secret format is not sent.
+        """
+        with _database_errors():
+            return await reflector.extract_facts(
+                actor=actor,
+                text=text,
+                store=store,
+                node_ids=node_ids,
+                rule_ids=rule_ids,
+                decision_ids=decision_ids,
+            )
+
+    @mcp.tool()
+    async def consolidate_memory(
+        actor: _Actor,
+        fact_ids: Annotated[
+            list[int] | None, Field(description="Draw conclusions from these active facts.")
+        ] = None,
+        node_id: Annotated[
+            int | None,
+            Field(description="Or from the active facts of this item and everything below it."),
+        ] = None,
+        query: Annotated[
+            str | None, Field(description="Or from the active facts a search for this finds.")
+        ] = None,
+        revise_belief_id: Annotated[
+            int | None,
+            Field(
+                description="Or: a stale belief to revise from the evidence that is still valid. "
+                "The revised belief replaces it."
+            ),
+        ] = None,
+        max_facts: Annotated[
+            int, Field(description="The most facts to show the model, from 1 to 200.")
+        ] = 50,
+        said_by: Annotated[
+            str | None,
+            Field(
+                description="Revising a belief a person confirmed: the person who changed their "
+                "mind. Needed, with quote."
+            ),
+        ] = None,
+        quote: Annotated[
+            str | None, Field(description="What that person said, or where. Needed with said_by.")
+        ] = None,
+    ) -> ConsolidateResult:
+        """Ask the language model for the conclusions some facts support. Needs a language model.
+
+        Give exactly one of fact_ids, node_id, query or revise_belief_id. Each belief the model
+        proposes must name the facts it rests on, and one that names anything it was not given is
+        dropped. The rest are recorded as beliefs with origin derived: suggestions, never
+        decisions. A belief with the same words as an active one is not recorded again. With
+        revise_belief_id, a belief that went stale is replaced by a revised one drawn up from
+        the evidence that is still valid; it is again only a suggestion.
+        """
+        with _database_errors():
+            return await reflector.consolidate_memory(
+                actor=actor,
+                fact_ids=fact_ids,
+                node_id=node_id,
+                query=query,
+                revise_belief_id=revise_belief_id,
+                max_facts=max_facts,
+                said_by=said_by,
+                quote=quote,
+            )
+
+    @mcp.tool()
+    async def find_contradictions(
+        actor: _Actor,
+        statement: Annotated[
+            str | None, Field(description="A new statement, in words, to check against beliefs.")
+        ] = None,
+        memory_id: Annotated[
+            int | None,
+            Field(description="Or the id of a fact or belief that is already recorded."),
+        ] = None,
+        scope: Annotated[
+            str,
+            Field(
+                description="related (the default): the beliefs it may clash with, in one call. "
+                "all: every active belief, one batch per call."
+            ),
+        ] = "related",
+        batch: Annotated[
+            int, Field(description="How many beliefs to show the model per call, from 1 to 200.")
+        ] = 25,
+        after_id: Annotated[
+            int | None,
+            Field(description="Scope all: leave empty for the first batch, then next_after_id."),
+        ] = None,
+    ) -> ContradictionResult:
+        """Ask the language model which active beliefs a new statement contradicts. Needs a
+        language model.
+
+        It returns proposals only and changes nothing. Each names a belief, why, and the clashing
+        words of the belief and of the statement, which the server checked are really there.
+        Applying one is your call: replace the belief with supersede_memory or retract it with
+        retract_memory, giving said_by and quote for a belief a person confirmed.
+
+        With scope related it looks at the beliefs on the same items, with shared evidence, or
+        found by words or meaning, and says how many that was out of all active beliefs. With
+        scope all it goes through every active belief in id order, a batch per call, and says how
+        many it has looked at and how many remain: call again with next_after_id until none do.
+        """
+        with _database_errors():
+            return await reflector.find_contradictions(
+                actor=actor,
+                statement=statement,
+                memory_id=memory_id,
+                scope=scope,
+                batch=batch,
+                after_id=after_id,
+            )
+
+    @mcp.tool()
+    async def reflect(
+        actor: _Actor,
+        question: Annotated[str, Field(description="The question, in words.")],
+        node_id: Annotated[
+            int | None,
+            Field(description="The item the question is about, so what is linked to it is used."),
+        ] = None,
+        rule_id: Annotated[
+            int | None, Field(description="Or the rule the question is about.")
+        ] = None,
+        limit: Annotated[
+            int, Field(description="How many items of memory to show the model, from 1 to 200.")
+        ] = 12,
+    ) -> ReflectResult:
+        """Ask a question and get an answer in words, from the memory only. Needs a language
+        model.
+
+        It finds decisions, principles, facts and beliefs that match the question (what is linked
+        to the item you name, then what matches by words and by meaning, as search does) and asks
+        the model to answer using only those. The answer lists the items it relied on, and one
+        that cites anything that was not found is refused. The answer is labelled generated and is
+        not stored: to keep a conclusion, record it yourself as a belief with its evidence.
+        """
+        with _database_errors():
+            return await reflector.reflect(
+                actor=actor, question=question, node_id=node_id, rule_id=rule_id, limit=limit
+            )
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:

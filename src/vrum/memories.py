@@ -5,7 +5,8 @@ A fact or belief is a record: it is never edited. A change is a newer item that 
 retraction. The server never decides by itself that something is contradicted: a caller names what
 is replaced."""
 
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
@@ -339,13 +340,14 @@ async def _insert_memory(
     happened_on: date | None,
     supersedes: list[int],
     evidence: tuple[list[int], list[int]] = ([], []),
+    origin: str = "stated",
 ) -> int:
     row = await fetch_one(
         conn,
-        "INSERT INTO memories (type, kind, text, source, happened_on, recorded_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "INSERT INTO memories (type, kind, text, source, happened_on, origin, recorded_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
         "RETURNING id, type, kind, text, source, happened_on, origin",
-        (memory_type, kind, text, source, happened_on, actor),
+        (memory_type, kind, text, source, happened_on, origin, actor),
     )
     assert row is not None
     after = snapshot(row, _RECORDED_FIELDS)
@@ -461,6 +463,16 @@ class Memories:
     def __init__(self, database: Database) -> None:
         self._database = database
 
+    @asynccontextmanager
+    async def _within(self, conn: AsyncConnection | None) -> AsyncIterator[AsyncConnection]:
+        """The caller's transaction, when it has one (so that what it writes and what it records
+        together are saved together or not at all), and otherwise a new one."""
+        if conn is not None:
+            yield conn
+        else:
+            async with self._database.transaction() as own:
+                yield own
+
     async def retain_fact(
         self,
         *,
@@ -472,6 +484,8 @@ class Memories:
         node_ids: list[int] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
+        origin: str = "stated",
+        conn: AsyncConnection | None = None,
     ) -> Memory:
         actor = clean_actor(actor)
         text = required_text(
@@ -488,7 +502,7 @@ class Memories:
             unique_ids(rule_ids),
             unique_ids(decision_ids),
         )
-        async with self._database.transaction() as conn:
+        async with self._within(conn) as conn:
             await require_link_targets(conn, nodes, rules, "the fact")
             await _require_decisions(conn, decisions)
             memory_id = await _insert_memory(
@@ -500,6 +514,7 @@ class Memories:
                 source=source,
                 happened_on=happened_on,
                 supersedes=[],
+                origin=origin,
             )
             await _add_links(conn, memory_id, actor, nodes, rules, decisions)
             return to_memory(await require_memory(conn, memory_id))
@@ -513,6 +528,8 @@ class Memories:
         evidence_decision_ids: list[int] | None,
         node_ids: list[int] | None,
         rule_ids: list[int] | None,
+        origin: str = "stated",
+        conn: AsyncConnection | None = None,
     ) -> Memory:
         actor = clean_actor(actor)
         text = required_text(
@@ -520,7 +537,7 @@ class Memories:
         )
         facts, decided = unique_ids(evidence_fact_ids), unique_ids(evidence_decision_ids)
         nodes, rules = unique_ids(node_ids), unique_ids(rule_ids)
-        async with self._database.transaction() as conn:
+        async with self._within(conn) as conn:
             await _lock(conn, shared=facts)
             await _require_evidence(conn, facts, decided)
             await require_link_targets(conn, nodes, rules, "the belief")
@@ -534,6 +551,7 @@ class Memories:
                 happened_on=None,
                 supersedes=[],
                 evidence=(facts, decided),
+                origin=origin,
             )
             await _add_links(conn, memory_id, actor, nodes, rules, [])
             return to_memory(await require_memory(conn, memory_id))
@@ -556,6 +574,8 @@ class Memories:
         decision_ids: list[int] | None,
         said_by: str | None,
         quote: str | None,
+        origin: str = "stated",
+        conn: AsyncConnection | None = None,
     ) -> MemoryChange:
         """Record a newer fact or belief that replaces one or more active ones of the same type,
         and mark each of them superseded, in one step."""
@@ -573,7 +593,7 @@ class Memories:
         facts, decided = unique_ids(evidence_fact_ids), unique_ids(evidence_decision_ids)
         extra_nodes, extra_rules = unique_ids(node_ids), unique_ids(rule_ids)
         extra_decisions = unique_ids(decision_ids)
-        async with self._database.transaction() as conn:
+        async with self._within(conn) as conn:
             types = {row["type"] for row in await _require_found(conn, old_ids)}
             if len(types) > 1:
                 raise Refusal(
@@ -636,6 +656,7 @@ class Memories:
                 happened_on=happened_on,
                 supersedes=old_ids,
                 evidence=(facts, decided),
+                origin=origin,
             )
             await _add_links(
                 conn,

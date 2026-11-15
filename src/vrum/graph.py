@@ -181,7 +181,8 @@ class Event(BaseModel):
         "claim_released, handoff, rule_created, rule_updated, rule_placed, rule_moved, "
         "decision_recorded, decision_superseded, decision_linked, decision_unlinked, "
         "memory_recorded, memory_superseded, memory_retracted, memory_linked, memory_unlinked, "
-        "memory_confirmed or memory_promoted."
+        "memory_confirmed, memory_promoted or model_call (a call to the language model: it is "
+        "about no one item, and says in after what was asked and which items were used)."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime

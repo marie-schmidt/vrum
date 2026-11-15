@@ -699,7 +699,8 @@ CREATE TABLE events (
         'rule_created', 'rule_updated', 'rule_placed', 'rule_moved',
         'decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked',
         'memory_recorded', 'memory_superseded', 'memory_retracted', 'memory_linked',
-        'memory_unlinked', 'memory_confirmed', 'memory_promoted'
+        'memory_unlinked', 'memory_confirmed', 'memory_promoted',
+        'model_call'
     )),
     CONSTRAINT event_actor_is_not_blank CHECK (btrim(actor) <> ''),
     -- A handoff says how the holder left the work and what the next person must know. A blank
@@ -710,12 +711,21 @@ CREATE TABLE events (
             AND btrim(coalesce(after->>'note', '')) <> ''
         )
     ),
+    -- A call to the language model says which tool made it, and what was asked.
+    CONSTRAINT model_call_says_what_was_asked CHECK (
+        action <> 'model_call' OR (
+            btrim(coalesce(after->>'tool', '')) <> '' AND btrim(coalesce(after->>'asked', '')) <> ''
+        )
+    ),
     CONSTRAINT event_names_what_it_is_about CHECK (
         CASE
             WHEN starts_with(action, 'rule_')
                 THEN rule_id IS NOT NULL AND decision_id IS NULL AND memory_id IS NULL
             WHEN starts_with(action, 'decision_') THEN decision_id IS NOT NULL AND memory_id IS NULL
             WHEN starts_with(action, 'memory_') THEN memory_id IS NOT NULL
+            -- A call to the language model is about no one item: the items it used are in `after`.
+            WHEN action = 'model_call' THEN node_id IS NULL AND other_node_id IS NULL
+                AND rule_id IS NULL AND decision_id IS NULL AND memory_id IS NULL
             ELSE node_id IS NOT NULL AND rule_id IS NULL AND decision_id IS NULL
                 AND memory_id IS NULL
         END
