@@ -10,8 +10,16 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 async def test_the_client_lists_the_tools(client: Client) -> None:
     tools = (await client.list_tools()).tools
-    assert [tool.name for tool in tools] == ["server_status"]
-    assert tools[0].description and "database" in tools[0].description
+    assert {tool.name for tool in tools} == {
+        "server_status",
+        "create_node",
+        "get_node",
+        "list_nodes",
+        "update_node",
+        "move_node",
+        "node_history",
+    }
+    assert all(tool.description for tool in tools)
 
 
 async def test_server_status_reports_the_real_database_and_pgvector(client: Client) -> None:

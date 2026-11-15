@@ -35,6 +35,7 @@ files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "integration: needs the running containers (VRUM_TEST_URL); run through ./check.sh",
 ]

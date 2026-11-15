@@ -25,3 +25,17 @@ These fill gaps the spec leaves open. None changes a spec default. The owner may
 - **What:** `SPEC.md` now ends with M10, a Kanban board at `/board` on the same server, where people see agent work and add or refine epics, stories and tasks. This changes the earlier "no web UI" and "no boards" statements: the board is allowed, other web UI and sprints are still out. Edits made on the board go through the same operations as the MCP tools, and the semantic index is refreshed from them by the reindex job.
 - **Defaults taken for M10, open to veto:** plain HTML, CSS and JavaScript with no build step and nothing loaded from the internet; sign-in with the existing bearer token; plain-text display with no Markdown rendering; Playwright for browser tests as a development dependency; the board checks for new events every 5 seconds; rules and decisions are read-only on the board.
 - **Decided by:** the owner (@marie-schmidt), who asked for the board. The defaults above are the loop's.
+
+## 2026-11-15: choices made while building M1
+
+These fill gaps the spec leaves open. None changes a spec default. The owner may veto any of them.
+
+- **Ids:** whole numbers given by the database, starting at 1, shared by epics, stories and tasks. They are short enough for an agent to type and read.
+- **Priority:** four named levels, `low`, `normal` (the default), `high` and `urgent`, rather than a number whose direction an agent would have to guess.
+- **Status:** a node can be `new`, `in_progress`, `blocked`, `done` or `dropped`, and can move freely between them; no workflow rules are invented. `ready` is never stored and cannot be set. M2 works it out from the links, so until then a node shows only its stored status.
+- **One parent, one way to change it:** `move_node` is the only way to change a parent. `update_node` also accepts `parent_id` for one reason only: so that an attempt to give a node a second parent is refused with a plain message that points to `move_node`.
+- **History:** every create, update and move is an event with the actor, the time, and the changed fields as they were and as they became, each with the node's version. A create lists every field. `node_history` returns them oldest first.
+- **No deleting:** there is no delete tool (use status `dropped`). The database also refuses to delete a node that has history, which is every node, and refuses to change or delete an event.
+- **Paging:** every list takes `limit` (1 to 200, default 50) and `after_id`, and returns `next_after_id` until the last page. Items come in id order.
+- **Titles and actors:** a title or actor that is blank is refused; surrounding spaces are trimmed. Actors are free text, with no list of known actors.
+- **Schema changes:** numbered SQL files in `src/vrum/migrations/`, applied once each when the server starts, under a database lock so that two servers starting together cannot clash. An applied file is never edited; a change is a new file.

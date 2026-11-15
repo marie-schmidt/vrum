@@ -25,10 +25,12 @@ The MCP endpoint is `http://127.0.0.1:8000/mcp` (or `VRUM_PORT`). `GET /health` 
 ## Layout
 
 - `src/vrum/config.py`: settings from the environment (the only place that reads it).
-- `src/vrum/db.py`: the PostgreSQL pool and the questions asked of the database.
-- `src/vrum/server.py`: the MCP tools and the health route.
+- `src/vrum/db.py`: the PostgreSQL pool, transactions, and applying `src/vrum/migrations/*.sql` at start.
+- `src/vrum/migrations/`: numbered SQL files, applied once each, in order. Never edit an applied file; add a new one.
+- `src/vrum/graph.py`: the one owner of epics, stories and tasks: every question and change goes through `Graph`, and it refuses with plain `Refusal` messages.
+- `src/vrum/server.py`: the MCP tools (thin: they call `Graph`) and the health route.
 - `src/vrum/__main__.py`: starts the server. `src/vrum/healthcheck.py`: the container health probe.
-- `tests/`: unit tests, plus `test_mcp_integration.py` (marked `integration`, driven by `./check.sh`).
+- `tests/`: unit tests, plus the integration tests (marked `integration`, driven by `./check.sh`): `test_mcp_integration.py` and `test_graph_integration.py` go through a real MCP client; `test_database_constraints.py` runs SQL inside the real database container to prove the database refuses bad data on its own. `helpers.py` holds the small shared test helpers.
 
 ## Working rules
 
