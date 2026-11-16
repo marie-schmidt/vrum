@@ -39,7 +39,33 @@ READ_TOOLS = (
     "export_graph",
     "changes_since",
 )
-WRITE_TOOLS = ("create_node", "update_node", "update_nodes", "move_node", "add_link", "remove_link")
+# find_contradictions only proposes (it changes nothing in the graph), but it asks the language
+# model and writes a record that it did, as a person's change does, so it takes a name too.
+WRITE_TOOLS = (
+    "create_node",
+    "update_node",
+    "update_nodes",
+    "move_node",
+    "add_link",
+    "remove_link",
+    "create_rule",
+    "update_rule",
+    "place_rule",
+    "move_rule",
+    "record_decision",
+    "supersede_decision",
+    "link_decision",
+    "unlink_decision",
+    "retain_fact",
+    "record_belief",
+    "supersede_memory",
+    "retract_memory",
+    "confirm_belief",
+    "promote_belief",
+    "link_memory",
+    "unlink_memory",
+    "find_contradictions",
+)
 BOARD_TOOLS = frozenset(READ_TOOLS + WRITE_TOOLS)
 
 # Where each kind of file is served from. Nothing else is, so a file dropped into the static

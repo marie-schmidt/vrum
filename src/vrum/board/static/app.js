@@ -6,9 +6,11 @@ import { actor, notify, setActor, ui } from './ctx.js';
 import { clear, h } from './dom.js';
 import * as graph from './graph.js';
 import * as kanban from './kanban.js';
+import * as memory from './memory.js';
 import * as outline from './outline.js';
 import * as panel from './panel.js';
 import * as roadmap from './roadmap.js';
+import * as rules from './rules.js';
 import { keepSynced, onChange, start, stopSyncing, store } from './store.js';
 import * as table from './table.js';
 
@@ -18,6 +20,8 @@ const PAGES = {
   roadmap: { title: 'Roadmap', view: roadmap },
   table: { title: 'Table', view: table },
   outline: { title: 'Outline', view: outline },
+  rules: { title: 'Rules', view: rules },
+  memory: { title: 'Memory', view: memory },
 };
 const top = document.getElementById('top');
 const main = document.getElementById('page');

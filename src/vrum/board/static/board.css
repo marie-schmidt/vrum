@@ -283,6 +283,48 @@ ul.outline li.empty { padding: 2rem 0; color: var(--ink-2); }
 .rm-deps .dep { stroke: var(--ink); stroke-width: 1.5; }
 .rm-deps .dep.conflict { stroke: var(--amber); stroke-dasharray: 5 3; stroke-width: 2; }
 
+/* Rules and Memory (M12) */
+label.check { display: inline-flex; gap: 0.35rem; align-items: center; font-weight: 500; margin: 0.2rem 0; }
+.toolbar label.check { margin: 0; }
+dialog.modal.wide { width: min(46rem, 94vw); max-height: 92vh; overflow-y: auto; }
+.rule-group { border-top: 3px solid var(--ink); margin-top: 1rem; padding-top: 0.5rem; }
+.rule-group.unplaced { border-top-color: var(--vermilion); }
+.group-head.over, .coverage-lists li.over { outline: 3px dashed var(--vermilion); outline-offset: 2px; background: #f0c9bb55; }
+.rules { margin-top: 0.5rem; }
+.rule, .entry { background: var(--white); border: 2px solid var(--ink); border-left-width: 8px; padding: 0.5rem 0.7rem; }
+.rule { cursor: grab; }
+.rule.status-dropped, .entry.replaced { border-style: dashed; border-left-style: solid; color: var(--ink-2); background: var(--paper-2); }
+.entry.stale { border-left-color: var(--amber); }
+.entry.belief { border-left-style: dashed; }
+.highlight { outline: 3px solid var(--vermilion); outline-offset: 2px; }
+.entry-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.3rem; }
+.entry-title, .rule-title { font-size: 1rem; }
+.entry-text { white-space: pre-wrap; margin: 0.3rem 0; }
+.entry p { margin: 0.3rem 0; }
+.entry .buttons, .rule .buttons { flex-wrap: wrap; align-items: center; }
+.chip.model { border-style: dotted; font-style: italic; }
+.chip.confirmed { border-color: var(--green); color: var(--green); font-weight: 700; }
+.chip.status-superseded, .chip.status-retracted, .chip.status-dropped { border-style: dashed; }
+.evidence { padding: 0.1rem 0; }
+.evidence.changed { color: var(--amber); }
+.stale-why { color: var(--amber); }
+.stale-group { border: 2px solid var(--amber); padding: 0.4rem 0.7rem; margin: 0.6rem 0; }
+.memory-section { border-top: 3px solid var(--ink); margin-top: 1.2rem; padding-top: 0.5rem; }
+.memory-filter { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; margin: 0.8rem 0; padding: 0.5rem; border: 2px solid var(--ink); background: var(--white); }
+.memory-filter label { display: inline; margin: 0; }
+.bulk { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.4rem 0.6rem; border: 2px solid var(--ink); background: var(--white); margin: 0.5rem 0; position: sticky; top: var(--top); z-index: 5; }
+.change-result { flex-direction: column; align-items: stretch; margin: 0.6rem 0; }
+.picker .chips { margin: 0.3rem 0; }
+.evidence-list { max-height: 11rem; overflow-y: auto; border: 2px solid var(--ink); padding: 0.4rem; background: var(--white); }
+.check-panel { border: 2px dashed var(--ink); padding: 0.5rem 0.7rem; margin: 0.6rem 0; }
+.proposal { border: 2px solid var(--amber); background: var(--white); padding: 0.4rem 0.6rem; }
+.quote { font-style: italic; margin: 0.2rem 0; }
+.recall-preview { border: 2px solid var(--ink); background: var(--white); padding: 0.4rem 0.7rem; margin: 0.8rem 0; }
+.recall-preview > summary { font-weight: 700; cursor: pointer; }
+.recall-section { border-top: 2px solid var(--ink); margin-top: 0.8rem; padding-top: 0.4rem; }
+.recall-section .entries { margin-top: 0.4rem; }
+.why { background: var(--paper-2); padding: 0.15rem 0.4rem; }
+
 @media (max-width: 60rem) {
   #layout.with-panel { grid-template-columns: minmax(0, 1fr); }
   #panel { position: static; max-height: none; border-left: none; border-top: 3px solid var(--ink); }

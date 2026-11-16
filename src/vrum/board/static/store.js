@@ -51,7 +51,7 @@ async function loadOverlaps() {
 }
 
 const LOADERS = {
-  rules: () => callAll('list_rules', {}),
+  rules: () => callAll('list_rules', { detail: true }),
   decisions: () => callAll('list_decisions', {}),
   memories: () => callAll('list_memories', {}),
   overlaps: loadOverlaps,
