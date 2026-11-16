@@ -342,7 +342,12 @@ class UpdateNodesResult(BaseModel):
 class ChangesPage(BaseModel):
     items: list[Event]
     next_after_id: int | None = Field(
-        description="Pass this as after_event_id for the next page. Empty when there are no more."
+        description="Pass this as after_event_id for the next page. Empty when there are no more, "
+        "and always empty when you asked for the newest changes."
+    )
+    next_before_id: int | None = Field(
+        description="Only when you asked for the newest changes: pass this as before_event_id to "
+        "read the changes before these. Empty when there are no older ones."
     )
     latest_event_id: int = Field(
         description="The newest event that is final. Once next_after_id is empty, keep this and "
@@ -779,10 +784,15 @@ class Workflow:
         decision_id: int | None,
         memory_id: int | None,
         limit: int,
+        newest: bool = False,
+        before_event_id: int | None = None,
     ) -> ChangesPage:
         limit = page_size(limit)
         if after_event_id < 0:
             raise Refusal(f"after_event_id must be 0 or more, but it is {after_event_id}.")
+        if before_event_id is not None and before_event_id < 1:
+            raise Refusal(f"before_event_id must be 1 or more, but it is {before_event_id}.")
+        backwards = newest or before_event_id is not None
         given = [
             name
             for name, value in (
@@ -822,24 +832,40 @@ class Workflow:
                         "gave you."
                     )
                 cursor = {"xid": found["xid"], "id": found["id"]}
+            ceiling = None
+            if before_event_id is not None:
+                top = await fetch_one(
+                    conn,
+                    "SELECT xid::text AS xid, id FROM events WHERE id = %s",
+                    (before_event_id,),
+                )
+                if top is None:
+                    raise Refusal(
+                        f"There is no event with id {before_event_id}. Pass the next_before_id of "
+                        "an earlier answer, or the id of an event you have seen."
+                    )
+                ceiling = {"bxid": top["xid"], "bid": top["id"]}
             # Only events of transactions that have all finished are shown, in the order their
             # transactions began, so that an event written late is never behind the cursor.
             final = "e.xid < pg_snapshot_xmin(pg_current_snapshot())"
+            order = "DESC" if backwards else "ASC"
             rows = await fetch_all(
                 conn,
                 "SELECT "
                 + ", ".join(f"e.{column.strip()}" for column in EVENT_COLUMNS.split(","))
                 + f" FROM events e WHERE {final} "
                 "AND (e.xid, e.id) > (%(xid)s::text::xid8, %(id)s) "
+                "AND (%(bid)s::bigint IS NULL OR (e.xid, e.id) < (%(bxid)s::text::xid8, %(bid)s)) "
                 "AND (%(actor)s::text IS NULL OR e.actor = %(actor)s) "
                 "AND (%(node)s::bigint IS NULL OR e.node_id = %(node)s "
                 "OR e.other_node_id = %(node)s) "
                 "AND (%(rule)s::bigint IS NULL OR e.rule_id = %(rule)s) "
                 "AND (%(decision)s::bigint IS NULL OR e.decision_id = %(decision)s) "
                 "AND (%(memory)s::bigint IS NULL OR e.memory_id = %(memory)s) "
-                "ORDER BY e.xid, e.id LIMIT %(fetch)s",
+                f"ORDER BY e.xid {order}, e.id {order} LIMIT %(fetch)s",
                 {
                     **cursor,
+                    **(ceiling or {"bxid": "0", "bid": None}),
                     "actor": actor.strip() if actor and actor.strip() else None,
                     "node": node_id,
                     "rule": rule_id,
@@ -852,10 +878,20 @@ class Workflow:
                 conn,
                 f"SELECT id FROM events e WHERE {final} ORDER BY e.xid DESC, e.id DESC LIMIT 1",
             )
+        if backwards:
+            shown = rows[:limit]
+            older = shown[-1]["id"] if len(rows) > limit else None
+            return ChangesPage(
+                items=[Event.model_validate(row) for row in reversed(shown)],
+                next_after_id=None,
+                next_before_id=older,
+                latest_event_id=int(latest["id"]) if latest else 0,
+            )
         page, next_after_id = split_page(rows, limit)
         return ChangesPage(
             items=[Event.model_validate(row) for row in page],
             next_after_id=next_after_id,
+            next_before_id=None,
             latest_event_id=int(latest["id"]) if latest else 0,
         )
 

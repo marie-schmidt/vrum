@@ -894,6 +894,59 @@ async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client)
     assert "0 or more" in await refused(client, "changes_since", after_event_id=-1)
 
 
+async def test_the_newest_changes_can_be_read_and_walked_back_without_reading_them_all(
+    client: Client,
+) -> None:
+    start = (await ok(client, "changes_since", after_event_id=0, limit=1))["latest_event_id"]
+    _, story, tasks = await project(client, 4)
+    await set_status(client, tasks[0], "blocked")
+    await make_rule(client, "A rule", story_id=story["id"])
+    await caught_up(client, (await event_ids_after(start))[-1])
+    # The feed's own order (a change that began earlier comes first), which is what walking
+    # backwards must give exactly reversed.
+    expected, _ = await feed(client, start, 200)
+    assert len(expected) >= 8
+
+    # The newest few, oldest first among them, with the way back and no way forward.
+    newest = await ok(client, "changes_since", after_event_id=start, newest=True, limit=4)
+    assert ids(newest["items"]) == expected[-4:]
+    assert newest["next_after_id"] is None and newest["next_before_id"] == expected[-4]
+    assert newest["latest_event_id"] == expected[-1]
+    # Walking back gives every event once, newest page first, and ends with no way back.
+    walked: list[int] = []
+    before: int | None = None
+    while True:
+        page = await ok(
+            client,
+            "changes_since",
+            after_event_id=start,
+            limit=3,
+            newest=True,
+            **({} if before is None else {"before_event_id": before}),
+        )
+        walked = ids(page["items"]) + walked
+        before = page["next_before_id"]
+        if before is None:
+            break
+    assert walked == expected
+    # Before an event implies newest, and it is exclusive.
+    older = await ok(client, "changes_since", before_event_id=expected[5], limit=2)
+    assert ids(older["items"]) == expected[3:5] and older["next_before_id"] == expected[3]
+    # The filters narrow it, and a short answer has nothing before it.
+    for_task = await ok(
+        client, "changes_since", node_id=tasks[0]["id"], newest=True, limit=50, after_event_id=start
+    )
+    assert for_task["next_before_id"] is None
+    assert all(tasks[0]["id"] in (e["node_id"], e["other_node_id"]) for e in for_task["items"])
+    assert "1 or more" in await refused(client, "changes_since", before_event_id=0)
+    assert "no event with id 999999999" in await refused(
+        client, "changes_since", before_event_id=999999999
+    )
+    # Reading forward is as it was: no way back is offered.
+    forward = await ok(client, "changes_since", after_event_id=start, limit=3)
+    assert forward["next_before_id"] is None
+
+
 async def test_an_event_that_finishes_late_is_never_skipped_by_someone_following_the_feed(
     client: Client,
 ) -> None:

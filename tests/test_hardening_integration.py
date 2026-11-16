@@ -577,6 +577,8 @@ BOUNDED = {
     "consolidate_memory",
     "reflect",
     "reindex",
+    # One entry for each person or agent who has taken work: as many as there are names.
+    "who_is_working",
 }
 
 

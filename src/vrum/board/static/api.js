@@ -64,6 +64,16 @@ export function call(tool, args) {
   });
 }
 
+// Try a tool that only reads, as the Tools page does. The server decides from its own tool list
+// which tools those are, and turns any other away.
+export function tryTool(tool, args) {
+  return send(`/board/api/try/${tool}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args || {}),
+  });
+}
+
 export function get(path) {
   return send(path, { method: 'GET' });
 }

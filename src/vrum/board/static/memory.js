@@ -14,7 +14,7 @@ import { ensure, store } from './store.js';
 
 const FIRST = 100;
 const KIND_CHOICES = [['', 'Everything'], ['decision', 'Decisions'], ['principle', 'Principles'], ['fact', 'Facts'], ['belief', 'Beliefs']];
-const STATUS_CHOICES = [['', 'Everything'], ['active', 'In force'], ['superseded', 'Superseded'], ['retracted', 'Retracted'], ['stale', 'Stale beliefs']];
+const STATUS_CHOICES = [['', 'Everything'], ['active', 'In force'], ['superseded', 'Superseded'], ['retracted', 'Retracted'], ['stale', 'Stale beliefs'], ['unconfirmed', 'Beliefs waiting to be confirmed']];
 const ORIGIN_CHOICES = [['', 'Any origin'], ['stated', 'Stated by a person or an agent'], ['extracted', 'Proposed by a language model'], ['derived', 'Drawn up by a language model']];
 const FILTERS = ['kind', 'status', 'origin', 'by', 'from', 'to', 'concerns'];
 
@@ -159,7 +159,12 @@ function keeps(entry, type, f) {
   if (f.kind === 'decision' && !(type === 'decision' && entry.kind === 'decision')) return false;
   if (f.kind === 'principle' && !(type === 'decision' && entry.kind === 'principle')) return false;
   if ((f.kind === 'fact' || f.kind === 'belief') && type !== f.kind) return false;
-  if (f.status === 'stale' ? !(type === 'belief' && entry.stale) : f.status && entry.status !== f.status) return false;
+  if (f.status === 'stale') {
+    if (!(type === 'belief' && entry.stale)) return false;
+  } else if (f.status === 'unconfirmed') {
+    // A belief in force that no person has confirmed and whose evidence has not changed.
+    if (!(type === 'belief' && entry.status === 'active' && !entry.stale && !entry.confirmed_by)) return false;
+  } else if (f.status && entry.status !== f.status) return false;
   if (f.origin && (type === 'decision' ? 'stated' : entry.origin) !== f.origin) return false;
   if (f.by && (type === 'decision' ? entry.decided_by : entry.recorded_by).toLowerCase() !== f.by) return false;
   const when = type === 'decision' ? dayOf(entry.decided_on) : dayOf(entry.recorded_at);

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
@@ -92,6 +93,23 @@ class FailedItem(BaseModel):
 MOST_FAILED_SHOWN = 50
 
 
+class IndexRun(BaseModel):
+    """How the last time the index was brought up to date went."""
+
+    at: datetime = Field(description="When it finished.")
+    embedded: int = Field(description="How many items it embedded.")
+    failed_total: int = Field(description="How many items the embedding service refused.")
+    waiting_after: int | None = Field(
+        description="How many items were still waiting afterwards. Empty when it stopped before "
+        "it could count."
+    )
+    error: str | None = Field(
+        description="Why it stopped early, in words (the service could not be reached). Empty when "
+        "it went through."
+    )
+    seconds: float = Field(description="How long it took.")
+
+
 class IndexReport(BaseModel):
     model: str = Field(description="The embedding model the index is built with.")
     dimensions: int = Field(description="The size of its vectors, read from the model.")
@@ -121,10 +139,29 @@ class Indexer:
         self._client = EmbeddingClient(settings) if settings else None
         # Passes run one at a time: a request for a reindex waits for the one already running.
         self._lock = asyncio.Lock()
+        self._last_run: IndexRun | None = None
 
     @property
     def client(self) -> EmbeddingClient | None:
         return self._client
+
+    @property
+    def last_run(self) -> IndexRun | None:
+        """How the last reindex since the server started went, for the status page."""
+        return self._last_run
+
+    async def probe(self, timeout: float) -> str:
+        """Whether the embedding service answers a short question: not_configured, answering or
+        unreachable. A service that refuses the text still answers."""
+        if self._client is None:
+            return "not_configured"
+        try:
+            await self._client.embed(["status check"], timeout=timeout)
+        except EmbeddingRejected:
+            return "answering"
+        except EmbeddingUnavailable:
+            return "unreachable"
+        return "answering"
 
     @property
     def max_chars(self) -> int:
@@ -143,10 +180,34 @@ class Indexer:
     async def reindex(self) -> IndexReport:
         """Bring the index up to date: build it if it does not exist (or was built with another
         model), then embed every item that is new or changed. Raises EmbeddingUnavailable when
-        the service cannot be reached at the start; later trouble is reported in the result."""
+        the service cannot be reached at the start; later trouble is reported in the result.
+        Either way, how it went is kept for the status page."""
+        started = time.monotonic()
+        try:
+            report = await self._reindex(started)
+        except EmbeddingUnavailable as error:
+            self._remember(0, 0, None, str(error), started)
+            raise
+        self._remember(
+            report.embedded, report.failed_total, report.waiting_after, report.error, started
+        )
+        return report
+
+    def _remember(
+        self, embedded: int, failed: int, waiting: int | None, error: str | None, started: float
+    ) -> None:
+        self._last_run = IndexRun(
+            at=datetime.now(UTC),
+            embedded=embedded,
+            failed_total=failed,
+            waiting_after=waiting,
+            error=error,
+            seconds=round(time.monotonic() - started, 3),
+        )
+
+    async def _reindex(self, started: float) -> IndexReport:
         client = self.require_client()
         assert self._settings is not None
-        started = time.monotonic()
         async with self._lock:
             probe = await client.embed(["dimension probe"])
             dimensions = len(probe[0])

@@ -26,6 +26,7 @@ let total = 0;
 let nextOffset = null;
 let threshold = null; // what the server used
 let bodies = new Map(); // "type:id" -> details, for the side-by-side view
+let rest = null; // the pairs not yet shown, when only the unmarked ones are listed
 let generation = 0;
 let loadedFor = '';
 
@@ -41,10 +42,12 @@ export function mount(element, initial) {
   const type = h('select', { id: 'overlap-type', 'aria-label': 'What to compare', onchange: () => ui.navigate({ type: type.value === 'story' ? null : type.value }) }, TYPES.map(([value, label]) => h('option', { value }, label)));
   const min = h('input', { id: 'overlap-min', type: 'number', min: 0, max: 1, step: 0.01, 'aria-describedby': 'overlap-help' });
   const epics = h('input', { id: 'overlap-epics', type: 'text', value: params.get('epics') || '', placeholder: 'such as 3, 7', 'aria-describedby': 'overlap-help' });
+  const unlinked = h('input', { id: 'overlap-unlinked', type: 'checkbox', checked: params.get('unlinked') === '1', onchange: () => ui.navigate({ unlinked: unlinked.checked ? '1' : null }) });
   parts = {
     type,
     min,
     epics,
+    unlinked,
     summary: h('p', { class: 'count', id: 'count', role: 'status' }),
     note: h('p', { class: 'quiet', id: 'overlap-note' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'overlap-problem' }),
@@ -70,8 +73,9 @@ export function mount(element, initial) {
         min,
         h('label', { for: 'overlap-epics' }, 'Only pairs with something in epics (ids)'),
         epics,
+        h('label', { class: 'check', for: 'overlap-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
         h('button', { type: 'submit', id: 'apply-threshold' }, 'Apply'),
-        h('button', { type: 'button', id: 'reset-threshold', onclick: () => ui.navigate({ min: null, epics: null }) }, 'Start again'),
+        h('button', { type: 'button', id: 'reset-threshold', onclick: () => ui.navigate({ min: null, epics: null, unlinked: null }) }, 'Start again'),
       ),
       h('p', { class: 'help', id: 'overlap-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
     ),
@@ -88,7 +92,7 @@ export function unmount() {
   root = null;
 }
 
-const asking = (from) => `${from.get('type') || 'story'}|${from.get('min') || ''}|${from.get('epics') || ''}`;
+const asking = (from) => `${from.get('type') || 'story'}|${from.get('min') || ''}|${from.get('epics') || ''}|${from.get('unlinked') || ''}`;
 
 export function update(next) {
   params = next;
@@ -107,16 +111,28 @@ const itemType = () => (TYPES.some(([value]) => value === params.get('type')) ? 
 // Numbers go as numbers; anything else goes as it is, so that the server says what is wrong with it.
 const epicIds = () => (params.get('epics') || '').split(/[\s,]+/).filter(Boolean).map((id) => (/^\d+$/.test(id) ? Number(id) : id));
 
-async function read(offset) {
+async function read(offset, size = PAGE) {
   const asked = params.get('min');
   const epics = epicIds();
   return call('find_overlaps', {
     item_type: itemType(),
-    limit: PAGE,
+    limit: size,
     offset,
     ...(asked !== null && asked !== '' ? { min_similarity: Number(asked) } : {}),
     ...(epics.length ? { epic_ids: epics } : {}),
   });
+}
+
+// Every pair there is, for the page that leaves out the ones somebody has already marked.
+async function readEvery() {
+  const first = await read(0, 200);
+  const every = [...first.items];
+  let page = first;
+  while (page.next_offset !== null && page.next_offset !== undefined) {
+    page = await read(page.next_offset, 200);
+    every.push(...page.items);
+  }
+  return { first, every };
 }
 
 // The words of the items in these pairs, for the side-by-side view: the nodes with their details in
@@ -144,20 +160,37 @@ async function load(fresh) {
     bodies = new Map();
   }
   try {
-    const first = await read(0);
-    if (mine !== generation || !root) return;
-    // A refresh keeps as many pairs as are already on the page.
-    const keep = fresh ? PAGE : Math.max(PAGE, pairs.length);
-    let page = first;
-    const all = [...first.items];
-    while (all.length < keep && page.next_offset !== null && page.next_offset !== undefined) {
-      page = await read(page.next_offset);
-      all.push(...page.items);
+    let first;
+    let all;
+    if (params.get('unlinked') === '1') {
+      // Every page is read and the pairs somebody has marked are left out; the rest are shown a
+      // page at a time from what was read.
+      const found = await readEvery();
+      if (mine !== generation || !root) return;
+      first = found.first;
+      const open = found.every.filter((pair) => pair.already_linked.length === 0);
+      const keep = fresh ? PAGE : Math.max(PAGE, pairs.length);
+      all = open.slice(0, keep);
+      rest = open.slice(keep);
+      total = open.length;
+      nextOffset = rest.length ? 1 : null;
+    } else {
+      rest = null;
+      first = await read(0);
+      if (mine !== generation || !root) return;
+      // A refresh keeps as many pairs as are already on the page.
+      const keep = fresh ? PAGE : Math.max(PAGE, pairs.length);
+      let page = first;
+      all = [...first.items];
+      while (all.length < keep && page.next_offset !== null && page.next_offset !== undefined) {
+        page = await read(page.next_offset);
+        all.push(...page.items);
+      }
+      if (mine !== generation || !root) return;
+      total = first.total;
+      nextOffset = page.next_offset ?? null;
     }
-    if (mine !== generation || !root) return;
     pairs = all;
-    total = first.total;
-    nextOffset = page.next_offset ?? null;
     threshold = first.threshold;
     parts.problem.textContent = '';
     parts.note.textContent = first.index.note;
@@ -179,20 +212,28 @@ async function load(fresh) {
 
 async function more() {
   const mine = generation;
-  const page = await read(nextOffset);
-  if (mine !== generation || !root) return;
-  pairs = [...pairs, ...page.items];
-  nextOffset = page.next_offset ?? null;
-  await describe(page.items.flatMap((pair) => [pair.first, pair.second]));
+  let items;
+  if (rest !== null) {
+    items = rest.splice(0, PAGE);
+    nextOffset = rest.length ? 1 : null;
+  } else {
+    const page = await read(nextOffset);
+    if (mine !== generation || !root) return;
+    items = page.items;
+    nextOffset = page.next_offset ?? null;
+  }
+  pairs = [...pairs, ...items];
+  await describe(items.flatMap((pair) => [pair.first, pair.second]));
   draw();
 }
 
 // -- drawing --------------------------------------------------------------------------------------
 
 function draw() {
+  const only = params.get('unlinked') === '1';
   parts.summary.textContent = total
-    ? `${plural(total, 'pair')} at ${threshold} or more alike${pairs.length < total ? `; ${pairs.length} shown` : ''}.`
-    : `No pairs are ${threshold} or more alike.`;
+    ? `${plural(total, 'pair')} at ${threshold} or more alike${only ? ', none of them marked yet' : ''}${pairs.length < total ? `; ${pairs.length} shown` : ''}.`
+    : `No pairs are ${threshold} or more alike${only ? ' that nobody has marked yet' : ''}.`;
   put(parts.list,
     total ? h('ul', { class: 'plain pairs' }, pairs.map(pairRow)) : null,
     nextOffset !== null ? h('p', {}, h('button', { type: 'button', id: 'show-more', onclick: more }, 'Show more pairs')) : null,

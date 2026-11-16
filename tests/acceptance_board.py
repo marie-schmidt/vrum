@@ -128,7 +128,7 @@ async def signing_in(page_url: str, token: str) -> None:
         await sign_in.get_by_role("button", name="Sign in").click()
         await w.page.locator("dialog.modal #name").fill("Ada Lovelace")
         await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
-        await expect(w.page.locator(".board")).to_be_visible()
+        await expect(w.page.locator("h1")).to_have_text("Home")
         cookies = await w.page.context.cookies()
         proof(
             "M10",

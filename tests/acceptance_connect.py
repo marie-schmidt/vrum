@@ -15,6 +15,7 @@ from playwright.async_api import Locator, Page, expect
 from tests.acceptance_finding import DUPLICATES
 from tests.acceptance_scenario import NO_MODEL_URL, URL, Failed, chapter, clip, proof
 from tests.board_helpers import (
+    PAGES,
     SLOW,
     asked,
     board_url,
@@ -43,7 +44,6 @@ from tests.helpers import (
 )
 
 ADA = "Ada Lovelace"
-PAGES = ["board", "graph", "roadmap", "table", "outline", "rules", "memory", "search", "overlaps"]
 
 
 def same_words(board_words: str, mcp_words: str) -> bool:

@@ -2,11 +2,15 @@
 without a token, what the page files do and do not contain, and its one setting."""
 
 import asyncio
+import os
 import re
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
 from vrum.board import BOARD_TOOLS, READ_TOOLS, SECURITY_HEADERS, STATIC, WRITE_TOOLS, open_paths
+from vrum.board.tools import AREAS, TOOL_PLACES, AgentsOnly, OnTheBoard, ToolPlace
 from vrum.config import ConfigError, Settings
 from vrum.server import create_server
 
@@ -109,3 +113,73 @@ def test_the_board_asks_for_news_every_five_seconds_unless_told_otherwise() -> N
     assert Settings.from_env({**ENV, "VRUM_BOARD_POLL_SECONDS": "2"}).board_poll_seconds == 2.0
     with pytest.raises(ConfigError, match="VRUM_BOARD_POLL_SECONDS must be a number of seconds"):
         Settings.from_env({**ENV, "VRUM_BOARD_POLL_SECONDS": "0.1"})
+
+
+# -- the Tools page: every tool is on the board or marked as for agents only ----------------------
+
+
+def live_tools() -> dict[str, Any]:
+    server = create_server(Settings.from_env(ENV))
+    return {tool.name: tool for tool in asyncio.run(server.list_tools())}
+
+
+def classification_problems(places: Mapping[str, ToolPlace], live: set[str]) -> list[str]:
+    """What is wrong with the map of tools: one the server has that is not in it, one in it that
+    the server does not have, one with no area, and one the board calls but marks as agents only."""
+    problems = [
+        f"{name} is neither on the board nor marked as for agents only"
+        for name in sorted(live - set(places))
+    ]
+    problems += [
+        f"{name} is in the map but the server has no such tool"
+        for name in sorted(set(places) - live)
+    ]
+    for name, place in sorted(places.items()):
+        if place.area not in AREAS:
+            problems.append(f"{name} is in an area that does not exist: {place.area}")
+        if isinstance(place.place, AgentsOnly) and name in BOARD_TOOLS:
+            problems.append(f"{name} is marked as for agents only, but the board calls it")
+        if isinstance(place.place, AgentsOnly) and not place.place.why.strip():
+            problems.append(f"{name} is for agents only and does not say why")
+        if isinstance(place.place, OnTheBoard) and not place.place.where.strip():
+            problems.append(f"{name} is on the board and does not say where")
+    return problems
+
+
+def test_every_tool_the_server_has_is_on_the_board_or_marked_as_for_agents_only() -> None:
+    # ./acceptance.sh runs this twice, to show that it fails when one tool is taken out of the map
+    # and passes again once it is back: VRUM_TEST_DROP_FROM_MAP names the tool to leave out.
+    places = dict(TOOL_PLACES)
+    places.pop(os.environ.get("VRUM_TEST_DROP_FROM_MAP", ""), None)
+    assert classification_problems(places, set(live_tools())) == []
+
+
+def test_that_check_fails_when_a_tool_is_missing_from_the_map_or_made_up() -> None:
+    # The check has teeth: take one tool out of the map and it is named; add one that is not a
+    # tool and that is named too.
+    live = set(live_tools())
+    smaller = {name: place for name, place in TOOL_PLACES.items() if name != "reindex"}
+    assert classification_problems(smaller, live) == [
+        "reindex is neither on the board nor marked as for agents only"
+    ]
+    larger = {**TOOL_PLACES, "no_such_tool": TOOL_PLACES["reindex"]}
+    assert classification_problems(larger, live) == [
+        "no_such_tool is in the map but the server has no such tool"
+    ]
+    calls_it = {**TOOL_PLACES, "search": ToolPlace("Server", AgentsOnly("A reason."))}
+    assert classification_problems(calls_it, live) == [
+        "search is marked as for agents only, but the board calls it"
+    ]
+
+
+def test_the_tools_that_only_read_say_so_and_are_the_ones_the_board_reads_with() -> None:
+    tools = live_tools()
+    reads = {
+        name for name, tool in tools.items() if tool.annotations and tool.annotations.read_only_hint
+    }
+    # Everything the board reads with is a read, and nothing the board writes with is.
+    assert set(READ_TOOLS) <= reads
+    assert reads.isdisjoint(WRITE_TOOLS)
+    # What changes something (the graph, the index or the log) is never marked as a read.
+    for name in ("create_node", "claim_node", "next_work", "reindex", "import_graph", "reflect"):
+        assert name not in reads

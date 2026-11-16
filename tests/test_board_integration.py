@@ -117,7 +117,8 @@ async def test_the_board_turns_away_a_wrong_or_empty_token_and_its_data_calls_ne
         await expect(name).to_be_visible()
         await name.fill("Ada Lovelace")
         await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
-        await expect(w.page.locator(".board")).to_be_visible()
+        # Home is the first page after signing in.
+        await expect(w.page.locator("h1")).to_have_text("Home")
         await expect(w.page.locator("#who")).to_contain_text("Ada Lovelace")
 
         # The token is kept for this tab only: not in the address, a cookie or the page's storage.

@@ -1,6 +1,7 @@
 """Helpers for the tests that drive the board in a real headless browser, against the real
 containers (see ./check.sh). The browser is Playwright's Chromium, a development dependency only."""
 
+import contextlib
 import datetime
 import json
 import re
@@ -12,13 +13,38 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import Client
-from playwright.async_api import Dialog, Locator, Page, Request, Route, async_playwright, expect
+from playwright.async_api import (
+    Dialog,
+    Locator,
+    Page,
+    Request,
+    Response,
+    Route,
+    async_playwright,
+    expect,
+)
 
 from tests.helpers import ok, reindexed, unique_word
 
 # Every request of the board has to go to the server it came from.
 VIEWPORT = {"width": 1500, "height": 1500}
 SLOW = 15_000  # milliseconds a page may take to show what a change should bring
+# Every page of the board, as its address names it.
+PAGES = [
+    "home",
+    "board",
+    "graph",
+    "roadmap",
+    "table",
+    "outline",
+    "rules",
+    "memory",
+    "search",
+    "overlaps",
+    "activity",
+    "tools",
+    "status",
+]
 
 
 def board_url(mcp_url: str) -> str:
@@ -51,6 +77,8 @@ class Watched:
     requests: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     dialogs: list[str] = field(default_factory=list)
+    # Every response the server sent, as (address, text), when the page was asked to keep them.
+    bodies: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def origin(self) -> str:
@@ -68,10 +96,11 @@ class Watched:
 
 @asynccontextmanager
 async def browser_page(
-    board: str, *, token: str | None, name: str | None = "Tester"
+    board: str, *, token: str | None, name: str | None = "Tester", keep_bodies: bool = False
 ) -> AsyncIterator[Watched]:
     """A headless browser on the board. With a token and a name it starts signed in, as a person
-    who has used the board before would be; with none it shows the sign-in."""
+    who has used the board before would be; with none it shows the sign-in. `keep_bodies` keeps
+    the text of every response, for a test that searches them all."""
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         try:
@@ -94,8 +123,15 @@ async def browser_page(
                 watched.dialogs.append(dialog.message)
                 await dialog.dismiss()
 
+            async def on_response(response: Response) -> None:
+                # A body that is gone (the page moved on) cannot be read, and is not needed.
+                with contextlib.suppress(Exception):
+                    watched.bodies.append((response.url, await response.text()))
+
             page.on("request", on_request)
             page.on("dialog", on_dialog)
+            if keep_bodies:
+                page.on("response", on_response)
             page.on("pageerror", lambda error: watched.problems.append(f"page error: {error}"))
             page.on(
                 "console",

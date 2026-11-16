@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from vrum.common import (
     Refusal,
     clean_actor,
+    fetch_all,
     fetch_one,
     record_event,
     required_text,
@@ -161,9 +162,101 @@ async def release_in(
     return row
 
 
+class HeldWork(BaseModel):
+    node_id: int
+    kind: str = Field(description="story or task.")
+    title: str
+    expires_at: datetime = Field(description="When the claim lapses, or lapsed.")
+
+
+class LastHandoff(BaseModel):
+    node_id: int | None
+    title: str | None
+    at: datetime
+    outcome: str = Field(description="done, blocked, dropped or released.")
+    note: str
+
+
+class AgentState(BaseModel):
+    actor: str = Field(description="The person or agent, as they gave their name.")
+    state: str = Field(
+        description="working (holds a claim that is in force), lapsed (holds one that ran out with "
+        "no handoff note) or finished (holds none, and the last thing they did was leave a "
+        "handoff note)."
+    )
+    holding: list[HeldWork] = Field(description="Claims in force, soonest to lapse first.")
+    lapsed: list[HeldWork] = Field(description="Claims that ran out, longest ago first.")
+    last_handoff: LastHandoff | None = Field(description="The last handoff note they left.")
+
+
+class WhoIsWorking(BaseModel):
+    as_of: datetime = Field(
+        description="The server's time for this answer, so that a countdown to a lease does not "
+        "depend on the clock of whoever reads it."
+    )
+    agents: list[AgentState] = Field(
+        description="Everyone who has taken work, by name: working first, then lapsed, then "
+        "finished."
+    )
+
+
+_STATE_ORDER = {"working": 0, "lapsed": 1, "finished": 2}
+
+
 class Claims:
     def __init__(self, database: Database) -> None:
         self._database = database
+
+    async def who_is_working(self) -> WhoIsWorking:
+        """Every actor who has held a claim or left a handoff note, with the state they are in:
+        what they hold, what ran out on them, and the last note they left."""
+        async with self._database.transaction() as conn:
+            held = await fetch_all(
+                conn,
+                "SELECT c.actor, c.node_id, n.kind, n.title, c.expires_at, "
+                "c.expires_at > clock_timestamp() AS live "
+                "FROM claims c JOIN nodes n ON n.id = c.node_id ORDER BY c.expires_at, c.node_id",
+            )
+            notes = await fetch_all(
+                conn,
+                "SELECT DISTINCT ON (e.actor) e.actor, e.node_id, n.title, e.at, "
+                "e.after ->> 'outcome' AS outcome, e.after ->> 'note' AS note "
+                "FROM events e LEFT JOIN nodes n ON n.id = e.node_id "
+                "WHERE e.action = 'handoff' ORDER BY e.actor, e.at DESC, e.id DESC",
+            )
+            now = await fetch_one(conn, "SELECT clock_timestamp() AS now")
+        assert now is not None
+        agents: dict[str, AgentState] = {}
+
+        def state_of(actor: str) -> AgentState:
+            if actor not in agents:
+                agents[actor] = AgentState(
+                    actor=actor, state="finished", holding=[], lapsed=[], last_handoff=None
+                )
+            return agents[actor]
+
+        for row in held:
+            work = HeldWork(
+                node_id=row["node_id"],
+                kind=row["kind"],
+                title=row["title"],
+                expires_at=row["expires_at"],
+            )
+            agent = state_of(row["actor"])
+            (agent.holding if row["live"] else agent.lapsed).append(work)
+        for row in notes:
+            state_of(row["actor"]).last_handoff = LastHandoff(
+                node_id=row["node_id"],
+                title=row["title"],
+                at=row["at"],
+                outcome=row["outcome"],
+                note=row["note"],
+            )
+        for agent in agents.values():
+            agent.lapsed.reverse()
+            agent.state = "working" if agent.holding else "lapsed" if agent.lapsed else "finished"
+        ordered = sorted(agents.values(), key=lambda a: (_STATE_ORDER[a.state], a.actor.lower()))
+        return WhoIsWorking(as_of=now["now"], agents=ordered)
 
     async def claim_node(self, *, actor: str, node_id: int, lease_seconds: int) -> Claim:
         actor = clean_actor(actor)

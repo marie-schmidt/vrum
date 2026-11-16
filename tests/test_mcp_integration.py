@@ -25,6 +25,7 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "claim_node",
         "renew_claim",
         "release_claim",
+        "who_is_working",
         "next_work",
         "finish_work",
         "create_plan",

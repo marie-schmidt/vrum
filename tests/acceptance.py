@@ -21,6 +21,7 @@ from tests.acceptance_finding import finding
 from tests.acceptance_memory import rules_and_memory
 from tests.acceptance_model import hardening, model_help
 from tests.acceptance_moving import moving
+from tests.acceptance_run import running
 from tests.acceptance_scenario import (
     PROOFS,
     Failed,
@@ -46,6 +47,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "views": views,
     "memory": rules_and_memory,
     "connecting": connecting,
+    "running": running,
     "moving": moving,
 }
 

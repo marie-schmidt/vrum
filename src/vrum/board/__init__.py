@@ -16,11 +16,14 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from vrum.board.tools import AREAS, TOOL_PLACES, AgentsOnly, OnTheBoard
 from vrum.config import Settings
 from vrum.guard import GuardedServer
 from vrum.search import Searcher
 
 STATIC = Path(__file__).parent / "static"
+# Where the MCP endpoint is on this server (the SDK's own default), for the Tools page.
+MCP_PATH = "/mcp"
 
 # The tools the pages may call. A test checks that each is a tool the server has. Each later
 # board milestone adds the tools its pages need.
@@ -40,6 +43,9 @@ READ_TOOLS = (
     "find_mentions",
     "export_graph",
     "changes_since",
+    "ready_work",
+    "who_is_working",
+    "server_status",
 )
 # find_contradictions and reflect only propose or answer (they change nothing in the graph), but
 # they ask the language model and write a record that they did, as a person's change does, so
@@ -51,6 +57,9 @@ WRITE_TOOLS = (
     "move_node",
     "add_link",
     "remove_link",
+    "claim_node",
+    "renew_claim",
+    "release_claim",
     "create_rule",
     "update_rule",
     "place_rule",
@@ -146,14 +155,7 @@ def add_board(mcp: GuardedServer, *, settings: Settings, searcher: Searcher) -> 
             headers={**SECURITY_HEADERS, "Cache-Control": "no-cache"},
         )
 
-    async def call_tool(request: Request) -> Response:
-        name = request.path_params["name"]
-        if name not in BOARD_TOOLS:
-            return _json({"message": f"The board does not use a tool called {name}."}, 404)
-        try:
-            arguments = await request.json()
-        except ValueError:
-            arguments = None
+    async def run(name: str, arguments: Any) -> Response:
         if not isinstance(arguments, dict):
             return _json({"message": "The request has to be a JSON object of arguments."}, 400)
         try:
@@ -170,6 +172,63 @@ def add_board(mcp: GuardedServer, *, settings: Settings, searcher: Searcher) -> 
             return _json({"message": _plain(name, error)}, 400)
         return _json(result.structured_content or {})
 
+    async def arguments_of(request: Request) -> Any:
+        try:
+            return await request.json()
+        except ValueError:
+            return None
+
+    async def call_tool(request: Request) -> Response:
+        name = request.path_params["name"]
+        if name not in BOARD_TOOLS:
+            return _json({"message": f"The board does not use a tool called {name}."}, 404)
+        return await run(name, await arguments_of(request))
+
+    async def try_tool(request: Request) -> Response:
+        """The Tools page's "try it": any tool the server itself says only reads, and nothing else.
+        The server's own list decides, so a tool that changes something can never be tried here."""
+        name = request.path_params["name"]
+        known = {tool.name: tool for tool in await mcp.list_tools()}
+        if name not in known:
+            return _json({"message": f"The server has no tool called {name}."}, 404)
+        annotations = known[name].annotations
+        if not (annotations and annotations.read_only_hint):
+            return _json(
+                {
+                    "message": f"{name} changes something, so the board does not let you try it "
+                    "here. Use the page the tool names, or an agent."
+                },
+                403,
+            )
+        return await run(name, await arguments_of(request))
+
+    async def tools(request: Request) -> Response:
+        """The server's live tool list, with where on the board each is used."""
+        found = []
+        for tool in await mcp.list_tools():
+            place = TOOL_PLACES.get(tool.name)
+            read_only = bool(tool.annotations and tool.annotations.read_only_hint)
+            found.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.input_schema,
+                    "changes_something": not read_only,
+                    "area": place.area if place else None,
+                    "page": place.place.page
+                    if place and isinstance(place.place, OnTheBoard)
+                    else None,
+                    "where": place.place.where
+                    if place and isinstance(place.place, OnTheBoard)
+                    else None,
+                    "agents_only": place.place.why
+                    if place and isinstance(place.place, AgentsOnly)
+                    else None,
+                    "board_calls": tool.name in BOARD_TOOLS,
+                }
+            )
+        return _json({"mcp_path": MCP_PATH, "areas": list(AREAS), "tools": found})
+
     async def info(request: Request) -> Response:
         return _json(
             {
@@ -184,6 +243,8 @@ def add_board(mcp: GuardedServer, *, settings: Settings, searcher: Searcher) -> 
 
     # The specific routes come first: the first that matches is the one that answers.
     mcp.custom_route("/board/api/tool/{name}", methods=["POST"])(call_tool)
+    mcp.custom_route("/board/api/try/{name}", methods=["POST"])(try_tool)
+    mcp.custom_route("/board/api/tools", methods=["GET"])(tools)
     mcp.custom_route("/board/api/info", methods=["GET"])(info)
     mcp.custom_route("/board/api/index", methods=["GET"])(index)
     for path in ("/board", "/board/"):

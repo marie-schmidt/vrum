@@ -4,7 +4,9 @@
 import { NotSignedIn, setToken, signOut, signedIn } from './api.js';
 import { actor, notify, setActor, ui } from './ctx.js';
 import { clear, h } from './dom.js';
+import * as activity from './activity.js';
 import * as graph from './graph.js';
+import * as home from './home.js';
 import * as kanban from './kanban.js';
 import * as memory from './memory.js';
 import * as outline from './outline.js';
@@ -14,11 +16,14 @@ import { refreshReferences } from './references.js';
 import * as roadmap from './roadmap.js';
 import * as rules from './rules.js';
 import * as search from './search.js';
+import * as status from './status.js';
 import { keepSynced, onChange, start, stopSyncing, store } from './store.js';
 import { keepSwitcher } from './switcher.js';
 import * as table from './table.js';
+import * as tools from './tools.js';
 
 const PAGES = {
+  home: { title: 'Home', view: home },
   board: { title: 'Board', view: kanban },
   graph: { title: 'Graph', view: graph },
   roadmap: { title: 'Roadmap', view: roadmap },
@@ -28,6 +33,9 @@ const PAGES = {
   memory: { title: 'Memory', view: memory },
   search: { title: 'Search', view: search },
   overlaps: { title: 'Overlaps', view: overlaps },
+  activity: { title: 'Activity', view: activity },
+  tools: { title: 'Tools', view: tools },
+  status: { title: 'Status', view: status },
 };
 const top = document.getElementById('top');
 const main = document.getElementById('page');
@@ -39,7 +47,7 @@ let running = false; // signed in and loaded
 
 function readAddress() {
   const [name, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
-  return { page: PAGES[name] ? name : 'board', params: new URLSearchParams(query) };
+  return { page: PAGES[name] ? name : 'home', params: new URLSearchParams(query) };
 }
 
 ui.navigate = (changes, { replace = false, page = ui.page } = {}) => {
@@ -98,7 +106,7 @@ function drawTop() {
     ),
   );
   clear(top).append(
-    h('a', { href: '#/board', class: 'brand' }, h('img', { src: '/board/brand/vrum-logo.svg', alt: 'vrum', height: 28 })),
+    h('a', { href: '#/home', class: 'brand' }, h('img', { src: '/board/brand/vrum-logo.svg', alt: 'vrum', height: 28 })),
     h('nav', { 'aria-label': 'Pages' }, links),
     h('span', { class: 'spacer' }),
     h('button', { type: 'button', id: 'switcher-open', class: 'link', title: 'Ctrl+K, or ⌘K', onclick: () => openJump() }, 'Jump to…'),

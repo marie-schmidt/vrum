@@ -11,12 +11,10 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, links_of, made
+from tests.board_helpers import PAGES, SLOW, board_url, browser_page, links_of, made
 from tests.helpers import make_belief, make_decision, make_fact, ok, the_token, unique_word
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
-
-PAGES = ["board", "graph", "roadmap", "table", "outline", "rules", "memory", "search", "overlaps"]
 
 
 @pytest.fixture

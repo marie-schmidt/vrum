@@ -13,6 +13,17 @@ export const ui = {
 
 const NAME_KEY = 'vrum.actor';
 
+// The address of a page with these choices, as a link: hrefTo('table', { q: 'status:blocked' }).
+// An empty choice is left out, and colons and commas stay readable, as in the address bar.
+export function hrefTo(page, choices = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(choices)) {
+    if (value !== null && value !== undefined && value !== '') params.set(key, String(value));
+  }
+  const query = params.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',');
+  return `#/${page}${query ? `?${query}` : ''}`;
+}
+
 // The name every change carries. Kept in this browser; whoever types it is who the history says.
 export function actor() {
   return localStorage.getItem(NAME_KEY) || '';

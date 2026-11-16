@@ -18,8 +18,8 @@ is built to be effective and efficient for agents and friendly to people: every 
 is wrong and what to do next, and every answer is small enough to read.
 
 It is a prototype, built one milestone at a time (see `PROGRESS.md`). You use it through an agent
-or a script, and through the board (Kanban, graph, roadmap, table, outline, rules, memory, search
-and overlaps so far, with more pages to come).
+or a script, and through the board (home, Kanban, graph, roadmap, table, outline, rules, memory,
+search, overlaps, activity, tools and status).
 
 ## Quick start
 
@@ -251,8 +251,36 @@ graph has a **Mentions** layer that draws them. Titles are not read for referenc
 word of an item's title, its id (`12`, `#12`, `rule 3`, `decision 7`) or the name of a page, and
 Enter goes there.
 
-**What it does not do yet.** The home page, the activity feed, the tools list and the status
-page come in the next milestone.
+**Home.** The page you land on. It says what needs a person's attention, as numbers you can click:
+ready work nobody holds, blocked and overdue items, claims that ran out with no handoff note,
+rules in no story, stories with no rule, decisions made in the last 7 days, stale beliefs, beliefs
+waiting for a person to confirm them, overlap candidates nobody has marked, and items waiting to
+be indexed. Each number is the same answer the tools give, and following it lands on exactly those
+items (the Table with that filter, or the Rules, Memory, Overlaps or Status page). Below them each
+epic shows how many stories and tasks it has in each status, as links.
+
+**Activity.** What happened, newest first, in plain words ("Ada moved rule 7 from story #3 to story
+#5"), with a handoff note shown in full. New changes appear within seconds with no reload. Filter by
+who, by kind of change, by item and by day (UTC); the filter is in the address. On the right,
+**Who is working on what** shows every claim in force with a countdown and every claim that ran out,
+and each agent's state (working, lapsed, finished). You can claim an item under your typed name
+(by its number, or from the work that is free to take), renew a claim, or release it with a note:
+the same operations an agent calls. A claim that ends moves to *lapsed* by itself.
+
+**Tools.** Every tool the server has, read from the server itself so the list can never be out of
+date: its description, its fields, whether it changes anything, and where on the board it can be
+done, or why it is for agents only. Any tool that only reads has **Try it**, which fills in a form
+from the tool's fields and shows what the server answers. A tool that changes something has no
+Try it, and the server refuses one even if it is asked. It also shows the endpoint and an example
+connection.
+
+**Status.** The version of Vrum, PostgreSQL and pgvector, how many of each kind of item there are,
+the state of the search index (how many wait to be indexed, which embedding service and model it
+uses, whether the service answers, the size of the vectors and the last reindex since the server
+started), and whether a language model is set up. It is what `server_status` says. **Download
+export** saves the whole graph as one JSON file, identical to the one `export_graph` gives. Backup,
+restore and import stay on the command line (see below), and the page says so. The token and the
+database password are never shown anywhere.
 
 **Table.** One row for each epic, story or task, with its kind, title, parent, status, priority,
 who holds it, what it waits on, progress, dates and last change. Click a heading to sort (again to
@@ -399,7 +427,9 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
   the recall preview), finds and connects on the board (search by words and by meaning with the
   embedding service stopped and back, counts, overlaps and what a click on a pair creates,
   Markdown that is only ever text, references and their backlinks, the quick switcher, and Ask),
-  and finally backs up, destroys
+  runs and sees it all (Home's numbers and where each leads, an agent's work and a person's claim
+  appearing in Activity, a claim that runs out, the Tools page against the server's own list, and
+  Status and the export compared with the tools), and finally backs up, destroys
   its own database, restores it, and loads an export into a fresh server. Every line it prints is
   one proof that holds. It uses a scripted stand-in for the embedding service and the language
   model, so nothing is downloaded and the answers are the same every run.

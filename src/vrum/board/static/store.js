@@ -73,6 +73,13 @@ async function reload() {
   }
 }
 
+// The work as it is now. A claim runs out with no change event, so a page that shows claims asks
+// again when one is due to, instead of waiting for news that never comes.
+export async function refreshWork() {
+  const nodes = await callAll('list_nodes', {});
+  store.nodes = new Map(nodes.map((node) => [node.id, node]));
+}
+
 async function refreshIndex() {
   const index = await get('/board/api/index');
   const changed =

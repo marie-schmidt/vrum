@@ -11,12 +11,13 @@ from typing import Annotated, Any
 import psycopg
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BaseModel, Field
+from mcp.types import ToolAnnotations
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.board import add_board
-from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims
+from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims, WhoIsWorking
 from vrum.common import Refusal, clean_actor, parse_day
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
 from vrum.db import Database
@@ -41,6 +42,7 @@ from vrum.reflection import (
 )
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 from vrum.search import OverlapPage, Searcher, SearchPage
+from vrum.status import ServerStatus, Status
 from vrum.workflow import (
     DEFAULT_CONTEXT_CHARS,
     ChangesPage,
@@ -160,16 +162,9 @@ _After = Annotated[
     Field(description="Leave empty for the first page; pass next_after_id for the next."),
 ]
 
-
-class ServerStatus(BaseModel):
-    vrum_version: str = Field(description="The version of this server.")
-    postgres_version: str = Field(description="The version of the PostgreSQL database.")
-    pgvector_version: str = Field(description="The version of the pgvector extension.")
-    language_model: str | None = Field(
-        description="The language model this server is set up to use for extract_facts, "
-        "consolidate_memory, find_contradictions and reflect. Empty when there is none: those "
-        "four tools then say so, and everything else works."
-    )
+# Tools that only read: they change nothing. The Tools page of the board says so from this, and
+# lets a person try exactly these.
+_READS = ToolAnnotations(read_only_hint=True)
 
 
 @contextmanager
@@ -216,6 +211,7 @@ def create_server(settings: Settings) -> GuardedServer:
         embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
     )
     recaller = Recaller(database, searcher)
+    status = Status(database, indexer, searcher, settings.llm.model if settings.llm else None)
     references = References(database)
     workflow = Workflow(database, graph, searcher)
     reflector = Reflector(
@@ -246,21 +242,18 @@ def create_server(settings: Settings) -> GuardedServer:
         "vrum", version=version("vrum"), lifespan=lifespan, instructions=INSTRUCTIONS
     )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def server_status() -> ServerStatus:
-        """Check that this server is running and can reach its database.
+        """Check that this server is running and can reach its database, and see how it is.
 
-        Returns the server version and the versions of PostgreSQL and the pgvector extension.
-        Call this first when connecting, or when something seems wrong.
+        Returns the server version and the versions of PostgreSQL and the pgvector extension, how
+        many of each kind of item it holds, which language model it uses (never its key), and
+        the state of the index: how many items are indexed and waiting, whether the embedding
+        service answers just now, its model and vector size, and how the last reindex went. Call
+        this first when connecting, or when something seems wrong.
         """
         with _database_errors():
-            status = await database.status()
-        return ServerStatus(
-            vrum_version=version("vrum"),
-            postgres_version=status.postgres_version,
-            pgvector_version=status.pgvector_version,
-            language_model=settings.llm.model if settings.llm else None,
-        )
+            return await status.server_status(version("vrum"))
 
     @mcp.tool()
     async def create_node(
@@ -300,14 +293,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 target_on=parse_day("target_on", target_on),
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def get_node(node_id: int) -> NodeDetail:
         """Read one epic, story or task in full, including the version you need to change it, how
         many handoff notes it has and the latest one."""
         with _database_errors():
             return await graph.get_node(node_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def list_nodes(
         kind: Annotated[str | None, Field(description="Only epic, story or task.")] = None,
         parent_id: Annotated[
@@ -456,7 +449,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 new_parent_id=new_parent_id,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def node_history(node_id: int, limit: _Limit = 50, after_id: _After = None) -> EventPage:
         """Read everything that was ever done to one node, oldest first, a page at a time.
 
@@ -508,7 +501,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def list_links(
         node_id: int,
         link_type: Annotated[
@@ -527,7 +520,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 node_id=node_id, link_type=link_type, limit=limit, after_id=after_id
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def ready_work(
         kind: Annotated[
             str | None,
@@ -589,6 +582,15 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await claims.release_claim(actor=actor, node_id=node_id, note=note)
+
+    @mcp.tool(annotations=_READS)
+    async def who_is_working() -> WhoIsWorking:
+        """See who is working on what: every person or agent who has taken work, with the claims
+        they hold and how long each has to run, the claims that ran out on them with no handoff
+        note, and the last handoff note they left. Working first, then lapsed, then finished.
+        Use it before taking work, to see who else is on the project and what they hold."""
+        with _database_errors():
+            return await claims.who_is_working()
 
     @mcp.tool()
     async def next_work(
@@ -707,7 +709,7 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await workflow.update_nodes(actor=actor, changes=changes)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def changes_since(
         after_event_id: Annotated[
             int,
@@ -725,6 +727,21 @@ def create_server(settings: Settings) -> GuardedServer:
             int | None, Field(description="Only changes to this fact or belief.")
         ] = None,
         limit: _Limit = 100,
+        newest: Annotated[
+            bool,
+            Field(
+                description="True: show the newest changes (up to limit) instead of the oldest, "
+                "still oldest first among them, to see what has just been going on. Use "
+                "next_before_id to read the ones before."
+            ),
+        ] = False,
+        before_event_id: Annotated[
+            int | None,
+            Field(
+                description="Walk backwards: only the changes before this event (it implies "
+                "newest). Pass the next_before_id of the last answer."
+            ),
+        ] = None,
     ) -> ChangesPage:
         """Show what changed after an event, oldest first, so you read only what is new.
 
@@ -732,7 +749,8 @@ def create_server(settings: Settings) -> GuardedServer:
         Every event after the one you give is shown, in order, and none is skipped even when
         another change was still being written. Events are ordered by when their change began,
         which for two changes at the very same moment can differ from their ids. Give at most
-        one of node_id, rule_id, decision_id and memory_id.
+        one of node_id, rule_id, decision_id and memory_id. To see only the newest changes, ask
+        for newest, and walk back with before_event_id.
         """
         with _database_errors():
             return await workflow.changes_since(
@@ -743,6 +761,8 @@ def create_server(settings: Settings) -> GuardedServer:
                 decision_id=decision_id,
                 memory_id=memory_id,
                 limit=limit,
+                newest=newest,
+                before_event_id=before_event_id,
             )
 
     @mcp.tool()
@@ -768,13 +788,13 @@ def create_server(settings: Settings) -> GuardedServer:
                 actor=actor, title=title, body=body, status=status, story_id=story_id
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def get_rule(rule_id: int) -> Rule:
         """Read one rule, including the version you need to change it."""
         with _database_errors():
             return await rules.get_rule(rule_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def list_rules(
         story_id: Annotated[int | None, Field(description="Only the rules in this story.")] = None,
         unplaced: Annotated[
@@ -858,14 +878,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 new_story_id=new_story_id,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def rule_history(rule_id: int, limit: _Limit = 50, after_id: _After = None) -> EventPage:
         """Read everything that was ever done to one rule, oldest first, a page at a time: who did
         it, when, and the changed fields as they were and as they became."""
         with _database_errors():
             return await rules.rule_history(rule_id=rule_id, limit=limit, after_id=after_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def coverage_report(
         show: Annotated[
             str,
@@ -943,14 +963,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 rule_ids=rule_ids,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def get_decision(decision_id: int) -> Decision:
         """Read one decision, with its status, what replaced it or what it replaced, and the nodes
         and rules it is linked to."""
         with _database_errors():
             return await decisions.get_decision(decision_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def list_decisions(
         kind: Annotated[str | None, Field(description="Only decision or principle.")] = None,
         status: Annotated[str | None, Field(description="Only active or superseded.")] = None,
@@ -1033,7 +1053,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 rule_ids=rule_ids,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def recall(
         node_id: Annotated[
             int | None, Field(description="The epic, story or task to recall what is known for.")
@@ -1346,14 +1366,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 decision_ids=decision_ids,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def get_memory(memory_id: int) -> Memory:
         """Read one fact or belief: its source or evidence, its status, who recorded and confirmed
         it, what replaced it, and what it concerns."""
         with _database_errors():
             return await memories.get_memory(memory_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def list_memories(
         type: Annotated[str | None, Field(description="Only fact or belief.")] = None,
         kind: Annotated[
@@ -1412,7 +1432,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 after_id=after_id,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def memory_history(
         memory_id: int, limit: _Limit = 50, after_id: _After = None
     ) -> EventPage:
@@ -1424,7 +1444,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 memory_id=memory_id, limit=limit, after_id=after_id
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def decision_history(
         decision_id: int, limit: _Limit = 50, after_id: _After = None
     ) -> EventPage:
@@ -1435,7 +1455,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 decision_id=decision_id, limit=limit, after_id=after_id
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def search(
         query: Annotated[
             str,
@@ -1496,7 +1516,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 offset=offset,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def similar_items(
         node_id: Annotated[int | None, Field(description="An epic, story or task.")] = None,
         rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
@@ -1535,7 +1555,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 offset=offset,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def find_overlaps(
         item_type: Annotated[
             str, Field(description="story (the default), epic or rule: what to compare.")
@@ -1580,7 +1600,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 offset=offset,
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def find_mentions(
         node_id: Annotated[
             int | None, Field(description="An epic, story or task: who refers to it.")
@@ -1634,7 +1654,7 @@ def create_server(settings: Settings) -> GuardedServer:
                     "when the service is back."
                 ) from error
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READS)
     async def export_graph(
         after: Annotated[
             str | None,
