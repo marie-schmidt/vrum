@@ -10,7 +10,7 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, hold_back_news
+from tests.board_helpers import SLOW, board_url, browser_page, hold_back_news, made, plain
 from tests.helpers import ok, refused, the_token, unique_word
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -23,25 +23,11 @@ def board(server_url: str) -> str:
     return board_url(server_url)
 
 
-async def made(
-    client: Client, kind: str, title: str, parent: int | None = None, **more: Any
-) -> int:
-    fields: dict[str, Any] = {"actor": "agent-1", "kind": kind, "title": title, **more}
-    if parent:
-        fields["parent_id"] = parent
-    return int((await ok(client, "create_node", **fields))["id"])
-
-
 async def rule_in(client: Client, title: str, story: int | None = None, **more: Any) -> int:
     fields: dict[str, Any] = {"actor": "agent-1", "title": title, **more}
     if story:
         fields["story_id"] = story
     return int((await ok(client, "create_rule", **fields))["id"])
-
-
-def plain(board_words: str, mcp_words: str) -> None:
-    assert board_words.strip() and not board_words.startswith("Error executing tool")
-    assert mcp_words.endswith(board_words.strip()), (board_words, mcp_words)
 
 
 def group(page: Page, story: int) -> Any:
@@ -188,7 +174,7 @@ async def test_a_new_rule_is_first_until_it_is_placed_and_a_second_placement_is_
     assert sorted(r["id"] for r in in_second) == sorted([anchor, rule])
 
 
-# -- editing, stale edits, dropped rules and the keyboard -------------------------------------------
+# -- editing, stale edits, dropped rules and the keyboard ------------------------------------------
 
 
 async def test_a_rule_is_edited_with_its_version_and_a_stale_edit_is_refused_keeping_what_was_typed(
@@ -293,6 +279,26 @@ async def test_dropped_rules_are_hidden_until_asked_for_and_moving_an_unplaced_r
         await expect(problem).to_be_visible(timeout=SLOW)
         plain(await problem.inner_text(), said_move)
         assert (await ok(client, "get_rule", rule_id=loose))["story_id"] is None
+        await dialog.get_by_role("button", name="Cancel").click()
+
+        # Dragging a rule that is in no story onto a story places it (it is not a move). A long
+        # list of unplaced rules can sit between the two, so the drag is made with the browser's
+        # own drag events rather than with the mouse.
+        transfer = await page.evaluate_handle("new DataTransfer()")
+        source = page.locator(f"#unplaced-group li.rule[data-rule='{loose}']")
+        head = page.locator(f"#rule-groups section[data-group='{story}'] .group-head")
+        await source.dispatch_event("dragstart", {"dataTransfer": transfer})
+        await head.dispatch_event("dragover", {"dataTransfer": transfer})
+        await head.dispatch_event("drop", {"dataTransfer": transfer})
+        await source.dispatch_event("dragend", {"dataTransfer": transfer})
+        await expect(group(page, story).locator(f"li.rule[data-rule='{loose}']")).to_be_visible(
+            timeout=SLOW
+        )
+        assert [e["action"] for e in await history(client, loose)] == [
+            "rule_created",
+            "rule_placed",
+        ]
+        assert (await ok(client, "get_rule", rule_id=loose))["story_id"] == story
         assert w.problems == [], w.problems
 
 

@@ -187,11 +187,11 @@ export function evidencePicker({ chosen = [] } = {}) {
     return h('li', { dataset: { evidence: `${type}:${id}` } }, h('label', { class: 'check' }, box, ` ${words}`));
   };
   const items = [
-    ...decisions.map((decision) => row('decision', decision.id, `${decision.kind === 'principle' ? 'Principle' : 'Decision'} #${decision.id}: ${clip(decision.title, 80)}`)),
     ...facts.map((fact) => row('fact', fact.id, `Fact #${fact.id}: ${clip(fact.text, 80)}`)),
+    ...decisions.map((decision) => row('decision', decision.id, `${decision.kind === 'principle' ? 'Principle' : 'Decision'} #${decision.id}: ${clip(decision.title, 80)}`)),
   ];
   const find = h('input', { type: 'search', autocomplete: 'off', 'aria-label': 'Narrow the list of evidence', placeholder: 'narrow the list' });
-  const list = h('ul', { class: 'plain evidence-list' }, items.length ? items : h('li', { class: 'quiet' }, 'There are no facts or decisions in force to rest on yet. Record one first.'));
+  const list = h('ul', { class: 'evidence-pick' }, items.length ? items : h('li', { class: 'quiet' }, 'There are no facts or decisions in force to rest on yet. Record one first.'));
   find.addEventListener('input', () => {
     const needle = find.value.trim().toLowerCase();
     for (const li of list.querySelectorAll('li')) li.hidden = Boolean(needle) && !li.textContent.toLowerCase().includes(needle);

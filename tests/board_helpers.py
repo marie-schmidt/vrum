@@ -11,7 +11,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from mcp import Client
 from playwright.async_api import Dialog, Locator, Page, Request, Route, async_playwright, expect
+
+from tests.helpers import ok
 
 # Every request of the board has to go to the server it came from.
 VIEWPORT = {"width": 1500, "height": 1500}
@@ -21,6 +24,22 @@ SLOW = 15_000  # milliseconds a page may take to show what a change should bring
 def board_url(mcp_url: str) -> str:
     """The address of the board of the server whose MCP endpoint is `mcp_url`."""
     return mcp_url.removesuffix("/mcp") + "/board"
+
+
+async def made(
+    client: Client, kind: str, title: str, parent: int | None = None, **more: Any
+) -> int:
+    """Make an epic, story or task through MCP as an agent would, and give its id."""
+    fields: dict[str, Any] = {"actor": "agent-1", "kind": kind, "title": title, **more}
+    if parent:
+        fields["parent_id"] = parent
+    return int((await ok(client, "create_node", **fields))["id"])
+
+
+def plain(board_words: str, mcp_words: str) -> None:
+    """The board said what the tool says: the same words, without the protocol's prefix."""
+    assert board_words.strip() and not board_words.startswith("Error executing tool")
+    assert mcp_words.endswith(board_words.strip()), (board_words, mcp_words)
 
 
 @dataclass

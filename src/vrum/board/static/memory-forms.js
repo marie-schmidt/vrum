@@ -114,7 +114,14 @@ export function recordMemory(type, { replacing = [], draft = null, fromCheck = f
   const keep = replacing.length ? h('input', { type: 'checkbox', name: 'keep_links', checked: true }) : null;
   const said = replacing.length && belief ? saidBy(replacing) : null;
   const checking = store.info.language_model && !fromCheck
-    ? checkPanel(type, () => body.value, () => ({ text: body.value, evidence: evidenceRefs(evidence ? evidence.value() : {}), concerns: refsOf(links.value()) }), { onReplaced: belief ? () => box.close() : null })
+    ? checkPanel(
+        type,
+        () => body.value,
+        // A belief being written is what replaces the belief a proposal names; a fact cannot, so
+        // the form for that starts from the old belief instead.
+        () => (belief ? { text: body.value, evidence: evidenceRefs(evidence.value()), concerns: refsOf(links.value()) } : null),
+        { onReplaced: belief ? () => box.close() : null },
+      )
     : null;
   const evidenceArgs = () => {
     const value = evidence.value();

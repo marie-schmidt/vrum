@@ -26,6 +26,28 @@ def test_the_board_cannot_write_to_the_index_or_load_a_whole_graph() -> None:
     assert not BOARD_TOOLS & {"reindex", "import_graph"}
 
 
+def test_every_tool_a_page_script_names_is_one_the_board_may_call() -> None:
+    # A page that names a tool the server would turn away would fail only when a person clicked
+    # it, so the names in the scripts are checked here against the list. A name with an
+    # underscore is a tool wherever it is quoted; a one-word name (recall, search) only counts as
+    # one where it is the first argument of a call, because `search` is also an HTML role.
+    server = create_server(Settings.from_env(ENV))
+    tools = {tool.name for tool in asyncio.run(server.list_tools())}
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        named = {
+            name
+            for name in tools
+            if re.search(
+                rf"['\"`]{name}['\"`]"
+                if "_" in name
+                else rf"\b(?:call|callAll)\(\s*['\"`]{name}['\"`]",
+                text,
+            )
+        }
+        assert named <= BOARD_TOOLS, f"{path.name} names {sorted(named - BOARD_TOOLS)}"
+
+
 def test_only_the_page_files_are_open_and_the_data_calls_are_not() -> None:
     opened = open_paths()
     assert set(opened.values()) == {"GET"}

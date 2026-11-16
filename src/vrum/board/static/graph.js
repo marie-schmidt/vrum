@@ -539,6 +539,15 @@ function drawLists() {
       details.push(h('p', { class: 'quiet' }, `Origin: ${dot.origin}. Recorded by ${dot.by}.${dot.type === 'belief' ? ' A suggestion, not a decision.' : ''}${dot.stale ? ' Stale: its evidence changed.' : ''}`));
     }
     if (dot.type === 'decision' || dot.type === 'principle') details.push(h('p', { class: 'quiet' }, `Decided by ${dot.by}.`));
+    // A rule, decision, fact or belief has no card: its page is where it can be read in full and changed.
+    const pages = {
+      rule: ['Rules', `#/rules?rule=${dot.id}`],
+      decision: ['Memory', `#/memory?entry=decision:${dot.id}`],
+      principle: ['Memory', `#/memory?entry=decision:${dot.id}`],
+      fact: ['Memory', `#/memory?entry=fact:${dot.id}`],
+      belief: ['Memory', `#/memory?entry=belief:${dot.id}`],
+    };
+    if (pages[dot.type]) details.push(h('p', {}, h('a', { class: 'open-entry', href: pages[dot.type][1] }, `Open it on the ${pages[dot.type][0]} page`)));
     parts.chosen.append(
       h('h3', {}, 'Chosen item'),
       h('p', {}, h('strong', {}, `${KIND[dot.type].label} #${dot.id}`), ` ${dot.title}`),

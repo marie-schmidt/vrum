@@ -18,7 +18,8 @@ is built to be effective and efficient for agents and friendly to people: every 
 is wrong and what to do next, and every answer is small enough to read.
 
 It is a prototype, built one milestone at a time (see `PROGRESS.md`). You use it through an agent
-or a script, and through the board (a Kanban board and a graph so far, with more pages to come).
+or a script, and through the board (Kanban, graph, roadmap, table, outline, rules and memory so
+far, with more pages to come).
 
 ## Quick start
 
@@ -190,8 +191,33 @@ dot to pin it, zoom and pan, colour by kind, status or epic, and filter by kind,
 line. Beside the drawing, a list of the chosen item's neighbours and a list of every item in view
 do everything a click on the drawing does, from the keyboard.
 
-**What it does not do yet.** Rules, decisions, facts and beliefs are shown but not edited on the
-board: an agent still does that. More pages (memory, search and the rest) come in the next
+**Rules.** Every rule, grouped by the story that owns it, with the rules that are in no story
+first (the newest on top) and the coverage report below: the rules in no story, and the stories
+with no rule, with dropped rules and stories left out. Write a rule (**New rule**), change its
+title, details or status (**Edit**), and put it in a story: drag it onto a story, or choose **Put in
+a story…**, where **Place** puts a rule that is in no story into one and **Move** takes a rule from
+its story to another in one step. A rule is in at most one story, so placing a rule that is already
+in one is refused, in the server's words. Dropped rules are hidden until you ask for them.
+
+**Memory.** What the project remembers, in four lists on one page: principles (pinned at the top),
+decisions, facts and beliefs, newest first. Filter by kind, status, origin, who recorded or decided
+it, the day, and the item it concerns. Every entry says where it came from and who: a decision its
+decider and reason, a fact its source, a belief the evidence it rests on and whether a person has
+confirmed it. A belief is marked as a suggestion, never a decision; anything a language model
+proposed or drew up says so; a stale belief (one whose evidence is no longer in force) is shown
+apart with which evidence changed; and a replaced item shows the chain to what replaced it.
+From the page a person can record a decision, a fact or a belief (picking its evidence from a
+list), say what each concerns, replace one with a newer one or retract it (nothing is edited: the
+form starts from the old words and records a new item, and a retraction offers to retract or
+replace the beliefs that went stale), confirm a belief, and make a belief a decision under their
+own name and reason. Choose several facts or beliefs to replace or retract them together; replacing
+a belief a person confirmed asks who changed their mind and what they said. When the server has a
+language model, writing a fact or a belief offers to check it against every belief: it shows how
+far the check has got, then each proposal with the words that clash, with buttons to replace the
+belief or retract it. The **recall preview** at the top shows what an agent would be told for an
+item or a rule: the very answer of the `recall` tool, in its sections and with its reasons.
+
+**What it does not do yet.** More pages (search, overlaps and the rest) come in the next
 milestones.
 
 **Table.** One row for each epic, story or task, with its kind, title, parent, status, priority,
@@ -333,7 +359,9 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
   model for help, is careful with secrets, shows the board to a person (what agents do appears on
   it, what a person does is in the graph, refusals read the same), shows the table, outline and
   roadmap (the filter language, changing several rows, dragging bars, an address that reproduces a
-  view), and finally backs up, destroys
+  view), writes rules and memory on the board (placing and dragging a rule, recording and replacing
+  decisions and beliefs, stale beliefs, confirming and promoting, a check against every belief and
+  the recall preview), and finally backs up, destroys
   its own database, restores it, and loads an export into a fresh server. Every line it prints is
   one proof that holds. It uses a scripted stand-in for the embedding service and the language
   model, so nothing is downloaded and the answers are the same every run.

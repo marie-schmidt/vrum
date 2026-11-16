@@ -19,7 +19,9 @@ from tests.board_helpers import (
     board_url,
     browser_page,
     hold_back_news,
+    made,
     on,
+    plain,
     timeline,
 )
 from tests.board_helpers import drag_bar as drag
@@ -34,20 +36,6 @@ ACTOR = "Ada Lovelace"
 @pytest.fixture
 def board(server_url: str) -> str:
     return board_url(server_url)
-
-
-async def made(
-    client: Client, kind: str, title: str, parent: int | None = None, **more: Any
-) -> int:
-    fields: dict[str, Any] = {"actor": "agent-1", "kind": kind, "title": title, **more}
-    if parent:
-        fields["parent_id"] = parent
-    return int((await ok(client, "create_node", **fields))["id"])
-
-
-def plain(board_words: str, mcp_words: str) -> None:
-    assert board_words.strip() and not board_words.startswith("Error executing tool")
-    assert mcp_words.endswith(board_words.strip()), (board_words, mcp_words)
 
 
 async def updates(client: Client, node_id: int) -> list[dict[str, Any]]:

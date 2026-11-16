@@ -135,7 +135,7 @@ export function memoryEntry(memory, { reason = null, actions = null, choose = nu
           'div',
           { class: 'evidence-block' },
           h('p', { class: 'quiet' }, `Rests on ${plural(memory.evidence_count, 'piece')} of evidence:`),
-          h('ul', { class: 'plain evidence-list' }, memory.evidence.map(evidenceLine)),
+          h('ul', { class: 'plain evidence-lines' }, memory.evidence.map(evidenceLine)),
           memory.confirmed_by ? h('p', { class: 'quiet' }, `Confirmed by ${memory.confirmed_by} on ${moment(memory.confirmed_at)}.`) : h('p', { class: 'quiet' }, memory.status === 'active' ? 'Nobody has confirmed it.' : ''),
           memory.promoted_decision_ids.length ? h('p', { class: 'quiet' }, 'Made into decisions: ', joined(memory.promoted_decision_ids.map((id) => entryLink('decision', id, `#${id}`)))) : null,
         )
