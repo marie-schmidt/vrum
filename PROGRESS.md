@@ -1,6 +1,6 @@
 # Progress
 
-Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C, M9, M10, M11, M12 and M13 done; M8 skipped; next is M14)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C, M9, M10, M11, M12, M13 and M14 done; M8 skipped; next is M15)
 
 ## Inputs (from the loop file)
 
@@ -31,7 +31,7 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M11. More views of the work (attempts: 1) (2026-11-16, commit cd84608)
 - [x] M12. Rules and memory on the board (attempts: 1) (2026-11-16, commit 7307fed)
 - [x] M13. Find and connect (attempts: 1) (2026-11-16, commit d55e6b7)
-- [ ] M14. Run and see it all (attempts: 0)
+- [x] M14. Run and see it all (attempts: 1) (2026-11-16, commit 5a69807)
 - [ ] M15. Accounts and private projects (attempts: 0)
 - [ ] M16. Simplify the product: work and context, without server-side generation (attempts: 0)
 - [ ] M17. Frontend redesign: the approved Vrum workbench, in light and dark (attempts: 0)
@@ -318,6 +318,19 @@ Full wording is in `DECISIONS.md`.
 - **Mutation checks:** with a retraction always retracting the dependent beliefs, the stale-belief test failed; with a drag always sending `move_rule`, the unplaced-rule drag failed; with the origin filter ignoring facts and beliefs, the filter test failed; with the preview showing a decision's reason instead of the tool's `why`, the preview test failed. Each was put back.
 - **Found along the way:** (1) Handing a list of elements to `append` or `replaceChildren` writes `[object HTMLElement]`, and handing it `null` writes "null"; the first screenshots showed both, and are why a screenshot is worth taking. (2) `.field input { width: 100% }` also reached the evidence checkboxes and squeezed their labels away. (3) The page container is shared by every page, so listeners put on it have to come off when the page goes. (4) A change of address is handled a moment after the script that made it returns, so tests wait until the lists are what they should be. (5) A real mouse drag needs the dragged row and its target both in view, which a long list of unplaced rules between them does not allow; that one test sends the browser's own drag events. (6) A belief a model drew up concerns nothing until someone links it, so the "Concerns" filter does not find it (a test of mine assumed it did). (7) The workspace app saved my unfinished work as a commit ("Save uncommitted changes", `afdb05d`) while this milestone was in progress, and it is on `origin/main` under the finished one; I did not rewrite history.
 - Scratch stacks, the clone, scratch scripts and screenshots are removed; no containers, volumes, networks or `vrum` images are left. The board's tool list gained the rule, decision and memory writes and `find_contradictions`.
+
+## M14 proof, as run
+
+- `./check.sh` (one run, nothing failed): lint, strict types, 197 unit tests and 334 integration tests pass on a database built from scratch (the new ones: the Home, Activity, Tools and Status browser tests, `test_status_integration.py`, the tool classification tests and the `newest` mode of `changes_since`).
+- From a clean clone of the commit (`5a69807`: no `.venv`, no `.env`), `./acceptance.sh` printed **ACCEPTANCE PASSED: 177 proofs in 325 seconds (M0 4, M1 6, M1A 8, M2 4, M3 5, M4 3, M4A 17, M5 11, M5B 18, M5C 14, M6 11, M7 4, M9 1, M10 18, M11 12, M12 8, M13 17, M14 16). M8 is skipped: no ledger path was given.** The new chapter, "Running it and seeing it all", shows each proof of the spec in a headless Chromium with a real MCP client beside it:
+  1. **Home:** it is the first page after signing in, and each number (ready work nobody holds, blocked, overdue, lapsed, rules in no story, stories with no rule, decisions this week, stale beliefs, beliefs waiting for confirmation, overlap candidates, items waiting to be indexed) equalled what the tools say for the same question. Following blocked, overdue, lapsed or free work landed on the Table filtered by that question with the same count and items; the rule numbers landed on the Rules page, the stale beliefs on the Memory page with exactly those beliefs and the overlap candidates on the Overlaps page with exactly the unmarked pairs; an epic's count of each status equalled `list_nodes` and following it showed exactly those items.
+  2. **Activity:** through MCP an agent took work with `next_work`, edited a rule, recorded a decision and finished with a handoff note. Within seconds and with no reload Activity showed each in plain words with the actor, the note in full and the claim in "Who is working on what" with a countdown. In the browser a person claimed a task under a typed name, renewed it and released it with a note, and a claim that ran out moved by itself to lapsed, as `get_node` and `who_is_working` said. The filters (actor, kind, item, day) each equalled `changes_since` with the same filter.
+  3. **Tools:** the page listed exactly the server's 58 tools (same count and names), each with its description and fields, 51 on the board and 7 for agents only with the reason. Try it on `list_nodes` equalled MCP; 24 tools only read and have a Try it, 34 change something and have none, and the server answered a try of one with 403. The classification test failed naming `reindex` when it was taken out of the map (shown once) and passed with it put back.
+  4. **Status:** it equalled `server_status` and the index state `search` reports; with the embedding service stopped it said so and counted the item waiting; on the second server it said no language model is set up; the downloaded export was identical to the MCP export, every page of it; the token and the database password were in none of the 113 responses the pages received, in no page, no address and no downloaded file.
+  5. **Earlier proofs:** every earlier proof still passed; the README, `AGENTS.md` and `./acceptance.sh` cover the new pages.
+- **Mutation checks:** with Home's blocked number linking to another filter, the following test failed; with the Status page writing the token on the page, the secrets test failed; with the try route no longer asking whether a tool only reads, the Tools test failed on a `create_node` that was accepted (200 instead of 403); with `reindex` out of the map, the classification test failed naming it. Each was put back and the tests pass again.
+- **Found along the way:** (1) An article called `tool-<name>` collided with the page's own `#tool-search`, so entries are `tool-entry-<name>`. (2) The tests that expected the Kanban as the first page now expect Home. (3) Counting rows twice in a row can pass on the old page, so the tests wait until the ids are the expected ones. (4) A test that clicks "Show more" a fixed 100 times stopped short on a database with over 2,000 overlap pairs; the limit is now worked out from the number of pairs. (5) Events are ordered by commit and then id, so the Activity feed cannot jump to an id; `changes_since` gained `newest` and `before_event_id`.
+- Scratch stacks, the clone, scratch scripts and screenshots are removed; no containers, volumes, networks or `vrum` images are left.
 
 ## M13 proof, as run
 
