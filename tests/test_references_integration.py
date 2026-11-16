@@ -9,7 +9,7 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
-    make_belief,
+    confirm,
     make_decision,
     make_fact,
     make_rule,
@@ -56,7 +56,6 @@ async def test_every_kind_of_text_can_hold_a_reference_to_every_kind_of_item(
     task = await node(client, "task", f"Task {word}", story)
     rule = (await make_rule(client, f"Rule {word}", story_id=story))["id"]
     fact = (await make_fact(client, f"Fact {word}", node_ids=[story]))["id"]
-    belief = (await make_belief(client, [{"id": fact}], f"Belief {word}"))["id"]
     decision = (await make_decision(client, f"Decision {word}"))["id"]
 
     mentioners = {
@@ -79,17 +78,18 @@ async def test_every_kind_of_text_can_hold_a_reference_to_every_kind_of_item(
             client,
             f"Decision two {word}",
             text=f"Because of [[fact:{fact}]].",
-            reason=f"And [[belief:{belief}]], and [[node:{task}]].",
+            reason=f"And [[rule:{rule}]], and [[node:{task}]].",
         )
     )["id"]
     fact_two = (await make_fact(client, f"Fact two {word}", source=f"[[decision:{decision}]]"))[
         "id"
     ]
-    belief_two = (await make_belief(client, [{"id": fact}], f"Belief two [[node:{story}]] {word}"))[
-        "id"
-    ]
+    fact_three = (await make_fact(client, f"Fact three [[node:{story}]] {word}"))["id"]
+    # A fact that is withdrawn, or replaced, is still text that names things, and says what it is.
+    gone = await make_fact(client, f"Gone [[node:{story}]] {word}")
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[gone["id"]], reason="It was wrong.")
 
-    # Who mentions the story: a story's body, a task's body and a belief's text, in item order.
+    # Who mentions the story: a story's body, a task's body and two facts' texts, in item order.
     by_story = {
         (m["source"]["item_type"], m["source"]["id"]): m
         for m in await everything(client, node_id=story)
@@ -97,11 +97,14 @@ async def test_every_kind_of_text_can_hold_a_reference_to_every_kind_of_item(
     assert who(await everything(client, node_id=story)) == [
         ("story", mentioners["story"]),
         ("task", mentioners["task"]),
-        ("belief", belief_two),
+        ("fact", fact_three),
+        ("fact", gone["id"]),
     ]
     assert by_story["task", mentioners["task"]]["fields"] == ["details"]
     assert by_story["story", mentioners["story"]]["fields"] == ["details"]
-    assert by_story["belief", belief_two]["fields"] == ["text"]
+    assert by_story["fact", fact_three]["fields"] == ["text"]
+    assert by_story["fact", fact_three]["source"]["status"] == "active"
+    assert by_story["fact", gone["id"]]["source"]["status"] == "withdrawn"
     assert f"[[node:{story}]]" in by_story["story", mentioners["story"]]["snippet"]
     assert by_story["task", mentioners["task"]]["source"]["status"]
     assert all(
@@ -111,13 +114,15 @@ async def test_every_kind_of_text_can_hold_a_reference_to_every_kind_of_item(
     )  # fmt: skip
 
     # Each other kind of item, each from another kind of text.
-    assert who(await everything(client, rule_id=rule)) == [("story", mentioners["story"])]
+    assert who(await everything(client, rule_id=rule)) == [
+        ("story", mentioners["story"]),
+        ("decision", decision_two),
+    ]
     assert who(await everything(client, decision_id=decision)) == [
         ("rule", rule_two),
         ("fact", fact_two),
     ]
-    assert who(await everything(client, memory_id=fact)) == [("decision", decision_two)]
-    assert who(await everything(client, memory_id=belief)) == [("decision", decision_two)]
+    assert who(await everything(client, fact_id=fact)) == [("decision", decision_two)]
     assert who(await everything(client, node_id=task)) == [("decision", decision_two)]
     (reason,) = await everything(client, node_id=task)
     assert reason["fields"] == ["reason"] and reason["source"]["title"] == f"Decision two {word}"
@@ -132,7 +137,38 @@ async def test_every_kind_of_text_can_hold_a_reference_to_every_kind_of_item(
     assert await everything(client, node_id=epic) == []
 
 
-async def test_a_missing_item_and_the_wrong_kind_are_plainly_missing_and_nothing_is_linked(
+async def test_a_replaced_decision_still_names_what_it_named_and_says_it_was_replaced(
+    client: Client,
+) -> None:
+    word = unique_word()
+    epic = await node(client, "epic", f"E {word}")
+    story = await node(client, "story", f"Story {word}", epic)
+    first = await make_decision(
+        client, f"First {word}", text=f"About [[node:{story}]].", node_ids=[story]
+    )
+    await confirm(client, "decision", first)
+    second = await ok(
+        client,
+        "supersede_decision",
+        actor="a",
+        decision_id=first["id"],
+        title=f"Second {word}",
+        text="Something else now.",
+        reason="Changed.",
+        decided_by="Marie",
+        said_by="Marie",
+        quote="Change it.",
+    )
+
+    mentions = await everything(client, node_id=story)
+
+    # The replaced decision is still text that names the story, and is shown as what it now is.
+    assert who(mentions) == [("decision", first["id"])]
+    assert mentions[0]["source"]["status"] == "superseded"
+    assert who(await everything(client, decision_id=second["id"])) == []
+
+
+async def test_a_missing_item_and_a_kind_that_is_gone_are_plainly_not_links_and_nothing_is_linked(
     client: Client,
 ) -> None:
     word = unique_word()
@@ -145,8 +181,9 @@ async def test_a_missing_item_and_the_wrong_kind_are_plainly_missing_and_nothing
         "task",
         f"Holder {word}",
         story,
-        body=f"Gone [[node:987654321]], wrong kind [[belief:{fact}]], fine [[fact:{fact}]], "
-        "and not references: [[node: 5]] [[node:05]] [[ node:5 ]] [[nodes:5]] [node:5] [[node:5].",
+        body=f"Gone [[node:987654321]] and [[decision:987654321]], fine [[fact:{fact}]], "
+        f"and not references: [[belief:{fact}]] [[principle:{fact}]] [[memory:{fact}]] "
+        "[[node: 5]] [[node:05]] [[ node:5 ]] [[nodes:5]] [node:5] [[node:5].",
     )
     mine = [
         m
@@ -154,12 +191,11 @@ async def test_a_missing_item_and_the_wrong_kind_are_plainly_missing_and_nothing
         if (m["source"]["item_type"], m["source"]["id"]) == ("task", holder)
     ]
     by_target = {(m["target"]["kind"], m["target"]["id"]): m["target"] for m in mine}
-    assert set(by_target) == {("node", 987654321), ("belief", fact), ("fact", fact)}
+    assert set(by_target) == {("node", 987654321), ("decision", 987654321), ("fact", fact)}
     assert by_target[("node", 987654321)] == {
         "kind": "node", "id": 987654321, "exists": False, "item_type": None, "title": None,
     }  # fmt: skip
-    # A belief written for a fact's id is missing, and the real fact is not.
-    assert by_target[("belief", fact)]["exists"] is False
+    assert by_target[("decision", 987654321)]["exists"] is False
     assert by_target[("fact", fact)]["exists"] is True
     assert by_target[("fact", fact)]["item_type"] == "fact"
     # A reference is only text: no link, and the story's own state is as it was.
@@ -243,11 +279,15 @@ async def test_with_no_target_every_reference_is_listed_and_equals_the_per_item_
 async def test_a_bad_request_is_refused_in_plain_words(client: Client) -> None:
     story = await node(client, "epic", f"Bad {unique_word()}")
     said = await refused(client, "find_mentions", node_id=story, rule_id=1)
-    assert "Give at most one of node_id, rule_id, decision_id or memory_id" in said
+    assert "Give at most one of node_id, rule_id, decision_id or fact_id" in said
     assert "There is no node with id 987654321" in await refused(
         client, "find_mentions", node_id=987654321
     )
     assert "There is no rule with id" in await refused(client, "find_mentions", rule_id=987654321)
+    assert "There is no decision with id" in await refused(
+        client, "find_mentions", decision_id=987654321
+    )
+    assert "There is no fact with id" in await refused(client, "find_mentions", fact_id=987654321)
     assert "offset must be 0 or more" in await refused(client, "find_mentions", offset=-1)
     assert "limit must be a whole number from 1 to 200" in await refused(
         client, "find_mentions", limit=0

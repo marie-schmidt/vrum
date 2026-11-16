@@ -168,8 +168,7 @@ def make_project(owner: Person, name: str | None = None) -> Project:
 
 
 def the_project() -> Project:
-    """The project almost every test works in, made once for this run, on the check stack. The
-    server with no language model shares its database, so the same project is there too."""
+    """The project almost every test works in, made once for this run, on the check stack."""
     global _shared
     if _shared is None:
         base = server_base()
@@ -182,9 +181,6 @@ def project_at(board_address: str) -> Project:
     base, _, rest = board_address.partition("/board/p/")
     number = int(rest.split("#")[0].split("/")[0])
     found = _projects.get((base, number))
-    if found is None:
-        # The second server shares the first one's database, so its projects are the same ones.
-        found = next((one for (_, known), one in _projects.items() if known == number), None)
     if found is None:
         pytest.fail(f"This run did not make the project at {board_address}.")
     return found

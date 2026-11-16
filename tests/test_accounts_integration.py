@@ -481,6 +481,15 @@ async def test_a_key_a_cookie_or_a_password_is_in_no_log_no_event_and_cannot_be_
             for tool, fields in (
                 ("create_node", {"kind": "epic", "title": f"leaked {secret}"}),
                 ("retain_fact", {"text": f"it is {secret}", "source": "somewhere"}),
+                (
+                    "record_decision",
+                    {
+                        "title": "d",
+                        "text": "t",
+                        "reason": f"because {secret}",
+                        "decided_by": "Marie",
+                    },
+                ),
             ):
                 refusal = await client.call_tool(tool, {"actor": "agent", **fields})
                 assert refusal.is_error and kind in str(refusal.content)
@@ -490,7 +499,7 @@ async def test_a_key_a_cookie_or_a_password_is_in_no_log_no_event_and_cannot_be_
     everything = json.dumps(events)
     for secret in (project.key, person.cookie, person.password, wrong):
         assert secret not in everything
-    logs = compose("logs", "app", "app-no-model", "--no-color")
+    logs = compose("logs", "app", "--no-color")
     assert logs.returncode == 0, logs.stderr
     for secret in (project.key, person.cookie, person.csrf, person.password, wrong):
         assert secret not in logs.stdout + logs.stderr

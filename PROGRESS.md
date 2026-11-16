@@ -35,8 +35,13 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M15. Accounts and private projects (attempts: 1) (2026-11-16, commit b1e3fea, with a board fix in 7e9bd5b)
 - [ ] M16. Simplify the product: work and context, without server-side generation (attempts: 0)
 - [ ] M17. Frontend redesign: the approved Vrum workbench, in light and dark (attempts: 0)
+- [ ] M18. Concise, recruiter-friendly README (attempts: 0)
 
 ## Added scope
+
+- Owner's clarification, 2026-11-16: M18 includes two screenshots of the real M17 app using the same explicitly fictional demo project: Board at the end of the overview and Graph below Getting started, showing work linked to facts and decisions. Populate the isolated screenshot project through real operations on a throwaway stack, label both images "Example project with fictional data", include alt text, and keep normal installations free of demo records. No real credentials or personal/private data may appear; remove the capture stack afterwards.
+
+- Owner's decision, 2026-11-16: M18 follows M17 and rewrites `README.md` for a concise, recruiter-friendly introduction. Put a short problem/value overview first and practical getting-started instructions second, followed only by worthwhile supporting detail and links to deeper guides. Use concrete, natural prose without em/en dashes, promotional filler or decorative AI-style patterns. Reflect the finished M16/M17 product, preserve essential reference material in linked docs, and update documentation checks rather than retaining a long README to satisfy old layout assumptions. Full scope and proof are in `SPEC.md`; the README rewrite has not started.
 
 - Owner's decision, 2026-11-15: M17 follows M16 and implements the approved, refined frontend design throughout the real application, including account/project flows and secondary surfaces. Preserve Vrum's wordmark and vermilion identity; use the refined light/dark Board and Graph references in `docs/design/m17/`, consistent typography/spacing/SVG icons, and Light / Dark / System with a persistent browser preference. Carry forward the fixes for stretched cards, square epic markers, wrapping, alignment, progress and graph routing. M15/M16 behaviour, accessibility, responsive layouts, safe rendering and the existing architecture remain intact. The full contract and real-container proofs are in `SPEC.md`. This records approval and scope only: M17 has not started, and M14 through M16 stay ahead of it.
 

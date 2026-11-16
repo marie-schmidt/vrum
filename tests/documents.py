@@ -48,16 +48,11 @@ def rule(rule_id: int, story: int | None, **more: Any) -> dict[str, Any]:
     }
 
 
-def memory(memory_id: int, kind: str, **more: Any) -> dict[str, Any]:
-    fact = kind == "fact"
+def fact(fact_id: int, **more: Any) -> dict[str, Any]:
     return {
-        "id": memory_id,
-        "type": kind,
-        "kind": "world" if fact else None,
-        "text": f"{kind} {memory_id}",
-        "source": "a chat" if fact else None,
-        "happened_on": None,
-        "origin": "stated",
+        "id": fact_id,
+        "text": f"fact {fact_id}",
+        "source": "a chat",
         "recorded_by": "ann",
         "recorded_at": WHEN,
         "status": "active",
@@ -68,7 +63,6 @@ def memory(memory_id: int, kind: str, **more: Any) -> dict[str, Any]:
         "node_ids": [],
         "rule_ids": [],
         "decision_ids": [],
-        "evidence": [],
         **more,
     }
 
@@ -76,15 +70,17 @@ def memory(memory_id: int, kind: str, **more: Any) -> dict[str, Any]:
 def decision(decision_id: int, **more: Any) -> dict[str, Any]:
     return {
         "id": decision_id,
-        "kind": "decision",
         "title": "A decision",
         "text": "What was decided",
         "reason": "Because",
         "decided_by": "Marie",
         "decided_on": "2026-11-15",
+        "project_wide": False,
         "status": "active",
         "superseded_by_id": None,
-        "promoted_from_id": None,
+        "status_reason": None,
+        "confirmed_by": None,
+        "confirmed_at": None,
         "recorded_at": WHEN,
         "node_ids": [],
         "rule_ids": [],
@@ -99,7 +95,7 @@ def event(event_id: int, **more: Any) -> dict[str, Any]:
         "other_node_id": None,
         "rule_id": None,
         "decision_id": None,
-        "memory_id": None,
+        "fact_id": None,
         "action": "create",
         "actor": "ann",
         "at": WHEN,
@@ -111,6 +107,6 @@ def event(event_id: int, **more: Any) -> dict[str, Any]:
 
 def a_file(**sections: list[dict[str, Any]]) -> dict[str, Any]:
     document: dict[str, Any] = {"format": "vrum-export", "version": 1}
-    for name in ("nodes", "links", "rules", "decisions", "memories", "events"):
+    for name in ("nodes", "links", "rules", "decisions", "facts", "events"):
         document[name] = sections.get(name, [])
     return document

@@ -276,15 +276,16 @@ async def walls() -> None:
             counts = (await ok(side.client, "server_status"))["counts"]
             exported = found["export"]["counts"]
             checks.append(counts["events"] == exported["events"] == len(found["export"]["events"]))
-            # A principle applies throughout its own project: this task is in no principle's links.
-            checks.append(side.world["principle"]["title"] in json.dumps(found["recall"]))
-            foreign = [other.world["principle"]["title"] for other in others]
+            # A decision that applies throughout its own project: this task is in no decision's
+            # links, and the project-wide one is in its recall, and no other project's is.
+            checks.append(side.world["wide"]["title"] in json.dumps(found["recall"]))
+            foreign = [other.world["wide"]["title"] for other in others]
             checks.append(all(title not in json.dumps(found["recall"]) for title in foreign))
         proof(
             "M15",
-            "exact and semantic search, similar items, overlaps, recall, principles, coverage, "
-            "claims, change feeds, counts and exports each show only the project's own records, "
-            "though the three projects share the same id numbers",
+            "exact and semantic search, similar items, overlaps, recall, project-wide decisions, "
+            "coverage, claims, change feeds, counts and exports each show only the project's own "
+            "records, though the three projects share the same id numbers",
             all(checks),
             f"{len(checks)} comparisons over 3 projects",
         )
@@ -312,10 +313,11 @@ async def walls() -> None:
             ),
             await refused(
                 a1.client,
-                "record_belief",
+                "retain_fact",
                 actor="x",
                 text="t",
-                evidence_fact_ids=[there.fact],
+                source="s",
+                decision_ids=[there.decision],
             ),
             await refused(
                 a1.client,
@@ -341,23 +343,23 @@ async def walls() -> None:
                 project=one,
             ),
             sql_refused(
-                "INSERT INTO belief_evidence (project_id, belief_id, fact_id) "
-                f"VALUES ({one}, {mine_ids['belief1']['id']}, {there.fact})"
+                "INSERT INTO fact_decisions (project_id, fact_id, decision_id) "
+                f"VALUES ({one}, {mine_ids['fact2']['id']}, {there.decision})"
             ),
             sql_refused(
-                f"UPDATE memories SET status = 'superseded', superseded_by_id = {there.fact}, "
-                f"status_reason = 'x' WHERE project_id = {one} AND id = {mine_ids['fact1']['id']}"
+                f"UPDATE facts SET status = 'superseded', superseded_by_id = {there.fact}, "
+                f"status_reason = 'x' WHERE project_id = {one} AND id = {mine_ids['fact2']['id']}"
             ),
             sql_refused(
                 f"UPDATE decisions SET status = 'superseded', superseded_by_id = {there.decision} "
-                f"WHERE project_id = {one} AND id = {mine_ids['principle']['id']}"
+                f"WHERE project_id = {one} AND id = {mine_ids['wide']['id']}"
             ),
         ]
         proof(
             "M15",
-            "a parent, a link, evidence or a replacement in another project is refused through "
-            "the tools and, even for the database's owner, by direct database writes; nothing in "
-            "either project changed",
+            "a parent, a link, a fact's decision or a replacement in another project is refused "
+            "through the tools and, even for the database's owner, by direct database writes; "
+            "nothing in either project changed",
             all("There is no" in text for text in by_tool)
             and all("violates" in text or "must be an active" in text for text in by_database)
             and await export_everything(a1.client) == before_a1
@@ -429,13 +431,19 @@ async def switching() -> None:
         connect(first.mcp_url, first.key) as one,
         connect(second.mcp_url, second.key) as two,
     ):
-        await made(one, "epic", f"Only in the first {word}")
+        epic_one = await made(one, "epic", f"Only in the first {word}")
+        story_one = await made(one, "story", f"First story {word}", epic_one)
+        await ok(one, "retain_fact", actor="a", text=f"A first fact {word}", source="The first")
         await made(two, "epic", f"Only in the second {word}")
         async with browser_page(first.address, token=first.key, name=None, keep_bodies=True) as w:
-            await w.open("#/board")
-            await expect(
-                w.page.get_by_role("region", name=f"Epic Only in the first {word}")
-            ).to_be_visible(timeout=SLOW)
+            # The first project's search drawer and detail panel are open when it is left.
+            await w.open(f"#/board?drawer=search&search=first+{word}&sel=node:{story_one}")
+            await expect(w.page.locator("#card-title")).to_contain_text(
+                f"#{story_one} ", timeout=SLOW
+            )
+            await expect(w.page.locator("#search-results li.result").first).to_be_visible(
+                timeout=SLOW
+            )
             released = asyncio.Event()
             held_back: list[str] = []
 
@@ -477,8 +485,46 @@ async def switching() -> None:
                 and all(f"Only in the first {word}" not in text for text in second_bodies),
                 f"{len(held_back)} held back, {len(later)} requests after the switch",
             )
+            # M16: the drawers and the panel are part of that. Nothing of the first project shows in
+            # any view, drawer or panel of the second, however late its answers were.
+            leaked = []
+            for address in (
+                "#/graph?view=everything",
+                "#/graph?view=context&as=list",
+                "#/roadmap",
+                "#/board?drawer=activity",
+                f"#/board?drawer=search&search=first+{word}",
+                f"#/board?sel=node:{story_one}",
+            ):
+                await w.go(address)
+                await asyncio.sleep(1)
+                text = await w.page.locator("body").inner_text()
+                leaked += [
+                    (address, gone)
+                    for gone in (
+                        f"Only in the first {word}",
+                        f"News for the first {word}",
+                        f"First story {word}",
+                        f"A first fact {word}",
+                    )
+                    if gone in text
+                ]
+            after = [text for url, text in w.bodies if f"/projects/{second.id}/" in url]
+            proof(
+                "M16",
+                "the held-back answers of a project that was left reach none of the other "
+                "project's views, drawers or detail panel: the search drawer and a chosen item "
+                "of the first did not come along, and what the second received holds nothing "
+                "of the first",
+                not leaked
+                and bool(after)
+                and all(f"First story {word}" not in text for text in after)
+                and all(f"A first fact {word}" not in text for text in after)
+                and not [url for url in w.requests[before:] if f"/projects/{first.id}/" in url],
+                f"{len(after)} responses of the second project read",
+            )
     async with browser_page(stranger_project.address, token=stranger_project.key, name=None) as w:
-        await w.open("#/home")
+        await w.open("#/board")
         await w.page.goto(first.address)
         await expect(w.page.locator("#no-such-project")).to_be_visible(timeout=SLOW)
         body = await w.page.locator("body").inner_text()
@@ -583,7 +629,7 @@ async def secrets_are_kept() -> None:
         exported = await export_everything(client)
     stored = held(f"SELECT password_hash FROM accounts WHERE email = '{person.email}'")
     dump = compose("exec", "-T", "db", "pg_dump", "-U", "vrum", "-d", "vrum").stdout
-    logs = compose("logs", "app", "app-no-model", "--no-color")
+    logs = compose("logs", "app", "--no-color")
     secrets = (person.password, person.cookie, person.csrf, project.key, wrong)
     proof(
         "M15",

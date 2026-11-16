@@ -116,42 +116,22 @@ def test_the_embedding_key_can_come_from_a_file(tmp_path: Path) -> None:
         Settings.from_env({**base, "EMBEDDING_API_KEY_FILE": str(empty)})
 
 
-def test_there_is_no_language_model_unless_one_is_set_up() -> None:
-    assert Settings.from_env(FULL_ENV).llm is None
-
-
-def test_a_language_model_needs_a_url_and_a_model_together() -> None:
-    with pytest.raises(ConfigError, match="LLM_MODEL is not set"):
-        Settings.from_env({**FULL_ENV, "LLM_BASE_URL": "http://model:8080/v1"})
-    with pytest.raises(ConfigError, match="LLM_BASE_URL is not set"):
-        Settings.from_env({**FULL_ENV, "LLM_MODEL": "a-model"})
-    with pytest.raises(ConfigError, match="must start with http"):
-        Settings.from_env({**FULL_ENV, "LLM_BASE_URL": "model:8080", "LLM_MODEL": "m"})
-
-
-def test_language_model_settings_have_defaults_and_the_key_stays_out_of_sight(
-    tmp_path: Path,
-) -> None:
-    base = {**FULL_ENV, "LLM_BASE_URL": "http://model:8080/v1/", "LLM_MODEL": "m"}
-    llm = Settings.from_env(base).llm
-    assert llm is not None and llm.base_url == "http://model:8080/v1" and llm.api_key is None
-    assert (llm.timeout_seconds, llm.max_input_chars) == (120.0, 12000)
-
-    key_file = tmp_path / "key"
-    key_file.write_text("a-key-in-a-file\n")
-    changed = Settings.from_env(
-        {**base, "LLM_TIMEOUT_SECONDS": "5", "LLM_MAX_INPUT_CHARS": "2000", "LLM_API_KEY": "k"}
-    ).llm
-    assert changed is not None and changed.api_key == "k"
-    assert (changed.timeout_seconds, changed.max_input_chars) == (5.0, 2000)
-    assert "k'" not in repr(changed)
-    from_file = Settings.from_env({**base, "LLM_API_KEY_FILE": str(key_file)}).llm
-    assert from_file is not None and from_file.api_key == "a-key-in-a-file"
-    assert "a-key-in-a-file" not in repr(from_file)
-    with pytest.raises(ConfigError, match="LLM_MAX_INPUT_CHARS must be a whole number of 1000"):
-        Settings.from_env({**base, "LLM_MAX_INPUT_CHARS": "10"})
-    with pytest.raises(ConfigError, match="LLM_TIMEOUT_SECONDS must be a number of seconds"):
-        Settings.from_env({**base, "LLM_TIMEOUT_SECONDS": "soon"})
+def test_there_is_no_language_model_setting_and_a_leftover_one_is_not_read() -> None:
+    # Vrum stores, retrieves and coordinates; it does not generate answers, so there is nothing
+    # to set up. An old LLM_* setting in the environment is simply not read, and its key is not
+    # treated as a secret the server holds.
+    leftover = {
+        **FULL_ENV,
+        "LLM_BASE_URL": "http://model:8080/v1",
+        "LLM_MODEL": "a-model",
+        "LLM_API_KEY": "left-over-model-key",
+    }
+    settings = Settings.from_env(leftover)
+    assert not hasattr(settings, "llm")
+    assert "left-over-model-key" not in repr(settings)
+    assert "left-over-model-key" not in settings.secrets()
+    assert settings == Settings.from_env(FULL_ENV)
+    assert Settings.from_env({**FULL_ENV, "LLM_BASE_URL": "model:8080"}).embedding is None
 
 
 def test_the_server_needs_no_token_to_start_and_a_leftover_one_changes_nothing() -> None:
@@ -170,15 +150,8 @@ def test_the_secrets_a_server_holds_are_listed_so_that_logs_can_be_scrubbed() ->
         "EMBEDDING_BASE_URL": "http://e/v1",
         "EMBEDDING_MODEL": "m",
         "EMBEDDING_API_KEY": "embedding-key-value",
-        "LLM_BASE_URL": "http://l/v1",
-        "LLM_MODEL": "m",
-        "LLM_API_KEY": "model-key-value",
     }
-    assert set(Settings.from_env(env).secrets()) == {
-        "s3cret-value",
-        "embedding-key-value",
-        "model-key-value",
-    }
+    assert set(Settings.from_env(env).secrets()) == {"s3cret-value", "embedding-key-value"}
 
 
 def test_the_request_size_limit_has_a_default_and_can_be_changed() -> None:

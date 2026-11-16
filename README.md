@@ -10,17 +10,20 @@ Give your coding agents shared tasks, lasting decisions and clear handoffs. Spen
 repeating yourself and more time moving the project forward.
 
 Vrum is a project graph that you run yourself, for AI coding agents and the people who work
-with them. It keeps what a project is made of: epics that hold stories that hold tasks, the rules
-(requirements) each story must meet, the decisions people made and why, and what the team has
-learned. Agents use it over MCP, so that every agent, in every session, starts from what is already
-known instead of from nothing. People see all of it, and steer it, on a board in the browser. It
-is built to be effective and efficient for agents and friendly to people: every refusal says what
-is wrong and what to do next, and every answer is small enough to read.
+with them. It keeps what a project is made of: epics that hold stories that hold tasks, the
+requirements each story must meet, the decisions people made and why, and the facts the team has
+learned and where they came from. Agents use it over MCP, so that every agent, in every session,
+starts from what is already known instead of from nothing. People see all of it, and steer it, on a
+board in the browser. It is built to be effective and efficient for agents and friendly to people:
+every refusal says what is wrong and what to do next, and every answer is small enough to read.
+Vrum stores, retrieves and coordinates; it never generates answers or conclusions: the agents
+connected to it do the reasoning and record what they find.
 
 It is a prototype, built one milestone at a time (see `PROGRESS.md`). You register an account on the
 board, make private projects there, and give each agent a key for one project. You use a project
-through an agent or a script, and through the board (home, Kanban, graph, roadmap, table, outline,
-rules, memory, search, overlaps, activity, tools, agent access and status).
+through an agent or a script, and through the board: **Board**, **Graph** and **Roadmap**, with
+search, an activity drawer and a settings menu (agent access, the tools reference, status and
+export) on every page.
 
 ## Quick start
 
@@ -66,8 +69,8 @@ To see for yourself that everything works, from a fresh clone, run `./acceptance
   secret that only the board's own page knows and is checked against where it came from, so another
   website cannot make your browser change anything. Failed sign-ins are slowed down: five wrong
   passwords for one address stop that address for ten minutes.
-- **A project** is a private workspace: its own epics, stories and tasks, rules, decisions,
-  principles, facts, beliefs, claims, history and search. A person sees only the projects they
+- **A project** is a private workspace: its own epics, stories and tasks, requirements, decisions,
+  facts, claims, history and search. A person sees only the projects they
   made, may make as many as they like, and switches between them from the top bar. Each project
   numbers its own items from 1, so node 12 in one project is not node 12 in another. Nothing is
   shared between projects, and a project can only be reached by its owner and by the agents the
@@ -166,15 +169,15 @@ This is the text the server hands to every agent when it connects (its MCP instr
 repeated here word for word, and a check fails if the two ever differ.
 
 <!-- agent-guide:start -->
-Vrum is a project graph. Epics hold stories, stories hold tasks, and rules, decisions, facts and beliefs are linked to them. A decision is what a named person decided and is authoritative. A belief is only a suggestion. Every write needs an actor: your own name.
+Vrum is a project graph. Epics hold stories, stories hold tasks, and requirements, decisions and facts are linked to them. A decision is what a named person decided; a fact is a statement with its source. Each is either unconfirmed or confirmed by a named person, and either in force or superseded or withdrawn: read both before you rely on it. Every write needs an actor: your own name.
 
 The working loop:
-1. `next_work` takes the most urgent free story or task and returns it with its rules, decisions, principles, facts, earlier handoff notes and similar items, all in one call. Keep the claim with `renew_claim` while you work.
+1. `next_work` takes the most urgent free story or task and returns it with its requirements, decisions (project-wide ones included), facts, earlier handoff notes and similar items, all in one call. Keep the claim with `renew_claim` while you work.
 2. Before you decide something that matters, `recall` what is known about the item. If you do not know where to look, use `search`.
-3. Record what is decided as it happens with `record_decision` (name the person who decided in decided_by), and what you learn with `retain_fact`.
+3. Record what is decided as it happens with `record_decision` (name the person who decided in decided_by), and what you learn with `retain_fact`. What you record starts unconfirmed: only a named person's review makes it confirmed (`set_confirmation`).
 4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a handoff note for whoever comes next. A blank note is refused.
 
-Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. `list_nodes` takes a filter text as its query argument, such as `kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also rule, decision, fact, belief); `find_mentions` lists who refers to one. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format is refused in every field and never stored: leave secrets out of what you write. If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` use it on the memory; what they return is proposed or generated, and is not a record until you record it.
+Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. `list_nodes` takes a filter text as its query argument, such as `kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also rule, decision, fact); `find_mentions` lists who refers to one. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format is refused in every field and never stored: leave secrets out of what you write. Vrum stores, retrieves and coordinates; it does not generate answers: you do the reasoning and record what you find.
 <!-- agent-guide:end -->
 
 Every tool describes itself: its description says what it does, what it needs and what it refuses,
@@ -198,148 +201,172 @@ to another account opens nothing: it is refused in the same words as a project t
 exist. Changes are recorded with your name, taken from your account when you sign in and
 changeable with "You are …: change", next to the agents' names.
 
-**Agent access.** The keys of the project: make one with a label, copy it (it is shown once), see
-when each was made and last used, and revoke the ones that are not wanted. It also shows the
-endpoint and how to send a key. See "Accounts, projects and agent keys".
+**Agent access** (Settings menu). The keys of the project: make one with a label, copy it (it is
+shown once), see when each was made and last used, and revoke the ones that are not wanted. It also
+shows the endpoint and how to send a key. See "Accounts, projects and agent keys".
+
+**The top bar, three views and two drawers.** A project has three views, **Board**, **Graph** and
+**Roadmap**, and the top bar of every one of them also holds the project switcher, a **search
+box**, an **Activity** button, a **Settings** menu, a **Jump to** button, the name your changes are
+recorded with, and, when the server cannot be reached, a banner that says so on whatever view you
+are on. The board opens on the Board. Search and Activity open as a **drawer** on the left of
+whichever view you are on; the **detail panel** on the right shows whichever item, requirement,
+decision or fact you chose, on any view. Opening a drawer, switching between the Map and the List
+of the Graph, or moving to another view never discards what you were typing in the detail panel or
+in the drawer. Settings holds **Agent access**, **Tools** and **Status and export**.
 
 **Board.** One column for each status and one lane for each epic. A card is a story or a task and
 shows who holds it and until when, what it is waiting for, its due date (and whether it is overdue
 or planned to start before something it needs is due), and its progress. Drag a card to another
 column of its own epic to change its status, or use its **Move** menu from the keyboard. *Ready* is
-worked out from the links, so nothing can be dropped there. Open a card to read and change its
-title, details, priority, dates and parent, to add or remove links, and to see its rules, the
-decisions in force, its facts and beliefs (a belief is shown as a suggestion, and every fact and
-belief with where it came from), what the index thinks it may duplicate, and its history. **New
-item** makes an epic, a story or a task, and **Coverage** lists the rules that are in no story and
-the stories that have no rule.
+worked out from the links, so nothing can be dropped there. Above the columns, **Needs attention**
+counts the ready work nobody holds, the blocked and the overdue items, the claims that ran out with
+no handoff note, the requirements that are in no story and the stories that have no requirement;
+each number is a link that shows exactly those items. The **filter box** keeps only the cards the
+filter language below asks for. **New item** makes an epic, a story or a task, and **Coverage**
+shows the requirements that are in no story and the stories that have no requirement. Choose a card
+to open it in the detail panel.
 
-**Graph.** The same work drawn as dots and lines, with a different shape for each kind and a
-different line for each kind of link, so colour is never the only clue. It opens on one epic.
-**Everything** draws every item, until there are more than a thousand dots, and then draws each epic
-as one dot and says so. **Around the chosen item** draws only what is one to three steps away.
-Rules, decisions, facts, beliefs and suggested overlaps are drawn once you switch them on. Drag a
-dot to pin it, zoom and pan, colour by kind, status or epic, and filter by kind, status and kind of
-line. Beside the drawing, a list of the chosen item's neighbours and a list of every item in view
-do everything a click on the drawing does, from the keyboard.
+**Graph.** The project's work and context, as one scope shown two ways. Choose *what* to show:
+**Work** (epics, stories and tasks, with the hierarchy and the links between them), **Context**
+(requirements, decisions and facts, and the work they concern) or **Everything** (both). Choose
+*how*: the **Map**, dots and lines with a different shape for each kind and a different line for
+each kind of link, so colour is never the only clue, or the **List**, which says the same in text.
+Both show the same records and the same relationships, and the record you chose and the epic you
+are looking at stay when you switch. Pick one epic, or all of them: a project of more than a
+thousand dots draws each epic as one dot and says so. **Reach** limits the map to what is one to
+three steps around the chosen record. Drag a dot to pin it, zoom and pan, colour by kind, status or
+epic, show replaced, withdrawn and dropped records, show the `[[references]]` written in texts,
+and filter by kind, status and kind of line; the filter box takes the work filter language below.
+A list of the chosen record's neighbours beside the map does everything a click on it does, from
+the keyboard. Choose a dot or a row to open it in the detail panel.
 
-**Rules.** Every rule, grouped by the story that owns it, with the rules that are in no story
-first (the newest on top) and the coverage report below: the rules in no story, and the stories
-with no rule, with dropped rules and stories left out. Write a rule (**New rule**), change its
-title, details or status (**Edit**), and put it in a story: drag it onto a story, or choose **Put in
-a story…**, where **Place** puts a rule that is in no story into one and **Move** takes a rule from
-its story to another in one step. A rule is in at most one story, so placing a rule that is already
-in one is refused, in the server's words. Dropped rules are hidden until you ask for them.
+**Requirements.** What a story must meet. In the Graph's List, in the Context or Everything preset,
+every requirement is grouped by the story that owns it, with the requirements that are in no story
+first (the newest on top) and the coverage report: the requirements in no story, and the stories
+with no requirement, with dropped requirements and stories left out. Write one (**New
+requirement**), change its title, details or status (**Edit**), and put it in a story: drag it
+onto a story, or choose **Put in a story…**, which puts a requirement that is in no story into one
+and takes one from its story to another in one step. A requirement is in at most one story, and
+placing one that is already in a story is refused, in the server's words. (The tools and
+`[[rule:3]]` references call a requirement a rule.)
 
-**Memory.** What the project remembers, in four lists on one page: principles (pinned at the top),
-decisions, facts and beliefs, newest first. Filter by kind, status, origin, who recorded or decided
-it, the day, and the item it concerns. Every entry says where it came from and who: a decision its
-decider and reason, a fact its source, a belief the evidence it rests on and whether a person has
-confirmed it. A belief is marked as a suggestion, never a decision; anything a language model
-proposed or drew up says so; a stale belief (one whose evidence is no longer in force) is shown
-apart with which evidence changed; and a replaced item shows the chain to what replaced it.
-From the page a person can record a decision, a fact or a belief (picking its evidence from a
-list), say what each concerns, replace one with a newer one or retract it (nothing is edited: the
-form starts from the old words and records a new item, and a retraction offers to retract or
-replace the beliefs that went stale), confirm a belief, and make a belief a decision under their
-own name and reason. Choose several facts or beliefs to replace or retract them together; replacing
-a belief a person confirmed asks who changed their mind and what they said. When the server has a
-language model, writing a fact or a belief offers to check it against every belief: it shows how
-far the check has got, then each proposal with the words that clash, with buttons to replace the
-belief or retract it. The **recall preview** at the top shows what an agent would be told for an
-item or a rule: the very answer of the `recall` tool, in its sections and with its reasons.
+**Facts and decisions.** What the project knows and what was decided, in the same List, newest
+first. A **decision** is what a named person decided and why (its title, text,
+reason and who decided it), and is marked **project-wide** when it applies throughout the project.
+A **fact** is a statement with where it came from (its source) and who recorded it. Each row says
+what it is, whether a person has confirmed it, and whether it is still in force. Filter each
+list by status (in force by default, replaced, withdrawn or all), by whether a person confirmed
+it, and by words; a list shows the first hundred and offers more. **Record a decision** and
+**Record a fact** write one, and each can name the items it concerns (picked from a list). Neither
+is ever edited: **Replace** records a newer one and keeps the old one as a record, pointing at its
+replacement, and **Withdraw** gives one up with a reason; the form starts from the old words, and
+a replaced record shows the chain. **Link** changes what a record in force concerns. Choose a row
+to open it in the detail panel, where its confirmation, lifecycle, links, mentions and history are
+written out.
 
-**Search.** One box over the `search` tool. Each result says how it matched (exact words, meaning
-or both), why, shows a snippet with the matched words marked, and its parent and status as the
-graph holds them now. Choose *Exact words only* or *Meaning only* to see one kind of match. The
-counts by kind (epic, story, task, rule, decision, principle, fact, belief), by status and by epic
-filter the results and keep the server's order. The page says how many items are waiting to be
-indexed: results by meaning may lag behind them, results by exact words never do. With the
-embedding service stopped, search by words still works, and searching by meaning says why it
-cannot. Under the results, **Ask** puts a question to a language model (if the server has one,
-see below): the answer is labelled *Generated, not a record*, shows the items it relied on as
-links, and is stored nowhere. You can record its conclusion as a belief under your own name,
-resting on those facts and decisions, or leave it. Without a model the box says so.
+**Confirmed or not.** Every fact and decision has an **Unconfirmed / Confirmed** dropdown. A
+record starts **Unconfirmed**, whoever writes it, and an agent that records something never
+confirms it. Choose **Confirmed** and the board asks who reviewed it: the name goes on the record
+with the time, and your own name is recorded separately as the one who made the change. It means
+that a named person looked at the record, not that Vrum checked it is true. Choosing
+**Unconfirmed** again asks who says so and what they said, because it takes away what a person
+gave. Only a record in force can change its confirmation: what a record was confirmed as stays on
+it, and in its history, after it is replaced or withdrawn. Replacing or withdrawing a record that a
+person confirmed also asks who changed their mind and what they said, and both the person and you
+are in the history. Recall and the briefing an agent gets show every record's confirmation and
+whether it is in force, so an unconfirmed record is never presented as confirmed.
 
-**Overlaps.** Pairs of stories (or epics, or rules) in different epics that look like the same
-thing, most alike first, with their scores, side by side with their details. Change how alike
-they must be (the server's setting is the start), or name epics to look at only pairs that have
-something in them. **Mark as duplicates** and **Mark as relates to** make that link in one click,
-with your name, and nothing is ever linked unless you click. Rules are compared too, and cannot
-be linked.
-
-**Markdown and references.** Details, rules, reasons, decision texts, facts and beliefs are shown
-as Markdown by the board's own small renderer: headings, paragraphs, lists, emphasis, code, quotes
-and web addresses, which open in a new tab. Raw HTML is never rendered and nothing is loaded from
-elsewhere, so a script or image tag is shown as the text it is. Write `[[node:12]]`, `[[rule:3]]`,
-`[[decision:7]]`, `[[fact:5]]` or `[[belief:2]]` in any text to refer to an item: it is shown as a
-link with the item's current title (and follows a rename), or plainly as missing when nothing has
-that id. Typing `[[` in an editor offers a pick-list. A reference is only text: it makes no link
-and changes no readiness and no order. Every item shows **Mentioned in**, the items whose text
-refers to it (the `find_mentions` tool works this out when asked and stores nothing), and the
-graph has a **Mentions** layer that draws them. Titles are not read for references.
-
-**Jump to.** Press Ctrl+K (⌘K on a Mac), or use the button in the top bar, on any page: type a
-word of an item's title, its id (`12`, `#12`, `rule 3`, `decision 7`) or the name of a page, and
-Enter goes there.
-
-**Home.** The page you land on. It says what needs a person's attention, as numbers you can click:
-ready work nobody holds, blocked and overdue items, claims that ran out with no handoff note,
-rules in no story, stories with no rule, decisions made in the last 7 days, stale beliefs, beliefs
-waiting for a person to confirm them, overlap candidates nobody has marked, and items waiting to
-be indexed. Each number is the same answer the tools give, and following it lands on exactly those
-items (the Table with that filter, or the Rules, Memory, Overlaps or Status page). Below them each
-epic shows how many stories and tasks it has in each status, as links.
-
-**Activity.** What happened, newest first, in plain words ("Ada moved rule 7 from story #3 to story
-#5"), with a handoff note shown in full. New changes appear within seconds with no reload. Filter by
-who, by kind of change, by item and by day (UTC); the filter is in the address. On the right,
-**Who is working on what** shows every claim in force with a countdown and every claim that ran out,
-and each agent's state (working, lapsed, finished). You can claim an item under your typed name
-(by its number, or from the work that is free to take), renew a claim, or release it with a note:
-the same operations an agent calls. A claim that ends moves to *lapsed* by itself.
-
-**Tools.** Every tool the server has, read from the server itself so the list can never be out of
-date: its description, its fields, whether it changes anything, and where on the board it can be
-done, or why it is for agents only. Any tool that only reads has **Try it**, which fills in a form
-from the tool's fields and shows what the server answers. A tool that changes something has no
-Try it, and the server refuses one even if it is asked. It also shows the endpoint, and how to send
-an agent key with an example connection.
-
-**Status.** The version of Vrum, PostgreSQL and pgvector, how many of each kind of item there are,
-the state of the search index (how many wait to be indexed, which embedding service and model it
-uses, whether the service answers, the size of the vectors and the last reindex since the server
-started), and whether a language model is set up. It is what `server_status` says, for this
-project. **Download export** saves the whole graph of this project as one JSON file, identical to
-the one `export_graph` gives, with nothing of any account in it. Backup, restore and import stay on
-the command line (see below), and the page says so. No password, session or key and not the
-database password is ever shown anywhere.
-
-**Table.** One row for each epic, story or task, with its kind, title, parent, status, priority,
-who holds it, what it waits on, progress, dates and last change. Click a heading to sort (again to
-reverse, a third time to clear), group by epic, story, status, priority or who holds it, and
-filter with the filter language below. Change a title, status, priority or date in the row itself.
-To change several rows at once, tick them, choose a priority and a status, and apply: each row is
-its own change at the version you saw it, and the result says which rows changed and which were
-refused, and why (for example because an agent changed that row since).
-
-**Outline.** The work as a tree you can fold: epics, their stories, their tasks, with the rules
-under each story and how many tasks are done on every branch. Drag a story or a task onto its new
-parent, or press `m` on it to choose one from a menu. The arrow keys walk the tree, Enter opens an
-item, and a refused move says why.
+**The detail panel.** Choose an epic, story, task, requirement, decision or fact, from any view,
+a search result, the activity feed or a `[[reference]]`, and it opens on the right. An epic, story
+or task shows its last handoff note, its details and the form to change its title, details,
+priority, dates and parent (at the version you saw), the links to add or remove, its requirements,
+the **facts and decisions** that concern it as an agent's `recall` would say them (decisions in
+force, project-wide decisions, facts, and the replaced or withdrawn ones apart, each with its
+confirmation and why it is there), what mentions it, what the index thinks it may duplicate, and
+its history. A requirement, decision or fact shows all its fields, its confirmation and
+lifecycle, what it concerns, what mentions it and its history, with the buttons above. If an agent
+changes what you have open while you are editing it, the panel says so and offers to load the
+current version, and what you typed stays.
 
 **Roadmap.** The work on a timeline, each item a bar from its start date to its target date, with
 a line for today and zoom by month, quarter or year. Group by epic, status, priority or who holds
-it, and filter with the filter language. Drag a bar to move both dates, or one end to move that
+it, and filter with the filter language below. Drag a bar to move both dates, or one end to move that
 date; with a bar focused, the arrow keys move it a day (Shift for a week, Alt for the start only,
 Ctrl for the target only), and Space picks several bars to move together. A pale dashed bar is an
 epic or story with no dates of its own, drawn over the span of what is under it. An arrow runs from
 what must come first to the item that waits for it; an item planned to start before something it
 needs first is due is marked "Schedule conflict" (a warning, nothing is blocked), and an overdue
 item says so in words. Items with no dates wait in a tray above: drag one onto the timeline to give
-it a week starting where you drop it, or type its dates there. The roadmap has no sprints.
+it a week starting where you drop it, or type its dates there. Every move is a change at the
+version the bar was drawn at, so one an agent changed since is refused and the bar goes back, and
+a start after the target is refused in the server's words. Choose a bar to open its item in the
+detail panel. The roadmap has no sprints.
 
-**The filter language.** One way to say which items you mean, for the Table's and the Roadmap's
-filter box and for the agents' `list_nodes` tool (as `query`), with the same answer for both.
+**Search.** The box in the top bar opens the search drawer, on any view, over the `search` tool.
+Each result says how it matched (exact words, meaning or both), why, shows a snippet with the
+matched words marked, and its parent and status as the graph holds them now; choose one to open
+it in the detail panel, and the drawer stays open. Choose *Exact words only* or *Meaning only* to
+see one kind of match. The counts by kind (epic, story, task, requirement, decision, fact), by
+status and by epic filter the results and keep the server's order. The drawer says how many items
+are waiting to be indexed: results by meaning may lag behind them, results by exact words never
+do. With the embedding service stopped, search by words still works, and searching by meaning
+says why it cannot. The search and its filters are in the address, so a search can be shared.
+
+**Possible duplicates.** The second tab of the search drawer: pairs of stories (or epics, or
+requirements) in different epics that look like the same thing, most alike first, with their
+scores, side by side with their details. Change how alike they must be (the server's setting is the
+start), or name epics to look at only pairs that have something in them. **Mark as duplicates** and
+**Mark as related** make that link in one click, with your name, and nothing is ever linked unless
+you click: looking never writes. Choose to compare stories, epics or requirements (requirements are
+compared too, and cannot be linked). It needs the embedding service.
+
+**Markdown and references.** Details, requirements, reasons, decision texts and facts are shown
+as Markdown by the board's own small renderer: headings, paragraphs, lists, emphasis, code, quotes
+and web addresses, which open in a new tab. Raw HTML is never rendered and nothing is loaded from
+elsewhere, so a script or image tag is shown as the text it is. Write `[[node:12]]`, `[[rule:3]]`,
+`[[decision:7]]` or `[[fact:5]]` in any text to refer to an item: it is shown as a link with the
+item's current title (and follows a rename), or plainly as missing when nothing has that id, and
+it opens the item in the detail panel. Typing `[[` in an editor offers a pick-list. A reference is
+only text: it makes no link
+and changes no readiness and no order. Every item shows **Mentioned in**, the items whose text
+refers to it (the `find_mentions` tool works this out when asked and stores nothing), and the
+graph has a **References** switch that draws them. Titles are not read for references.
+
+**Jump to.** Press Ctrl+K (⌘K on a Mac), or use the button in the top bar, on any view: type a
+word of an item's title, its id (`12`, `#12`, `requirement 3`, `decision 7`, `fact 5`) or the name of a
+view, drawer or settings page, and Enter goes there.
+
+**Activity.** The **Activity** button in the top bar opens a drawer, on any view, with what
+happened, newest first, in plain words ("Ada moved rule 7 from story #3 to story #5"), with a
+handoff note shown in full. New changes appear within seconds with no reload. Filter by who, by
+kind of change (work, links, claims, handoffs, requirements, decisions, facts), by item and by day
+(UTC); the filter is in the address. Above the feed, **Who is working on what** shows every claim
+in force with a countdown and every claim that ran out, and each agent's state (working, lapsed,
+finished). You can claim an item under your typed name
+(by its number, or from the work that is free to take), renew a claim, or release it with a note:
+the same operations an agent calls. A claim that ends moves to *lapsed* by itself. An event in the
+feed opens its item in the detail panel.
+
+**Tools** (Settings menu). Every tool the server has, read from the server itself so the list can never be out of
+date: its description, its fields, whether it changes anything, and where on the board it can be
+done, or why it is for agents only. Any tool that only reads has **Try it**, which fills in a form
+from the tool's fields and shows what the server answers. A tool that changes something has no
+Try it, and the server refuses one even if it is asked. It also shows the endpoint, and how to send
+an agent key with an example connection.
+
+**Status and export** (Settings menu). The version of Vrum, PostgreSQL and pgvector, how many of each kind of item there are,
+the state of the search index (how many wait to be indexed, which embedding service and model it
+uses, whether the service answers, the size of the vectors and the last reindex since the server
+started). It is what `server_status` says, for this
+project. **Download export** saves the whole graph of this project as one JSON file, identical to
+the one `export_graph` gives, with nothing of any account in it. Backup, restore and import stay on
+the command line (see below), and the page says so. No password, session or key and not the
+database password is ever shown anywhere.
+
+**The filter language.** One way to say which items you mean, for the filter box of the Board, the
+Roadmap and the Graph's work and for the agents' `list_nodes` tool (as `query`), with the same
+answer for all of them.
 
 - Words find items whose title or details contain them, whatever the case: `login "reset password"`.
 - `field:value` narrows by a field, and commas mean "any of these": `status:ready,in_progress`.
@@ -355,15 +382,22 @@ filter box and for the agents' `list_nodes` tool (as `query`), with the same ans
   to each other must all hold; `OR` (in capitals) starts a new group.
 
 A query that cannot be read is refused with a plain message saying what was not understood, and
-nothing is listed. Every page has its own address, with the filter, sort, grouping and zoom after
-the `#`, so you can share a view by copying the link: the server keeps no saved views.
+nothing is listed. The filter is kept in the address, so you can share a view by copying the link.
+
+**Addresses.** Everything you choose lives in the address after the `#` (never a session or a key),
+so a view can be reproduced by opening the same address, and the server keeps no saved views. The
+view is `#/board`, `#/graph` or `#/roadmap` (or `#/access`, `#/tools`, `#/status`), and after it
+come the choices: `sel=node:12` (or `rule:3`, `decision:7`, `fact:5`) for the record open in the
+detail panel; `q=` for the work filter and `epic=` for an epic; for the Graph, `view=work`,
+`context` or `everything` and `as=map` or `list`; for the Roadmap, `group=` and `zoom=`;
+`drawer=search` or `drawer=activity` for the drawer, with `search=`, `search_mode=` and the
+other `search_…` choices, `dups=1` for possible duplicates, and `act_…` choices for the
+activity filters. For example `#/graph?view=context&as=list&sel=fact:5`.
 
 **It is the same graph.** A change on the board is the same operation an agent calls, with the same
 checks. If you drop a card where it cannot go, or edit something an agent has changed since you
-read it, the board says what the server says, in the same words, and keeps what you typed. Every
-page has its own address, and what you chose lives in it after the `#` (never a session or a key), so you
-can share a view by copying the link. How often the board asks for news is
-`VRUM_BOARD_POLL_SECONDS` (5 by default).
+read it, the board says what the server says, in the same words, and keeps what you typed. How
+often the board asks for news is `VRUM_BOARD_POLL_SECONDS` (5 by default).
 
 ## What is in it
 
@@ -371,36 +405,37 @@ can share a view by copying the link. How often the board asks for news is
   target date, and links between them (`needs_first`, `supersedes`, `duplicates`, `relates_to`).
   What is ready to start is worked out, never typed in. Work is claimed with a lease, so two agents
   never take the same task, and a handoff note says what the next one must know.
-- **Rules:** each requirement sits in exactly one story, and a report lists the ones with no story
-  and the stories with no rules.
-- **Decisions and principles:** what a named person decided and why. They are never edited: a
-  change of mind is a new decision that replaces the old one, which stays as a record.
-- **Facts and beliefs:** a fact is something known, with where it came from. A belief is a
-  conclusion that rests on facts and decisions, and is marked stale when one of them stops being
-  true. A belief is only a suggestion until a person confirms it, and never counts as a decision.
+- **Requirements:** each requirement sits in exactly one story, and a report lists the ones with no
+  story and the stories with no requirements.
+- **Decisions and facts:** the two kinds of context a project keeps. A decision is what a named
+  person decided and why; one that applies throughout the project is marked project-wide and is
+  included in every briefing and recall of that project. A fact is a statement with where it came
+  from. Neither is ever edited: a change is a newer record that replaces the old one, or a
+  withdrawal with its reason, and the old one stays as a record. Both start **unconfirmed**; a named
+  person can confirm one (who and when are kept), which says that someone reviewed it, not that it
+  is true. An agent that records a statement is never thereby a person's confirmation, and changing
+  a confirmed record needs that person's word. What a record was confirmed as stays in its history
+  after it is replaced or withdrawn.
 - **Search:** by exact words, by meaning, or both, and each result says how it matched. It also
   finds similar items and stories that overlap across epics. Any text can refer to an item with
-  `[[node:12]]`, and `find_mentions` says what refers to what.
+  `[[node:12]]`, `[[rule:3]]`, `[[decision:7]]` or `[[fact:5]]`, and `find_mentions` says what refers
+  to what.
 - **History:** every change is kept, with who made it and what it was before. `changes_since`
   gives an agent only what is new.
 
-## Optional: finding by meaning, and a language model
+## Optional: finding by meaning
 
-Searching by exact words needs nothing. Searching by meaning, similar items and overlaps need an
-embedding service, and four tools need a language model: `extract_facts`, `consolidate_memory`,
-`find_contradictions` and `reflect`. Without them everything else works, and those tools say so.
-Both are any OpenAI-compatible service, set in `.env` (see `.env.example` for every setting).
+Searching by exact words needs nothing. Searching by meaning, similar items and possible duplicates
+need an embedding service: any OpenAI-compatible one, set in `.env` (see `.env.example` for every
+setting). Without it everything else works, and a search says plainly that meaning is not set up.
+Vrum never asks a language model anything: the embedding service only turns text into numbers so
+that records can be compared.
 
-- To run an embedding model on this machine, add `EMBEDDING_BASE_URL=http://ollama:11434/v1` and
-  `EMBEDDING_MODEL=all-minilm`, and start with
-  `docker compose --profile local-embeddings up -d --build --wait` (the first start downloads about
-  50 MB).
-- For a language model, set `LLM_BASE_URL` and `LLM_MODEL`. Nothing is sent anywhere unless you set
-  a URL, and text that holds a well-known secret format (an access token, a private key) is never
-  sent.
-
-What a model proposes is always checked against the text or the evidence it was given and labelled
-as proposed or generated. It is never a record until a person or an agent records it.
+To run an embedding model on this machine, add `EMBEDDING_BASE_URL=http://ollama:11434/v1` and
+`EMBEDDING_MODEL=all-minilm`, and start with
+`docker compose --profile local-embeddings up -d --build --wait` (the first start downloads about
+50 MB). Nothing is sent anywhere unless you set a URL, and text that holds a well-known secret
+format (an access token, a private key) is never stored.
 
 ## Backup, restore and moving data
 
@@ -417,12 +452,12 @@ as proposed or generated. It is never a record until a person or an agent record
   `uv run python scripts/export_graph.py http://127.0.0.1:8000/mcp graph.json` writes the whole
   graph of that project as one JSON file that you can read and keep, and `scripts/import_graph.py`
   loads such a file into an **empty project** (make one on the board, and a key for it), keeping
-  every id, date, origin and the history. It is all or nothing, and the file can be as big as one
+  every id, date, confirmation and the history. It is all or nothing, and the file can be as big as one
   request may be (4 MiB unless you raise `VRUM_MAX_REQUEST_BYTES`). Accounts, sessions and keys are
   never in the file.
 - **Markdown copy:** `uv run python scripts/export_markdown.py http://127.0.0.1:8000/mcp notes`
-  writes one file for every epic, story, task, rule, decision, fact and belief of the project, with
-  its fields at the top and everything it is connected to as `[[references]]`, to read in Obsidian
+  writes one file for every epic, story, task, requirement, decision and fact of the project, with
+  its fields (including whether a person confirmed it, and whether it is still in force) at the top and everything it is connected to as `[[references]]`, to read in Obsidian
   or keep in git. It is read-only and is made again from the graph each time.
 
 These scripts need `uv` and `VRUM_AGENT_KEY` in the environment (`export VRUM_AGENT_KEY=<the key>`).
@@ -440,7 +475,6 @@ what it does. The ones you are likely to want:
 | `VRUM_MAX_REQUEST_BYTES` | The most one request may hold. 4 MiB by default. |
 | `VRUM_BOARD_POLL_SECONDS` | How often the board asks the server what changed. 5 by default. |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` | An embedding service, for search by meaning. |
-| `LLM_BASE_URL`, `LLM_MODEL` | A language model, for the four tools that need one. |
 
 ## Checks
 
@@ -453,22 +487,20 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
   image; `uv` downloads it the first time (about 100 MB).
 - `./acceptance.sh` is the shorter story to read and trust. From a clean clone it starts Vrum,
   and walks one scenario through a real MCP client and a headless browser: it registers an account,
-  creates a project and an agent key, and is turned away without one, plans, works with ten agents at once, decides, remembers, finds, asks a
-  model for help, is careful with secrets, shows the board to a person (what agents do appears on
-  it, what a person does is in the graph, refusals read the same), shows the table, outline and
-  roadmap (the filter language, changing several rows, dragging bars, an address that reproduces a
-  view), writes rules and memory on the board (placing and dragging a rule, recording and replacing
-  decisions and beliefs, stale beliefs, confirming and promoting, a check against every belief and
-  the recall preview), finds and connects on the board (search by words and by meaning with the
-  embedding service stopped and back, counts, overlaps and what a click on a pair creates,
-  Markdown that is only ever text, references and their backlinks, the quick switcher, and Ask),
-  runs and sees it all (Home's numbers and where each leads, an agent's work and a person's claim
-  appearing in Activity, a claim that runs out, the Tools page against the server's own list, and
-  Status and the export compared with the tools), and finally backs up, destroys
-  its own database, restores it, and loads an export into a fresh server. Every line it prints is
-  one proof that holds. It uses a scripted stand-in for the embedding service and the language
-  model, so nothing is downloaded and the answers are the same every run.
-  `./acceptance.sh finding model` runs only those chapters.
+  creates a project and an agent key, and is turned away without one, plans, works with ten agents
+  at once, records decisions and facts with their sources and reasons, confirms them and replaces
+  and withdraws them, finds (by exact words, and by meaning with the embedding service stopped and
+  back), is careful with secrets, and shows the project to a person (what agents do appears on the
+  Board, what a person does is in the graph, refusals read the same; the Graph's work, context and
+  everything presets and its map and list; the Roadmap, the filter language, dragging bars and
+  an address that reproduces a view; search and possible duplicates in the drawer, and what a
+  click on a pair creates; Markdown that is only ever text, references and their backlinks and the
+  quick switcher; the Activity drawer with an agent's work and a person's claim; the Tools and
+  Status pages against the server's own list and `server_status`, and the export), and finally
+  backs up, destroys its own database, restores it, and loads an export into a fresh server.
+  Every line it prints is one proof that holds. It uses a scripted stand-in for the embedding
+  service, so nothing is downloaded and the answers are the same every run.
+  `./acceptance.sh finding board` runs only those chapters.
 
 ## Where things are
 

@@ -1,10 +1,13 @@
-"""M14's Status page against the running containers, driven in a real headless browser and checked
-against a real MCP client (see ./check.sh): what it shows equals `server_status` and the index state
-the searches report, the embedding service is seen answering and then not, the downloaded export
-is the MCP export, and no agent key, session or database password is in any page or response."""
+"""M16's Status page, one of the settings pages, against the running containers, driven in a real
+headless browser and checked against a real MCP client (see ./check.sh): it is reached from the
+Settings menu with the keyboard, what it shows equals `server_status` and the index state the
+searches report (and names no language model, since there is none), the embedding service is seen
+answering and then not, the downloaded export is the MCP export, and no agent key, session or
+database password is in any page or response."""
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +15,8 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, made
+from tests.board_helpers import SLOW, board_call, board_url, browser_page, made
+from tests.board_search import open_settings
 from tests.helpers import (
     embeddings_stopped,
     export_everything,
@@ -27,18 +31,9 @@ from tests.world import SESSION_COOKIE, project_at
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
-COUNTS = (
-    "epics",
-    "stories",
-    "tasks",
-    "links",
-    "rules",
-    "decisions",
-    "principles",
-    "facts",
-    "beliefs",
-    "events",
-)
+COUNTS = ("epics", "stories", "tasks", "links", "rules", "decisions", "facts", "events")
+SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
+NO_MODEL = re.compile(r"language model|belief|principle", re.IGNORECASE)
 
 
 @pytest.fixture
@@ -51,7 +46,7 @@ async def shown(page: Page, name: str) -> str:
     return (await page.locator(f"#status-body tr[data-name={name}] .value").inner_text()).strip()
 
 
-# -- 4: what the page shows is what the server says ----------------------------------------------
+# -- what the page shows is what the server says -------------------------------------------------
 
 
 async def test_status_equals_server_status_and_the_index_state_through_mcp(
@@ -65,7 +60,8 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
     await reindexed(client)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open("#/status")
+        await w.open("#/graph")
+        await open_settings(page, "status")
         await expect(page.locator("#versions")).to_be_visible(timeout=SLOW)
         status = await ok(client, "server_status")
         said = (await ok(client, "search", query=word, limit=1))["index"]
@@ -73,9 +69,14 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert await shown(page, "vrum_version") == status["vrum_version"]
         assert await shown(page, "postgres_version") == status["postgres_version"]
         assert await shown(page, "pgvector_version") == status["pgvector_version"]
-        # The size of every kind of item.
+        # The size of every kind of item, which are the ones of the two context records and no
+        # others.
+        assert set(status["counts"]) == set(COUNTS)
         for name in COUNTS:
             assert await shown(page, name) == str(status["counts"][name]), name
+        assert await page.locator("#sizes tr[data-name]").evaluate_all(
+            "els => els.map(e => e.dataset.name)"
+        ) == list(COUNTS)
         # The index, as the server and a search both say it.
         index = status["index"]
         assert (index["meaning"], index["waiting_to_index"]) == (
@@ -94,8 +95,13 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert (
             f"{last['embedded']} item" in text and f"{last['waiting_after']} still waiting" in text
         )
-        # The language model is named, never keyed.
-        await expect(page.locator("#language-model")).to_contain_text(status["language_model"])
+        await expect(page.locator("#index-state")).to_have_text("Index: 0 waiting")
+        # There is no language model: not in what the server says, not on the page.
+        assert "language_model" not in status
+        assert not NO_MODEL.search(await page.locator("#page").inner_text())
+        assert await page.locator("#language-model").count() == 0
+        info = board_call(board, "GET", "/board/api/info").body
+        assert "language_model" not in json.dumps(info)
         assert w.problems == []
 
 
@@ -107,48 +113,35 @@ async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_pag
     await reindexed(client)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open("#/status")
-        await expect(page.locator("#status-body tr[data-name=service] .value")).to_have_text(
-            "Answering", timeout=SLOW
-        )
+        await w.open("#/roadmap")
+        await open_settings(page, "status")
+        service = page.locator("#status-body tr[data-name=service] .value")
+        await expect(service).to_have_text("Answering", timeout=SLOW)
         before = int(await shown(page, "waiting"))
         with embeddings_stopped():
             await made(client, "story", f"Not indexed {word}", epic)
-            await w.go("#/home")
-            await w.go("#/status")
-            await expect(page.locator("#status-body tr[data-name=service] .value")).to_have_text(
-                "Not answering", timeout=SLOW
-            )
+            # The page says so as soon as the board hears that something waits.
+            await expect(service).to_have_text("Not answering", timeout=SLOW)
             await expect(page.locator("#status-body tr[data-name=waiting] .value")).to_have_text(
                 str(before + 1), timeout=SLOW
+            )
+            await expect(page.locator("#index-state")).to_have_text(
+                f"Index: {before + 1} waiting", timeout=SLOW
             )
             status = await ok(client, "server_status")
             assert status["index"]["embedding_service"] == "unreachable"
             assert status["index"]["waiting_to_index"] == before + 1
+            assert w.problems == []
         await reindexed(client)
-        await w.go("#/home")
-        await w.go("#/status")
-        await expect(page.locator("#status-body tr[data-name=service] .value")).to_have_text(
-            "Answering", timeout=SLOW
-        )
+        await expect(service).to_have_text("Answering", timeout=SLOW)
         await expect(page.locator("#status-body tr[data-name=waiting] .value")).to_have_text(
             "0", timeout=SLOW
         )
+        await expect(page.locator("#index-state")).to_have_text("Index: 0 waiting", timeout=SLOW)
         assert w.problems == []
 
 
-async def test_a_server_with_no_language_model_says_so(board: str) -> None:
-    url = os.environ.get("VRUM_NO_MODEL_TEST_URL", "")
-    assert url, "Run the integration tests through ./check.sh."
-    async with browser_page(board_url(url), token=the_token()) as w:
-        await w.open("#/status")
-        await expect(w.page.locator("#language-model")).to_contain_text(
-            "None is set up", timeout=SLOW
-        )
-        assert w.problems == []
-
-
-# -- 4: the export, and what is never shown ------------------------------------------------------
+# -- the export, and what is never shown ---------------------------------------------------------
 
 
 async def test_the_downloaded_export_is_the_mcp_export(
@@ -158,14 +151,23 @@ async def test_the_downloaded_export_is_the_mcp_export(
     epic = await made(client, "epic", f"Exported {word}")
     story = await made(client, "story", f"Story {word}", epic)
     await made(client, "task", f"Task {word}", story)
-    await make_decision(client, f"Decision {word}", node_ids=[story])
-    fact = await make_fact(client, f"A fact {word}")
+    decision = await make_decision(client, f"Decision {word}", node_ids=[story])
+    fact = await make_fact(
+        client, f"A fact {word}", node_ids=[story], decision_ids=[decision["id"]]
+    )
     await ok(
-        client, "record_belief", actor="a", text=f"A belief {word}", evidence_fact_ids=[fact["id"]]
+        client,
+        "set_confirmation",
+        actor="a",
+        kind="fact",
+        record_id=fact["id"],
+        confirmation="confirmed",
+        person="Marie",
     )
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open("#/status")
+        await w.open("#/board")
+        await open_settings(page, "status")
         await expect(page.locator("#download-export")).to_be_visible(timeout=SLOW)
         async with page.expect_download() as waiting:
             await page.locator("#download-export").click()
@@ -178,6 +180,10 @@ async def test_the_downloaded_export_is_the_mcp_export(
         mcp = await export_everything(client)
         assert got == mcp
         assert got["format"] and got["counts"]["nodes"] == len(got["nodes"]) >= 3
+        assert set(got["counts"]) == set(SECTIONS)
+        # The records come with their confirmation and what they concern.
+        exported = next(f for f in got["facts"] if f["id"] == fact["id"])
+        assert exported["confirmed_by"] == "Marie" and exported["confirmed_at"]
         await expect(page.locator("#export-note")).to_contain_text("Downloaded:", timeout=SLOW)
         await expect(page.locator("#export-note")).to_contain_text(f"{len(got['events'])} events")
         assert word in path.read_text(encoding="utf-8")
@@ -187,6 +193,7 @@ async def test_the_downloaded_export_is_the_mcp_export(
 async def test_no_agent_key_no_session_and_no_database_password_is_in_any_page_or_response(
     client: Client, board: str, tmp_path: Path
 ) -> None:
+    word = unique_word()
     project = project_at(board)
     password = os.environ.get("VRUM_DB_PASSWORD", "no-such-password-set")
     async with browser_page(board, token=the_token(), keep_bodies=True) as w:
@@ -198,13 +205,24 @@ async def test_no_agent_key_no_session_and_no_database_password_is_in_any_page_o
             "the database password": password,
         }
         assert all(len(secret) >= 16 for secret in secrets.values())
-        await w.open("#/home")
+        await w.open("#/board")
         texts = []
-        for name in ("home", "activity", "tools", "access", "status", "memory", "search"):
-            await w.go(f"#/{name}")
+        # Every page and every drawer, as the person would reach them.
+        for address in (
+            "#/board",
+            "#/graph?view=context&as=list",
+            "#/roadmap",
+            "#/board?drawer=activity",
+            f"#/graph?drawer=search&search={word}",
+            "#/roadmap?drawer=search&dups=1",
+            "#/access",
+            "#/tools",
+            "#/status",
+        ):
+            await w.go(address)
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(500)
-            if name == "access":
+            if address == "#/access":
                 # The keys are listed by their first letters and nothing more.
                 await expect(page.locator("#keys")).to_contain_text(f"{project.key[:8]}…")
             texts.append(await page.locator("body").inner_text())

@@ -78,3 +78,14 @@ def test_it_refuses_to_touch_an_env_that_already_exists(project: Path) -> None:
 
     assert result.returncode == 1 and "already exists" in result.stderr
     assert env.read_text() == "VRUM_DB_PASSWORD=keep-me\nVRUM_PORT=9000\n# a note of mine\n"
+
+
+def test_nothing_it_writes_or_documents_sets_up_a_language_model(project: Path) -> None:
+    # Vrum does not generate answers, so no setting for a chat service is offered: not in the
+    # example, not in the compose file, and not in what init-env writes.
+    run_init(project)
+
+    for path in (project / ".env", ROOT / ".env.example", ROOT / "compose.yaml"):
+        text = path.read_text()
+        assert "LLM_" not in text, path
+        assert "language model" not in text.lower(), path

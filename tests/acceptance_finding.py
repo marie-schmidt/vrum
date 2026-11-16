@@ -6,10 +6,11 @@ from typing import Any
 from mcp import Client
 
 from tests.acceptance_scenario import URL, chapter, clip, proof, sql_value, stories
+from tests.board_search import DUPLICATES
 from tests.helpers import (
+    confirm,
     connect,
     embeddings_stopped,
-    make_belief,
     make_decision,
     make_fact,
     ok,
@@ -20,37 +21,6 @@ from tests.helpers import (
     unique_word,
 )
 from tests.scripted_embeddings import cosine, embed
-
-# Each story and its twin say the same thing in other words. The first four twins use exactly the
-# same ideas; the last four add a word of their own, so they are alike but not identical.
-DUPLICATES = [
-    (
-        "Customers receive an invoice by email after payment",
-        "Clients receive a bill by mail after charge",
-    ),
-    ("Export the monthly report as a CSV file", "Download the monthly summary as a CSV file"),
-    (
-        "Users sign in with a password and keep their role",
-        "Customers authenticate with credentials and keep their privilege",
-    ),
-    (
-        "Translate every image caption into the customer language",
-        "Localisation of every photo caption into the client locale",
-    ),
-    (
-        "Search results appear slow for large projects",
-        "Lookup results appear sluggish for large projects today",
-    ),
-    (
-        "Create a backup every night and restore it on demand",
-        "Make a snapshot every night and recover it on demand tonight",
-    ),
-    ("Dark theme for the mobile app", "Night theme for the smartphone app now"),
-    (
-        "Cancel a subscription and keep an audit trail",
-        "Terminate a membership and keep a log history for good",
-    ),
-]
 
 
 async def search(client: Client, query: str, **arguments: Any) -> dict[str, Any]:
@@ -113,15 +83,11 @@ async def finding() -> None:
             story_id=story["id"],
         )  # fmt: skip
         decision = await make_decision(client, "A decision", text=f"We choose {word}.")
-        principle = await make_decision(
-            client, "A principle", kind="principle", text=f"Always {word}."
-        )
+        decision = await confirm(client, "decision", decision, "Marie")
         fact = await make_fact(client, f"The {word} service is slow.")
-        belief = await make_belief(client, [fact], f"Probably {word} needs a cache.")
         expected = {
             ("epic", epic["id"]), ("story", story["id"]), ("task", task["id"]),
-            ("rule", rule["id"]), ("decision", decision["id"]),
-            ("principle", principle["id"]), ("fact", fact["id"]), ("belief", belief["id"]),
+            ("rule", rule["id"]), ("decision", decision["id"]), ("fact", fact["id"]),
         }  # fmt: skip
         page = await search(client, word, mode="words", limit=200)
         results = by_item(page)
@@ -142,10 +108,8 @@ async def finding() -> None:
         lists = {
             **{kind: [n for n in nodes if n["kind"] == kind] for kind in ("epic", "story", "task")},
             "rule": await listing(client, "list_rules"),
-            "decision": await listing(client, "list_decisions", kind="decision"),
-            "principle": await listing(client, "list_decisions", kind="principle"),
-            "fact": await listing(client, "list_memories", type="fact"),
-            "belief": await listing(client, "list_memories", type="belief"),
+            "decision": await listing(client, "list_decisions"),
+            "fact": await listing(client, "list_facts"),
         }
         from_lists = {
             kind: len([item for item in items if word in text_of(item)])
@@ -159,13 +123,16 @@ async def finding() -> None:
         )
         proof(
             "M5",
-            "a fact and a belief are found by words, labelled with their origin",
-            results[("fact", fact["id"])]["origin"] == "stated"
-            and "Fact (stated)" in results[("fact", fact["id"])]["label"]
-            and results[("belief", belief["id"])]["suggestion"] is True
-            and "Suggestion" in results[("belief", belief["id"])]["label"]
-            and "Decision decided by Marie" in results[("decision", decision["id"])]["label"],
-            results[("belief", belief["id"])]["label"][:60],
+            "a fact and a decision are found by words, each carrying its confirmation and whether "
+            "it is in force, so an unconfirmed fact is never mistaken for a confirmed decision",
+            (results[("fact", fact["id"])]["confirmation"], results[("fact", fact["id"])]["status"])
+            == ("unconfirmed", "active")
+            and results[("fact", fact["id"])]["label"].startswith("Fact, not confirmed by a person")
+            and results[("decision", decision["id"])]["confirmation"] == "confirmed"
+            and results[("decision", decision["id"])]["label"].startswith(
+                "Decision, confirmed by Marie on "
+            ),
+            results[("fact", fact["id"])]["label"][:60],
         )
 
         # -- meaning
@@ -174,9 +141,7 @@ async def finding() -> None:
         body = "After payment the client gets a bill by mail."
         found_story = await story_with(client, title, body)
         found_fact = await make_fact(client, title)
-        found_belief = await make_belief(
-            client, [found_fact], f"Clients receive a bill by mail {w}"
-        )
+        found_decision = await make_decision(client, f"Clients receive a bill by mail {w}")
         await reindexed(client)
         paraphrase = "Send the bill to clients by mail once charged"
         score = cosine(embed(f"{title}\n{body}"), embed(paraphrase))
@@ -211,13 +176,15 @@ async def finding() -> None:
         by_meaning = by_item(
             await search(client, "Clients get a bill by mail", mode="meaning", limit=50)
         )
-        keys = [("fact", found_fact["id"]), ("belief", found_belief["id"])]
+        keys = [("fact", found_fact["id"]), ("decision", found_decision["id"])]
         proof(
             "M5",
-            "a fact and a belief are found by words and by meaning, labelled with their origin",
+            "a fact and a decision are found by words and by meaning, each labelled with its "
+            "confirmation and lifecycle",
             all(k in by_words and by_words[k]["matched"] == "words" for k in keys)
             and all(k in by_meaning and by_meaning[k]["matched"] == "meaning" for k in keys)
-            and all(by_meaning[k]["origin"] == "stated" for k in keys),
+            and all(by_meaning[k]["confirmation"] == "unconfirmed" for k in keys)
+            and all("not confirmed by a person" in by_meaning[k]["label"] for k in keys),
         )
 
         # -- the service goes away and comes back
@@ -301,6 +268,14 @@ async def finding() -> None:
             f"unrelated pairs; duplicates scored {min(scores[p] for p in duplicates):.2f} to "
             f"{max(scores[p] for p in duplicates):.2f}, unrelated at most "
             f"{max(scores[p] for p in unrelated):.2f}",
+        )
+        proof(
+            "M16",
+            "the optional embedding service stands on its own: with no language model anywhere, "
+            "meaning search and overlap detection work against it, and exact words kept working "
+            "while it was stopped",
+            back["matched"] == "meaning" and duplicates <= flagged and hit["matched"] == "words",
+            f"{len(flagged)} overlapping pairs found by meaning",
         )
 
         # -- the index is derived, and only reindex writes to it

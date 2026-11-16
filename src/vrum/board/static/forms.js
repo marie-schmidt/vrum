@@ -1,7 +1,7 @@
-// What the Rules and Memory pages share: dialogs, labelled fields, a picker for the items a record
-// concerns and a picker for the evidence of a belief. Nothing here decides what is allowed: every
-// form sends what the person typed and shows the server's answer in its own words, so no field is
-// marked as required (the browser would refuse a blank before the server could say why).
+// What the record dialogs share: dialogs, labelled fields and a picker for the items a record
+// concerns. Nothing here decides what is allowed: every form sends what the person typed and shows
+// the server's answer in its own words, so no field is marked as required (the browser would refuse
+// a blank before the server could say why).
 
 import { Refusal } from './api.js';
 import { h } from './dom.js';
@@ -77,10 +77,11 @@ export function dialogForm({ fields, submit, cancel = null, work, also = [] }) {
 
 // -- what a record concerns ------------------------------------------------------------------------
 
-// The way an item is named in a picker: #12 for an epic, story or task, "rule 3", "decision 5".
+// The way an item is named in a picker: #12 for an epic, story or task, "requirement 3",
+// "decision 5". "rule 3" is understood too, because that is what the tools call a requirement.
 const refText = {
   node: (id) => `#${id}`,
-  rule: (id) => `rule ${id}`,
+  rule: (id) => `requirement ${id}`,
   decision: (id) => `decision ${id}`,
 };
 
@@ -88,12 +89,12 @@ function titleOfRef(type, id) {
   if (type === 'node') return titleOf(id);
   const list = type === 'rule' ? store.rules : store.decisions;
   const found = (list || []).find((item) => item.id === id);
-  return found ? found.title : `${type} ${id}`;
+  return found ? found.title : `${type === 'rule' ? 'requirement' : type} ${id}`;
 }
 
 export function parseRef(text, kinds) {
   const typed = text.trim();
-  let found = /^rule\s*#?\s*(\d+)/i.exec(typed);
+  let found = /^(?:rule|requirement)\s*#?\s*(\d+)/i.exec(typed);
   if (found && kinds.includes('rule')) return { type: 'rule', id: Number(found[1]) };
   found = /^decision\s*#?\s*(\d+)/i.exec(typed);
   if (found && kinds.includes('decision')) return { type: 'decision', id: Number(found[1]) };
@@ -109,7 +110,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
   const listId = uid('picker-list-');
   const options = [];
   if (kinds.includes('node')) for (const node of store.nodes.values()) options.push(`#${node.id} ${node.title}`);
-  if (kinds.includes('rule')) for (const rule of store.rules || []) options.push(`rule ${rule.id} ${rule.title}`);
+  if (kinds.includes('rule')) for (const rule of store.rules || []) options.push(`requirement ${rule.id} ${rule.title}`);
   if (kinds.includes('decision')) for (const decision of store.decisions || []) options.push(`decision ${decision.id} ${decision.title}`);
   const input = h('input', { type: 'text', list: listId, autocomplete: 'off', 'aria-label': `${label}: type an id or pick from the list`, placeholder: 'an id such as #12, or a title' });
   const problem = h('p', { class: 'problem', role: 'alert' });
@@ -131,7 +132,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
     if (!input.value.trim()) return;
     const ref = parseRef(input.value, kinds);
     if (!ref) {
-      problem.textContent = 'Type an id such as #12 (rule 3 for a rule, decision 5 for a decision), or pick from the list.';
+      problem.textContent = 'Type an id such as #12 (requirement 3 for a requirement, decision 5 for a decision), or pick from the list.';
       return;
     }
     refs.set(`${ref.type}:${ref.id}`, ref);
@@ -159,6 +160,13 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
   );
   return {
     element,
+    // Forget what was chosen, once it has been sent.
+    reset() {
+      refs.clear();
+      input.value = '';
+      problem.textContent = '';
+      draw();
+    },
     // What to send: a list for each kind, and only when something was chosen.
     value() {
       add();
@@ -167,44 +175,6 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
       if (kinds.includes('node') && pick('node').length) out.node_ids = pick('node');
       if (kinds.includes('rule') && pick('rule').length) out.rule_ids = pick('rule');
       if (kinds.includes('decision') && pick('decision').length) out.decision_ids = pick('decision');
-      return out;
-    },
-  };
-}
-
-// -- the evidence of a belief ----------------------------------------------------------------------
-
-// The facts and decisions that are in force, to tick the ones a belief rests on. A belief can rest
-// on nothing else (not on another belief), and the server checks that again.
-export function evidencePicker({ chosen = [] } = {}) {
-  const wanted = new Set(chosen.map((item) => `${item.type}:${item.id}`));
-  const facts = (store.memories || []).filter((memory) => memory.type === 'fact' && memory.status === 'active');
-  const decisions = (store.decisions || []).filter((decision) => decision.status === 'active');
-  const boxes = [];
-  const row = (type, id, words) => {
-    const box = h('input', { type: 'checkbox', value: `${type}:${id}`, checked: wanted.has(`${type}:${id}`) });
-    boxes.push(box);
-    return h('li', { dataset: { evidence: `${type}:${id}` } }, h('label', { class: 'check' }, box, ` ${words}`));
-  };
-  const items = [
-    ...facts.map((fact) => row('fact', fact.id, `Fact #${fact.id}: ${clip(fact.text, 80)}`)),
-    ...decisions.map((decision) => row('decision', decision.id, `${decision.kind === 'principle' ? 'Principle' : 'Decision'} #${decision.id}: ${clip(decision.title, 80)}`)),
-  ];
-  const find = h('input', { type: 'search', autocomplete: 'off', 'aria-label': 'Narrow the list of evidence', placeholder: 'narrow the list' });
-  const list = h('ul', { class: 'evidence-pick' }, items.length ? items : h('li', { class: 'quiet' }, 'There are no facts or decisions in force to rest on yet. Record one first.'));
-  find.addEventListener('input', () => {
-    const needle = find.value.trim().toLowerCase();
-    for (const li of list.querySelectorAll('li')) li.hidden = Boolean(needle) && !li.textContent.toLowerCase().includes(needle);
-  });
-  return {
-    element: h('div', { class: 'field picker', role: 'group', 'aria-label': 'Evidence' }, h('label', { for: (find.id = uid()) }, 'Evidence: the facts and decisions it rests on'), find, list),
-    value() {
-      const ticked = boxes.filter((box) => box.checked).map((box) => box.value.split(':'));
-      const out = {};
-      const factIds = ticked.filter(([type]) => type === 'fact').map(([, id]) => Number(id));
-      const decisionIds = ticked.filter(([type]) => type === 'decision').map(([, id]) => Number(id));
-      if (factIds.length) out.evidence_fact_ids = factIds;
-      if (decisionIds.length) out.evidence_decision_ids = decisionIds;
       return out;
     },
   };

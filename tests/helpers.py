@@ -1,11 +1,9 @@
 """Small helpers for tests that talk to the running containers: through a real MCP client, or
 straight to the database."""
 
-import json
 import os
 import random
 import subprocess
-import urllib.request
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -299,16 +297,24 @@ async def make_fact(client: Client, text: str = "A fact", **arguments: Any) -> d
     return await ok(client, "retain_fact", **{**fields, **arguments})
 
 
-async def make_belief(
-    client: Client, evidence: list[dict[str, Any]], text: str = "A belief", **arguments: Any
+async def confirm(
+    client: Client, kind: str, record: dict[str, Any], person: str = "Marie", **arguments: Any
 ) -> dict[str, Any]:
-    """A belief resting on the given facts."""
-    fields: dict[str, Any] = {
-        "actor": "agent-1",
-        "text": text,
-        "evidence_fact_ids": [fact["id"] for fact in evidence],
-    }
-    return await ok(client, "record_belief", **{**fields, **arguments})
+    """A named person confirms a fact or a decision. Returns the record as it is afterwards."""
+    answer = await ok(
+        client,
+        "set_confirmation",
+        **{
+            "actor": "agent-1",
+            "kind": kind,
+            "record_id": record["id"],
+            "confirmation": "confirmed",
+            "person": person,
+            **arguments,
+        },
+    )
+    changed: dict[str, Any] = answer[kind]
+    return changed
 
 
 def unique_word() -> str:
@@ -337,55 +343,10 @@ async def reindexed(client: Client) -> dict[str, Any]:
     return report
 
 
-class ScriptedModel:
-    """The scripted language model of the check stack (tests/scripted_model.py): tells it what to
-    answer, and asks what Vrum sent it. A rule matches any request whose messages contain `when`,
-    so a test uses a made-up word (unique_word) to keep its rules apart from every other test's."""
-
-    def __init__(self) -> None:
-        self._url = os.environ.get("VRUM_TEST_MODEL_URL", "")
-        if not self._url:
-            pytest.fail(
-                "VRUM_TEST_MODEL_URL is not set. Run the integration tests through ./check.sh."
-            )
-
-    def _call(self, path: str, body: Any = None) -> Any:
-        request = urllib.request.Request(
-            f"{self._url}{path}",
-            data=None if body is None else json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="GET" if body is None else "POST",
-        )
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read())
-
-    def script(self, when: str, reply: Any, status: int | None = None) -> None:
-        """Answer requests containing `when` with `reply` (JSON, or text for an answer that is
-        not JSON), or with this HTTP error status."""
-        self._call("/script", {"when": when, "reply": reply, "status": status})
-
-    def received(self, containing: str) -> list[dict[str, Any]]:
-        """Every request so far whose messages contain this text."""
-        found: list[dict[str, Any]] = self._call("/received")
-        return [request for request in found if containing in request["text"]]
-
-
-@contextmanager
-def model_stopped() -> Iterator[None]:
-    """The scripted language model is stopped inside the block and started again after it."""
-    stopped = compose("stop", "scripted-model")
-    assert stopped.returncode == 0, stopped.stderr
-    try:
-        yield
-    finally:
-        started = compose("up", "--detach", "--wait", "scripted-model")
-        assert started.returncode == 0, started.stderr
-
-
 async def export_everything(client: Client, limit: int = 200) -> dict[str, Any]:
     """The whole export: every page of export_graph, put together."""
     document: dict[str, Any] = {"format": None, "version": None, "counts": None}
-    for section in ("nodes", "links", "rules", "decisions", "memories", "events"):
+    for section in ("nodes", "links", "rules", "decisions", "facts", "events"):
         document[section] = []
     after: str | None = None
     while True:
@@ -479,6 +440,15 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     decision1 = await make_decision(
         client, f"Use email {word}", node_ids=[story1["id"]], rule_ids=[rule1["id"]]
     )
+    await ok(
+        client,
+        "set_confirmation",
+        actor="ann",
+        kind="decision",
+        record_id=decision1["id"],
+        confirmation="confirmed",
+        person="Marie",
+    )
     decision2 = await ok(
         client,
         "supersede_decision",
@@ -488,9 +458,27 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         text="Both ways of logging in.",
         reason="Marie changed her mind.",
         decided_by="Marie",
+        said_by="Marie",
+        quote="Let us have both.",
     )
-    principle = await make_decision(
-        client, f"Keep it simple {word}", kind="principle", node_ids=[epic["id"]]
+    decision3 = await make_decision(client, f"Use a password manager {word}")
+    decision3 = await ok(
+        client,
+        "withdraw_decision",
+        actor="ann",
+        decision_id=decision3["id"],
+        reason="Not needed after all.",
+    )
+    wide = await make_decision(client, f"Keep it simple {word}", project_wide=True)
+    await ok(
+        client,
+        "set_confirmation",
+        actor="ann",
+        kind="decision",
+        record_id=wide["id"],
+        confirmation="confirmed",
+        person="Marie",
+        quote="Yes, keep it simple.",
     )
 
     fact1 = await make_fact(
@@ -499,14 +487,22 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         node_ids=[story1["id"]],
         rule_ids=[rule1["id"]],
         decision_ids=[decision2["id"]],
-        happened_on="2026-11-01",
     )
-    fact2 = await make_fact(client, f"Codes arrive in 5 seconds {word}", kind="experience")
+    await ok(
+        client,
+        "set_confirmation",
+        actor="ann",
+        kind="fact",
+        record_id=fact1["id"],
+        confirmation="confirmed",
+        person="Marie",
+    )
+    fact2 = await make_fact(client, f"Codes arrive in 5 seconds {word}")
     fact3 = await make_fact(client, f"Codes arrive in 10 seconds {word}")
     fact4 = (
         await ok(
             client,
-            "supersede_memory",
+            "supersede_fact",
             actor="ann",
             replaces=[fact3["id"]],
             reason="Measured again.",
@@ -515,39 +511,25 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         )
     )["replacement"]
     fact5 = await make_fact(client, f"The office has a dog {word}")
-    await ok(client, "retract_memory", actor="ann", memory_ids=[fact5["id"]], reason="It is a cat.")
-
-    belief1 = await make_belief(
+    await ok(client, "withdraw_fact", actor="ann", fact_ids=[fact5["id"]], reason="It is a cat.")
+    fact6 = await make_fact(client, f"Codes never expire {word}")
+    await ok(
         client,
-        [fact1],
-        f"Phones come first {word}",
-        evidence_decision_ids=[decision2["id"]],
-        node_ids=[story1["id"]],
-    )
-    await ok(client, "confirm_belief", actor="ann", memory_id=belief1["id"], confirmed_by="Marie")
-    belief2 = await make_belief(client, [fact2], f"Codes are quick {word}")
-    await ok(client, "retract_memory", actor="ann", memory_ids=[fact2["id"]], reason="Wrong.")
-    belief3 = await make_belief(client, [fact4], f"Codes are very quick {word}")
-    belief4 = (
-        await ok(
-            client,
-            "supersede_memory",
-            actor="ann",
-            replaces=[belief3["id"]],
-            reason="More precise.",
-            text=f"Codes take about 3 seconds {word}",
-            evidence_fact_ids=[fact4["id"]],
-        )
-    )["replacement"]
-    belief5 = await make_belief(client, [fact4], f"Keep codes short {word}")
-    decision3 = await ok(
-        client,
-        "promote_belief",
+        "set_confirmation",
         actor="ann",
-        memory_id=belief5["id"],
-        title=f"Codes are short {word}",
-        reason="Marie agrees.",
-        decided_by="Marie",
+        kind="fact",
+        record_id=fact6["id"],
+        confirmation="confirmed",
+        person="Marie",
+    )
+    await ok(
+        client,
+        "withdraw_fact",
+        actor="ann",
+        fact_ids=[fact6["id"]],
+        reason="They expire in an hour.",
+        said_by="Marie",
+        quote="No, they expire.",
     )
     return {
         "epic": epic,
@@ -561,15 +543,11 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         "decision1": decision1,
         "decision2": decision2,
         "decision3": decision3,
-        "principle": principle,
+        "wide": wide,
         "fact1": fact1,
         "fact2": fact2,
         "fact3": fact3,
         "fact4": fact4,
         "fact5": fact5,
-        "belief1": belief1,
-        "belief2": belief2,
-        "belief3": belief3,
-        "belief4": belief4,
-        "belief5": belief5,
+        "fact6": fact6,
     }

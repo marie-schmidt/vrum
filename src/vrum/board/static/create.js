@@ -94,7 +94,7 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
               `Created ${KIND[made.kind].label.toLowerCase()} #${made.id}, “${made.title}”.` +
                 (similar.length ? ` It looks like: ${similar.join('; ')}.` : ''),
             );
-            ui.navigate({ card: made.id, panel: null });
+            ui.navigate({ sel: `node:${made.id}`, panel: null });
           } catch (error) {
             if (!(error instanceof Refusal)) throw error;
             problem.textContent = error.message;

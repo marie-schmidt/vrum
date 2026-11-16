@@ -6,7 +6,7 @@ import { Refusal, createProject, projects, register, signIn } from './api.js';
 import { setActor } from './ctx.js';
 import { h, moment, put } from './dom.js';
 
-const projectAddress = (project) => `/board/p/${project.id}#/home`;
+const projectAddress = (project) => `/board/p/${project.id}#/board`;
 
 function labelled(id, label, control, help = null) {
   const note = help ? h('p', { class: 'quiet', id: `${id}-help` }, help) : null;
@@ -94,7 +94,7 @@ export async function showProjects(main, session) {
         location.assign(projectAddress(made));
       }),
     },
-    labelled('project-name', found.length ? 'Name of a new project' : 'Name of your first project', name, 'A project is a private workspace with its own work, rules, decisions and memory.'),
+    labelled('project-name', found.length ? 'Name of a new project' : 'Name of your first project', name, 'A project is a private workspace with its own work, requirements, decisions and facts.'),
     problem,
     submit,
   );

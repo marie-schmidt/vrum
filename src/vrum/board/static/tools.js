@@ -5,8 +5,12 @@
 // has a "Try it" form built from its input fields; the server decides which tools those are.
 
 import { Refusal, get, tryTool } from './api.js';
-import { hrefTo, ui } from './ctx.js';
+import { ui, viewLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
+
+// Where on the board a tool is done is a page (Board, Graph, Roadmap, Agent access, Tools, Status),
+// or one of the two drawers that open over any page.
+const DRAWERS = ['search', 'activity'];
 
 let root = null;
 let params = new URLSearchParams();
@@ -73,8 +77,11 @@ export function unmount() {
 }
 
 export function update(next) {
+  const before = params;
   params = next;
   if (!root || !listing) return;
+  // Only a new search changes the list: opening a drawer leaves open forms and typed fields alone.
+  if ((next.get('q') || '') === (before.get('q') || '')) return;
   parts.search.value = params.get('q') || '';
   draw();
 }
@@ -102,7 +109,7 @@ function drawConnect() {
         'Send it with every request, in a header: ',
         h('code', {}, 'Authorization: Bearer <the agent key>'),
         '. A key belongs to this one project and reaches nothing else. You make and revoke keys on the ',
-        h('a', { href: hrefTo('access') }, 'Agent access'),
+        viewLink('access', {}, {}, 'Agent access'),
         ' page, and a key is shown only once, when it is made. Never put it in a file you commit: let the client read it from the environment.',
       ),
     ),
@@ -172,7 +179,9 @@ function fieldTable(fields) {
 function whereOnTheBoard(tool) {
   if (tool.agents_only) return h('p', { class: 'where agents' }, h('span', { class: 'chip' }, 'For agents only'), ` ${tool.agents_only}`);
   if (!tool.where) return h('p', { class: 'where problem' }, 'This tool has not been placed on the board or marked as for agents only yet.');
-  return h('p', { class: 'where' }, h('span', { class: 'chip' }, 'On the board'), ' ', h('a', { href: hrefTo(tool.page) }, tool.where));
+  // A drawer opens over the page that is open; a page is gone to.
+  const link = DRAWERS.includes(tool.page) ? viewLink(ui.page, { drawer: tool.page }, {}, tool.where) : viewLink(tool.page, {}, {}, tool.where);
+  return h('p', { class: 'where' }, h('span', { class: 'chip' }, 'On the board'), ' ', link);
 }
 
 function toolEntry(tool) {

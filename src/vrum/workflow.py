@@ -37,6 +37,7 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.decisions import require_decision
+from vrum.facts import require_fact
 from vrum.graph import (
     EVENT_COLUMNS,
     KINDS,
@@ -54,7 +55,7 @@ from vrum.graph import (
     require_node,
 )
 from vrum.links import LINK_TYPES, insert_link
-from vrum.memories import memory_label, require_memory
+from vrum.records import label_of
 from vrum.rules import RULE_STATUSES, insert_rule, require_rule
 from vrum.search import Searcher, SearchResult
 
@@ -81,14 +82,13 @@ _SIMILAR_WANTED = 5
 # What each section is called in the sentence that says what was left out.
 _SECTION_NAMES = {
     "parents": "parents",
-    "rules": "rules",
+    "rules": "requirements",
     "handoffs": "handoff notes",
     "prerequisites": "prerequisites",
     "active_decisions": "decisions",
-    "active_principles": "principles",
+    "project_wide_decisions": "project-wide decisions",
     "facts": "facts",
-    "beliefs": "beliefs",
-    "superseded_decisions": "superseded decisions",
+    "past_decisions": "past decisions",
     "unblocks": "items it unblocks",
     "similar": "similar items",
 }
@@ -122,32 +122,42 @@ class ContextRule(BaseModel):
 
 class ContextDecision(BaseModel):
     id: int
-    kind: str = Field(description="decision or principle.")
+    label: str = Field(
+        description="What this is, in plain words: whether it is in force and whether a person "
+        "confirmed it."
+    )
     title: str
     text: str
     reason: str
     decided_by: str = Field(description="The person who made it.")
     decided_on: date
-    status: str = Field(description="active or superseded.")
+    project_wide: bool = Field(description="True when it applies throughout the project.")
+    status: str = Field(description="active, superseded or withdrawn.")
     superseded_by_id: int | None
+    confirmation: str = Field(
+        description="confirmed once a named person has reviewed it, otherwise unconfirmed."
+    )
+    confirmed_by: str | None = Field(description="The person who confirmed it.")
     linked_to: list[int] = Field(
-        description="Which of this item and its parents it is linked to. Empty for a principle "
-        "that is not linked to any of them: a principle applies everywhere."
+        description="Which of this item and its parents it is linked to. Empty for a "
+        "project-wide decision that is not linked to any of them."
     )
 
 
-class ContextMemory(BaseModel):
+class ContextFact(BaseModel):
     id: int
-    type: str = Field(description="fact or belief.")
-    label: str = Field(description="What this is, in plain words.")
-    text: str
-    origin: str = Field(description="stated, extracted or derived.")
-    recorded_by: str
-    confirmed_by: str | None = Field(description="For a belief: the person who has looked at it.")
-    linked_to: list[int] = Field(description="Which of this item and its parents it is linked to.")
-    suggestion: bool = Field(
-        description="True for a belief, and for anything a model wrote: weigh it, do not obey it."
+    label: str = Field(
+        description="What this is, in plain words: whether it is in force and whether a person "
+        "confirmed it, and where it came from."
     )
+    text: str
+    source: str = Field(description="Where it came from.")
+    recorded_by: str
+    confirmation: str = Field(
+        description="confirmed once a named person has reviewed it, otherwise unconfirmed."
+    )
+    confirmed_by: str | None = Field(description="The person who confirmed it.")
+    linked_to: list[int] = Field(description="Which of this item and its parents it is linked to.")
 
 
 class Prerequisite(BaseModel):
@@ -176,32 +186,27 @@ class WorkContext(BaseModel):
         description="What it needs first (needs_first), with the notes left on each."
     )
     active_decisions: list[ContextDecision] = Field(
-        description="Decisions in force, linked to this item or its parents. Authoritative."
+        description="Decisions in force, linked to this item or its parents, other than "
+        "project-wide ones. Each says whether a person confirmed it."
     )
-    active_principles: list[ContextDecision] = Field(
-        description="Every principle in force. They apply everywhere."
+    project_wide_decisions: list[ContextDecision] = Field(
+        description="Every project-wide decision in force. They apply throughout the project."
     )
-    facts: list[ContextMemory] = Field(
-        description="Active facts linked to this item or its parents, with where each came from."
+    facts: list[ContextFact] = Field(
+        description="Active facts linked to this item or its parents, with where each came from "
+        "and whether a person confirmed it."
     )
-    beliefs: list[ContextMemory] = Field(
-        description="Active beliefs linked to this item or its parents, that are not stale. "
-        "Suggestions: weigh them, do not obey them."
-    )
-    superseded_decisions: list[ContextDecision] = Field(
-        description="Decisions linked to this item or its parents that were replaced. Shown so "
-        "you can see what changed. They are not in force."
+    past_decisions: list[ContextDecision] = Field(
+        description="Decisions linked to this item or its parents that were superseded or "
+        "withdrawn. Shown so you can see what changed. They are not in force."
     )
     unblocks: list[Dependent] = Field(description="What is waiting for this item to be done.")
     similar: list[SearchResult] = Field(
-        description="Existing stories, decisions, facts and beliefs alike in meaning. Suggestions "
-        "only: they were found by similarity, not by any link."
+        description="Existing stories, decisions and facts alike in meaning. Suggestions only: "
+        "they were found by similarity, not by any link."
     )
     similar_note: str | None = Field(
         description="Why there are no similar items, when meaning could not be used."
-    )
-    stale_beliefs_left_out: int = Field(
-        description="How many linked beliefs were left out because their evidence has changed."
     )
     characters: int = Field(description="How much of the size limit this context uses.")
     max_characters: int = Field(description="The size limit. The work itself is never cut.")
@@ -782,7 +787,7 @@ class Workflow:
         node_id: int | None,
         rule_id: int | None,
         decision_id: int | None,
-        memory_id: int | None,
+        fact_id: int | None,
         limit: int,
         newest: bool = False,
         before_event_id: int | None = None,
@@ -799,13 +804,13 @@ class Workflow:
                 ("node_id", node_id),
                 ("rule_id", rule_id),
                 ("decision_id", decision_id),
-                ("memory_id", memory_id),
+                ("fact_id", fact_id),
             )
             if value is not None
         ]
         if len(given) > 1:
             raise Refusal(
-                "Give at most one of node_id, rule_id, decision_id or memory_id: the one item to "
+                "Give at most one of node_id, rule_id, decision_id or fact_id: the one item to "
                 "follow. Leave them all out to see every change."
             )
         async with self._database.transaction(snapshot=True) as conn:
@@ -817,8 +822,8 @@ class Workflow:
                 await require_rule(conn, rule_id)
             if decision_id is not None:
                 await require_decision(conn, decision_id)
-            if memory_id is not None:
-                await require_memory(conn, memory_id)
+            if fact_id is not None:
+                await require_fact(conn, fact_id)
             cursor = {"xid": "0", "id": 0}
             if after_event_id:
                 found = await fetch_one(
@@ -860,7 +865,7 @@ class Workflow:
                 "OR e.other_node_id = %(node)s) "
                 "AND (%(rule)s::bigint IS NULL OR e.rule_id = %(rule)s) "
                 "AND (%(decision)s::bigint IS NULL OR e.decision_id = %(decision)s) "
-                "AND (%(memory)s::bigint IS NULL OR e.memory_id = %(memory)s) "
+                "AND (%(fact)s::bigint IS NULL OR e.fact_id = %(fact)s) "
                 f"ORDER BY e.xid {order}, e.id {order} LIMIT %(fetch)s",
                 {
                     **cursor,
@@ -869,7 +874,7 @@ class Workflow:
                     "node": node_id,
                     "rule": rule_id,
                     "decision": decision_id,
-                    "memory": memory_id,
+                    "fact": fact_id,
                     "fetch": limit + 1,
                 },
             )
@@ -1113,38 +1118,43 @@ class Workflow:
         ]
         decision_rows = await fetch_all(
             conn,
-            "SELECT d.id, d.kind, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.status, "
-            "d.superseded_by_id, ARRAY(SELECT dn.node_id FROM decision_nodes dn "
+            "SELECT d.id, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.project_wide, "
+            "d.status, d.superseded_by_id, d.status_reason, d.confirmed_by, d.confirmed_at, "
+            "ARRAY(SELECT dn.node_id FROM decision_nodes dn "
             "WHERE dn.decision_id = d.id AND dn.node_id = ANY(%(chain)s) ORDER BY dn.node_id) "
             "AS linked_to FROM decisions d WHERE EXISTS (SELECT 1 FROM decision_nodes dn "
             "WHERE dn.decision_id = d.id AND dn.node_id = ANY(%(chain)s)) "
-            "OR (d.kind = 'principle' AND d.status = 'active') ORDER BY d.id",
+            "OR (d.project_wide AND d.status = 'active') ORDER BY d.id",
             {"chain": chain_ids},
         )
-        decisions = [ContextDecision.model_validate(row) for row in decision_rows]
-        memory_rows = await fetch_all(
-            conn,
-            "SELECT m.id, m.type, m.text, m.source, m.origin, m.recorded_by, m.confirmed_by, "
-            "m.stale, ARRAY(SELECT mn.node_id FROM memory_nodes mn WHERE mn.memory_id = m.id "
-            "AND mn.node_id = ANY(%(chain)s) ORDER BY mn.node_id) AS linked_to "
-            "FROM memory_state m WHERE m.status = 'active' AND EXISTS (SELECT 1 FROM memory_nodes "
-            "mn WHERE mn.memory_id = m.id AND mn.node_id = ANY(%(chain)s)) ORDER BY m.id",
-            {"chain": chain_ids},
-        )
-        memories = [
-            ContextMemory(
-                id=row["id"],
-                type=row["type"],
-                label=memory_label(row),
-                text=row["text"],
-                origin=row["origin"],
-                recorded_by=row["recorded_by"],
-                confirmed_by=row["confirmed_by"],
-                linked_to=row["linked_to"],
-                suggestion=row["type"] == "belief" or row["origin"] != "stated",
+        decisions = [
+            ContextDecision.model_validate(
+                {
+                    **row,
+                    "label": label_of("decision", row),
+                    "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
+                }
             )
-            for row in memory_rows
-            if not row["stale"]
+            for row in decision_rows
+        ]
+        fact_rows = await fetch_all(
+            conn,
+            "SELECT f.id, f.text, f.source, f.recorded_by, f.status, f.confirmed_by, "
+            "f.confirmed_at, ARRAY(SELECT fn.node_id FROM fact_nodes fn WHERE fn.fact_id = f.id "
+            "AND fn.node_id = ANY(%(chain)s) ORDER BY fn.node_id) AS linked_to "
+            "FROM facts f WHERE f.status = 'active' AND EXISTS (SELECT 1 FROM fact_nodes "
+            "fn WHERE fn.fact_id = f.id AND fn.node_id = ANY(%(chain)s)) ORDER BY f.id",
+            {"chain": chain_ids},
+        )
+        facts = [
+            ContextFact.model_validate(
+                {
+                    **row,
+                    "label": f"{label_of('fact', row)}. Source: {row['source']}",
+                    "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
+                }
+            )
+            for row in fact_rows
         ]
         prerequisites = [
             Prerequisite(
@@ -1175,19 +1185,11 @@ class Workflow:
                 {"work": work.id},
             )
         ]
-        stale = await fetch_one(
-            conn,
-            "SELECT count(*) AS stale FROM memory_state m WHERE m.status = 'active' AND m.stale "
-            "AND EXISTS (SELECT 1 FROM memory_nodes mn WHERE mn.memory_id = m.id "
-            "AND mn.node_id = ANY(%s))",
-            (chain_ids,),
-        )
-        assert stale is not None
         shown = {
             *((node.kind, node.id) for node in chain),
             (work.kind, work.id),
-            *((d.kind, d.id) for d in decisions),
-            *((m.type, m.id) for m in memories),
+            *(("decision", d.id) for d in decisions),
+            *(("fact", f.id) for f in facts),
         }
         return {
             "parents": parents,
@@ -1195,16 +1197,14 @@ class Workflow:
             "handoffs": await handoffs_of(conn, work.id),
             "prerequisites": prerequisites,
             "active_decisions": [
-                d for d in decisions if d.kind == "decision" and d.status == "active"
+                d for d in decisions if d.status == "active" and not d.project_wide
             ],
-            "active_principles": [
-                d for d in decisions if d.kind == "principle" and d.status == "active"
+            "project_wide_decisions": [
+                d for d in decisions if d.status == "active" and d.project_wide
             ],
-            "facts": [m for m in memories if m.type == "fact"],
-            "beliefs": [m for m in memories if m.type == "belief"],
-            "superseded_decisions": [d for d in decisions if d.status == "superseded"],
+            "facts": facts,
+            "past_decisions": [d for d in decisions if d.status != "active"],
             "unblocks": dependents,
-            "stale_beliefs_left_out": int(stale["stale"]),
             "shown": shown,
         }
 
@@ -1215,7 +1215,7 @@ class Workflow:
         context. Suggestions, and never worth waiting for: it says so when it cannot be had."""
         found, _, note = await self._searcher.similar(
             node_id=work.id,
-            wanted_types=["story", "decision", "fact", "belief"],
+            wanted_types=["story", "decision", "fact"],
             exclude=parts["shown"],
             limit=_SIMILAR_WANTED,
             timeout=5.0,
@@ -1263,7 +1263,6 @@ class Workflow:
         return WorkContext(
             **kept,
             similar_note=similar_note,
-            stale_beliefs_left_out=parts["stale_beliefs_left_out"],
             characters=used,
             max_characters=max_chars,
             left_out=left_out,

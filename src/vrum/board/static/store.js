@@ -1,20 +1,18 @@
 // What the board knows: the work (nodes and the links between them), and, once a page asks for
-// them, the rules, decisions, facts and beliefs. It is a copy of what the server holds, fetched
-// with the same tools an agent uses and refreshed from the same change feed. The server is the
-// only place anything is kept.
+// them, the requirements (rules), decisions and facts. It is a copy of what the server holds,
+// fetched with the same tools an agent uses and refreshed from the same change feed. The server is
+// the only place anything is kept.
 
-import { Refusal, call, callAll, callPaged, exported, get, indexState } from './api.js';
+import { call, callAll, callPaged, exported, get, indexState } from './api.js';
 
 export const store = {
   nodes: new Map(), // id -> node
   links: [], // { id, source_id, target_id, link_type }
   rules: null, // loaded when a page asks for them
   decisions: null,
-  memories: null,
-  overlaps: null, // pairs of stories the index thinks may be the same
-  overlapNote: null, // why there are none, when the index could not be used
+  facts: null,
   references: null, // every [[reference]] written in any text, loaded when the graph asks
-  info: { poll_seconds: 5, language_model: null },
+  info: { poll_seconds: 5 },
   index: null, // what the index can do now, and how many items are waiting
   cursor: 0, // the newest change event seen
 };
@@ -31,31 +29,10 @@ function emit(change) {
   listeners.forEach((fn) => fn(change));
 }
 
-// Pairs of stories the index thinks may be the same. Without an index there are none, and the
-// server's words say why.
-async function loadOverlaps() {
-  const pairs = [];
-  let offset = 0;
-  try {
-    while (offset !== null && offset !== undefined) {
-      const page = await call('find_overlaps', { limit: 200, offset });
-      pairs.push(...page.items);
-      offset = page.next_offset;
-    }
-  } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    store.overlapNote = error.message;
-    return [];
-  }
-  store.overlapNote = null;
-  return pairs;
-}
-
 const LOADERS = {
   rules: () => callAll('list_rules', { detail: true }),
   decisions: () => callAll('list_decisions', {}),
-  memories: () => callAll('list_memories', {}),
-  overlaps: loadOverlaps,
+  facts: () => callAll('list_facts', {}),
   references: async () => (await callPaged('find_mentions', {})).items,
 };
 
@@ -63,6 +40,10 @@ const LOADERS = {
 export async function ensure(name) {
   if (store[name] === null) store[name] = await LOADERS[name]();
 }
+
+// The requirements, decisions and facts, for what names them (the quick switcher, the feed, a
+// reference in a text).
+export const ensureContext = () => Promise.all([ensure('rules'), ensure('decisions'), ensure('facts')]);
 
 async function reload() {
   const [nodes, links] = await Promise.all([callAll('list_nodes', {}), exported('links')]);
@@ -122,11 +103,12 @@ export async function sync() {
 
 let timer = null;
 
-export function keepSynced(onTrouble) {
+export function keepSynced(onTrouble, onWell = () => {}) {
   stopSyncing();
   const tick = async () => {
     try {
       await sync();
+      onWell();
     } catch (error) {
       onTrouble(error);
     }

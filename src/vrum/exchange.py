@@ -1,13 +1,18 @@
 """Moving the whole graph out of one server and into another as data (M7).
 
 `export_page` reads everything a page at a time, in a fixed order, as plain data. `import_document`
-loads such a file into a server that holds nothing yet, keeping every id, date, origin and event,
-in one step: either all of it is loaded or none of it. Backing up and restoring the whole database
-is separate (scripts/backup.sh and scripts/restore.sh); this is the portable, readable form.
+loads such a file into a server that holds nothing yet, keeping every id, date, confirmation and
+event, in one step: either all of it is loaded or none of it. Backing up and restoring the whole
+database is separate (scripts/backup.sh and scripts/restore.sh); this is the portable, readable
+form.
+
+Facts and decisions are exported as they stand: their lifecycle (active, superseded or withdrawn,
+what replaced them, why), who confirmed them and when (an ended record keeps the confirmation it
+had), and what they are linked to.
 
 Left out on purpose: claims (a claim is a lease that runs out, not part of the graph; the events
-that recorded it are exported) and everything that is worked out from the rest (what is ready, what
-is stale, the search columns and the semantic index, which the server rebuilds)."""
+that recorded it are exported) and everything that is worked out from the rest (what is ready, the
+search columns and the semantic index, which the server rebuilds)."""
 
 import re
 from collections.abc import Iterable
@@ -25,11 +30,11 @@ from vrum.db import Database
 FORMAT = "vrum-export"
 FORMAT_VERSION = 1
 # The order everything is written in, and the order an import needs: a node before what points to
-# it, memories before the decisions promoted from them, events last.
-SECTIONS = ("nodes", "links", "rules", "decisions", "memories", "events")
+# it, decisions before the facts that concern them, events last.
+SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
 # How many problems in a file are listed before "and N more".
 _MOST_PROBLEMS = 20
-_A = {"epic": "an epic", "story": "a story", "belief": "a belief", "fact": "a fact"}
+_A = {"epic": "an epic", "story": "a story"}
 
 _QUERIES = {
     "nodes": (
@@ -41,16 +46,17 @@ _QUERIES = {
         "SELECT id, story_id, title, body, status, version, created_at, updated_at FROM rules"
     ),
     "decisions": (
-        "SELECT id, kind, title, text, reason, decided_by, decided_on, status, "
-        "superseded_by_id, promoted_from_id, recorded_at, node_ids, rule_ids FROM decision_state"
+        "SELECT id, title, text, reason, decided_by, decided_on, project_wide, status, "
+        "superseded_by_id, status_reason, confirmed_by, confirmed_at, recorded_at, node_ids, "
+        "rule_ids FROM decision_state"
     ),
-    "memories": (
-        "SELECT id, type, kind, text, source, happened_on, origin, recorded_by, recorded_at, "
-        "status, superseded_by_id, status_reason, confirmed_by, confirmed_at, node_ids, rule_ids, "
-        "decision_ids, evidence FROM memory_state"
+    "facts": (
+        "SELECT id, text, source, recorded_by, recorded_at, status, superseded_by_id, "
+        "status_reason, confirmed_by, confirmed_at, node_ids, rule_ids, decision_ids "
+        "FROM fact_state"
     ),
     "events": (
-        "SELECT id, node_id, other_node_id, rule_id, decision_id, memory_id, action, actor, at, "
+        "SELECT id, node_id, other_node_id, rule_id, decision_id, fact_id, action, actor, at, "
         "before, after FROM events"
     ),
 }
@@ -60,7 +66,7 @@ class ExportPage(BaseModel):
     format: str = Field(description=f'Always "{FORMAT}".')
     version: int = Field(description="The version of this file format, now 1.")
     section: str | None = Field(
-        description="Which list `items` belongs to: nodes, links, rules, decisions, memories or "
+        description="Which list `items` belongs to: nodes, links, rules, decisions, facts or "
         "events. Empty when there is nothing at all to export."
     )
     items: list[dict[str, Any]] = Field(
@@ -93,13 +99,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _exported(section: str, row: dict[str, Any]) -> dict[str, Any]:
-    if section == "memories":
-        # The view says more about each piece of evidence than the file needs: what it is.
-        row = {
-            **row,
-            "evidence": [{"type": item["type"], "id": item["id"]} for item in row["evidence"]],
-        }
+def _exported(row: dict[str, Any]) -> dict[str, Any]:
     return {key: _plain(value) for key, value in row.items()}
 
 
@@ -193,38 +193,34 @@ class RuleItem(_Item):
     updated_at: Moment
 
 
+Status = Literal["active", "superseded", "withdrawn"]
+
+
 class DecisionItem(_Item):
     id: Id
-    kind: Literal["decision", "principle"]
     title: str
     text: str
     reason: str
     decided_by: str
     decided_on: Day
-    status: Literal["active", "superseded"]
+    project_wide: bool
+    status: Status
     superseded_by_id: Id | None
-    promoted_from_id: Id | None
+    status_reason: str | None
+    confirmed_by: str | None
+    confirmed_at: Moment | None
     recorded_at: Moment
     node_ids: list[Id]
     rule_ids: list[Id]
 
 
-class EvidenceItem(_Item):
-    type: Literal["fact", "decision"]
+class FactItem(_Item):
     id: Id
-
-
-class MemoryItem(_Item):
-    id: Id
-    type: Literal["fact", "belief"]
-    kind: Literal["world", "experience"] | None
     text: str
-    source: str | None
-    happened_on: Day | None
-    origin: Literal["stated", "extracted", "derived"]
+    source: str
     recorded_by: str
     recorded_at: Moment
-    status: Literal["active", "superseded", "retracted"]
+    status: Status
     superseded_by_id: Id | None
     status_reason: str | None
     confirmed_by: str | None
@@ -232,7 +228,6 @@ class MemoryItem(_Item):
     node_ids: list[Id]
     rule_ids: list[Id]
     decision_ids: list[Id]
-    evidence: list[EvidenceItem]
 
 
 class EventItem(_Item):
@@ -241,8 +236,36 @@ class EventItem(_Item):
     other_node_id: Id | None
     rule_id: Id | None
     decision_id: Id | None
-    memory_id: Id | None
-    action: str
+    fact_id: Id | None
+    action: Literal[
+        "create",
+        "update",
+        "move",
+        "link_added",
+        "link_removed",
+        "claimed",
+        "claim_renewed",
+        "claim_released",
+        "handoff",
+        "rule_created",
+        "rule_updated",
+        "rule_placed",
+        "rule_moved",
+        "decision_recorded",
+        "decision_superseded",
+        "decision_withdrawn",
+        "decision_linked",
+        "decision_unlinked",
+        "decision_confirmed",
+        "decision_unconfirmed",
+        "fact_recorded",
+        "fact_superseded",
+        "fact_withdrawn",
+        "fact_linked",
+        "fact_unlinked",
+        "fact_confirmed",
+        "fact_unconfirmed",
+    ]
     actor: str
     at: Moment
     before: dict[str, Any] | None
@@ -257,7 +280,7 @@ class Document(_Item):
     links: list[LinkItem]
     rules: list[RuleItem]
     decisions: list[DecisionItem]
-    memories: list[MemoryItem]
+    facts: list[FactItem]
     events: list[EventItem]
 
 
@@ -295,6 +318,76 @@ def _refuse_file(problems: list[str]) -> Refusal:
     )
 
 
+def _lifecycle_problems(
+    noun: str, place: str, record: DecisionItem | FactItem, found: dict[int, Any]
+) -> list[str]:
+    """Where a fact or decision stands has to hang together, as the database requires: a
+    superseded one names the later one that replaced it, a withdrawn one does not, the reason it
+    ended is there exactly when one is needed (a fact says why however it ended; a decision only
+    says why it was withdrawn), and a confirmation names a person and a time or neither."""
+    problems: list[str] = []
+    replacement = record.superseded_by_id
+    if record.status == "superseded":
+        if replacement is None:
+            problems.append(
+                f"{place}: a superseded {noun} needs superseded_by_id, the {noun} that replaced it"
+            )
+        elif replacement not in found:
+            problems.append(f"{place}: superseded_by_id={replacement} is not a {noun} in the file")
+        elif replacement <= record.id:
+            problems.append(
+                f"{place}: superseded_by_id={replacement} must be a later id than {record.id}: a "
+                f"{noun} is replaced by one recorded after it"
+            )
+    elif replacement is not None:
+        problems.append(
+            f"{place}: superseded_by_id is only for a superseded {noun}, and this one is "
+            f"{record.status}"
+        )
+    needs_reason = record.status == "withdrawn" or (noun == "fact" and record.status != "active")
+    if needs_reason:
+        if record.status_reason is None or not record.status_reason.strip():
+            problems.append(f"{place}: a {record.status} {noun} needs status_reason, why it ended")
+    elif record.status_reason is not None:
+        only_for = "a fact that has ended" if noun == "fact" else "a withdrawn decision"
+        problems.append(
+            f"{place}: status_reason is only for {only_for}, and this one is {record.status}"
+        )
+    if (record.confirmed_by is None) != (record.confirmed_at is None):
+        problems.append(
+            f"{place}: confirmed_by and confirmed_at go together: give both, or neither when no "
+            "person has confirmed it"
+        )
+    elif record.confirmed_by is not None and not record.confirmed_by.strip():
+        problems.append(f"{place}: confirmed_by must be the name of a person")
+    return problems
+
+
+def _event_problems(place: str, event: EventItem) -> list[str]:
+    """An event says what it is about, as the database requires: a rule event names its rule and
+    no decision or fact, a decision event names its decision and no fact, a fact event names its
+    fact, and any other event names its node and nothing else."""
+    action = event.action
+    if action.startswith("rule_"):
+        wrong = event.rule_id is None or event.decision_id is not None or event.fact_id is not None
+        needs = "rule_id, and no decision_id or fact_id"
+    elif action.startswith("decision_"):
+        wrong = event.decision_id is None or event.fact_id is not None
+        needs = "decision_id, and no fact_id"
+    elif action.startswith("fact_"):
+        wrong = event.fact_id is None
+        needs = "fact_id"
+    else:
+        wrong = (
+            event.node_id is None
+            or event.rule_id is not None
+            or event.decision_id is not None
+            or event.fact_id is not None
+        )
+        needs = "node_id, and no rule_id, decision_id or fact_id"
+    return [f"{place}: the action '{action}' needs {needs}"] if wrong else []
+
+
 def _check_references(document: Document) -> list[str]:
     """Everything a file points at has to be in the file. Reported all at once, by place."""
     problems: list[str] = []
@@ -306,11 +399,11 @@ def _check_references(document: Document) -> list[str]:
                 problems.append(f"{section}[{index}]: id {item.id} is used twice")
             found[item.id] = item
         ids[section] = found
-    nodes, rules, decisions, memories = (
+    nodes, rules, decisions, facts = (
         ids["nodes"],
         ids["rules"],
         ids["decisions"],
-        ids["memories"],
+        ids["facts"],
     )
 
     def need(
@@ -321,7 +414,7 @@ def _check_references(document: Document) -> list[str]:
         item = found.get(wanted)
         if item is None:
             problems.append(f"{place}: {label}={wanted} is not in the file")
-        elif accept and item.kind != accept and getattr(item, "type", None) != accept:
+        elif accept and item.kind != accept:
             problems.append(f"{place}: {label}={wanted} must be {_A[accept]}")
         return item
 
@@ -347,31 +440,24 @@ def _check_references(document: Document) -> list[str]:
             need(place, "node_ids", nodes, node_id)
         for rule_id in decision.rule_ids:
             need(place, "rule_ids", rules, rule_id)
-        need(place, "superseded_by_id", decisions, decision.superseded_by_id)
-        need(place, "promoted_from_id", memories, decision.promoted_from_id, "belief")
-    for i, memory in enumerate(document.memories):
-        place = f"memories[{i}] (id {memory.id})"
-        for node_id in memory.node_ids:
+        problems.extend(_lifecycle_problems("decision", place, decision, decisions))
+    for i, fact in enumerate(document.facts):
+        place = f"facts[{i}] (id {fact.id})"
+        for node_id in fact.node_ids:
             need(place, "node_ids", nodes, node_id)
-        for rule_id in memory.rule_ids:
+        for rule_id in fact.rule_ids:
             need(place, "rule_ids", rules, rule_id)
-        for decision_id in memory.decision_ids:
+        for decision_id in fact.decision_ids:
             need(place, "decision_ids", decisions, decision_id)
-        replacement = need(place, "superseded_by_id", memories, memory.superseded_by_id)
-        if replacement is not None and replacement.type != memory.type:
-            problems.append(f"{place}: a {memory.type} can only be replaced by a {memory.type}")
-        for evidence in memory.evidence:
-            if evidence.type == "fact":
-                need(place, "evidence fact", memories, evidence.id, "fact")
-            else:
-                need(place, "evidence decision", decisions, evidence.id)
+        problems.extend(_lifecycle_problems("fact", place, fact, facts))
     for i, event in enumerate(document.events):
         place = f"events[{i}] (id {event.id})"
         need(place, "node_id", nodes, event.node_id)
         need(place, "other_node_id", nodes, event.other_node_id)
         need(place, "rule_id", rules, event.rule_id)
         need(place, "decision_id", decisions, event.decision_id)
-        need(place, "memory_id", memories, event.memory_id)
+        need(place, "fact_id", facts, event.fact_id)
+        problems.extend(_event_problems(place, event))
     return problems
 
 
@@ -434,7 +520,7 @@ class Exchange:
                 )
                 if not rows:
                     continue
-                page = [_exported(name, row) for row in rows[:limit]]
+                page = [_exported(row) for row in rows[:limit]]
                 if len(rows) > limit:
                     following: str | None = f"{name}:{page[-1]['id']}"
                 elif position + 1 < len(SECTIONS):
@@ -478,7 +564,7 @@ class Exchange:
         return ImportResult(
             counts=counts,
             message=(
-                f"Imported {total} items with their ids, dates, origins and history. If an "
+                f"Imported {total} items with their ids, dates, confirmations and history. If an "
                 "embedding service is set up, the server now indexes them for search by meaning "
                 "in the background."
             ),
@@ -514,9 +600,10 @@ async def _insert(conn: AsyncConnection, statement: str, rows: Iterable[tuple[An
 
 
 async def _load(conn: AsyncConnection, doc: Document) -> None:
-    """Write a checked file. Everything is written as it was first made (active, not confirmed,
-    not replaced) and the endings are applied last, so that the database's own rules, which stop
-    anything from changing once it has ended, are never bypassed."""
+    """Write a checked file. Facts and decisions are written as they were first made (active, not
+    confirmed, not replaced), with all their links; then confirmations are applied, then the
+    endings last, so that the database's own rules, which stop anything from changing once it has
+    ended, are never bypassed."""
     rank = {"epic": 0, "story": 1, "task": 2}
     await _insert(
         conn,
@@ -558,43 +645,30 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     )
     await _insert(
         conn,
-        "INSERT INTO memories (id, type, kind, text, source, happened_on, origin, recorded_by, "
-        "recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (
-            (
-                m.id,
-                m.type,
-                m.kind,
-                m.text,
-                m.source,
-                m.happened_on,
-                m.origin,
-                m.recorded_by,
-                m.recorded_at,
-            )
-            for m in doc.memories
-        ),
-    )
-    await _insert(
-        conn,
-        "INSERT INTO decisions (id, kind, title, text, reason, decided_by, decided_on, "
-        "promoted_from_id, recorded_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO decisions (id, title, text, reason, decided_by, decided_on, project_wide, "
+        "recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
                 d.id,
-                d.kind,
                 d.title,
                 d.text,
                 d.reason,
                 d.decided_by,
                 d.decided_on,
-                d.promoted_from_id,
+                d.project_wide,
                 d.recorded_at,
             )
             for d in doc.decisions
         ),
     )
+    await _insert(
+        conn,
+        "INSERT INTO facts (id, text, source, recorded_by, recorded_at) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        ((f.id, f.text, f.source, f.recorded_by, f.recorded_at) for f in doc.facts),
+    )
+    # Every link is written while its decision or fact is still active: the database keeps the
+    # links of one that has ended as they were.
     await _insert(
         conn,
         "INSERT INTO decision_nodes (decision_id, node_id) VALUES (%s, %s)",
@@ -607,52 +681,52 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     )
     await _insert(
         conn,
-        "INSERT INTO memory_nodes (memory_id, node_id) VALUES (%s, %s)",
-        ((m.id, node_id) for m in doc.memories for node_id in m.node_ids),
+        "INSERT INTO fact_nodes (fact_id, node_id) VALUES (%s, %s)",
+        ((f.id, node_id) for f in doc.facts for node_id in f.node_ids),
     )
     await _insert(
         conn,
-        "INSERT INTO memory_rules (memory_id, rule_id) VALUES (%s, %s)",
-        ((m.id, rule_id) for m in doc.memories for rule_id in m.rule_ids),
+        "INSERT INTO fact_rules (fact_id, rule_id) VALUES (%s, %s)",
+        ((f.id, rule_id) for f in doc.facts for rule_id in f.rule_ids),
     )
     await _insert(
         conn,
-        "INSERT INTO memory_decisions (memory_id, decision_id) VALUES (%s, %s)",
-        ((m.id, decision_id) for m in doc.memories for decision_id in m.decision_ids),
+        "INSERT INTO fact_decisions (fact_id, decision_id) VALUES (%s, %s)",
+        ((f.id, decision_id) for f in doc.facts for decision_id in f.decision_ids),
+    )
+    # A confirmation is made while the record is still active, and not in the same step as its
+    # ending: the database refuses both at once. An ended record keeps the confirmation it had.
+    await _insert(
+        conn,
+        "UPDATE decisions SET confirmed_by = %s, confirmed_at = %s WHERE id = %s",
+        ((d.confirmed_by, d.confirmed_at, d.id) for d in doc.decisions if d.confirmed_by),
     )
     await _insert(
         conn,
-        "INSERT INTO belief_evidence (belief_id, fact_id, decision_id) VALUES (%s, %s, %s)",
+        "UPDATE facts SET confirmed_by = %s, confirmed_at = %s WHERE id = %s",
+        ((f.confirmed_by, f.confirmed_at, f.id) for f in doc.facts if f.confirmed_by),
+    )
+    await _insert(
+        conn,
+        "UPDATE decisions SET status = %s, superseded_by_id = %s, status_reason = %s WHERE id = %s",
         (
-            (m.id, e.id if e.type == "fact" else None, e.id if e.type == "decision" else None)
-            for m in doc.memories
-            for e in m.evidence
-        ),
-    )
-    # A confirmation is made before a belief ends, and not in the same step: the database refuses
-    # both at once.
-    await _insert(
-        conn,
-        "UPDATE memories SET confirmed_by = %s, confirmed_at = %s WHERE id = %s",
-        ((m.confirmed_by, m.confirmed_at, m.id) for m in doc.memories if m.confirmed_by),
-    )
-    await _insert(
-        conn,
-        "UPDATE memories SET status = %s, superseded_by_id = %s, status_reason = %s WHERE id = %s",
-        (
-            (m.status, m.superseded_by_id, m.status_reason, m.id)
-            for m in doc.memories
-            if m.status != "active"
+            (d.status, d.superseded_by_id, d.status_reason, d.id)
+            for d in doc.decisions
+            if d.status != "active"
         ),
     )
     await _insert(
         conn,
-        "UPDATE decisions SET status = 'superseded', superseded_by_id = %s WHERE id = %s",
-        ((d.superseded_by_id, d.id) for d in doc.decisions if d.status == "superseded"),
+        "UPDATE facts SET status = %s, superseded_by_id = %s, status_reason = %s WHERE id = %s",
+        (
+            (f.status, f.superseded_by_id, f.status_reason, f.id)
+            for f in doc.facts
+            if f.status != "active"
+        ),
     )
     await _insert(
         conn,
-        "INSERT INTO events (id, node_id, other_node_id, rule_id, decision_id, memory_id, "
+        "INSERT INTO events (id, node_id, other_node_id, rule_id, decision_id, fact_id, "
         "action, actor, at, before, after) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
@@ -662,7 +736,7 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
                 e.other_node_id,
                 e.rule_id,
                 e.decision_id,
-                e.memory_id,
+                e.fact_id,
                 e.action,
                 e.actor,
                 e.at,

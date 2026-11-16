@@ -1,0 +1,57 @@
+/* Records (facts, decisions, requirements) and the shared detail panel. Owned by the records work. */
+
+/* A record in a list, in recall and in a dialog. Nothing is told by colour alone: every chip has a word. */
+.record { list-style: none; background: var(--white); border: 2px solid var(--ink); border-left-width: 8px; padding: 0.5rem 0.7rem; overflow-wrap: anywhere; }
+.record p { margin: 0.3rem 0; }
+.record.ended { border-style: dashed; border-left-style: solid; color: var(--ink-2); background: var(--paper-2); }
+.record.ended .record-title, .record.ended .record-heading a { text-decoration-style: dashed; }
+.record-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-bottom: 0.3rem; }
+.record-title { font-weight: 700; }
+.record-heading { font-size: 1rem; margin: 0.2rem 0; }
+.record-text { margin: 0.3rem 0; }
+.record-second { margin: 0.2rem 0; }
+.entries { list-style: none; padding: 0; margin: 0.4rem 0; display: grid; gap: 0.5rem; }
+.chip.confirmation-confirmed { border-color: var(--green); color: var(--green); font-weight: 700; }
+.chip.confirmation-unconfirmed { border-style: dashed; color: var(--ink-2); }
+.chip.lifecycle-superseded, .chip.lifecycle-withdrawn { border-style: dashed; border-color: var(--amber); color: var(--amber); font-weight: 700; }
+.chip.project-wide { background: var(--paper-2); }
+.ended-reason, .chain { color: var(--amber); }
+
+/* The detail panel: a fact, a decision or a requirement */
+.record-detail > header { display: grid; gap: 0.4rem; position: relative; padding-right: 2rem; margin-bottom: 0.5rem; }
+.record-detail h2 { overflow-wrap: anywhere; }
+.record-detail .buttons, .card-detail .buttons { flex-wrap: wrap; align-items: center; }
+.panel-problem { margin: 0 0 0.6rem; }
+.record-actions { margin: 0.2rem 0; }
+.handoff-note { margin: 0.2rem 0 0.4rem 0.6rem; padding-left: 0.6rem; border-left: 4px solid var(--line); }
+
+/* The Unconfirmed / Confirmed dropdown */
+.confirmation-control { display: grid; grid-template-columns: auto minmax(8rem, 14rem); gap: 0.3rem 0.6rem; align-items: center; }
+.confirmation-control > label { font-weight: 700; }
+.confirmation-control > .confirmation-note { grid-column: 1 / -1; margin: 0; }
+.confirmation-select { border: 2px solid var(--ink); background: var(--white); padding: 0.2rem 0.4rem; }
+.confirmation-control[data-confirmation="confirmed"] .confirmation-select { border-color: var(--green); }
+.confirmation-select:disabled { border-style: dashed; color: var(--ink-2); }
+
+/* Recall: what an agent is told for an item or a requirement */
+.recall-block { margin: 0.4rem 0; }
+.recall-section { border-top: 2px solid var(--ink); margin-top: 0.8rem; padding-top: 0.4rem; }
+.recall-section .entries { margin-top: 0.4rem; }
+.why { background: var(--paper-2); padding: 0.15rem 0.4rem; }
+.similar-item { margin: 0.2rem 0; }
+
+/* Requirements on a story, an epic or a task */
+.requirements { list-style: none; padding: 0; margin: 0.3rem 0; display: grid; gap: 0.5rem; }
+.requirement { background: var(--white); border: 2px solid var(--ink); border-left-width: 8px; padding: 0.4rem 0.6rem; overflow-wrap: anywhere; }
+.requirement.status-dropped { border-style: dashed; border-left-style: solid; color: var(--ink-2); background: var(--paper-2); }
+.requirement-group { margin: 0.5rem 0; }
+.requirement-group h4 { margin-bottom: 0.2rem; }
+.chip.rule-status.status-dropped, .chip.rule-status.status-settled { border-style: dashed; }
+.in-story { margin: 0.2rem 0; }
+
+/* The dialogs for records */
+.said-by { border: 2px dashed var(--ink); padding: 0.4rem 0.7rem; margin: 0.6rem 0; }
+.said-by > summary { cursor: pointer; font-weight: 600; }
+.replacing { border-left: 4px solid var(--amber); padding-left: 0.6rem; margin: 0.4rem 0; }
+.concerns-list { margin: 0.4rem 0; }
+.concerns-list .unlink { margin-left: 0.4rem; }

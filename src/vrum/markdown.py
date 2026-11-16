@@ -1,6 +1,8 @@
-"""A read-only Markdown copy of the graph (M7): one file per epic, story, task, rule, decision,
-principle, fact and belief, with its fields at the top and everything it is connected to written as
-`[[file name]]` references, so a person can read it in Obsidian or keep it in git. A reference a
+"""A read-only Markdown copy of the graph (M7): one file per epic, story, task, requirement (the
+rules of the database), decision and fact, with its fields at the top and everything it is
+connected to written as `[[file name]]` references, so a person can read it in Obsidian or keep it
+in git. A decision or fact says in plain words what it is, whether it still counts (active,
+superseded by another, or withdrawn and why) and whether a person confirmed it. A reference a
 person wrote in a text (`[[node:12]]`, see references.py) becomes the same kind of link to that
 item's file.
 
@@ -20,7 +22,7 @@ from vrum.references import REFERENCE_PATTERN
 _REFERENCE = re.compile(REFERENCE_PATTERN)
 
 # The folders the export owns. A tool that writes it replaces these and touches nothing else.
-FOLDERS = ("epics", "stories", "tasks", "rules", "decisions", "facts", "beliefs")
+FOLDERS = ("epics", "stories", "tasks", "rules", "decisions", "facts")
 
 _LONGEST_SLUG = 50
 # Fields written as they are, not as quoted text: whole numbers, days and times, and the words
@@ -29,13 +31,10 @@ _BARE = {
     "id",
     "version",
     "type",
-    "kind",
     "status",
     "priority",
-    "origin",
     "start_on",
     "target_on",
-    "happened_on",
     "decided_on",
     "created_at",
     "updated_at",
@@ -55,18 +54,26 @@ _NODE_FIELDS = (
     "updated_at",
 )
 _RULE_FIELDS = ("type", "id", "title", "status", "version", "created_at", "updated_at")
-_DECISION_FIELDS = ("type", "id", "title", "status", "decided_by", "decided_on", "recorded_at")
-_MEMORY_FIELDS = (
+_DECISION_FIELDS = (
     "type",
     "id",
-    "kind",
-    "source",
-    "happened_on",
-    "origin",
-    "recorded_by",
-    "recorded_at",
+    "title",
     "status",
     "status_reason",
+    "project_wide",
+    "decided_by",
+    "decided_on",
+    "confirmed_by",
+    "confirmed_at",
+    "recorded_at",
+)
+_FACT_FIELDS = (
+    "type",
+    "id",
+    "status",
+    "status_reason",
+    "recorded_by",
+    "recorded_at",
     "confirmed_by",
     "confirmed_at",
 )
@@ -78,12 +85,10 @@ _LABELS = (
     ("supersedes", "superseded by"),
     ("duplicates", "duplicates"),
     ("relates to", "relates to"),
-    ("story", "rules"),
+    ("story", "requirements"),
     ("affects", "decisions that affect it"),
     ("replaced by", "replaces"),
-    ("promoted from", "promoted to"),
-    ("concerns", "facts and beliefs about it"),
-    ("rests on", "evidence for"),
+    ("concerns", "facts about it"),
 )
 _ORDER: dict[str, int] = {}
 for _position, (_outgoing, _incoming) in enumerate(_LABELS):
@@ -112,6 +117,43 @@ def _value(name: str, value: Any) -> str:
     if name in _BARE:
         return str(value)
     return json.dumps(value, ensure_ascii=False)
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _standing(noun: str, item: Mapping[str, Any]) -> str:
+    """Where a decision or fact stands, in plain words: what it is, whether it still counts, and
+    whether a person confirmed it. A replacement is written as a reference, so that it becomes a
+    link to the file that replaced it. An ended record keeps the confirmation it had."""
+    kind = noun
+    if item.get("project_wide"):
+        kind = "project-wide decision (it applies throughout the project)"
+    status = item["status"]
+    reason = _one_line(item.get("status_reason") or "")
+    if status == "superseded":
+        replacement = item["superseded_by_id"]
+        lifecycle = (
+            "superseded" if replacement is None else f"superseded by [[{noun}:{replacement}]]"
+        )
+    elif status == "withdrawn":
+        lifecycle = "withdrawn"
+    else:
+        lifecycle = "active"
+    if reason and status != "active":
+        lifecycle += f". Why: {reason}"
+    if item["confirmed_by"]:
+        confirmation = (
+            f"confirmed by {_one_line(item['confirmed_by'])} on {item['confirmed_at'][:10]}"
+        )
+        if status != "active":
+            confirmation += ", as it was when it ended"
+    else:
+        confirmation = "not confirmed by a person"
+    return "\n".join(
+        [f"- Kind: {kind}", f"- Status: {lifecycle}", f"- Confirmation: {confirmation}"]
+    )
 
 
 def _front_matter(entry: _Entry) -> list[str]:
@@ -190,29 +232,31 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
             ),
         )
     for decision in document["decisions"]:
-        kind = decision["kind"]
         add(
             ("decision", decision["id"]),
             _Entry(
-                f"{kind}-{decision['id']}-{_slug(decision['title'])}",
+                f"decision-{decision['id']}-{_slug(decision['title'])}",
                 "decisions",
                 _DECISION_FIELDS,
-                {**decision, "type": kind},
+                {**decision, "type": "decision"},
                 decision["title"],
-                [decision["text"], f"## Reason\n\n{decision['reason']}"],
+                [
+                    _standing("decision", decision),
+                    decision["text"],
+                    f"## Reason\n\n{decision['reason']}",
+                ],
             ),
         )
-    for memory in document["memories"]:
-        kind = memory["type"]
+    for fact in document["facts"]:
         add(
-            ("memory", memory["id"]),
+            ("fact", fact["id"]),
             _Entry(
-                f"{kind}-{memory['id']}-{_slug(memory['text'])}",
-                "facts" if kind == "fact" else "beliefs",
-                _MEMORY_FIELDS,
-                memory,
-                f"{kind.capitalize()} {memory['id']}",
-                [memory["text"]],
+                f"fact-{fact['id']}-{_slug(fact['text'])}",
+                "facts",
+                _FACT_FIELDS,
+                {**fact, "type": "fact"},
+                f"Fact {fact['id']}",
+                [_standing("fact", fact), fact["text"], f"## Source\n\n{fact['source']}"],
             ),
         )
 
@@ -245,28 +289,19 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
             connect(here, ("rule", rule_id), "affects")
         if decision["superseded_by_id"] is not None:
             connect(here, ("decision", decision["superseded_by_id"]), "replaced by")
-        if decision["promoted_from_id"] is not None:
-            connect(here, ("memory", decision["promoted_from_id"]), "promoted from")
-    for memory in document["memories"]:
-        here = ("memory", memory["id"])
-        for node_id in memory["node_ids"]:
+    for fact in document["facts"]:
+        here = ("fact", fact["id"])
+        for node_id in fact["node_ids"]:
             connect(here, ("node", node_id), "concerns")
-        for rule_id in memory["rule_ids"]:
+        for rule_id in fact["rule_ids"]:
             connect(here, ("rule", rule_id), "concerns")
-        for decision_id in memory["decision_ids"]:
+        for decision_id in fact["decision_ids"]:
             connect(here, ("decision", decision_id), "concerns")
-        if memory["superseded_by_id"] is not None:
-            connect(here, ("memory", memory["superseded_by_id"]), "replaced by")
-        for evidence in memory["evidence"]:
-            kind = "memory" if evidence["type"] == "fact" else "decision"
-            connect(here, (kind, evidence["id"]), "rests on")
+        if fact["superseded_by_id"] is not None:
+            connect(here, ("fact", fact["superseded_by_id"]), "replaced by")
 
-    # How a reference to each item is written (`[[fact:5]]`): a principle is a decision, and the
-    # kind of a fact or belief is the kind its reference names.
-    stems = {
-        (str(entry.item["type"]) if kind == "memory" else kind, ident): entry.stem
-        for (kind, ident), entry in entries.items()
-    }
+    # How a reference to each item is written (`[[fact:5]]`) is the kind it is keyed by.
+    stems = {key: entry.stem for key, entry in entries.items()}
     files: dict[str, str] = {}
     for entry in entries.values():
         entry.links.sort(key=lambda link: (_ORDER[link[0]], *_rank(link[1])))

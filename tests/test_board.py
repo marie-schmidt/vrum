@@ -200,5 +200,60 @@ def test_the_tools_that_only_read_say_so_and_are_the_ones_the_board_reads_with()
     assert set(READ_TOOLS) <= reads
     assert reads.isdisjoint(WRITE_TOOLS)
     # What changes something (the graph, the index or the log) is never marked as a read.
-    for name in ("create_node", "claim_node", "next_work", "reindex", "import_graph", "reflect"):
+    for name in (
+        "create_node",
+        "claim_node",
+        "next_work",
+        "reindex",
+        "import_graph",
+        "retain_fact",
+        "record_decision",
+        "set_confirmation",
+    ):
         assert name not in reads
+
+
+# -- M16: three views, no generation, no removed pages --------------------------------------------
+
+GENERATION = {"extract_facts", "consolidate_memory", "find_contradictions", "reflect"}
+
+
+def test_the_board_is_three_views_and_the_settings_pages_and_the_old_pages_have_no_script() -> None:
+    ctx = (STATIC / "ctx.js").read_text(encoding="utf-8")
+    views = re.search(r"export const VIEWS = \[(.*?)\]", ctx)
+    settings = re.search(r"export const SETTINGS = \[(.*?)\]", ctx)
+    assert views and settings
+    assert re.findall(r"'(\w+)'", views.group(1)) == ["board", "graph", "roadmap"]
+    assert re.findall(r"'(\w+)'", settings.group(1)) == ["access", "tools", "status"]
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    pages = re.search(r"const PAGES = \{(.*?)\n\};", app, re.S)
+    assert pages
+    assert re.findall(r"^\s{2}(\w+): \{ title", pages.group(1), re.M) == [
+        "board",
+        "graph",
+        "roadmap",
+        "access",
+        "tools",
+        "status",
+    ]
+    # Home, Table, Outline, Rules, Memory, Overlaps and Ask are gone, scripts and all: Search and
+    # Activity are drawers, and requirements, facts and decisions live in the panel and the Graph.
+    gone = {"home", "table", "outline", "rules", "memory", "memory-forms", "overlaps", "ask"}
+    assert not [path.name for path in SCRIPTS if path.stem in gone]
+
+
+def test_no_generation_tool_exists_and_the_board_neither_calls_nor_names_one() -> None:
+    tools = set(live_tools())
+    assert not tools & GENERATION
+    assert not BOARD_TOOLS & GENERATION
+    assert not {name for name in tools if "belief" in name or "principle" in name}
+    # The board's own words never name a language model or an Ask box.
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8").lower()
+        assert "language model" not in text and "language_model" not in text, path.name
+        assert "reflect" not in text.replace("reflection", ""), path.name
+    # Facts and decisions are written, withdrawn and confirmed through the board's operations.
+    assert {"retain_fact", "record_decision", "withdraw_fact", "withdraw_decision"} <= set(
+        WRITE_TOOLS
+    )
+    assert "set_confirmation" in WRITE_TOOLS

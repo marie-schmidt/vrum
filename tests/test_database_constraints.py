@@ -8,8 +8,8 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
+    confirm,
     day,
-    make_belief,
     make_decision,
     make_fact,
     make_rule,
@@ -343,6 +343,14 @@ async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
     )
 
 
+def refused_by_the_database(attempts: dict[str, tuple[str, str]]) -> None:
+    """Each statement must fail, and say what the database's own rule says."""
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+
 async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     old = await make_decision(client, "Old", node_ids=[story["id"]])
@@ -357,10 +365,25 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
         decided_by="Ann",
     )
     other = await make_decision(client, "Standing")
+    gone = await make_decision(client, "Given up", node_ids=[story["id"]])
+    await ok(client, "withdraw_decision", actor="a", decision_id=gone["id"], reason="Not needed")
+    confirmed = await make_decision(client, "Confirmed")
+    await confirm(client, "decision", confirmed, "Marie")
+    ended = await make_decision(client, "Confirmed, then given up")
+    await confirm(client, "decision", ended, "Ann")
+    await ok(
+        client,
+        "withdraw_decision",
+        actor="a",
+        decision_id=ended["id"],
+        reason="Dropped",
+        said_by="Ann",
+        quote="Drop it",
+    )
+    later = await make_decision(client, "The newest one")
 
     def new_decision(**changes: str) -> str:
         fields = {
-            "kind": "decision",
             "title": "x",
             "text": "x",
             "reason": "x",
@@ -369,52 +392,149 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
         }
         fields.update(changes)
         columns = ", ".join(fields)
-        values = ", ".join(f"'{value}'" for value in fields.values())
+        values = ", ".join("NULL" if value == "NULL" else f"'{value}'" for value in fields.values())
         return f"INSERT INTO decisions ({columns}, decided_on) VALUES ({values}, current_date)"
 
+    def update(decision: dict[str, object], assignments: str) -> str:
+        return f"UPDATE decisions SET {assignments} WHERE {mine()} AND id = {decision['id']}"
+
     attempts = {
-        "an unknown kind": (new_decision(kind="rule"), "decision_kind_is_known"),
         "an unknown status": (new_decision(status="open"), "decision_status_is_known"),
         "a blank title": (new_decision(title=" "), "decision_title_is_not_blank"),
         "blank text": (new_decision(text=" "), "decision_text_is_not_blank"),
         "a blank reason": (new_decision(reason=" "), "decision_reason_is_not_blank"),
+        "no reason at all": (new_decision(reason="NULL"), "violates not-null constraint"),
         "nobody who decided it": (new_decision(decided_by=" "), "decision_decided_by_is_not_blank"),
+        "no date": (
+            "INSERT INTO decisions (title, text, reason, decided_by) VALUES ('x', 'x', 'x', 'x')",
+            "violates not-null constraint",
+        ),
         "superseded by nothing": (
             new_decision(status="superseded"),
             "decision_is_superseded_exactly_when_replaced",
         ),
+        "withdrawn with no reason": (
+            new_decision(status="withdrawn"),
+            "decision_is_withdrawn_with_a_reason",
+        ),
+        "withdrawn with a blank reason": (
+            new_decision(status="withdrawn", status_reason=" "),
+            "decision_is_withdrawn_with_a_reason",
+        ),
+        "an active decision with a reason for ending": (
+            new_decision(status_reason="because"),
+            "decision_is_withdrawn_with_a_reason",
+        ),
+        "a decision that is superseded and has a withdrawal reason": (
+            update(
+                other,
+                f"status = 'superseded', superseded_by_id = {later['id']}, status_reason = 'r'",
+            ),
+            "decision_is_withdrawn_with_a_reason",
+        ),
         "replaced while still marked active": (
-            f"UPDATE decisions SET superseded_by_id = {other['id']} "
-            f"WHERE {mine()} AND id = {new['id']}",
+            update(other, f"superseded_by_id = {later['id']}"),
             "decision_is_superseded_exactly_when_replaced",
         ),
         "replaced by an earlier decision": (
-            f"UPDATE decisions SET status = 'superseded', superseded_by_id = {old['id']} "
-            f"WHERE {mine()} AND id = {new['id']}",
+            update(new, f"status = 'superseded', superseded_by_id = {old['id']}"),
             "decision_is_replaced_by_a_later_one",
         ),
         "an edit to what was decided": (
-            f"UPDATE decisions SET text = 'something else' WHERE {mine()} AND id = {other['id']}",
+            update(other, "text = 'something else'"),
+            "A decision cannot be edited",
+        ),
+        "an edit to its title": (
+            update(other, "title = 'something else'"),
+            "A decision cannot be edited",
+        ),
+        "an edit to why": (
+            update(other, "reason = 'something else'"),
             "A decision cannot be edited",
         ),
         "an edit to who decided it": (
-            f"UPDATE decisions SET decided_by = 'someone else' "
-            f"WHERE {mine()} AND id = {other['id']}",
+            update(other, "decided_by = 'someone else'"),
+            "A decision cannot be edited",
+        ),
+        "an edit to the day it was decided": (
+            update(other, "decided_on = decided_on + 1"),
+            "A decision cannot be edited",
+        ),
+        "an edit to whether it is project-wide": (
+            update(other, "project_wide = NOT project_wide"),
+            "A decision cannot be edited",
+        ),
+        "an edit to when it was recorded": (
+            update(other, "recorded_at = recorded_at + interval '1 day'"),
             "A decision cannot be edited",
         ),
         "bringing a superseded decision back": (
-            f"UPDATE decisions SET status = 'active', superseded_by_id = NULL "
-            f"WHERE {mine()} AND id = {old['id']}",
-            "A superseded decision cannot change again",
+            update(old, "status = 'active', superseded_by_id = NULL"),
+            "A superseded or withdrawn decision cannot change again",
         ),
         "pointing a superseded decision at another replacement": (
-            f"UPDATE decisions SET superseded_by_id = {other['id']} "
-            f"WHERE {mine()} AND id = {old['id']}",
-            "A superseded decision cannot change again",
+            update(old, f"superseded_by_id = {other['id']}"),
+            "A superseded or withdrawn decision cannot change again",
+        ),
+        "bringing a withdrawn decision back": (
+            update(gone, "status = 'active', status_reason = NULL"),
+            "A superseded or withdrawn decision cannot change again",
+        ),
+        "changing why a decision was withdrawn": (
+            update(gone, "status_reason = 'another reason'"),
+            "A superseded or withdrawn decision cannot change again",
         ),
         "deleting a decision": (
             f"DELETE FROM decisions WHERE {mine()} AND id = {other['id']}",
             "cannot be deleted",
+        ),
+        "deleting a decision that has ended": (
+            f"DELETE FROM decisions WHERE {mine()} AND id = {gone['id']}",
+            "cannot be deleted",
+        ),
+        "a confirmation with a person and no time": (
+            update(other, "confirmed_by = 'Ann'"),
+            "decision_confirmation_names_a_person_and_a_time",
+        ),
+        "a confirmation with a time and no person": (
+            update(other, "confirmed_at = now()"),
+            "decision_confirmation_names_a_person_and_a_time",
+        ),
+        "a confirmation by a blank name": (
+            update(other, "confirmed_by = ' ', confirmed_at = now()"),
+            "decision_confirmation_names_a_person_and_a_time",
+        ),
+        "taking away only the person of a confirmation": (
+            update(confirmed, "confirmed_by = NULL"),
+            "decision_confirmation_names_a_person_and_a_time",
+        ),
+        "confirming a decision in the step that gives it up": (
+            update(
+                other,
+                "status = 'withdrawn', status_reason = 'r', confirmed_by = 'Ann', "
+                "confirmed_at = now()",
+            ),
+            "cannot be confirmed or unconfirmed in the same step that ends it",
+        ),
+        "unconfirming a decision in the step that gives it up": (
+            update(
+                confirmed,
+                "status = 'withdrawn', status_reason = 'r', confirmed_by = NULL, "
+                "confirmed_at = NULL",
+            ),
+            "cannot be confirmed or unconfirmed in the same step that ends it",
+        ),
+        "confirming a decision that was given up": (
+            update(gone, "confirmed_by = 'Ann', confirmed_at = now()"),
+            "A superseded or withdrawn decision cannot change again",
+        ),
+        "taking the confirmation from a decision that was given up": (
+            update(ended, "confirmed_by = NULL, confirmed_at = NULL"),
+            "A superseded or withdrawn decision cannot change again",
+        ),
+        "confirming a decision that was superseded": (
+            update(old, "confirmed_by = 'Ann', confirmed_at = now()"),
+            "A superseded or withdrawn decision cannot change again",
         ),
         "a link to a node that does not exist": (
             f"INSERT INTO decision_nodes (decision_id, node_id) VALUES ({other['id']}, 987654321)",
@@ -422,6 +542,10 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
         ),
         "a link to a rule that does not exist": (
             f"INSERT INTO decision_rules (decision_id, rule_id) VALUES ({other['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "a link from a decision that does not exist": (
+            f"INSERT INTO decision_nodes (decision_id, node_id) VALUES (987654321, {story['id']})",
             "violates foreign key constraint",
         ),
         "the same link twice": (
@@ -438,15 +562,31 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
             f"DELETE FROM decision_nodes WHERE {mine()} AND decision_id = {old['id']}",
             "keeps the links it had",
         ),
+        "a new link on a withdrawn decision": (
+            f"INSERT INTO decision_nodes (decision_id, node_id) "
+            f"VALUES ({gone['id']}, {story['parent_id']})",
+            "keeps the links it had",
+        ),
+        "removing a link from a withdrawn decision": (
+            f"DELETE FROM decision_nodes WHERE {mine()} AND decision_id = {gone['id']}",
+            "keeps the links it had",
+        ),
         "a decision event that names no decision": (
             "INSERT INTO events (action, actor, after) VALUES ('decision_recorded', 'x', '{}')",
             "event_names_what_it_is_about",
         ),
+        "a decision event that names a fact": (
+            f"INSERT INTO events (decision_id, fact_id, action, actor, after) "
+            f"VALUES ({other['id']}, {other['id']}, 'decision_withdrawn', 'x', '{{}}')",
+            "event_names_what_it_is_about",
+        ),
+        "an event of the old promotion": (
+            f"INSERT INTO events (decision_id, action, actor, after) "
+            f"VALUES ({other['id']}, 'decision_promoted', 'x', '{{}}')",
+            "event_action_is_known",
+        ),
     }
-    for what, (sql, expected) in attempts.items():
-        result = run_sql(sql)
-        assert result.returncode != 0, f"The database accepted {what}."
-        assert expected in result.stderr, f"{what}: {result.stderr}"
+    refused_by_the_database(attempts)
 
     kept = await ok(client, "get_decision", decision_id=old["id"])
     assert (kept["status"], kept["superseded_by_id"], kept["node_ids"]) == (
@@ -454,7 +594,23 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
         new["id"],
         [story["id"]],
     )
-    assert (await ok(client, "get_decision", decision_id=other["id"]))["text"] == other["text"]
+    assert await ok(client, "get_decision", decision_id=other["id"]) == other
+    assert (await ok(client, "get_decision", decision_id=confirmed["id"]))["confirmed_by"] == (
+        "Marie"
+    )
+    withdrawn = await ok(client, "get_decision", decision_id=ended["id"])
+    assert (withdrawn["status"], withdrawn["confirmed_by"]) == ("withdrawn", "Ann")
+    assert (await ok(client, "get_decision", decision_id=gone["id"]))["node_ids"] == [story["id"]]
+
+    # While a decision is in force only its confirmation can change, and the database allows that.
+    changed = run_sql(update(later, "confirmed_by = 'Bob', confirmed_at = now()"))
+    assert changed.returncode == 0, changed.stderr
+    assert (await ok(client, "get_decision", decision_id=later["id"]))["confirmation"] == (
+        "confirmed"
+    )
+    cleared = run_sql(update(later, "confirmed_by = NULL, confirmed_at = NULL"))
+    assert cleared.returncode == 0, cleared.stderr
+    assert (await ok(client, "get_decision", decision_id=later["id"]))["confirmed_by"] is None
 
 
 async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> None:
@@ -471,18 +627,26 @@ async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> No
     )
 
 
-async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) -> None:
+async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    early = await make_fact(client, "Earlier than the rest")
-    fact = await make_fact(client, "Kept", node_ids=[story["id"]])
-    belief = await make_belief(client, [fact], "A belief")
-    confirmed = await make_belief(client, [fact], "A confirmed belief")
-    await ok(client, "confirm_belief", actor="a", memory_id=confirmed["id"], confirmed_by="Marie")
+    rule = await make_rule(client, story_id=story["id"])
     decision = await make_decision(client, "A decision")
-    old = await make_fact(client, "Old", node_ids=[story["id"]])
+    early = await make_fact(client, "Earlier than the rest")
+    fact = await make_fact(
+        client,
+        "Kept",
+        node_ids=[story["id"]],
+        rule_ids=[rule["id"]],
+        decision_ids=[decision["id"]],
+    )
+    confirmed = await make_fact(client, "A confirmed fact")
+    await confirm(client, "fact", confirmed, "Marie")
+    old = await make_fact(
+        client, "Old", node_ids=[story["id"]], rule_ids=[rule["id"]], decision_ids=[decision["id"]]
+    )
     change = await ok(
         client,
-        "supersede_memory",
+        "supersede_fact",
         actor="a",
         replaces=[old["id"]],
         reason="Changed",
@@ -490,207 +654,365 @@ async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) 
         source="s",
     )
     new = change["replacement"]
-    retracted = await make_fact(client, "Wrong")
-    await ok(client, "retract_memory", actor="a", memory_ids=[retracted["id"]], reason="Wrong")
+    withdrawn = await make_fact(client, "Wrong", node_ids=[story["id"]])
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[withdrawn["id"]], reason="Wrong")
+    ended = await make_fact(client, "Confirmed, then wrong")
+    await confirm(client, "fact", ended, "Ann")
+    await ok(
+        client,
+        "withdraw_fact",
+        actor="a",
+        fact_ids=[ended["id"]],
+        reason="Wrong",
+        said_by="Ann",
+        quote="It was wrong",
+    )
+    later = await make_fact(client, "The newest one")
 
-    def memory(**changes: str) -> str:
-        fields = {"type": "fact", "kind": "world", "text": "x", "source": "x", "recorded_by": "x"}
+    def new_fact(**changes: str) -> str:
+        fields = {"text": "x", "source": "x", "recorded_by": "x"}
         fields.update(changes)
         columns = ", ".join(fields)
         values = ", ".join("NULL" if value == "NULL" else f"'{value}'" for value in fields.values())
-        return f"INSERT INTO memories ({columns}) VALUES ({values})"
+        return f"INSERT INTO facts ({columns}) VALUES ({values})"
 
-    new_belief = (
-        "WITH b AS (INSERT INTO memories (type, text, recorded_by) "
-        "VALUES ('belief', 'x', 'x') RETURNING id) "
-        "INSERT INTO belief_evidence (belief_id, {column}) SELECT id, {value} FROM b"
-    )
+    def update(item: dict[str, object], assignments: str) -> str:
+        return f"UPDATE facts SET {assignments} WHERE {mine()} AND id = {item['id']}"
+
     attempts = {
-        "an unknown type": (memory(type="rumour"), "memory_type_is_known"),
-        "an unknown kind": (memory(kind="rumour"), "memory_kind_is_known"),
-        "a fact with no source": (memory(source="NULL"), "fact_has_a_kind_and_a_source"),
-        "a fact with a blank source": (memory(source=" "), "fact_has_a_kind_and_a_source"),
-        "a fact with no kind": (memory(kind="NULL"), "fact_has_a_kind_and_a_source"),
-        "blank text": (memory(text=" "), "memory_text_is_not_blank"),
-        "nobody who recorded it": (memory(recorded_by=" "), "memory_recorded_by_is_not_blank"),
-        "an unknown origin": (memory(origin="guessed"), "memory_origin_is_known"),
-        "a fact a model drew up as a belief": (
-            memory(origin="derived"),
-            "memory_origin_matches_its_type",
+        "an unknown status": (
+            new_fact(status="open", status_reason="because"),
+            "fact_status_is_known",
         ),
-        "a belief with a source": (
-            memory(type="belief", kind="NULL"),
-            "belief_has_no_fact_fields",
+        "a fact with no source": (new_fact(source="NULL"), "violates not-null constraint"),
+        "a fact with a blank source": (new_fact(source=" "), "fact_source_is_not_blank"),
+        "blank text": (new_fact(text=" "), "fact_text_is_not_blank"),
+        "nobody who recorded it": (new_fact(recorded_by=" "), "fact_recorded_by_is_not_blank"),
+        "an active fact with a reason for ending": (
+            new_fact(status_reason="because"),
+            "fact_has_a_reason_once_it_has_ended",
         ),
-        "an active fact with a reason": (
-            memory(status_reason="because"),
-            "memory_has_a_reason_once_it_has_ended",
+        "a withdrawn fact with no reason": (
+            new_fact(status="withdrawn"),
+            "fact_has_a_reason_once_it_has_ended",
         ),
-        "a retracted fact with no reason": (
-            memory(status="retracted"),
-            "memory_has_a_reason_once_it_has_ended",
+        "a withdrawn fact with a blank reason": (
+            new_fact(status="withdrawn", status_reason=" "),
+            "fact_has_a_reason_once_it_has_ended",
         ),
         "a superseded fact with no replacement": (
-            memory(status="superseded", status_reason="because"),
-            "memory_is_superseded_exactly_when_replaced",
+            new_fact(status="superseded", status_reason="because"),
+            "fact_is_superseded_exactly_when_replaced",
         ),
-        "a fact confirmed by someone": (
-            f"UPDATE memories SET confirmed_by = 'Ann', confirmed_at = now() "
-            f"WHERE {mine()} AND id = {fact['id']}",
-            "only_a_belief_is_confirmed",
+        "replaced while still marked active": (
+            update(fact, f"superseded_by_id = {later['id']}"),
+            "fact_is_superseded_exactly_when_replaced",
         ),
-        "replaced by an earlier item": (
-            f"UPDATE memories SET status = 'superseded', superseded_by_id = {early['id']}, "
-            f"status_reason = 'r' WHERE {mine()} AND id = {fact['id']}",
-            "memory_is_replaced_by_a_later_one",
+        "superseded with no reason": (
+            update(fact, f"status = 'superseded', superseded_by_id = {later['id']}"),
+            "fact_has_a_reason_once_it_has_ended",
         ),
-        "a fact replaced by a belief": (
-            f"UPDATE memories SET status = 'superseded', superseded_by_id = {belief['id']}, "
-            f"status_reason = 'r' WHERE {mine()} AND id = {fact['id']}",
-            "memory_is_replaced_by_its_own_type",
+        "replaced by an earlier fact": (
+            update(
+                fact,
+                f"status = 'superseded', superseded_by_id = {early['id']}, status_reason = 'r'",
+            ),
+            "fact_is_replaced_by_a_later_one",
+        ),
+        "replaced by a fact that does not exist": (
+            update(
+                fact, "status = 'superseded', superseded_by_id = 987654321, status_reason = 'r'"
+            ),
+            "violates foreign key constraint",
         ),
         "editing the text": (
-            f"UPDATE memories SET text = 'something else' WHERE {mine()} AND id = {fact['id']}",
-            "A fact or belief cannot be edited",
+            update(fact, "text = 'something else'"),
+            "A fact cannot be edited",
         ),
         "editing the source": (
-            f"UPDATE memories SET source = 'someone else' WHERE {mine()} AND id = {fact['id']}",
-            "A fact or belief cannot be edited",
+            update(fact, "source = 'someone else'"),
+            "A fact cannot be edited",
         ),
         "editing who recorded it": (
-            f"UPDATE memories SET recorded_by = 'someone else' "
-            f"WHERE {mine()} AND id = {fact['id']}",
-            "A fact or belief cannot be edited",
+            update(fact, "recorded_by = 'someone else'"),
+            "A fact cannot be edited",
+        ),
+        "editing when it was recorded": (
+            update(fact, "recorded_at = recorded_at + interval '1 day'"),
+            "A fact cannot be edited",
         ),
         "deleting it": (
-            f"DELETE FROM memories WHERE {mine()} AND id = {fact['id']}",
+            f"DELETE FROM facts WHERE {mine()} AND id = {fact['id']}",
             "cannot be deleted",
         ),
-        "bringing a retracted fact back": (
-            f"UPDATE memories SET status = 'active', status_reason = NULL "
-            f"WHERE {mine()} AND id = {retracted['id']}",
-            "cannot change again",
+        "deleting one that has ended": (
+            f"DELETE FROM facts WHERE {mine()} AND id = {withdrawn['id']}",
+            "cannot be deleted",
+        ),
+        "bringing a withdrawn fact back": (
+            update(withdrawn, "status = 'active', status_reason = NULL"),
+            "A superseded or withdrawn fact cannot change again",
+        ),
+        "changing why a fact was withdrawn": (
+            update(withdrawn, "status_reason = 'another reason'"),
+            "A superseded or withdrawn fact cannot change again",
         ),
         "pointing a superseded fact at another replacement": (
-            f"UPDATE memories SET superseded_by_id = {new['id']} "
-            f"WHERE {mine()} AND id = {old['id']}",
-            "cannot change again",
+            update(old, f"superseded_by_id = {later['id']}"),
+            "A superseded or withdrawn fact cannot change again",
         ),
-        "changing who confirmed a belief": (
-            f"UPDATE memories SET confirmed_by = 'Bob' WHERE {mine()} AND id = {confirmed['id']}",
-            "A confirmation cannot be changed",
+        "a confirmation with a person and no time": (
+            update(fact, "confirmed_by = 'Ann'"),
+            "confirmation_names_a_person_and_a_time",
         ),
-        "confirming a belief in the step that retracts it": (
-            f"UPDATE memories SET status = 'retracted', status_reason = 'r', "
-            f"confirmed_by = 'Ann', confirmed_at = now() "
-            f"WHERE {mine()} AND id = {belief['id']}",
-            "cannot be confirmed in the same step",
+        "a confirmation with a time and no person": (
+            update(fact, "confirmed_at = now()"),
+            "confirmation_names_a_person_and_a_time",
         ),
-        "a belief with no evidence": (
-            "INSERT INTO memories (type, text, recorded_by) VALUES ('belief', 'x', 'x')",
-            "A belief needs evidence",
+        "a confirmation by a blank name": (
+            update(fact, "confirmed_by = ' ', confirmed_at = now()"),
+            "confirmation_names_a_person_and_a_time",
         ),
-        "evidence that is a belief": (
-            new_belief.format(column="fact_id", value=belief["id"]),
-            "evidence_is_never_a_belief",
+        "confirming a fact in the step that withdraws it": (
+            update(
+                fact,
+                "status = 'withdrawn', status_reason = 'r', confirmed_by = 'Ann', "
+                "confirmed_at = now()",
+            ),
+            "cannot be confirmed or unconfirmed in the same step that ends it",
         ),
-        "evidence that is a retracted fact": (
-            new_belief.format(column="fact_id", value=retracted["id"]),
-            "must be an active fact or decision",
+        "unconfirming a fact in the step that withdraws it": (
+            update(
+                confirmed,
+                "status = 'withdrawn', status_reason = 'r', confirmed_by = NULL, "
+                "confirmed_at = NULL",
+            ),
+            "cannot be confirmed or unconfirmed in the same step that ends it",
         ),
-        "evidence that is a fact and a decision at once": (
-            f"INSERT INTO belief_evidence (belief_id, fact_id, decision_id) "
-            f"VALUES ({belief['id']}, {fact['id']}, {decision['id']})",
-            "evidence_is_a_fact_or_a_decision",
+        "confirming a fact that was withdrawn": (
+            update(withdrawn, "confirmed_by = 'Ann', confirmed_at = now()"),
+            "A superseded or withdrawn fact cannot change again",
         ),
-        "evidence that is a decision that does not exist": (
-            new_belief.format(column="decision_id", value=987654321),
-            "must be an active fact or decision",
+        "taking the confirmation from a fact that was withdrawn": (
+            update(ended, "confirmed_by = NULL, confirmed_at = NULL"),
+            "A superseded or withdrawn fact cannot change again",
         ),
-        "changing the evidence of a belief": (
-            f"UPDATE belief_evidence SET fact_id = {early['id']} "
-            f"WHERE {mine()} AND belief_id = {belief['id']}",
-            "cannot be changed or removed",
-        ),
-        "removing the evidence of a belief": (
-            f"DELETE FROM belief_evidence WHERE {mine()} AND belief_id = {belief['id']}",
-            "cannot be changed or removed",
-        ),
-        "a belief that concerns a decision": (
-            f"INSERT INTO memory_decisions (memory_id, decision_id) "
-            f"VALUES ({belief['id']}, {decision['id']})",
-            "only_a_fact_concerns_a_decision",
+        "confirming a fact that was superseded": (
+            update(old, "confirmed_by = 'Ann', confirmed_at = now()"),
+            "A superseded or withdrawn fact cannot change again",
         ),
         "a link to a node that does not exist": (
-            f"INSERT INTO memory_nodes (memory_id, node_id) VALUES ({fact['id']}, 987654321)",
+            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({fact['id']}, 987654321)",
             "violates foreign key constraint",
         ),
         "a link to a rule that does not exist": (
-            f"INSERT INTO memory_rules (memory_id, rule_id) VALUES ({fact['id']}, 987654321)",
+            f"INSERT INTO fact_rules (fact_id, rule_id) VALUES ({fact['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "a link to a decision that does not exist": (
+            f"INSERT INTO fact_decisions (fact_id, decision_id) VALUES ({fact['id']}, 987654321)",
+            "violates foreign key constraint",
+        ),
+        "a link from a fact that does not exist": (
+            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES (987654321, {story['id']})",
             "violates foreign key constraint",
         ),
         "the same link twice": (
-            f"INSERT INTO memory_nodes (memory_id, node_id) VALUES ({fact['id']}, {story['id']})",
-            "memory_nodes_pkey",
+            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({fact['id']}, {story['id']})",
+            "fact_nodes_pkey",
         ),
-        "a new link on a superseded fact": (
-            f"INSERT INTO memory_nodes (memory_id, node_id) "
-            f"VALUES ({old['id']}, {story['parent_id']})",
+        "the same rule link twice": (
+            f"INSERT INTO fact_rules (fact_id, rule_id) VALUES ({fact['id']}, {rule['id']})",
+            "fact_rules_pkey",
+        ),
+        "the same decision link twice": (
+            f"INSERT INTO fact_decisions (fact_id, decision_id) "
+            f"VALUES ({fact['id']}, {decision['id']})",
+            "fact_decisions_pkey",
+        ),
+        "a new node link on a superseded fact": (
+            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({old['id']}, {story['parent_id']})",
             "keeps the links it had",
         ),
-        "removing a link from a superseded fact": (
-            f"DELETE FROM memory_nodes WHERE {mine()} AND memory_id = {old['id']}",
+        "removing a node link from a superseded fact": (
+            f"DELETE FROM fact_nodes WHERE {mine()} AND fact_id = {old['id']}",
             "keeps the links it had",
         ),
-        "a decision promoted from a fact": (
-            f"INSERT INTO decisions (kind, title, text, reason, decided_by, decided_on, "
-            f"promoted_from_id) VALUES ('decision', 'x', 'x', 'x', 'x', current_date, "
-            f"{fact['id']})",
-            "decision_is_promoted_from_a_belief",
+        "removing a rule link from a superseded fact": (
+            f"DELETE FROM fact_rules WHERE {mine()} AND fact_id = {old['id']}",
+            "keeps the links it had",
         ),
-        "changing where a decision came from": (
-            f"UPDATE decisions SET promoted_from_id = {belief['id']} "
-            f"WHERE {mine()} AND id = {decision['id']}",
-            "A decision cannot be edited",
+        "removing a decision link from a superseded fact": (
+            f"DELETE FROM fact_decisions WHERE {mine()} AND fact_id = {old['id']}",
+            "keeps the links it had",
+        ),
+        "a new link on a withdrawn fact": (
+            f"INSERT INTO fact_nodes (fact_id, node_id) "
+            f"VALUES ({withdrawn['id']}, {story['parent_id']})",
+            "keeps the links it had",
+        ),
+        "removing a link from a withdrawn fact": (
+            f"DELETE FROM fact_nodes WHERE {mine()} AND fact_id = {withdrawn['id']}",
+            "keeps the links it had",
         ),
         "a fact event that names no fact": (
-            "INSERT INTO events (action, actor, after) VALUES ('memory_recorded', 'x', '{}')",
+            "INSERT INTO events (action, actor, after) VALUES ('fact_recorded', 'x', '{}')",
             "event_names_what_it_is_about",
         ),
+        "a fact event that names a fact that does not exist": (
+            "INSERT INTO events (fact_id, action, actor, after) "
+            "VALUES (987654321, 'fact_recorded', 'x', '{}')",
+            "violates foreign key constraint",
+        ),
+        "a node event that names a fact": (
+            f"INSERT INTO events (node_id, fact_id, action, actor, after) "
+            f"VALUES ({story['id']}, {fact['id']}, 'update', 'x', '{{}}')",
+            "event_names_what_it_is_about",
+        ),
+        "a rule event that names a fact": (
+            f"INSERT INTO events (rule_id, fact_id, action, actor, after) "
+            f"VALUES ({rule['id']}, {fact['id']}, 'rule_updated', 'x', '{{}}')",
+            "event_names_what_it_is_about",
+        ),
+        "an event of the old memory": (
+            f"INSERT INTO events (fact_id, action, actor, after) "
+            f"VALUES ({fact['id']}, 'memory_recorded', 'x', '{{}}')",
+            "event_action_is_known",
+        ),
+        "an event of the old belief confirmation": (
+            f"INSERT INTO events (fact_id, action, actor, after) "
+            f"VALUES ({fact['id']}, 'memory_confirmed', 'x', '{{}}')",
+            "event_action_is_known",
+        ),
     }
-    for what, (sql, expected) in attempts.items():
-        result = run_sql(sql)
-        assert result.returncode != 0, f"The database accepted {what}."
-        assert expected in result.stderr, f"{what}: {result.stderr}"
+    refused_by_the_database(attempts)
 
     # None of it changed anything.
-    kept = await ok(client, "get_memory", memory_id=fact["id"])
-    assert (kept["text"], kept["source"], kept["status"], kept["node_ids"]) == (
-        "Kept",
-        "The team call",
-        "active",
-        [story["id"]],
-    )
-    assert (await ok(client, "get_memory", memory_id=belief["id"]))["evidence_count"] == 1
-    assert (await ok(client, "get_memory", memory_id=retracted["id"]))["status"] == "retracted"
-    replaced = await ok(client, "get_memory", memory_id=old["id"])
+    kept = await ok(client, "get_fact", fact_id=fact["id"])
+    assert kept == fact
+    replaced = await ok(client, "get_fact", fact_id=old["id"])
     assert (replaced["status"], replaced["superseded_by_id"], replaced["node_ids"]) == (
         "superseded",
         new["id"],
         [story["id"]],
     )
-    assert (await ok(client, "get_memory", memory_id=confirmed["id"]))["confirmed_by"] == "Marie"
+    assert (replaced["rule_ids"], replaced["decision_ids"]) == ([rule["id"]], [decision["id"]])
+    assert (await ok(client, "get_fact", fact_id=withdrawn["id"]))["status"] == "withdrawn"
+    assert (await ok(client, "get_fact", fact_id=confirmed["id"]))["confirmed_by"] == "Marie"
+    gone = await ok(client, "get_fact", fact_id=ended["id"])
+    assert (gone["status"], gone["confirmed_by"]) == ("withdrawn", "Ann")
+
+    # While a fact is in force only its confirmation can change, and the database allows that.
+    changed = run_sql(update(later, "confirmed_by = 'Bob', confirmed_at = now()"))
+    assert changed.returncode == 0, changed.stderr
+    assert (await ok(client, "get_fact", fact_id=later["id"]))["confirmation"] == "confirmed"
+    cleared = run_sql(update(later, "confirmed_by = NULL, confirmed_at = NULL"))
+    assert cleared.returncode == 0, cleared.stderr
+    assert (await ok(client, "get_fact", fact_id=later["id"]))["confirmed_by"] is None
 
 
-async def test_a_fact_or_belief_event_cannot_be_rewritten_either(client: Client) -> None:
+async def test_a_fact_event_cannot_be_rewritten_either(client: Client) -> None:
     fact = await make_fact(client, "Logged")
     assert (
         "append-only"
         in run_sql(
-            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND memory_id = {fact['id']}"
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND fact_id = {fact['id']}"
         ).stderr
     )
     assert (
         "append-only"
-        in run_sql(f"DELETE FROM events WHERE {mine()} AND memory_id = {fact['id']}").stderr
+        in run_sql(f"DELETE FROM events WHERE {mine()} AND fact_id = {fact['id']}").stderr
     )
+
+
+async def test_a_projects_own_role_cannot_delete_a_record_or_rewrite_the_log(
+    client: Client,
+) -> None:
+    fact = await make_fact(client, "Kept")
+    decision = await make_decision(client, "Kept too")
+
+    # What the server itself runs as is not even allowed to try.
+    for sql in (
+        f"DELETE FROM facts WHERE id = {fact['id']}",
+        f"DELETE FROM decisions WHERE id = {decision['id']}",
+        "UPDATE events SET actor = 'someone'",
+        "DELETE FROM events",
+    ):
+        result = run_sql(sql, as_project=True)
+        assert result.returncode != 0, f"The project's role was allowed to run: {sql}"
+        assert "permission denied" in result.stderr, f"{sql}: {result.stderr}"
+    # It sees its own records, and only its own.
+    result = run_sql(
+        "SELECT count(*) FILTER (WHERE project_id <> current_project()) FROM facts",
+        plain=True,
+        as_project=True,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "0", result.stderr
+    assert (await ok(client, "get_fact", fact_id=fact["id"]))["text"] == "Kept"
+    assert (await ok(client, "get_decision", decision_id=decision["id"]))["title"] == "Kept too"
+
+
+def test_the_project_is_part_of_every_key_and_every_work_table_is_walled() -> None:
+    # Every reference between two tables that hold a project's work names the project too, so a
+    # fact, a decision, a link or an event cannot refer to a row of another project.
+    result = run_sql(
+        "SELECT string_agg(c.conrelid::regclass::text || '.' || c.conname, ', ' "
+        "ORDER BY c.conname) FROM pg_constraint c "
+        "WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace "
+        "AND c.confrelid <> 'projects'::regclass "
+        "AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.conrelid "
+        "AND a.attname = 'project_id' AND NOT a.attisdropped) "
+        "AND NOT EXISTS (SELECT 1 FROM unnest(c.conkey) k JOIN pg_attribute a "
+        "ON a.attrelid = c.conrelid AND a.attnum = k WHERE a.attname = 'project_id')",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", f"These references do not name the project: {result.stdout}"
+
+    # And every table with a project_id shows only that project's rows to the project's role.
+    result = run_sql(
+        "SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c "
+        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'project_id' "
+        "WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' "
+        "AND c.relname NOT IN ('sessions', 'agent_keys') "
+        "AND NOT (c.relrowsecurity "
+        "AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid))",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", f"These tables have no row filter: {result.stdout}"
+
+
+def test_the_schema_holds_only_the_two_context_records() -> None:
+    tables = run_sql(
+        "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables "
+        "WHERE table_schema = 'public'",
+        plain=True,
+        project=None,
+    ).stdout.split(",")
+    assert {"facts", "decisions", "fact_nodes", "fact_rules", "fact_decisions"} <= set(tables)
+    assert {"decision_nodes", "decision_rules", "fact_state", "decision_state"} <= set(tables)
+    for gone in (
+        "memories",
+        "memory_nodes",
+        "memory_rules",
+        "memory_decisions",
+        "belief_evidence",
+        "memory_state",
+        "model_calls",
+    ):
+        assert gone not in tables, f"{gone} is still in the database"
+
+    # No column of the old taxonomy is left: no kind of fact or decision, no origin, no promotion.
+    result = run_sql(
+        "SELECT string_agg(table_name || '.' || column_name, ', ' ORDER BY table_name) "
+        "FROM information_schema.columns WHERE table_schema = 'public' AND ("
+        "column_name IN ('memory_id', 'promoted_from_id', 'origin', 'happened_on', 'type') "
+        "OR (table_name IN ('decisions', 'decision_state', 'facts', 'fact_state') "
+        "AND column_name = 'kind'))",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "", result.stdout

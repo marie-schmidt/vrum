@@ -19,11 +19,10 @@ SCRIPT = Path(__file__).resolve().parent.parent / "src/vrum/board/static/referen
         ("see [[rule:3]], then", "rule", "3"),
         ("a [[decision:7]] b", "decision", "7"),
         ("[[fact:5]]", "fact", "5"),
-        ("[[belief:2]]", "belief", "2"),
         ("[[node:123456789012345678]]", "node", "123456789012345678"),
     ],
 )
-def test_the_five_kinds_are_references(text: str, kind: str, ident: str) -> None:
+def test_the_four_kinds_are_references(text: str, kind: str, ident: str) -> None:
     found = re.search(REFERENCE_PATTERN, text)
     assert found and found.groups() == (kind, ident)
     assert kind in REFERENCE_KINDS
@@ -40,6 +39,8 @@ def test_the_five_kinds_are_references(text: str, kind: str, ident: str) -> None
         "[[nodes:5]]",
         "[[Node:5]]",
         "[[principle:5]]",
+        "[[belief:5]]",
+        "[[memory:5]]",
         "[node:5]",
         "[[node:5]",
         "[[node:]]",

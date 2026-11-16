@@ -1,23 +1,24 @@
-// Activity: everything that happens, newest first, in plain words, and beside it who is working on
-// what. The feed is the server's change feed (the newest changes first, and older ones when asked
-// for), filtered by who, what kind of change, which item and when; the actor and the item are
-// asked of the server and the kind and the days are worked out here on what was read. The right
-// side is `who_is_working`: every claim in force with a countdown to its lease, the claims that ran
-// out, each person's or agent's state, and buttons to take, renew or release work under the name
-// the person typed, which are the same operations an agent calls.
+// Activity, in the drawer: everything that happens, newest first, in plain words, and above it who
+// is working on what. The feed is the server's change feed (the newest changes first, and older
+// ones when asked for), filtered by who, what kind of change, which item and when; the actor and
+// the item are asked of the server and the kind and the days are worked out here on what was
+// read. The claims are `who_is_working`: every claim in force with a countdown to its lease, the
+// claims that ran out, each person's or agent's state, and buttons to take, renew or release work
+// under the name the person typed, which are the same operations an agent calls. The filters are
+// in the address, with the prefix act_ (act_actor, act_kind, act_item, act_from, act_to).
 
 import { Refusal, call } from './api.js';
-import { actor, notify, ui } from './ctx.js';
+import { actor, notify, recordLink, ui } from './ctx.js';
 import { clear, h, moment, plural, put } from './dom.js';
 import { CHANGE_KINDS, aboutItem, eventRow, kindOfAction } from './events.js';
 import { dialogForm, field, openDialog } from './forms.js';
-import { hrefFor, loadTargets } from './references.js';
-import { store, sync } from './store.js';
+import { ensureContext, sync } from './store.js';
 
 const PAGE = 100;
 const WANT = 50; // rows to show before a filter on the kind or the days stops reading back
 const MOST_PAGES = 40; // and the most pages it reads for one look, so it cannot run away
 const DEFAULT_LEASE = 900;
+const FILTERS = ['act_actor', 'act_kind', 'act_item', 'act_from', 'act_to'];
 
 let root = null;
 let params = new URLSearchParams();
@@ -28,34 +29,39 @@ let working = null; // the last answer of who_is_working
 let free = []; // ready work nobody holds
 let skew = 0; // the server's clock minus this one's, in milliseconds
 let loadedFor = '';
-let generation = 0;
+let shownFilters = ''; // the filters the boxes were last filled from
+let generation = 0; // the feed that is wanted now
+let life = 0; // this showing of the drawer, so that a late answer for an earlier one is dropped
 let ticker = null;
 let refetching = false;
-let drawn = null; // what the side was last drawn from
+let drawn = null; // what the claims were last drawn from
 let typed = { lease: String(DEFAULT_LEASE), id: '' }; // what is in its boxes, kept across a redraw
 
 // -- the filters --------------------------------------------------------------------------------------
 
-// An item as typed or in the address: 12, #12, node:12, rule 3, decision:7, fact 5, belief 2.
+// An item as typed or in the address: 12, #12, node:12, requirement 3, decision:7, fact 5.
 export function parseItem(text) {
-  const found = /^(node|rule|decision|fact|belief)?\s*[:#]?\s*#?(\d+)$/i.exec(String(text || '').trim());
-  return found ? { kind: (found[1] || 'node').toLowerCase(), id: Number(found[2]) } : null;
+  const found = /^(node|rule|requirement|decision|fact)?\s*[:#]?\s*#?(\d+)$/i.exec(String(text || '').trim());
+  if (!found) return null;
+  const kind = (found[1] || 'node').toLowerCase();
+  return { kind: kind === 'requirement' ? 'rule' : kind, id: Number(found[2]) };
 }
 
-const ITEM_ARGUMENT = { node: 'node_id', rule: 'rule_id', decision: 'decision_id', fact: 'memory_id', belief: 'memory_id' };
+const ITEM_ARGUMENT = { node: 'node_id', rule: 'rule_id', decision: 'decision_id', fact: 'fact_id' };
 
 function filters() {
-  const text = (params.get('item') || '').trim();
+  const text = (params.get('act_item') || '').trim();
   return {
-    actor: (params.get('actor') || '').trim(),
-    kind: params.get('kind') || '',
+    actor: (params.get('act_actor') || '').trim(),
+    kind: params.get('act_kind') || '',
     text,
     item: parseItem(text),
-    from: params.get('from') || '',
-    to: params.get('to') || '',
+    from: params.get('act_from') || '',
+    to: params.get('act_to') || '',
   };
 }
 
+const filterKey = () => FILTERS.map((name) => params.get(name) || '').join('|');
 const serverKey = (f) => `${f.actor}|${f.text}`;
 
 // What the server is asked: the actor and the one item to follow.
@@ -73,10 +79,11 @@ function keeps(event, f) {
   return true;
 }
 
-// -- the page -------------------------------------------------------------------------------------
+// -- the drawer -----------------------------------------------------------------------------------
 
 export async function mount(element, initial) {
   root = element;
+  life += 1;
   params = initial;
   events = [];
   older = null;
@@ -89,14 +96,14 @@ export async function mount(element, initial) {
   parts = {
     actor: control('actor', 'input', { type: 'text', list: 'a-who', autocomplete: 'off', placeholder: 'a name' }),
     kind: control('kind', 'select', {}, [['', 'Everything'], ...CHANGE_KINDS.map(([value, label]) => [value, label])].map(([value, label]) => h('option', { value }, label))),
-    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: '#12, rule 3, decision 7, fact 5' }),
+    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: '#12, requirement 3, decision 7, fact 5' }),
     from: control('from', 'input', { type: 'date' }),
     to: control('to', 'input', { type: 'date' }),
     who: h('datalist', { id: 'a-who' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'activity-problem' }),
-    summary: h('p', { class: 'count', id: 'count', role: 'status' }),
+    summary: h('p', { class: 'count', id: 'activity-count', role: 'status' }),
     feed: h('div', { id: 'feed' }),
-    side: h('aside', { id: 'working', 'aria-label': 'Who is working on what' }),
+    side: h('section', { id: 'working', 'aria-label': 'Who is working on what' }),
   };
   const label = (name, text) => h('label', { for: `a-${name}` }, text);
   const form = h(
@@ -107,7 +114,13 @@ export async function mount(element, initial) {
       role: 'search',
       onsubmit: (event) => {
         event.preventDefault();
-        ui.navigate({ actor: parts.actor.value.trim() || null, kind: parts.kind.value || null, item: parts.item.value.trim() || null, from: parts.from.value || null, to: parts.to.value || null });
+        ui.navigate({
+          act_actor: parts.actor.value.trim() || null,
+          act_kind: parts.kind.value || null,
+          act_item: parts.item.value.trim() || null,
+          act_from: parts.from.value || null,
+          act_to: parts.to.value || null,
+        });
       },
     },
     label('actor', 'Who'),
@@ -121,19 +134,23 @@ export async function mount(element, initial) {
     parts.from,
     label('to', 'To day'),
     parts.to,
-    h('button', { type: 'submit', class: 'primary', id: 'apply-activity' }, 'Apply'),
-    h('button', { type: 'button', id: 'clear-activity', onclick: () => ui.navigate({ actor: null, kind: null, item: null, from: null, to: null }) }, 'Clear'),
+    h('div', { class: 'buttons' },
+      h('button', { type: 'submit', class: 'primary', id: 'apply-activity' }, 'Apply'),
+      h('button', { type: 'button', id: 'clear-activity', onclick: () => ui.navigate(Object.fromEntries(FILTERS.map((name) => [name, null]))) }, 'Clear'),
+    ),
     h('span', { class: 'quiet' }, 'Days are UTC days.'),
   );
   put(
     root,
-    h('h1', {}, 'Activity'),
-    form,
-    parts.problem,
-    h('div', { class: 'activity-layout' }, h('section', { id: 'feed-section', 'aria-label': 'Changes, newest first' }, parts.summary, parts.feed), parts.side),
+    parts.side,
+    h('section', { id: 'feed-section', 'aria-label': 'Changes, newest first' }, h('h3', {}, 'Changes'), form, parts.problem, parts.summary, parts.feed),
   );
   fillForm();
-  await loadTargets();
+  try {
+    await ensureContext();
+  } catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+  }
   if (!root) return;
   loadFeed(true);
   loadWorking();
@@ -142,6 +159,7 @@ export async function mount(element, initial) {
 
 export function unmount() {
   generation += 1;
+  life += 1;
   root = null;
   clearInterval(ticker);
   ticker = null;
@@ -150,7 +168,9 @@ export function unmount() {
 export function update(next) {
   params = next;
   if (!root) return;
-  fillForm();
+  // The boxes are filled again only when the filters in the address changed, so that what is
+  // typed in them and not applied yet stays while the rest of the address changes.
+  if (filterKey() !== shownFilters) fillForm();
   const f = filters();
   if (serverKey(f) !== loadedFor) loadFeed(true);
   else drawFeed();
@@ -170,11 +190,12 @@ export function refresh(news) {
 }
 
 function fillForm() {
-  parts.actor.value = params.get('actor') || '';
-  parts.kind.value = params.get('kind') || '';
-  parts.item.value = params.get('item') || '';
-  parts.from.value = params.get('from') || '';
-  parts.to.value = params.get('to') || '';
+  shownFilters = filterKey();
+  parts.actor.value = params.get('act_actor') || '';
+  parts.kind.value = params.get('act_kind') || '';
+  parts.item.value = params.get('act_item') || '';
+  parts.from.value = params.get('act_from') || '';
+  parts.to.value = params.get('act_to') || '';
 }
 
 // -- the feed -----------------------------------------------------------------------------------------
@@ -266,9 +287,10 @@ function drawFeed() {
 // -- who is working on what ---------------------------------------------------------------------------
 
 async function loadWorking() {
+  const mine = life;
   try {
     const [answer, ready] = await Promise.all([call('who_is_working', {}), call('ready_work', { limit: 10 })]);
-    if (!root) return;
+    if (!root || mine !== life) return;
     working = answer;
     free = ready.items;
     skew = Date.parse(answer.as_of) - Date.now();
@@ -280,7 +302,7 @@ async function loadWorking() {
     }
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    if (root) put(parts.side, h('h2', {}, 'Who is working on what'), h('p', { class: 'problem', role: 'alert' }, error.message));
+    if (root) put(parts.side, h('h3', {}, 'Who is working on what'), h('p', { class: 'problem', role: 'alert' }, error.message));
   }
 }
 
@@ -320,8 +342,10 @@ function tick() {
 
 const STATE = { working: 'Working', lapsed: 'Lapsed', finished: 'Finished, with a handoff note' };
 
+const itemLink = (id, text) => recordLink('node', id, { class: 'item-link', dataset: { id } }, text);
+
 function nodeLink(work) {
-  return h('a', { class: 'item-link', href: hrefFor('node', work.node_id), dataset: { id: work.node_id } }, `${work.kind} #${work.node_id} “${work.title}”`);
+  return itemLink(work.node_id, `${work.kind} #${work.node_id} “${work.title}”`);
 }
 
 async function attempt(job, done) {
@@ -379,14 +403,14 @@ function drawWorking() {
   const claimId = h('input', { type: 'text', id: 'claim-id', autocomplete: 'off', placeholder: '#12', value: typed.id, oninput: () => { typed.id = claimId.value; } });
   put(
     parts.side,
-    h('h2', {}, 'Who is working on what'),
+    h('h3', {}, 'Who is working on what'),
     h('p', { class: 'quiet', id: 'acting-as' }, actor() ? `Buttons act as ${actor()}.` : 'Give your name first (top right): the buttons act under it.'),
-    h('section', { id: 'claims-live' }, h('h3', {}, `Claims in force (${live.length})`), live.length ? h('ul', { class: 'plain claims' }, live.map(([agent, work]) => claimRow(agent, work, true))) : h('p', { class: 'quiet' }, 'Nobody holds anything right now.')),
-    lapsed.length ? h('section', { id: 'claims-lapsed' }, h('h3', {}, `Claims that ran out (${lapsed.length})`), h('p', { class: 'quiet' }, 'These ran out with no handoff note. Anyone can take the work again; the holder can still release it with a note.'), h('ul', { class: 'plain claims' }, lapsed.map(([agent, work]) => claimRow(agent, work, false)))) : null,
+    h('section', { id: 'claims-live' }, h('h4', {}, `Claims in force (${live.length})`), live.length ? h('ul', { class: 'plain claims' }, live.map(([agent, work]) => claimRow(agent, work, true))) : h('p', { class: 'quiet' }, 'Nobody holds anything right now.')),
+    lapsed.length ? h('section', { id: 'claims-lapsed' }, h('h4', {}, `Claims that ran out (${lapsed.length})`), h('p', { class: 'quiet' }, 'These ran out with no handoff note. Anyone can take the work again; the holder can still release it with a note.'), h('ul', { class: 'plain claims' }, lapsed.map(([agent, work]) => claimRow(agent, work, false)))) : null,
     h(
       'section',
       { id: 'agents' },
-      h('h3', {}, `People and agents (${working.agents.length})`),
+      h('h4', {}, `People and agents (${working.agents.length})`),
       working.agents.length
         ? h('ul', { class: 'plain agents' }, working.agents.map(agentRow))
         : h('p', { class: 'quiet' }, 'Nobody has taken work yet.'),
@@ -394,7 +418,7 @@ function drawWorking() {
     h(
       'section',
       { id: 'free' },
-      h('h3', {}, `Free to take (${free.length}${free.length === 10 ? ' or more' : ''})`),
+      h('h4', {}, `Free to take (${free.length}${free.length === 10 ? ' or more' : ''})`),
       h('p', { class: 'quiet', id: 'lease-help' }, 'Ready work that nobody holds, oldest first. A claim lasts this many seconds unless it is renewed:'),
       h('label', { for: 'lease' }, 'Lease in seconds'),
       lease,
@@ -422,7 +446,7 @@ function drawWorking() {
               h(
                 'li',
                 { class: 'claim', dataset: { node: node.id } },
-                h('a', { class: 'item-link', href: hrefFor('node', node.id) }, `${node.kind} #${node.id} “${node.title}”`),
+                itemLink(node.id, `${node.kind} #${node.id} “${node.title}”`),
                 h('button', { type: 'button', class: 'take', onclick: () => attempt(() => call('claim_node', { actor: actor(), node_id: node.id, lease_seconds: Number(lease.value) }), `Took #${node.id}.`) }, 'Claim'),
               ),
             ),

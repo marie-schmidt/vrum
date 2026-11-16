@@ -112,7 +112,7 @@ export function indexState() {
   return send(scoped('/index'), { method: 'GET' });
 }
 
-// What does not belong to a project: how often to ask for news, which language model there is.
+// What does not belong to a project: how often to ask for news.
 export function get(path) {
   return send(path, { method: 'GET' });
 }
@@ -145,7 +145,7 @@ export async function callPaged(tool, args) {
   }
 }
 
-// Every item of one list of the export (links, rules, decisions or memories), which is the one
+// Every item of one list of the export (links, rules, decisions or facts), which is the one
 // place that gives all the links at once.
 export async function exported(section) {
   const items = [];

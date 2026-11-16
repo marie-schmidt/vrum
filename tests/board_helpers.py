@@ -25,29 +25,19 @@ from playwright.async_api import (
     expect,
 )
 
-from tests.helpers import ok, reindexed, unique_word
+from tests.helpers import ok, reindexed, run_sql, unique_word
 from tests.world import SESSION_COOKIE, Person, Project, Reply, project_at, the_project
 
 # Every request of the board has to go to the server it came from.
 VIEWPORT = {"width": 1500, "height": 1500}
 SLOW = 15_000  # milliseconds a page may take to show what a change should bring
-# Every page of the board, as its address names it.
-PAGES = [
-    "home",
-    "board",
-    "graph",
-    "roadmap",
-    "table",
-    "outline",
-    "rules",
-    "memory",
-    "search",
-    "overlaps",
-    "activity",
-    "tools",
-    "access",
-    "status",
-]
+# Every page of the board, as its address names it: the three views of the work, and the pages
+# that the Settings menu opens. Search and Activity are drawers (`drawer=search|activity`).
+VIEWS = ["board", "graph", "roadmap"]
+SETTINGS = ["access", "tools", "status"]
+PAGES = [*VIEWS, *SETTINGS]
+# What the board's old addresses named, which are not pages any more (and have no alias).
+GONE = ["home", "table", "outline", "rules", "memory", "overlaps", "ask", "search", "activity"]
 
 
 def board_url(mcp_url: str, project: Project | None = None) -> str:
@@ -180,43 +170,87 @@ async def hold_back_news(page: Page) -> None:
     await page.wait_for_load_state("networkidle")
 
 
-# -- the views of M11: Table, Outline and Roadmap -------------------------------------------------
+# -- the work views: Board and Roadmap ---------------------------------------------------------
 
 
 async def apply_filter(page: Page, text: str) -> None:
-    """Type a filter into the box that the Table and the Roadmap share, and apply it."""
+    """Type a filter into the box that the Board, the Graph and the Roadmap share, and apply it."""
     await page.locator("#filter").fill(text)
     await page.locator("form.filter button[type=submit]").click()
 
 
-async def shown_ids(page: Page, count: int) -> list[int]:
-    """The ids of the Table's rows, in the order shown, once it says it holds `count` items."""
-    await expect(page.locator("#count")).to_contain_text(f"{count} item", timeout=SLOW)
-    ids: list[int] = await page.locator("tr.item").evaluate_all(
+def card(page: Page, node_id: int) -> Locator:
+    """The Board's card of a story or task."""
+    return page.locator(f".card[data-id='{node_id}']")
+
+
+def cell(page: Page, epic_id: int, status: str) -> Locator:
+    """The column of one status in the lane of one epic of the Board."""
+    return page.locator(f".cell[data-epic='{epic_id}'][data-status='{status}']")
+
+
+async def cards_are(page: Page, wanted: set[int]) -> None:
+    """Wait until the Board shows exactly these cards (stories and tasks), and no others."""
+    await page.wait_for_function(
+        """wanted => {
+            const ids = [...document.querySelectorAll('.card')]
+                .map(e => Number(e.dataset.id)).sort((a, b) => a - b);
+            return ids.length === wanted.length && ids.every((id, at) => id === wanted[at]);
+        }""",
+        arg=sorted(wanted),
+        timeout=SLOW,
+    )
+
+
+async def shown_cards(page: Page, count: int) -> list[int]:
+    """The ids of the cards the Board shows (stories and tasks), once there are `count` of them."""
+    await expect(page.locator(".card")).to_have_count(count, timeout=SLOW)
+    ids: list[int] = await page.locator(".card").evaluate_all(
         "els => els.map(e => Number(e.dataset.id))"
     )
     return ids
 
 
-async def sort_by(page: Page, column: str, becomes: str) -> None:
-    """Click a column heading of the Table, and wait until it says it is sorted that way."""
-    await page.locator(f"th[data-column={column}] button").click()
-    await expect(page.locator(f"th[data-column={column}]")).to_have_attribute("aria-sort", becomes)
-
-
-async def groups(page: Page) -> dict[str, list[int]]:
-    """The Table's groups: the key of each, and the ids in it in the order shown."""
-    found: dict[str, list[int]] = await page.locator("tbody.group").evaluate_all(
-        """els => Object.fromEntries(els.map(g => [
-            g.dataset.group,
-            [...g.querySelectorAll('tr.item')].map(r => Number(r.dataset.id)),
-        ]))"""
-    )
-    return found
+async def create_in_browser(
+    page: Page, kind: str, title: str, parent: int | None = None, *, body: str = ""
+) -> int:
+    """Make an epic, story or task with the Board's own form (New item), and give its id: the
+    form opens the new item in the detail panel, whose title says it."""
+    await page.locator("#new-item").click()
+    dialog = page.locator("dialog.modal")
+    await dialog.locator("#new-kind").select_option(kind)
+    if parent is not None:
+        await dialog.locator("#new-parent").select_option(str(parent))
+    await dialog.locator("#new-title").fill(title)
+    if body:
+        await dialog.locator("#new-body").fill(body)
+    await dialog.get_by_role("button", name="Create").click()
+    heading = page.locator("#card-title")
+    await expect(heading).to_contain_text(title, timeout=SLOW)
+    found = re.match(r"#(\d+) ", await heading.inner_text())
+    assert found, await heading.inner_text()
+    return int(found.group(1))
 
 
 def on(text: str) -> datetime.date:
     return datetime.date.fromisoformat(text)
+
+
+def database_footprint() -> tuple[str, str]:
+    """Every table of the database, and how many rows each holds that a view could add to: a
+    view is its address, so opening one must add none."""
+    tables = run_sql(
+        "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables "
+        "WHERE table_schema = 'public'",
+        plain=True,
+    ).stdout.strip()
+    rows = run_sql(
+        "SELECT (SELECT count(*) FROM events) || ',' || (SELECT count(*) FROM nodes) || ',' || "
+        "(SELECT count(*) FROM facts) || ',' || (SELECT count(*) FROM decisions) || ',' || "
+        "(SELECT count(*) FROM claims)",
+        plain=True,
+    ).stdout.strip()
+    return tables, rows
 
 
 def bar_of(page: Page, node_id: int) -> Locator:
@@ -264,7 +298,7 @@ async def drag_bar(page: Page, node_id: int, days: float, grip: str | None = Non
     await page.mouse.up()
 
 
-# -- M13: Search, Overlaps and links --------------------------------------------------------------
+# -- Search and possible duplicates (the search drawer) and links -----------------------------
 
 
 async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[str, int, str]]:
@@ -280,25 +314,30 @@ async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[st
 
 
 async def search_for(page: Page, query: str, mode: str = "both") -> None:
-    """Type a search into the Search page and press its button."""
+    """Type a search into the search drawer and press its button. With the drawer closed, the box
+    of the top bar opens it first, as a person would."""
+    if not await page.locator("#search-box").count():
+        await page.locator("#global-search").fill(query)
+        await page.locator("#global-search-go").click()
+        await expect(page.locator("#search-box")).to_be_visible(timeout=SLOW)
     await page.locator("#search-box").fill(query)
     await page.locator("#search-mode").select_option(mode)
     await page.locator("#search-go").click()
 
 
 async def listed(page: Page, count: int) -> list[tuple[str, int, str]]:
-    """The results the Search page lists, in the order shown, once it says how many there are."""
-    await expect(page.locator("#count")).to_have_text(
+    """The results the search drawer lists, in the order shown, once it says how many there are."""
+    await expect(page.locator("#search-count")).to_have_text(
         re.compile(rf"^{count} results?\b"), timeout=SLOW
     )
-    rows: list[list[Any]] = await page.locator("li.result").evaluate_all(
+    rows: list[list[Any]] = await page.locator("#search-results li.result").evaluate_all(
         "els => els.map(e => [e.dataset.type, Number(e.dataset.id), e.dataset.matched])"
     )
     return [(kind, ident, how) for kind, ident, how in rows]
 
 
 async def facet(page: Page, name: str) -> dict[str, int]:
-    """One group of filter buttons of the Search page: the label of each and its count."""
+    """One group of filter buttons of the search drawer: the label of each and its count."""
     texts = await page.locator(f"fieldset.facet[data-facet={name}] button").all_inner_texts()
     found: dict[str, int] = {}
     for text in texts:
@@ -331,10 +370,11 @@ async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
 
 
 async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
-    """Every pair the Overlaps page lists, in the order shown, asking for more until no more."""
-    await expect(page.locator("#count")).to_contain_text(re.compile(r"pairs?\b"), timeout=SLOW)
+    """Every pair the possible-duplicates view of the search drawer lists, in the order shown,
+    asking for more until no more."""
+    await expect(page.locator("#dup-count")).to_contain_text(re.compile(r"pairs?\b"), timeout=SLOW)
     for _ in range(100):
-        more = page.locator("#show-more")
+        more = page.locator("#dup-more")
         if await more.count() == 0:
             break
         count = await page.locator("li.pair").count()

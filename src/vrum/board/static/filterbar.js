@@ -1,6 +1,6 @@
-// The filter box that the Table and the Roadmap share. The text is the same filter language that
-// list_nodes takes as `query`, and it is the server that reads it: the page only sends it, shows
-// what the server answers, and keeps the text in the address (`q`).
+// The filter box that the Board and the Roadmap share (and the Graph, for its work). The text is the
+// same filter language that list_nodes takes as `query`, and it is the server that reads it: the
+// page only sends it, shows what the server answers, and keeps the text in the address (`q`).
 
 import { Refusal, callAll } from './api.js';
 import { h } from './dom.js';

@@ -27,24 +27,33 @@ async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
     epic, story, task = await make_tree(client)
     await ok(client, "create_rule", actor="marie", title="A rule", story_id=story["id"])
     await make_decision(client, "A decision")
-    await make_decision(client, "A principle", kind="principle")
-    fact = await make_fact(client, "A fact")
-    await ok(client, "record_belief", actor="a", text="A belief", evidence_fact_ids=[fact["id"]])
+    await make_decision(client, "A project-wide decision", project_wide=True)
+    await make_fact(client, "A fact")
     await reindexed(client)
 
     status = await ok(client, "server_status")
 
     counts = status["counts"]
+    assert set(counts) == {
+        "epics",
+        "stories",
+        "tasks",
+        "links",
+        "rules",
+        "decisions",
+        "facts",
+        "events",
+    }
     for name, kind in (("epics", "epic"), ("stories", "story"), ("tasks", "task")):
         assert counts[name] == (await ok(client, "list_nodes", kind=kind, limit=1))["total"], name
     assert counts["rules"] == (await ok(client, "list_rules", limit=1))["total"]
-    for name, kind in (("decisions", "decision"), ("principles", "principle")):
-        assert counts[name] == (await ok(client, "list_decisions", kind=kind, limit=1))["total"]
-    for name, kind in (("facts", "fact"), ("beliefs", "belief")):
-        assert counts[name] == (await ok(client, "list_memories", type=kind, limit=1))["total"]
+    assert counts["decisions"] == (await ok(client, "list_decisions", limit=1))["total"]
+    assert counts["facts"] == (await ok(client, "list_facts", limit=1))["total"]
+    assert counts["decisions"] >= 2 and counts["facts"] >= 1
     exported = (await ok(client, "export_graph", limit=1))["counts"]
     assert counts["links"] == exported["links"] and counts["events"] == exported["events"]
     assert counts["epics"] + counts["stories"] + counts["tasks"] == exported["nodes"]
+    assert (counts["decisions"], counts["facts"]) == (exported["decisions"], exported["facts"])
     assert epic["id"] and task["id"]
 
 
@@ -64,7 +73,15 @@ async def test_the_index_state_equals_what_search_says_and_is_never_a_secret(
     assert index["embedding_service"] == "answering"
     assert index["embedding_model"] == "scripted-embedding"
     assert index["vector_size"] == 1024 and index["indexed"] > 0
-    assert status["language_model"] == "scripted-model"
+    # There is no language model to name: Vrum stores and retrieves, it does not generate.
+    assert set(status) == {
+        "vrum_version",
+        "postgres_version",
+        "pgvector_version",
+        "counts",
+        "index",
+        "checked_at",
+    }
     # What the last reindex did is kept, with its result.
     last = index["last_reindex"]
     assert last["error"] is None and last["waiting_after"] == 0 and last["failed_total"] == 0
@@ -90,15 +107,6 @@ async def test_a_stopped_embedding_service_is_seen_and_the_failed_reindex_is_kep
     assert again["index"]["embedding_service"] == "answering"
     await reindexed(client)
     assert (await ok(client, "server_status"))["index"]["last_reindex"]["error"] is None
-
-
-async def test_a_server_with_no_services_says_so_and_no_model_is_named(
-    no_model_client: Client,
-) -> None:
-    status = await ok(no_model_client, "server_status")
-    assert status["language_model"] is None
-    assert status["index"]["embedding_service"] in {"answering", "not_configured"}
-    assert status["counts"]["epics"] >= 0
 
 
 async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(

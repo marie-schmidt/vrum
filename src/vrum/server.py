@@ -12,35 +12,27 @@ import psycopg
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.accounts import Accounts
 from vrum.board import add_board
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims, WhoIsWorking
-from vrum.common import Refusal, clean_actor, parse_day
+from vrum.common import Refusal, check_choice, clean_actor, parse_day
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
 from vrum.db import Database, current_project
 from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.embeddings import EmbeddingUnavailable
 from vrum.exchange import Exchange, ExportPage, ImportResult
+from vrum.facts import Fact, FactChange, FactPage, Facts
 from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
 from vrum.guard import GuardedServer
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
-from vrum.llm import LanguageModel
 from vrum.logs import event
-from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
 from vrum.references import MentionPage, References
-from vrum.reflection import (
-    ConsolidateResult,
-    ContradictionResult,
-    ExtractResult,
-    Reflector,
-    ReflectResult,
-)
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 from vrum.search import OverlapPage, Searcher, SearchPage
 from vrum.status import ServerStatus, Status
@@ -61,21 +53,35 @@ from vrum.workflow import (
 
 log = logging.getLogger("vrum.server")
 
+
+class RecordConfirmation(BaseModel):
+    """The answer of set_confirmation: the record that changed, whichever kind it is."""
+
+    kind: str = Field(description="fact or decision.")
+    fact: Fact | None = Field(default=None, description="The fact, when it was a fact.")
+    decision: Decision | None = Field(
+        default=None, description="The decision, when it was a decision."
+    )
+
+
 # What any agent is told when it connects: the working loop, in a few lines. A test checks that it
 # names only tools that exist.
 INSTRUCTIONS = """\
-Vrum is a project graph. Epics hold stories, stories hold tasks, and rules, decisions, facts and \
-beliefs are linked to them. A decision is what a named person decided and is authoritative. A \
-belief is only a suggestion. Every write needs an actor: your own name.
+Vrum is a project graph. Epics hold stories, stories hold tasks, and requirements, decisions and \
+facts are linked to them. A decision is what a named person decided; a fact is a statement with \
+its source. Each is either unconfirmed or confirmed by a named person, and either in force or \
+superseded or withdrawn: read both before you rely on it. Every write needs an actor: your own \
+name.
 
 The working loop:
-1. `next_work` takes the most urgent free story or task and returns it with its rules, decisions, \
-principles, facts, earlier handoff notes and similar items, all in one call. Keep the claim with \
-`renew_claim` while you work.
+1. `next_work` takes the most urgent free story or task and returns it with its requirements, \
+decisions (project-wide ones included), facts, earlier handoff notes and similar items, all in \
+one call. Keep the claim with `renew_claim` while you work.
 2. Before you decide something that matters, `recall` what is known about the item. If you do not \
 know where to look, use `search`.
 3. Record what is decided as it happens with `record_decision` (name the person who decided in \
-decided_by), and what you learn with `retain_fact`.
+decided_by), and what you learn with `retain_fact`. What you record starts unconfirmed: only a \
+named person's review makes it confirmed (`set_confirmation`).
 4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a \
 handoff note for whoever comes next. A blank note is refused.
 
@@ -83,13 +89,11 @@ Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` chan
 `changes_since` shows only what is new since an event, and `ready_work` lists what is free. \
 `list_nodes` takes a filter text as its query argument, such as \
 `kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also \
-rule, decision, fact, belief); `find_mentions` lists who refers to one. Lists leave out bodies \
+rule, decision, fact); `find_mentions` lists who refers to one. Lists leave out bodies \
 unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a \
 well-known secret format is refused in every field and never stored: leave secrets out of what \
-you write. \
-If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` \
-and `reflect` use it on the memory; what they return is proposed or generated, and is not a \
-record until you record it.
+you write. Vrum stores, retrieves and coordinates; it does not generate answers: you do the \
+reasoning and record what you find.
 """
 
 _Detail = Annotated[
@@ -122,17 +126,10 @@ _ConcernedRuleIds = Annotated[list[int] | None, Field(description="Ids of the ru
 _ConcernedDecisionIds = Annotated[
     list[int] | None, Field(description="Ids of the decisions it concerns.")
 ]
-_EvidenceFactIds = Annotated[
-    list[int] | None,
-    Field(description="Ids of the active facts it rests on. Only facts, never other beliefs."),
-]
-_EvidenceDecisionIds = Annotated[
-    list[int] | None, Field(description="Ids of the active decisions it rests on.")
-]
 _SaidBy = Annotated[
     str | None,
     Field(
-        description="The person who changed their mind. Needed, with quote, to change a belief a "
+        description="The person who changed their mind. Needed, with quote, to change a record a "
         "person has confirmed. If you are passing on what a person told you, give their name here "
         "and your own in actor."
     ),
@@ -140,10 +137,6 @@ _SaidBy = Annotated[
 _Quote = Annotated[
     str | None,
     Field(description="What that person said, or where they said it. Needed with said_by."),
-]
-_HappenedOn = Annotated[
-    str | None,
-    Field(description="The day it was true or happened, as YYYY-MM-DD, if known."),
 ]
 _DecidedOn = Annotated[
     date | None,
@@ -202,7 +195,7 @@ def create_server(settings: Settings) -> GuardedServer:
     claims = Claims(database)
     rules = Rules(database)
     decisions = Decisions(database)
-    memories = Memories(database)
+    facts = Facts(database)
     exchange = Exchange(database)
     indexer = Indexer(database, settings.embedding)
     embedding = settings.embedding
@@ -213,17 +206,9 @@ def create_server(settings: Settings) -> GuardedServer:
         embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
     )
     recaller = Recaller(database, searcher)
-    status = Status(database, indexer, searcher, settings.llm.model if settings.llm else None)
+    status = Status(database, indexer, searcher)
     references = References(database)
     workflow = Workflow(database, graph, searcher)
-    reflector = Reflector(
-        database,
-        LanguageModel(settings.llm) if settings.llm else None,
-        memories,
-        decisions,
-        searcher,
-        recaller,
-    )
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -250,9 +235,9 @@ def create_server(settings: Settings) -> GuardedServer:
         """Check that this server is running and can reach its database, and see how it is.
 
         Returns the server version and the versions of PostgreSQL and the pgvector extension, how
-        many of each kind of item it holds, which language model it uses (never its key), and
-        the state of the index: how many items are indexed and waiting, whether the embedding
-        service answers just now, its model and vector size, and how the last reindex went. Call
+        many of each kind of item it holds, and the state of the index: how many items are
+        indexed and waiting, whether the embedding service answers just now, its model and vector
+        size, and how the last reindex went. Call
         this first when connecting, or when something seems wrong.
         """
         with _database_errors():
@@ -622,10 +607,11 @@ def create_server(settings: Settings) -> GuardedServer:
         the oldest. It is claimed for you in the same step, and exactly one actor gets each item
         however many ask at once.
 
-        The context holds its epic and story, the rules of its story, the decisions linked to it
-        or its parents (and replaced ones, kept apart), every principle, facts and beliefs, notes
-        left by earlier holders, what it waits for, what waits for it, and similar items that are
-        only suggestions. When nothing is free this is not an error: found is false and message
+        The context holds its epic and story, the requirements of its story, the decisions linked
+        to it or its parents (past ones kept apart), every project-wide decision, the facts linked
+        to it or its parents (each saying whether a person confirmed it), notes left by earlier
+        holders, what it waits for, what waits for it, and similar items that are only
+        suggestions. When nothing is free this is not an error: found is false and message
         says how much work is held, waiting or blocked.
         """
         with _database_errors():
@@ -724,11 +710,9 @@ def create_server(settings: Settings) -> GuardedServer:
         node_id: Annotated[int | None, Field(description="Only changes to this node.")] = None,
         rule_id: Annotated[int | None, Field(description="Only changes to this rule.")] = None,
         decision_id: Annotated[
-            int | None, Field(description="Only changes to this decision or principle.")
+            int | None, Field(description="Only changes to this decision.")
         ] = None,
-        memory_id: Annotated[
-            int | None, Field(description="Only changes to this fact or belief.")
-        ] = None,
+        fact_id: Annotated[int | None, Field(description="Only changes to this fact.")] = None,
         limit: _Limit = 100,
         newest: Annotated[
             bool,
@@ -752,7 +736,7 @@ def create_server(settings: Settings) -> GuardedServer:
         Every event after the one you give is shown, in order, and none is skipped even when
         another change was still being written. Events are ordered by when their change began,
         which for two changes at the very same moment can differ from their ids. Give at most
-        one of node_id, rule_id, decision_id and memory_id. To see only the newest changes, ask
+        one of node_id, rule_id, decision_id and fact_id. To see only the newest changes, ask
         for newest, and walk back with before_event_id.
         """
         with _database_errors():
@@ -762,7 +746,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 node_id=node_id,
                 rule_id=rule_id,
                 decision_id=decision_id,
-                memory_id=memory_id,
+                fact_id=fact_id,
                 limit=limit,
                 newest=newest,
                 before_event_id=before_event_id,
@@ -936,27 +920,29 @@ def create_server(settings: Settings) -> GuardedServer:
                 "your own name goes in actor."
             ),
         ],
-        kind: Annotated[
-            str,
+        project_wide: Annotated[
+            bool,
             Field(
-                description="decision: something decided about this work. principle: a standing "
-                "guideline that applies everywhere."
+                description="True when it applies throughout the project, not to particular "
+                "work: every recall and briefing of the project then includes it while it is "
+                "active."
             ),
-        ] = "decision",
+        ] = False,
         decided_on: _DecidedOn = None,
         node_ids: _NodeIds = None,
         rule_ids: _RuleIds = None,
     ) -> Decision:
-        """Record a decision or a principle, and the epics, stories, tasks and rules it affects.
+        """Record a decision, and the epics, stories, tasks and rules it affects.
 
-        Decisions are a record and are never edited. To change one, supersede it. Link a decision
-        to what it affects so that recall finds it for those items. A principle applies
-        everywhere, so every recall also returns every active principle.
+        Decisions are a record and are never edited. To change one, supersede it; to give it up,
+        withdraw it. It starts unconfirmed: confirming is a separate step that a named person
+        takes (set_confirmation). Link a decision to what it affects so that recall finds it for
+        those items.
         """
         with _database_errors():
             return await decisions.record_decision(
                 actor=actor,
-                kind=kind,
+                project_wide=project_wide,
                 title=title,
                 text=text,
                 reason=reason,
@@ -968,23 +954,35 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool(annotations=_READS)
     async def get_decision(decision_id: int) -> Decision:
-        """Read one decision, with its status, what replaced it or what it replaced, and the nodes
-        and rules it is linked to."""
+        """Read one decision, with its status, whether a person confirmed it, what replaced it or
+        what it replaced, and the nodes and rules it is linked to."""
         with _database_errors():
             return await decisions.get_decision(decision_id)
 
     @mcp.tool(annotations=_READS)
     async def list_decisions(
-        kind: Annotated[str | None, Field(description="Only decision or principle.")] = None,
-        status: Annotated[str | None, Field(description="Only active or superseded.")] = None,
+        status: Annotated[
+            str | None, Field(description="Only active, superseded or withdrawn.")
+        ] = None,
+        project_wide: Annotated[
+            bool | None,
+            Field(description="True: only project-wide decisions. False: only the others."),
+        ] = None,
+        confirmation: Annotated[
+            str | None, Field(description="Only confirmed or unconfirmed.")
+        ] = None,
         limit: _Limit = 50,
         after_id: _After = None,
     ) -> DecisionPage:
-        """List decisions and principles, oldest first, a page at a time. Every filter is optional.
-        For the principles in force, ask for kind=principle and status=active."""
+        """List decisions, oldest first, a page at a time. Every filter is optional. For the
+        project-wide decisions in force, ask for project_wide=true and status=active."""
         with _database_errors():
             return await decisions.list_decisions(
-                kind=kind, status=status, limit=limit, after_id=after_id
+                status=status,
+                project_wide=project_wide,
+                confirmation=confirmation,
+                limit=limit,
+                after_id=after_id,
             )
 
     @mcp.tool()
@@ -992,7 +990,7 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
     ) -> Decision:
         """Say that an active decision also affects more nodes or rules. Nothing is changed if any
-        id is wrong or already linked. A superseded decision keeps the links it had."""
+        id is wrong or already linked. A decision that is not active keeps the links it had."""
         with _database_errors():
             return await decisions.link_decision(
                 actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
@@ -1003,7 +1001,7 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
     ) -> Decision:
         """Say that an active decision no longer affects some nodes or rules. Nothing is changed if
-        any of them is not linked. A superseded decision keeps the links it had."""
+        any of them is not linked. A decision that is not active keeps the links it had."""
         with _database_errors():
             return await decisions.unlink_decision(
                 actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
@@ -1019,9 +1017,12 @@ def create_server(settings: Settings) -> GuardedServer:
         decided_by: Annotated[
             str, Field(description="The person who made the new decision. Not you: that is actor.")
         ],
-        kind: Annotated[
-            str | None,
-            Field(description="decision or principle. Leave empty to keep the old one's kind."),
+        project_wide: Annotated[
+            bool | None,
+            Field(
+                description="Whether the new decision is project-wide. Leave empty to keep the "
+                "old one's."
+            ),
         ] = None,
         decided_on: _DecidedOn = None,
         keep_links: Annotated[
@@ -1033,19 +1034,22 @@ def create_server(settings: Settings) -> GuardedServer:
         ] = True,
         node_ids: _NodeIds = None,
         rule_ids: _RuleIds = None,
+        said_by: _SaidBy = None,
+        quote: _Quote = None,
     ) -> Decision:
         """Replace an active decision with a new one, in one step.
 
         The old decision is kept, marked superseded, and points to the new one, so nothing is lost
         or overwritten. Recall shows the old one as superseded, never as active. Returns the new
-        decision. A decision that is already superseded cannot be superseded again: supersede its
-        replacement instead.
+        decision, which starts unconfirmed. A decision that is already superseded cannot be
+        superseded again: supersede its replacement instead. A decision a person confirmed can be
+        replaced only with said_by and quote.
         """
         with _database_errors():
             return await decisions.supersede_decision(
                 actor=actor,
                 decision_id=decision_id,
-                kind=kind,
+                project_wide=project_wide,
                 title=title,
                 text=text,
                 reason=reason,
@@ -1054,6 +1058,24 @@ def create_server(settings: Settings) -> GuardedServer:
                 keep_links=keep_links,
                 node_ids=node_ids,
                 rule_ids=rule_ids,
+                said_by=said_by,
+                quote=quote,
+            )
+
+    @mcp.tool()
+    async def withdraw_decision(
+        actor: _Actor,
+        decision_id: Annotated[int, Field(description="The active decision being given up.")],
+        reason: Annotated[str, Field(description="Why it is given up.")],
+        said_by: _SaidBy = None,
+        quote: _Quote = None,
+    ) -> Decision:
+        """Give an active decision up, with the reason, without replacing it. Nothing is deleted:
+        it stays as a record, marked withdrawn, and recall shows it as no longer in force. A
+        decision a person confirmed can be withdrawn only with said_by and quote."""
+        with _database_errors():
+            return await decisions.withdraw_decision(
+                actor=actor, decision_id=decision_id, reason=reason, said_by=said_by, quote=quote
             )
 
     @mcp.tool(annotations=_READS)
@@ -1067,9 +1089,8 @@ def create_server(settings: Settings) -> GuardedServer:
         show: Annotated[
             str,
             Field(
-                description="all, or one of active_decisions, active_principles, facts, beliefs, "
-                "stale_beliefs, superseded_decisions or past_memories to page through just that "
-                "section."
+                description="all, or one of active_decisions, project_wide_decisions, facts, "
+                "past_decisions or past_facts to page through just that section."
             ),
         ] = "all",
         limit: Annotated[int, Field(description="How many of each section, from 1 to 200.")] = 50,
@@ -1080,21 +1101,21 @@ def create_server(settings: Settings) -> GuardedServer:
         with_similar: Annotated[
             bool,
             Field(
-                description="True: also return decisions, facts and beliefs that are alike in "
-                "meaning but not linked, as suggestions in a section of their own."
+                description="True: also return decisions and facts that are alike in meaning but "
+                "not linked, as suggestions in a section of their own."
             ),
         ] = False,
     ) -> Recall:
         """Recall everything known that matters for one node or rule, in separate sections.
 
-        Decisions are what people decided, and are authoritative. Principles apply everywhere.
-        Facts say where they came from. Beliefs are conclusions drawn from evidence and are only
-        suggestions: weigh them, do not obey them. Stale beliefs rest on evidence that has since
-        changed, and past memories were replaced or found wrong; neither is in force. Every entry
-        says why it is there. Only exact links are followed: nothing is inferred, and what is
-        linked to the parent or children of this item is not included, so recall those too if
-        they matter. With with_similar, a last section adds what is alike in meaning but not
-        linked, as suggestions. Call this before starting work.
+        Decisions are what people decided; project-wide ones apply throughout the project. Facts
+        say where they came from. Every entry says whether a named person confirmed it (an
+        unconfirmed record is not yet reviewed) and whether it is still in force: past decisions
+        and past facts were superseded or withdrawn and are not. Every entry says why it is there.
+        Only exact links are followed: nothing is inferred, and what is linked to the parent or
+        children of this item is not included, so recall those too if they matter. With
+        with_similar, a last section adds what is alike in meaning but not linked, as suggestions.
+        Call this before starting work.
         """
         with _database_errors():
             return await recaller.recall(
@@ -1117,90 +1138,44 @@ def create_server(settings: Settings) -> GuardedServer:
                 "what was observed. Never blank."
             ),
         ],
-        kind: Annotated[
-            str,
-            Field(
-                description="world: true about the project, its tools or its domain. experience: "
-                "something that was done or observed."
-            ),
-        ] = "world",
-        happened_on: _HappenedOn = None,
         node_ids: _ConcernedNodeIds = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
-    ) -> Memory:
+    ) -> Fact:
         """Record a fact, with where it came from and what it concerns.
 
-        A fact is a record and is never edited. When it changes, replace it with supersede_memory;
-        when it was wrong, retract it with retract_memory. A fact is not a decision. Link it to
-        what it concerns so that recall finds it for those items.
+        A fact is a record and is never edited. When it changes, replace it with supersede_fact;
+        when it was wrong, withdraw it with withdraw_fact. A fact is not a decision, and it starts
+        unconfirmed: confirming is a separate step that a named person takes (set_confirmation),
+        so recording a fact yourself never counts as a person's review. Link it to what it
+        concerns so that recall finds it for those items.
         """
         with _database_errors():
-            return await memories.retain_fact(
+            return await facts.retain_fact(
                 actor=actor,
                 text=text,
                 source=source,
-                kind=kind,
-                happened_on=parse_day("happened_on", happened_on),
                 node_ids=node_ids,
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
 
     @mcp.tool()
-    async def record_belief(
-        actor: _Actor,
-        text: Annotated[str, Field(description="The conclusion, in plain words.")],
-        evidence_fact_ids: _EvidenceFactIds = None,
-        evidence_decision_ids: _EvidenceDecisionIds = None,
-        node_ids: _ConcernedNodeIds = None,
-        rule_ids: _ConcernedRuleIds = None,
-    ) -> Memory:
-        """Record a belief: a conclusion drawn from evidence.
-
-        Give at least one active fact or decision it rests on, and never another belief. A belief
-        is only ever a suggestion: it is not a decision and changes nothing in the graph. It goes
-        stale on its own when any of its evidence stops being active. It is never edited: replace
-        it with supersede_memory or retract it with retract_memory.
-        """
-        with _database_errors():
-            return await memories.record_belief(
-                actor=actor,
-                text=text,
-                evidence_fact_ids=evidence_fact_ids,
-                evidence_decision_ids=evidence_decision_ids,
-                node_ids=node_ids,
-                rule_ids=rule_ids,
-            )
-
-    @mcp.tool()
-    async def supersede_memory(
+    async def supersede_fact(
         actor: _Actor,
         replaces: Annotated[
             list[int],
             Field(
-                description="The ids of the active facts, or the active beliefs, that the new "
-                "item replaces. Any number, all of one type."
+                description="The ids of the active facts that the new fact replaces. Any number."
             ),
         ],
         reason: Annotated[str, Field(description="Why they are being replaced.")],
-        text: Annotated[str, Field(description="The new fact or belief.")],
-        source: Annotated[
-            str | None, Field(description="For a new fact: where it came from. Never blank.")
-        ] = None,
-        kind: Annotated[
-            str | None,
-            Field(
-                description="For a new fact: world or experience. Leave empty to keep the old kind."
-            ),
-        ] = None,
-        happened_on: _HappenedOn = None,
-        evidence_fact_ids: _EvidenceFactIds = None,
-        evidence_decision_ids: _EvidenceDecisionIds = None,
+        text: Annotated[str, Field(description="The new fact.")],
+        source: Annotated[str, Field(description="Where the new fact came from. Never blank.")],
         keep_links: Annotated[
             bool,
             Field(
-                description="True: the new item concerns what the old ones did. False: it starts "
+                description="True: the new fact concerns what the old ones did. False: it starts "
                 "with only the ids you give."
             ),
         ] = True,
@@ -1209,28 +1184,21 @@ def create_server(settings: Settings) -> GuardedServer:
         decision_ids: _ConcernedDecisionIds = None,
         said_by: _SaidBy = None,
         quote: _Quote = None,
-    ) -> MemoryChange:
-        """Replace one or more facts, or one or more beliefs, with a newer one, in one step.
+    ) -> FactChange:
+        """Replace one or more facts with a newer one, in one step.
 
-        Use this when something is no longer true, for example when a person shares a belief that
-        contradicts older ones: list them all in replaces. The old ones are kept, marked
-        superseded, and point to the new one. If any of them does not exist or is not active,
-        nothing is changed. A new belief still needs its own evidence, and a new fact its source.
-        The answer lists the beliefs that went stale because of the change and the decisions that
-        were made from a belief you replaced; neither is changed. A belief a person has confirmed
-        can be replaced only with said_by and quote.
+        Use this when something is no longer true as it was recorded: list every old fact in
+        replaces. The old ones are kept, marked superseded, and point to the new one, which starts
+        unconfirmed. If any of them does not exist or is not active, nothing is changed. A fact a
+        person confirmed can be replaced only with said_by and quote.
         """
         with _database_errors():
-            return await memories.supersede_memory(
+            return await facts.supersede_fact(
                 actor=actor,
                 replaces=replaces,
                 reason=reason,
                 text=text,
                 source=source,
-                kind=kind,
-                happened_on=parse_day("happened_on", happened_on),
-                evidence_fact_ids=evidence_fact_ids,
-                evidence_decision_ids=evidence_decision_ids,
                 keep_links=keep_links,
                 node_ids=node_ids,
                 rule_ids=rule_ids,
@@ -1240,163 +1208,145 @@ def create_server(settings: Settings) -> GuardedServer:
             )
 
     @mcp.tool()
-    async def retract_memory(
+    async def withdraw_fact(
         actor: _Actor,
-        memory_ids: Annotated[
-            list[int], Field(description="The ids of the active facts or beliefs that are wrong.")
+        fact_ids: Annotated[
+            list[int], Field(description="The ids of the active facts that are wrong.")
         ],
         reason: Annotated[str, Field(description="Why they are wrong.")],
-        with_dependent_beliefs: Annotated[
-            bool,
-            Field(
-                description="True: also retract every active belief that rests on a fact you are "
-                "retracting, with the same reason. False: those beliefs are only shown as stale, "
-                "because a belief with other evidence may still hold."
-            ),
-        ] = False,
         said_by: _SaidBy = None,
         quote: _Quote = None,
-    ) -> MemoryChange:
-        """Mark one or more facts or beliefs as wrong, in one step. Nothing is deleted.
+    ) -> FactChange:
+        """Mark one or more facts as wrong, in one step. Nothing is deleted: each stays as a
+        record, marked withdrawn, with the reason.
 
-        If any of them does not exist or is not active, nothing is changed. The answer lists the
-        beliefs that went stale because of it and the decisions that were made from a belief you
-        retracted; neither is changed. A belief a person has confirmed can be retracted only with
-        said_by and quote.
+        If any of them does not exist or is not active, nothing is changed. A fact a person
+        confirmed can be withdrawn only with said_by and quote.
         """
         with _database_errors():
-            return await memories.retract_memory(
-                actor=actor,
-                memory_ids=memory_ids,
-                reason=reason,
-                with_dependent_beliefs=with_dependent_beliefs,
-                said_by=said_by,
-                quote=quote,
+            return await facts.withdraw_fact(
+                actor=actor, fact_ids=fact_ids, reason=reason, said_by=said_by, quote=quote
             )
 
     @mcp.tool()
-    async def confirm_belief(
+    async def set_confirmation(
         actor: _Actor,
-        memory_id: Annotated[int, Field(description="The active belief that was looked at.")],
-        confirmed_by: Annotated[
+        kind: Annotated[str, Field(description="fact or decision.")],
+        record_id: Annotated[int, Field(description="The id of that fact or decision.")],
+        confirmation: Annotated[
             str,
             Field(
-                description="The person who looked at the belief. Not you: your name goes in actor."
+                description="confirmed: a named person reviewed it. unconfirmed: take that "
+                "confirmation away."
             ),
         ],
-    ) -> Memory:
-        """Record that a named person has looked at a belief. It stays a suggestion.
-
-        A stale belief cannot be confirmed. A belief that is already confirmed stays as it is.
-        """
-        with _database_errors():
-            return await memories.confirm_belief(
-                actor=actor, memory_id=memory_id, confirmed_by=confirmed_by
-            )
-
-    @mcp.tool()
-    async def promote_belief(
-        actor: _Actor,
-        memory_id: Annotated[int, Field(description="The active belief to turn into a decision.")],
-        title: str,
-        reason: Annotated[str, Field(description="Why the person decided this.")],
-        decided_by: Annotated[
+        person: Annotated[
             str,
             Field(
-                description="The person who made the decision. Not you: your name goes in actor."
+                description="The person: who reviewed it (to confirm), or who says the "
+                "confirmation no longer stands (to unconfirm). Not you: your name goes in actor."
             ),
         ],
-        text: Annotated[
-            str | None, Field(description="What is decided. Leave empty to use the belief's text.")
+        quote: Annotated[
+            str | None,
+            Field(
+                description="What the person said, or where. Optional to confirm; needed to "
+                "unconfirm."
+            ),
         ] = None,
-        kind: Annotated[
-            str, Field(description="decision, or principle for a standing guideline.")
-        ] = "decision",
-        decided_on: _DecidedOn = None,
-    ) -> Decision:
-        """Turn an active belief into a decision made by a named person.
+    ) -> RecordConfirmation:
+        """Record that a named person reviewed a fact or decision, or take that back.
 
-        The new decision concerns what the belief concerned and keeps a link back to it. The belief
-        itself is not changed. A stale belief cannot be promoted.
+        Confirmation says a person looked at the record, not that Vrum proved it true. A record
+        starts unconfirmed, and recording one yourself is never a person's confirmation. Only an
+        active record's confirmation changes: what a superseded or withdrawn record was confirmed
+        as stays in its history. The change is logged with who made it.
         """
+        check_choice("kind", kind, ("fact", "decision"))
         with _database_errors():
-            return await memories.promote_belief(
-                actor=actor,
-                memory_id=memory_id,
-                decided_by=decided_by,
-                title=title,
-                reason=reason,
-                text=text,
+            if kind == "fact":
+                return RecordConfirmation(
+                    kind=kind,
+                    fact=await facts.set_confirmation(
+                        actor=actor,
+                        fact_id=record_id,
+                        confirmation=confirmation,
+                        person=person,
+                        quote=quote,
+                    ),
+                )
+            return RecordConfirmation(
                 kind=kind,
-                decided_on=decided_on,
+                decision=await decisions.set_confirmation(
+                    actor=actor,
+                    decision_id=record_id,
+                    confirmation=confirmation,
+                    person=person,
+                    quote=quote,
+                ),
             )
 
     @mcp.tool()
-    async def link_memory(
+    async def link_fact(
         actor: _Actor,
-        memory_id: int,
+        fact_id: int,
         node_ids: _ConcernedNodeIds = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
-    ) -> Memory:
-        """Say that an active fact or belief also concerns more nodes or rules (a fact also
-        decisions). Nothing is changed if any id is wrong or already linked."""
+    ) -> Fact:
+        """Say that an active fact also concerns more nodes, rules or decisions. Nothing is
+        changed if any id is wrong or already linked."""
         with _database_errors():
-            return await memories.link_memory(
+            return await facts.link_fact(
                 actor=actor,
-                memory_id=memory_id,
+                fact_id=fact_id,
                 node_ids=node_ids,
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
 
     @mcp.tool()
-    async def unlink_memory(
+    async def unlink_fact(
         actor: _Actor,
-        memory_id: int,
+        fact_id: int,
         node_ids: _ConcernedNodeIds = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
-    ) -> Memory:
-        """Say that an active fact or belief no longer concerns some nodes, rules or decisions.
-        Nothing is changed if any of them is not linked."""
+    ) -> Fact:
+        """Say that an active fact no longer concerns some nodes, rules or decisions. Nothing is
+        changed if any of them is not linked."""
         with _database_errors():
-            return await memories.unlink_memory(
+            return await facts.unlink_fact(
                 actor=actor,
-                memory_id=memory_id,
+                fact_id=fact_id,
                 node_ids=node_ids,
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
 
     @mcp.tool(annotations=_READS)
-    async def get_memory(memory_id: int) -> Memory:
-        """Read one fact or belief: its source or evidence, its status, who recorded and confirmed
-        it, what replaced it, and what it concerns."""
+    async def get_fact(fact_id: int) -> Fact:
+        """Read one fact: its source, its status, whether and by whom it was confirmed, what
+        replaced it, and what it concerns."""
         with _database_errors():
-            return await memories.get_memory(memory_id)
+            return await facts.get_fact(fact_id)
 
     @mcp.tool(annotations=_READS)
-    async def list_memories(
-        type: Annotated[str | None, Field(description="Only fact or belief.")] = None,
-        kind: Annotated[
-            str | None, Field(description="Only world or experience (facts have one).")
-        ] = None,
+    async def list_facts(
         status: Annotated[
-            str | None, Field(description="Only active, superseded or retracted.")
+            str | None, Field(description="Only active, superseded or withdrawn.")
         ] = None,
-        origin: Annotated[
-            str | None, Field(description="Only stated, extracted or derived.")
-        ] = None,
-        stale: Annotated[
-            bool | None,
-            Field(description="True: only beliefs that are stale. False: only those that are not."),
+        confirmation: Annotated[
+            str | None, Field(description="Only confirmed or unconfirmed.")
         ] = None,
         node_id: Annotated[
             int | None, Field(description="Only what concerns exactly this node.")
         ] = None,
         rule_id: Annotated[
             int | None, Field(description="Only what concerns exactly this rule.")
+        ] = None,
+        decision_id: Annotated[
+            int | None, Field(description="Only what concerns this decision.")
         ] = None,
         within_node_id: Annotated[
             int | None,
@@ -1405,47 +1355,33 @@ def create_server(settings: Settings) -> GuardedServer:
                 "or a rule in one of those stories. One walk over a whole area."
             ),
         ] = None,
-        rests_on_memory_id: Annotated[
-            int | None, Field(description="Only beliefs that rest on this fact.")
-        ] = None,
-        rests_on_decision_id: Annotated[
-            int | None, Field(description="Only beliefs that rest on this decision.")
-        ] = None,
         limit: _Limit = 50,
         after_id: _After = None,
-    ) -> MemoryPage:
-        """List facts and beliefs, oldest first, a page at a time. Every filter is optional.
+    ) -> FactPage:
+        """List facts, oldest first, a page at a time. Every filter is optional.
 
         The answer says how many match in all, so you can walk every page and check that none was
         skipped. For one area of the project, use within_node_id.
         """
         with _database_errors():
-            return await memories.list_memories(
-                memory_type=type,
-                kind=kind,
+            return await facts.list_facts(
                 status=status,
-                origin=origin,
-                stale=stale,
+                confirmation=confirmation,
                 node_id=node_id,
                 rule_id=rule_id,
+                decision_id=decision_id,
                 within_node_id=within_node_id,
-                rests_on_memory_id=rests_on_memory_id,
-                rests_on_decision_id=rests_on_decision_id,
                 limit=limit,
                 after_id=after_id,
             )
 
     @mcp.tool(annotations=_READS)
-    async def memory_history(
-        memory_id: int, limit: _Limit = 50, after_id: _After = None
-    ) -> EventPage:
-        """Read everything that was ever done to one fact or belief, oldest first, a page at a
-        time: who recorded, linked, confirmed, replaced or retracted it, and when. A person who
-        changed their mind, and the agent that passed it on, are both in it."""
+    async def fact_history(fact_id: int, limit: _Limit = 50, after_id: _After = None) -> EventPage:
+        """Read everything that was ever done to one fact, oldest first, a page at a time: who
+        recorded, linked, confirmed, replaced or withdrew it, and when. A person who changed their
+        mind, and the agent that passed it on, are both in it."""
         with _database_errors():
-            return await memories.memory_history(
-                memory_id=memory_id, limit=limit, after_id=after_id
-            )
+            return await facts.fact_history(fact_id=fact_id, limit=limit, after_id=after_id)
 
     @mcp.tool(annotations=_READS)
     async def decision_history(
@@ -1478,14 +1414,11 @@ def create_server(settings: Settings) -> GuardedServer:
         ] = "both",
         types: Annotated[
             list[str] | None,
-            Field(
-                description="Only these types: epic, story, task, rule, decision, principle, "
-                "fact, belief."
-            ),
+            Field(description="Only these types: epic, story, task, rule, decision, fact."),
         ] = None,
         statuses: Annotated[
             list[str] | None,
-            Field(description="Only these statuses, such as ready, done, active or retracted."),
+            Field(description="Only these statuses, such as ready, done, active or withdrawn."),
         ] = None,
         min_similarity: Annotated[
             float | None,
@@ -1499,12 +1432,13 @@ def create_server(settings: Settings) -> GuardedServer:
             int, Field(description="How many results to skip. Pass next_offset for the next page.")
         ] = 0,
     ) -> SearchPage:
-        """Search epics, stories, tasks, rules, decisions, principles, facts and beliefs.
+        """Search epics, stories, tasks, requirements, decisions and facts.
 
         Each result says how it matched (words, meaning or both), why, and shows a snippet with
-        the matched words between « and ». Matches by meaning alone are suggestions, and a belief
-        or a fact a model wrote is always labelled so. The answer counts the matches by type and
-        by status. Exact words are found the moment something is saved, and keep working when the
+        the matched words between « and ». Matches by meaning alone are suggestions. A decision
+        or fact says whether a person confirmed it and whether it is still in force. The answer
+        counts the matches by type and by status. Exact words are found the moment something is
+        saved, and keep working when the
         embedding service is down; the answer says when meaning could not be used. Tasks are
         found by exact words only.
         """
@@ -1523,12 +1457,12 @@ def create_server(settings: Settings) -> GuardedServer:
     async def similar_items(
         node_id: Annotated[int | None, Field(description="An epic, story or task.")] = None,
         rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
-        decision_id: Annotated[int | None, Field(description="Or a decision or principle.")] = None,
-        memory_id: Annotated[int | None, Field(description="Or a fact or belief.")] = None,
+        decision_id: Annotated[int | None, Field(description="Or a decision.")] = None,
+        fact_id: Annotated[int | None, Field(description="Or a fact.")] = None,
         text: Annotated[str | None, Field(description="Or a piece of text.")] = None,
         types: Annotated[
             list[str] | None,
-            Field(description="Only these types, such as decision, fact or belief."),
+            Field(description="Only these types, such as decision or fact."),
         ] = None,
         min_similarity: Annotated[
             float | None,
@@ -1541,7 +1475,7 @@ def create_server(settings: Settings) -> GuardedServer:
     ) -> SearchPage:
         """Find items that are alike in meaning to one item or one piece of text, nearest first.
 
-        Give exactly one of node_id, rule_id, decision_id, memory_id or text. The item itself is
+        Give exactly one of node_id, rule_id, decision_id, fact_id or text. The item itself is
         left out. Every result is a suggestion. It needs the embedding service and the index; if
         either is not ready it says so and changes nothing.
         """
@@ -1550,7 +1484,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 node_id=node_id,
                 rule_id=rule_id,
                 decision_id=decision_id,
-                memory_id=memory_id,
+                fact_id=fact_id,
                 text=text,
                 types=types,
                 min_similarity=min_similarity,
@@ -1609,8 +1543,8 @@ def create_server(settings: Settings) -> GuardedServer:
             int | None, Field(description="An epic, story or task: who refers to it.")
         ] = None,
         rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
-        decision_id: Annotated[int | None, Field(description="Or a decision or principle.")] = None,
-        memory_id: Annotated[int | None, Field(description="Or a fact or belief.")] = None,
+        decision_id: Annotated[int | None, Field(description="Or a decision.")] = None,
+        fact_id: Annotated[int | None, Field(description="Or a fact.")] = None,
         limit: _Limit = 50,
         offset: Annotated[
             int, Field(description="How many to skip. Pass next_offset for the next page.")
@@ -1619,9 +1553,9 @@ def create_server(settings: Settings) -> GuardedServer:
         """List the items whose text refers to one item, or, with no item given, every reference
         written anywhere in the graph.
 
-        A reference is [[node:12]], [[rule:3]], [[decision:7]], [[fact:5]] or [[belief:2]] in the
-        details of an epic, story, task or rule, the text or reason of a decision (or principle),
-        or the text or source of a fact or belief. Titles are not read. It is only
+        A reference is [[node:12]], [[rule:3]], [[decision:7]] or [[fact:5]] in the details of an
+        epic, story, task or requirement, the text or reason of a decision, or the text or source
+        of a fact. Titles are not read. It is only
         text: it creates no link, changes no readiness and no order, and nothing is stored for it.
         This reads the text of everything when asked. Each mention says which item holds it, where
         and a snippet around it, and, for every reference, whether the item it names exists: one
@@ -1633,7 +1567,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 node_id=node_id,
                 rule_id=rule_id,
                 decision_id=decision_id,
-                memory_id=memory_id,
+                fact_id=fact_id,
                 limit=limit,
                 offset=offset,
             )
@@ -1641,7 +1575,7 @@ def create_server(settings: Settings) -> GuardedServer:
     @mcp.tool()
     async def reindex() -> IndexReport:
         """Bring the semantic index up to date now: build it if it does not exist, then embed
-        every epic, story, rule, decision, principle, fact and belief that is new or changed.
+        every epic, story, requirement, decision and fact that is new or changed.
 
         The server also does this by itself within seconds, so you rarely need it. This is the only
         thing that writes to the index, which holds nothing that is not in the graph and can be
@@ -1666,14 +1600,14 @@ def create_server(settings: Settings) -> GuardedServer:
         limit: _Limit = 200,
     ) -> ExportPage:
         """Read the whole graph as data, one page at a time: every epic, story and task (with
-        dates), link, rule, decision and principle (with what each affects), fact and belief (with
-        origin, status, what each concerns and, for a belief, its evidence), and the event log.
+        dates), link, rule, decision (with what each affects) and fact (with its source, status,
+        confirmation and what it concerns), and the event log.
 
-        Each page holds items of one list (nodes, links, rules, decisions, memories or events), in
+        Each page holds items of one list (nodes, links, rules, decisions, facts or events), in
         id order. Keep calling with next_after until it is empty; the first page also says how
         many items each list holds in all, to check you got them all. Dates and times are text.
         Not included: claims (leases that run out) and what is worked out from the rest (what is
-        ready, what is stale, the search and semantic indexes).
+        ready, the search and semantic indexes).
 
         The file this makes can be loaded into an empty server with import_graph, and turned into
         a Markdown copy to read in Obsidian or keep in git. scripts/export_graph.py and
@@ -1689,13 +1623,13 @@ def create_server(settings: Settings) -> GuardedServer:
             dict[str, Any],
             Field(
                 description="The whole export, as one object with format, version, counts and the "
-                "lists nodes, links, rules, decisions, memories and events, as export_graph "
+                "lists nodes, links, rules, decisions, facts and events, as export_graph "
                 "pages give them."
             ),
         ],
     ) -> ImportResult:
         """Load a whole export into this server, which must be empty. Every id, date, status,
-        origin and event is kept, so what is exported afterwards is identical to the file.
+        confirmation and event is kept, so what is exported afterwards is identical to the file.
 
         It is all or nothing: the file is checked first and every problem in it is listed at once,
         and the database checks everything again as it is loaded. A server that already holds
@@ -1709,181 +1643,6 @@ def create_server(settings: Settings) -> GuardedServer:
             result = await exchange.import_document(document)
         event(log, logging.INFO, "import_finished", actor=actor[:100], counts=result.counts)
         return result
-
-    @mcp.tool()
-    async def extract_facts(
-        actor: _Actor,
-        text: Annotated[
-            str,
-            Field(description="The text to find facts in: an item's body, a handoff note, notes."),
-        ],
-        store: Annotated[
-            bool,
-            Field(
-                description="True: keep the facts that pass the checks, as facts with origin "
-                "extracted. False (the default): only show them."
-            ),
-        ] = False,
-        node_ids: Annotated[
-            list[int] | None,
-            Field(description="With store: the epics, stories or tasks the stored facts concern."),
-        ] = None,
-        rule_ids: Annotated[
-            list[int] | None, Field(description="With store: the rules they concern.")
-        ] = None,
-        decision_ids: Annotated[
-            list[int] | None, Field(description="With store: the decisions they concern.")
-        ] = None,
-    ) -> ExtractResult:
-        """Ask the language model for the facts in a text. Needs a language model on the server.
-
-        Each proposed fact comes with the exact passage it was taken from, and the server drops
-        any whose passage is not in the text. By default nothing is stored. With store the facts
-        are kept with origin extracted, the passage as their source and you as the one who
-        recorded them, so they are never mistaken for facts a person wrote. Text that contains a
-        well-known secret format is not sent.
-        """
-        with _database_errors():
-            return await reflector.extract_facts(
-                actor=actor,
-                text=text,
-                store=store,
-                node_ids=node_ids,
-                rule_ids=rule_ids,
-                decision_ids=decision_ids,
-            )
-
-    @mcp.tool()
-    async def consolidate_memory(
-        actor: _Actor,
-        fact_ids: Annotated[
-            list[int] | None, Field(description="Draw conclusions from these active facts.")
-        ] = None,
-        node_id: Annotated[
-            int | None,
-            Field(description="Or from the active facts of this item and everything below it."),
-        ] = None,
-        query: Annotated[
-            str | None, Field(description="Or from the active facts a search for this finds.")
-        ] = None,
-        revise_belief_id: Annotated[
-            int | None,
-            Field(
-                description="Or: a stale belief to revise from the evidence that is still valid. "
-                "The revised belief replaces it."
-            ),
-        ] = None,
-        max_facts: Annotated[
-            int, Field(description="The most facts to show the model, from 1 to 200.")
-        ] = 50,
-        said_by: Annotated[
-            str | None,
-            Field(
-                description="Revising a belief a person confirmed: the person who changed their "
-                "mind. Needed, with quote."
-            ),
-        ] = None,
-        quote: Annotated[
-            str | None, Field(description="What that person said, or where. Needed with said_by.")
-        ] = None,
-    ) -> ConsolidateResult:
-        """Ask the language model for the conclusions some facts support. Needs a language model.
-
-        Give exactly one of fact_ids, node_id, query or revise_belief_id. Each belief the model
-        proposes must name the facts it rests on, and one that names anything it was not given is
-        dropped. The rest are recorded as beliefs with origin derived: suggestions, never
-        decisions. A belief with the same words as an active one is not recorded again. With
-        revise_belief_id, a belief that went stale is replaced by a revised one drawn up from
-        the evidence that is still valid; it is again only a suggestion.
-        """
-        with _database_errors():
-            return await reflector.consolidate_memory(
-                actor=actor,
-                fact_ids=fact_ids,
-                node_id=node_id,
-                query=query,
-                revise_belief_id=revise_belief_id,
-                max_facts=max_facts,
-                said_by=said_by,
-                quote=quote,
-            )
-
-    @mcp.tool()
-    async def find_contradictions(
-        actor: _Actor,
-        statement: Annotated[
-            str | None, Field(description="A new statement, in words, to check against beliefs.")
-        ] = None,
-        memory_id: Annotated[
-            int | None,
-            Field(description="Or the id of a fact or belief that is already recorded."),
-        ] = None,
-        scope: Annotated[
-            str,
-            Field(
-                description="related (the default): the beliefs it may clash with, in one call. "
-                "all: every active belief, one batch per call."
-            ),
-        ] = "related",
-        batch: Annotated[
-            int, Field(description="How many beliefs to show the model per call, from 1 to 200.")
-        ] = 25,
-        after_id: Annotated[
-            int | None,
-            Field(description="Scope all: leave empty for the first batch, then next_after_id."),
-        ] = None,
-    ) -> ContradictionResult:
-        """Ask the language model which active beliefs a new statement contradicts. Needs a
-        language model.
-
-        It returns proposals only and changes nothing. Each names a belief, why, and the clashing
-        words of the belief and of the statement, which the server checked are really there.
-        Applying one is your call: replace the belief with supersede_memory or retract it with
-        retract_memory, giving said_by and quote for a belief a person confirmed.
-
-        With scope related it looks at the beliefs on the same items, with shared evidence, or
-        found by words or meaning, and says how many that was out of all active beliefs. With
-        scope all it goes through every active belief in id order, a batch per call, and says how
-        many it has looked at and how many remain: call again with next_after_id until none do.
-        """
-        with _database_errors():
-            return await reflector.find_contradictions(
-                actor=actor,
-                statement=statement,
-                memory_id=memory_id,
-                scope=scope,
-                batch=batch,
-                after_id=after_id,
-            )
-
-    @mcp.tool()
-    async def reflect(
-        actor: _Actor,
-        question: Annotated[str, Field(description="The question, in words.")],
-        node_id: Annotated[
-            int | None,
-            Field(description="The item the question is about, so what is linked to it is used."),
-        ] = None,
-        rule_id: Annotated[
-            int | None, Field(description="Or the rule the question is about.")
-        ] = None,
-        limit: Annotated[
-            int, Field(description="How many items of memory to show the model, from 1 to 200.")
-        ] = 12,
-    ) -> ReflectResult:
-        """Ask a question and get an answer in words, from the memory only. Needs a language
-        model.
-
-        It finds decisions, principles, facts and beliefs that match the question (what is linked
-        to the item you name, then what matches by words and by meaning, as search does) and asks
-        the model to answer using only those. The answer lists the items it relied on, and one
-        that cites anything that was not found is refused. The answer is labelled generated and is
-        not stored: to keep a conclusion, record it yourself as a belief with its evidence.
-        """
-        with _database_errors():
-            return await reflector.reflect(
-                actor=actor, question=question, node_id=node_id, rule_id=rule_id, limit=limit
-            )
 
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:

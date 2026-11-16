@@ -88,10 +88,14 @@ export function update(next) {
   if ((next.get('q') || '') !== (before.get('q') || '')) {
     picked = new Set();
     load();
-  } else {
-    if ((next.get('zoom') || 'month') !== (before.get('zoom') || 'month')) wantToday = true;
+  } else if ((next.get('zoom') || 'month') !== (before.get('zoom') || 'month')) {
+    wantToday = true;
+    draw();
+  } else if ((next.get('group') || '') !== (before.get('group') || '')) {
     draw();
   }
+  // Nothing else in the address (the drawer, the selected record) changes the timeline, so it is
+  // left as it is, with its scroll, its chosen bars and what is being dragged.
 }
 
 export function refresh() {
@@ -280,7 +284,7 @@ function labelFor(entry, mode) {
     'div',
     { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { id: node.id, kind: node.kind } },
     h('span', { 'aria-hidden': 'true' }, `${KIND[node.kind].sign} `),
-    h('button', { type: 'button', class: 'link', onclick: () => ui.navigate({ card: node.id, panel: null }) }, `#${node.id} ${node.title}`),
+    h('button', { type: 'button', class: 'link', onclick: () => ui.navigate({ sel: `node:${node.id}`, panel: null }) }, `#${node.id} ${node.title}`),
     node.overdue ? h('span', { class: 'chip overdue' }, '! Overdue') : null,
     node.schedule_conflicts.length ? h('span', { class: 'chip conflict', title: `It starts before ${node.schedule_conflicts.map((id) => `#${id}`).join(', ')} is due` }, '! Schedule conflict') : null,
   );
@@ -526,7 +530,7 @@ function pointerDown(event) {
     drag = null;
     if (!started.moved) {
       if (started.together) togglePicked(id);
-      else ui.navigate({ card: id, panel: null });
+      else ui.navigate({ sel: `node:${id}`, panel: null });
     } else if (started.days !== 0 && mode !== 'click') {
       commit(targetsFor(id, mode), mode, started.days);
     } else {
@@ -552,7 +556,7 @@ function barKey(event) {
   const item = geometry?.items.get(id);
   if (!item) return;
   const key = event.key;
-  if (key === 'Enter') ui.navigate({ card: id, panel: null });
+  if (key === 'Enter') ui.navigate({ sel: `node:${id}`, panel: null });
   else if (key === ' ') togglePicked(id);
   else if (key === 'Escape') {
     picked = new Set();

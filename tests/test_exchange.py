@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from tests.documents import WHEN, a_file, decision, event, link, memory, node, rule
+from tests.documents import WHEN, a_file, decision, event, fact, link, node, rule
 from vrum.common import Refusal
 from vrum.exchange import Document, check_document
 
@@ -30,26 +30,47 @@ def test_an_empty_file_and_a_whole_one_are_accepted() -> None:
         ],
         links=[link(1, 3, 2, "relates_to")],
         rules=[rule(1, 2)],
-        decisions=[decision(1, node_ids=[2], rule_ids=[1])],
-        memories=[
-            memory(1, "fact", node_ids=[2], decision_ids=[1]),
-            memory(
-                2,
-                "belief",
-                evidence=[{"type": "fact", "id": 1}, {"type": "decision", "id": 1}],
+        decisions=[
+            decision(
+                1,
+                node_ids=[2],
+                rule_ids=[1],
+                project_wide=True,
                 confirmed_by="Marie",
                 confirmed_at=WHEN,
             ),
+            decision(2, status="withdrawn", status_reason="No longer true"),
+            decision(3, status="superseded", superseded_by_id=4),
+            decision(4),
         ],
-        events=[event(1, node_id=1, after={"title": "epic 1"})],
+        facts=[
+            fact(1, node_ids=[2], rule_ids=[1], decision_ids=[1]),
+            fact(
+                2,
+                status="superseded",
+                superseded_by_id=3,
+                status_reason="Newer",
+                confirmed_by="Marie",
+                confirmed_at=WHEN,
+            ),
+            fact(3),
+            fact(4, status="withdrawn", status_reason="Was wrong"),
+        ],
+        events=[
+            event(1, node_id=1, after={"title": "epic 1"}),
+            event(2, action="fact_recorded", fact_id=1),
+            event(3, action="fact_linked", fact_id=1, node_id=2),
+            event(4, action="decision_withdrawn", decision_id=2),
+            event(5, action="rule_created", rule_id=1, node_id=2),
+        ],
     )
     whole["counts"] = {
         "nodes": 3,
         "links": 1,
         "rules": 1,
-        "decisions": 1,
-        "memories": 2,
-        "events": 1,
+        "decisions": 4,
+        "facts": 4,
+        "events": 5,
     }
 
     parsed = check_document(whole)
@@ -57,7 +78,22 @@ def test_an_empty_file_and_a_whole_one_are_accepted() -> None:
     assert [n.status for n in parsed.nodes] == ["ready", "new", "new"]
     assert str(parsed.nodes[0].start_on) == "2026-12-01"
     assert parsed.nodes[0].created_at.tzinfo is not None
-    assert parsed.memories[1].evidence[1].type == "decision"
+    assert parsed.decisions[0].project_wide and parsed.decisions[1].status_reason is not None
+    assert parsed.decisions[1].status == "withdrawn" and not parsed.decisions[3].project_wide
+    # What a person confirmed stays visible after the fact it was confirmed on was replaced.
+    assert (parsed.facts[1].status, parsed.facts[1].confirmed_by) == ("superseded", "Marie")
+    assert parsed.facts[1].confirmed_at is not None
+    assert parsed.facts[0].decision_ids == [1]
+
+
+def test_a_file_in_the_old_form_is_refused_by_name() -> None:
+    old = a_file()
+    old["memories"] = old.pop("facts")
+
+    message = the_refusal(old)
+
+    assert "facts: Field required" in message
+    assert "memories: Extra inputs are not permitted" in message
 
 
 def test_everything_wrong_with_the_shape_is_listed_at_once_without_the_values_found() -> None:
@@ -124,42 +160,187 @@ def test_everything_a_file_points_at_has_to_be_in_it() -> None:
             "rules[0] (id 1): story_id=1 must be a story",
         ),
         (
-            a_file(decisions=[decision(1, node_ids=[9], rule_ids=[8], superseded_by_id=7)]),
+            a_file(decisions=[decision(1, node_ids=[9], rule_ids=[8])]),
             "node_ids=9 is not in the file",
         ),
         (
-            a_file(decisions=[decision(1, promoted_from_id=1)], memories=[memory(1, "fact")]),
-            "promoted_from_id=1 must be a belief",
+            a_file(decisions=[decision(1, node_ids=[9], rule_ids=[8])]),
+            "rule_ids=8 is not in the file",
         ),
         (
-            a_file(memories=[memory(1, "fact", superseded_by_id=2), memory(2, "belief")]),
-            "a fact can only be replaced by a fact",
+            a_file(facts=[fact(1, node_ids=[9], rule_ids=[8], decision_ids=[7])]),
+            "facts[0] (id 1): decision_ids=7 is not in the file",
         ),
         (
-            a_file(
-                memories=[
-                    memory(1, "belief", evidence=[{"type": "fact", "id": 2}]),
-                    memory(2, "belief"),
-                ]
-            ),
-            "evidence fact=2 must be a fact",
-        ),
-        (
-            a_file(memories=[memory(1, "belief", evidence=[{"type": "decision", "id": 4}])]),
-            "evidence decision=4 is not in the file",
+            a_file(facts=[fact(1, rule_ids=[8])]),
+            "facts[0] (id 1): rule_ids=8 is not in the file",
         ),
         (
             a_file(events=[event(1, node_id=3)]),
             "events[0] (id 1): node_id=3 is not in the file",
+        ),
+        (
+            a_file(events=[event(1, action="fact_recorded", fact_id=3)]),
+            "events[0] (id 1): fact_id=3 is not in the file",
         ),
     ]
     for document, expected in cases:
         assert expected in the_refusal(document), expected
 
 
+def test_a_replacement_is_a_later_record_of_the_same_kind() -> None:
+    cases: list[tuple[dict[str, Any], str]] = [
+        (
+            a_file(
+                facts=[fact(1), fact(2, status="superseded", superseded_by_id=1, status_reason="x")]
+            ),
+            "facts[1] (id 2): superseded_by_id=1 must be a later id than 2",
+        ),
+        (
+            a_file(facts=[fact(1, status="superseded", superseded_by_id=1, status_reason="x")]),
+            "superseded_by_id=1 must be a later id than 1",
+        ),
+        (
+            a_file(facts=[fact(1, status="superseded", superseded_by_id=5, status_reason="x")]),
+            "facts[0] (id 1): superseded_by_id=5 is not a fact in the file",
+        ),
+        (
+            # Fact and decision ids are separate lists: decision 2 does not replace a fact.
+            a_file(
+                facts=[fact(1, status="superseded", superseded_by_id=2, status_reason="x")],
+                decisions=[decision(2)],
+            ),
+            "superseded_by_id=2 is not a fact in the file",
+        ),
+        (
+            a_file(
+                decisions=[decision(1, status="superseded", superseded_by_id=2)], facts=[fact(2)]
+            ),
+            "decisions[0] (id 1): superseded_by_id=2 is not a decision in the file",
+        ),
+        (
+            a_file(decisions=[decision(3, status="superseded", superseded_by_id=2), decision(2)]),
+            "decisions[0] (id 3): superseded_by_id=2 must be a later id than 3",
+        ),
+        (
+            a_file(facts=[fact(1, status="superseded", status_reason="x")]),
+            "a superseded fact needs superseded_by_id",
+        ),
+        (
+            a_file(decisions=[decision(1, status="superseded")]),
+            "a superseded decision needs superseded_by_id",
+        ),
+        (
+            a_file(facts=[fact(1, superseded_by_id=2), fact(2)]),
+            "superseded_by_id is only for a superseded fact, and this one is active",
+        ),
+        (
+            a_file(
+                decisions=[
+                    decision(1, status="withdrawn", status_reason="x", superseded_by_id=2),
+                    decision(2),
+                ]
+            ),
+            "superseded_by_id is only for a superseded decision, and this one is withdrawn",
+        ),
+    ]
+    for document, expected in cases:
+        assert expected in the_refusal(document), expected
+
+
+def test_the_reason_a_record_ended_is_there_exactly_when_it_is_needed() -> None:
+    bad = a_file(
+        facts=[
+            fact(1, status="superseded", superseded_by_id=2),
+            fact(2, status="withdrawn"),
+            fact(3, status="withdrawn", status_reason="   "),
+            fact(4, status_reason="Why"),
+        ],
+        decisions=[
+            decision(1, status="withdrawn"),
+            decision(2, status="superseded", superseded_by_id=3, status_reason="Why"),
+            decision(3, status_reason="Why"),
+            # A decision that was superseded needs no reason of its own: its replacement says why.
+            decision(4, status="superseded", superseded_by_id=5),
+            decision(5),
+        ],
+    )
+
+    message = the_refusal(bad)
+
+    for problem in (
+        "facts[0] (id 1): a superseded fact needs status_reason, why it ended",
+        "facts[1] (id 2): a withdrawn fact needs status_reason, why it ended",
+        "facts[2] (id 3): a withdrawn fact needs status_reason, why it ended",
+        "facts[3] (id 4): status_reason is only for a fact that has ended, and this one is active",
+        "decisions[0] (id 1): a withdrawn decision needs status_reason, why it ended",
+        "decisions[1] (id 2): status_reason is only for a withdrawn decision, and this one is "
+        "superseded",
+        "decisions[2] (id 3): status_reason is only for a withdrawn decision, and this one is "
+        "active",
+    ):
+        assert problem in message, (problem, message)
+    assert "decisions[3]" not in message and "decisions[4]" not in message
+
+
+def test_a_confirmation_names_a_person_and_a_time_or_neither() -> None:
+    bad = a_file(
+        facts=[
+            fact(1, confirmed_by="Marie"),
+            fact(2, confirmed_at=WHEN),
+            fact(3, confirmed_by="  ", confirmed_at=WHEN),
+        ],
+        decisions=[
+            decision(1, confirmed_by="Marie"),
+            decision(2, confirmed_by="Marie", confirmed_at=WHEN),
+        ],
+    )
+
+    message = the_refusal(bad)
+
+    together = "confirmed_by and confirmed_at go together"
+    assert f"facts[0] (id 1): {together}" in message
+    assert f"facts[1] (id 2): {together}" in message
+    assert "facts[2] (id 3): confirmed_by must be the name of a person" in message
+    assert f"decisions[0] (id 1): {together}" in message
+    assert "decisions[1]" not in message
+
+
+def test_an_event_has_a_known_action_and_names_what_it_is_about() -> None:
+    unknown = the_refusal(a_file(events=[event(1, node_id=1, action="belief_confirmed")]))
+    assert "events[0].action: Input should be" in unknown
+
+    bad = a_file(
+        nodes=[node(1, "epic", None)],
+        rules=[rule(1, None)],
+        decisions=[decision(1)],
+        facts=[fact(1)],
+        events=[
+            event(1, action="fact_recorded"),
+            event(2, action="decision_recorded", decision_id=1, fact_id=1),
+            event(3, action="rule_updated", rule_id=1, fact_id=1),
+            event(4, action="update", node_id=1, fact_id=1),
+            event(5, action="claimed"),
+        ],
+    )
+
+    message = the_refusal(bad)
+
+    for problem in (
+        "events[0] (id 1): the action 'fact_recorded' needs fact_id",
+        "events[1] (id 2): the action 'decision_recorded' needs decision_id, and no fact_id",
+        "events[2] (id 3): the action 'rule_updated' needs rule_id, and no decision_id or fact_id",
+        "events[3] (id 4): the action 'update' needs node_id, and no rule_id, decision_id or "
+        "fact_id",
+        "events[4] (id 5): the action 'claimed' needs node_id, and no rule_id, decision_id or "
+        "fact_id",
+    ):
+        assert problem in message, (problem, message)
+
+
 def test_a_file_cut_short_or_changed_says_so_by_its_own_counts() -> None:
     cut = a_file(nodes=[node(1, "epic", None)])
-    cut["counts"] = {"nodes": 2, "links": 0, "rules": 0, "decisions": 0, "memories": 0}
+    cut["counts"] = {"nodes": 2, "links": 0, "rules": 0, "decisions": 0, "facts": 0}
 
     message = the_refusal(cut)
 
@@ -174,7 +355,8 @@ def test_a_secret_in_any_text_is_refused_by_field_and_not_repeated() -> None:
     secret = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5"
     for document, field in (
         (a_file(nodes=[node(1, "epic", None, body=f"key {secret}")]), "nodes[0].body"),
-        (a_file(memories=[memory(1, "fact", source=secret)]), "memories[0].source"),
+        (a_file(facts=[fact(1, source=secret)]), "facts[0].source"),
+        (a_file(decisions=[decision(1, status_reason=secret)]), "decisions[0].status_reason"),
     ):
         with pytest.raises(Refusal) as refusal:
             check_document(document)

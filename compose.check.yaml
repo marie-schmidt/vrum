@@ -18,52 +18,9 @@ services:
       timeout: 4s
       retries: 20
 
-  # Stands in for a language model: a test tells it what to answer and later asks what it was
-  # sent (see tests/scripted_model.py). Its port is published so tests can reach it. Tests stop and
-  # start it to see what happens when it is gone.
-  scripted-model:
-    image: python:3.12-slim
-    volumes:
-      - ./tests/scripted_model.py:/service.py:ro
-    command: ["python", "/service.py"]
-    ports:
-      - "127.0.0.1:${VRUM_MODEL_SCRIPT_PORT:-18002}:8080"
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
-      interval: 2s
-      timeout: 4s
-      retries: 20
-
   app:
     environment:
       EMBEDDING_BASE_URL: http://scripted-embeddings:8080/v1
       EMBEDDING_MODEL: scripted-embedding
       # Look for new work every second, so the checks do not have to wait long for the index.
       EMBEDDING_REINDEX_SECONDS: "1"
-      LLM_BASE_URL: http://scripted-model:8080/v1
-      LLM_MODEL: scripted-model
-
-  # A second server on the same database with no language model set up, to see what the tools
-  # that need one say. It starts after the first, which builds the database.
-  app-no-model:
-    build: .
-    depends_on:
-      app:
-        condition: service_healthy
-    environment:
-      VRUM_HOST: 0.0.0.0
-      VRUM_PORT: ${VRUM_NO_MODEL_PORT:-18001}
-      VRUM_DB_HOST: db
-      VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set.}
-    ports:
-      - "127.0.0.1:${VRUM_NO_MODEL_PORT:-18001}:${VRUM_NO_MODEL_PORT:-18001}"
-    healthcheck:
-      test: ["CMD", "python", "-m", "vrum.healthcheck"]
-      interval: 5s
-      timeout: 5s
-      start_period: 15s
-      retries: 10

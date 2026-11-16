@@ -1,12 +1,12 @@
 // What happened, in plain words. One change event of the history becomes a sentence: who did what
 // to which item, with the item named by its kind, id and current title and linked to where it is
-// shown. Used by the Activity page. Every event the server can write is covered, and one it does
-// not know is shown by its name rather than hidden.
+// shown (the detail panel). Used by the Activity drawer. Every event the server can write is
+// covered, and one it does not know is shown by its name rather than hidden.
 
 import { h, moment } from './dom.js';
+import { recordLink } from './ctx.js';
 import { renderMarkdown } from './markdown.js';
 import { KIND, LINK, STATUS } from './labels.js';
-import { hrefFor, resolve } from './references.js';
 import { store } from './store.js';
 
 const clip = (text, size = 60) => {
@@ -14,60 +14,63 @@ const clip = (text, size = 60) => {
   return one.length > size ? `${one.slice(0, size - 1)}…` : one;
 };
 
+const FACT_ACTIONS = ['fact_recorded', 'fact_superseded', 'fact_withdrawn', 'fact_linked', 'fact_unlinked', 'fact_confirmed', 'fact_unconfirmed'];
+const DECISION_ACTIONS = ['decision_recorded', 'decision_superseded', 'decision_withdrawn', 'decision_linked', 'decision_unlinked', 'decision_confirmed', 'decision_unconfirmed'];
+
 // What can be filtered by: the actions of the history in the groups a person thinks in.
 export const CHANGE_KINDS = [
   ['work', 'Work items', ['create', 'update', 'move']],
   ['links', 'Links', ['link_added', 'link_removed']],
   ['claims', 'Claims', ['claimed', 'claim_renewed', 'claim_released']],
   ['handoffs', 'Handoff notes', ['handoff']],
-  ['rules', 'Rules', ['rule_created', 'rule_updated', 'rule_placed', 'rule_moved']],
-  ['decisions', 'Decisions', ['decision_recorded', 'decision_superseded', 'decision_linked', 'decision_unlinked']],
-  ['memory', 'Facts and beliefs', ['memory_recorded', 'memory_superseded', 'memory_retracted', 'memory_linked', 'memory_unlinked', 'memory_confirmed', 'memory_promoted']],
-  ['model', 'Language model calls', ['model_call']],
+  ['requirements', 'Requirements', ['rule_created', 'rule_updated', 'rule_placed', 'rule_moved']],
+  ['decisions', 'Decisions', DECISION_ACTIONS],
+  ['facts', 'Facts', FACT_ACTIONS],
 ];
 
 export const kindOfAction = (action) => (CHANGE_KINDS.find(([, , actions]) => actions.includes(action)) || [])[0] || 'other';
 
-// A named item as a link: "story #12 “Log in”", "rule 4 “Short codes”", "belief 2 “…”".
+// A named item as a link: "story #12 “Log in”", "requirement 4 “Short codes”", "fact 2 “…”".
 function named(kind, id) {
   if (id === null || id === undefined) return 'an item';
   let words;
-  let linkKind = kind;
   if (kind === 'node') {
-    const found = resolve('node', id);
-    words = found.exists ? `${KIND[found.type].label.toLowerCase()} #${id} “${clip(found.title)}”` : `item #${id}`;
+    const found = store.nodes.get(id);
+    words = found ? `${KIND[found.kind].label.toLowerCase()} #${id} “${clip(found.title)}”` : `item #${id}`;
   } else if (kind === 'rule') {
-    const found = resolve('rule', id);
-    words = found.exists && found.title ? `rule ${id} “${clip(found.title)}”` : `rule ${id}`;
+    const found = (store.rules || []).find((item) => item.id === id);
+    words = found && found.title ? `requirement ${id} “${clip(found.title)}”` : `requirement ${id}`;
   } else if (kind === 'decision') {
     const found = (store.decisions || []).find((item) => item.id === id);
-    words = found ? `${found.kind} ${id} “${clip(found.title)}”` : `decision ${id}`;
+    words = found ? `decision ${id} “${clip(found.title)}”` : `decision ${id}`;
   } else {
-    const found = (store.memories || []).find((item) => item.id === id);
-    linkKind = found ? found.type : 'fact';
-    words = found ? `${found.type} ${id} “${clip(found.text)}”` : `fact or belief ${id}`;
+    const found = (store.facts || []).find((item) => item.id === id);
+    words = found ? `fact ${id} “${clip(found.text)}”` : `fact ${id}`;
   }
-  return h('a', { class: 'item-link', href: hrefFor(linkKind, id), dataset: { kind: linkKind, id: String(id) } }, words);
+  return recordLink(kind, id, { class: 'item-link', dataset: { kind, id: String(id) } }, words);
 }
 
 const node = (id) => named('node', id);
 const rule = (id) => named('rule', id);
 const decision = (id) => named('decision', id);
-const memory = (id) => named('memory', id);
+const fact = (id) => named('fact', id);
 
-// Whatever the event names as its subject, whichever kind of thing that is.
+const present = (value) => value !== null && value !== undefined;
+
+// Whatever the event names as its subject, whichever kind of thing that is. A fact or decision
+// event may also name what it concerns, so the record comes before what it is linked to.
 function subject(event) {
-  if (event.rule_id !== null && event.rule_id !== undefined) return rule(event.rule_id);
-  if (event.decision_id !== null && event.decision_id !== undefined) return decision(event.decision_id);
-  if (event.memory_id !== null && event.memory_id !== undefined) return memory(event.memory_id);
+  if (present(event.fact_id)) return fact(event.fact_id);
+  if (present(event.decision_id)) return decision(event.decision_id);
+  if (present(event.rule_id)) return rule(event.rule_id);
   return node(event.node_id);
 }
 
-// What a link or a concern points at: the node, rule or decision the event is also about.
+// What a link or a concern points at: the node, requirement or decision the event is also about.
 function target(event) {
-  if (event.node_id !== null && event.node_id !== undefined) return node(event.node_id);
-  if (event.rule_id !== null && event.rule_id !== undefined) return rule(event.rule_id);
-  if (event.decision_id !== null && event.decision_id !== undefined) return decision(event.decision_id);
+  if (present(event.node_id)) return node(event.node_id);
+  if (present(event.rule_id)) return rule(event.rule_id);
+  if (present(event.decision_id)) return decision(event.decision_id);
   return 'an item';
 }
 
@@ -93,6 +96,39 @@ function changes(event) {
 
 function story(id) {
   return id === null || id === undefined ? 'no story' : node(id);
+}
+
+// Why a record ended, and the person's own words when it needed them.
+const why = (a) => {
+  const text = a.status_reason ?? a.reason;
+  return text ? `: ${clip(text, 80)}` : '';
+};
+const said = (a) => {
+  const who = a.said_by ?? a.person;
+  if (!who && !a.quote) return '';
+  return `, on the word of ${who || 'a person'}${a.quote ? `: “${clip(a.quote, 100)}”` : ''}`;
+};
+
+// A fact or a decision: recorded, replaced, withdrawn, linked, unlinked, confirmed, unconfirmed.
+function describeRecord(kind, event, a) {
+  const name = kind === 'fact' ? fact : decision;
+  const self = name(kind === 'fact' ? event.fact_id : event.decision_id);
+  switch (event.action.slice(kind.length + 1)) {
+    case 'recorded':
+      return ['recorded ', self, kind === 'fact' ? (a.source ? `, source: ${clip(a.source, 70)}` : '') : `, decided by ${a.decided_by}${a.project_wide ? ', for the whole project' : ''}`];
+    case 'superseded':
+      return ['replaced ', self, ' with ', name(a.superseded_by_id), why(a), said(a)];
+    case 'withdrawn':
+      return ['withdrew ', self, why(a), said(a)];
+    case 'linked':
+      return ['linked ', self, ' to ', target(event)];
+    case 'unlinked':
+      return ['unlinked ', self, ' from ', target(event)];
+    case 'confirmed':
+      return [a.confirmed_by && a.confirmed_by !== event.actor ? `recorded that ${a.confirmed_by} confirmed ` : 'confirmed ', self];
+    default:
+      return ['took back the confirmation of ', self, said(a)];
+  }
 }
 
 // The sentence, without the actor: an array of text and links.
@@ -127,31 +163,9 @@ export function describe(event) {
       return ['put ', rule(event.rule_id), ' in ', node(a.story_id)];
     case 'rule_moved':
       return ['moved ', rule(event.rule_id), ' from ', story(b.story_id), ' to ', story(a.story_id)];
-    case 'decision_recorded':
-      return ['recorded ', decision(event.decision_id), `, decided by ${a.decided_by}`];
-    case 'decision_superseded':
-      return ['replaced ', decision(event.decision_id), ' with ', decision(a.superseded_by_id)];
-    case 'decision_linked':
-      return ['linked ', decision(event.decision_id), ' to ', target(event)];
-    case 'decision_unlinked':
-      return ['unlinked ', decision(event.decision_id), ' from ', target(event)];
-    case 'memory_recorded':
-      return ['recorded ', memory(event.memory_id), a.origin && a.origin !== 'stated' ? ` (${a.origin === 'extracted' ? 'proposed' : 'drawn up'} by a language model)` : ''];
-    case 'memory_superseded':
-      return ['replaced ', memory(event.memory_id), ' with ', memory(a.superseded_by_id), a.reason ? `: ${clip(a.reason, 80)}` : ''];
-    case 'memory_retracted':
-      return ['retracted ', memory(event.memory_id), a.reason ? `: ${clip(a.reason, 80)}` : ''];
-    case 'memory_linked':
-      return ['linked ', memory(event.memory_id), ' to ', target(event)];
-    case 'memory_unlinked':
-      return ['unlinked ', memory(event.memory_id), ' from ', target(event)];
-    case 'memory_confirmed':
-      return [a.confirmed_by && a.confirmed_by !== event.actor ? `recorded that ${a.confirmed_by} confirmed ` : 'confirmed ', memory(event.memory_id)];
-    case 'memory_promoted':
-      return ['made ', memory(event.memory_id), ' a decision: ', decision(a.decision_id), `, decided by ${a.decided_by}`];
-    case 'model_call':
-      return [`asked the language model${a.model ? ` (${a.model})` : ''}${a.asked ? `: “${clip(a.asked, 100)}”` : ''}${a.used ? `, which looked at ${a.used.length} item${a.used.length === 1 ? '' : 's'}` : ''}`];
     default:
+      if (FACT_ACTIONS.includes(event.action)) return describeRecord('fact', event, a);
+      if (DECISION_ACTIONS.includes(event.action)) return describeRecord('decision', event, a);
       return [`${event.action.replace(/_/g, ' ')} `, subject(event)];
   }
 }
@@ -175,5 +189,5 @@ export function aboutItem(event, item) {
   if (item.kind === 'node') return event.node_id === item.id || event.other_node_id === item.id;
   if (item.kind === 'rule') return event.rule_id === item.id;
   if (item.kind === 'decision') return event.decision_id === item.id;
-  return event.memory_id === item.id;
+  return event.fact_id === item.id;
 }

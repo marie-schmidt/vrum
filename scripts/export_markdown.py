@@ -1,12 +1,13 @@
 """Write a Markdown copy of the graph of a running Vrum into a folder: one file per epic, story,
-task, rule, decision, principle, fact and belief, with its fields at the top and its links written
-as [[references]], to read in Obsidian or keep in git.
+task, requirement (a rule), decision and fact, with its fields at the top and its links written
+as [[references]], to read in Obsidian or keep in git. A decision or fact says whether it still
+counts and whether a person confirmed it.
 
     VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/export_markdown.py \\
         http://127.0.0.1:8000/mcp vrum-notes
 
 The copy is read-only: it is made again from the graph each time. This replaces the folders epics,
-stories, tasks, rules, decisions, facts and beliefs inside the target folder and leaves anything
+stories, tasks, rules, decisions and facts inside the target folder and leaves anything
 else in it alone. A target folder that has something else in it and was not made by this script is
 refused, so that nothing of yours is overwritten. The same graph gives the same files, so a copy
 kept in git only changes when the graph does."""

@@ -20,6 +20,7 @@ from mcp import Client
 
 from tests.helpers import (
     all_nodes,
+    confirm,
     connect,
     export_everything,
     make_decision,
@@ -141,7 +142,7 @@ async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_
                 side.word in str(node["title"]) or "Only here" in node["title"] for node in nodes
             )
             assert {1, 2, 3, 4, 5, 6} <= {node["id"] for node in nodes}
-            for tool in ("list_rules", "list_decisions", "list_memories"):
+            for tool in ("list_rules", "list_decisions", "list_facts"):
                 found = await ok(side.client, tool, limit=200)
                 owns(side, others, found["items"])
             owns(side, others, await ok(side.client, "changes_since", after_event_id=0, limit=200))
@@ -154,6 +155,8 @@ async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_
             assert counts["events"] == exported["counts"]["events"]
             assert counts["links"] == exported["counts"]["links"]
             assert counts["rules"] == exported["counts"]["rules"]
+            assert counts["decisions"] == exported["counts"]["decisions"]
+            assert counts["facts"] == exported["counts"]["facts"]
             assert counts["epics"] + counts["stories"] + counts["tasks"] == len(exported["nodes"])
         # The same number names a different record in each project.
         titles = {
@@ -165,19 +168,53 @@ async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_
         assert len(await all_nodes(b1.client)) > len(await all_nodes(a1.client))
 
 
-async def test_a_principle_applies_throughout_its_project_and_never_across_the_install() -> None:
+async def test_a_project_wide_decision_applies_throughout_its_project_and_no_other() -> None:
     async with three_projects() as (a1, a2, b1, _):
         sides = [a1, a2, b1]
         for side in sides:
-            # A task no principle names: the principle of the project still applies to it.
+            others = [other for other in sides if other is not side]
+            wide = side.world["wide"]
+            # A task that no decision names: the project-wide decision of the project still
+            # applies to it, in its recall.
             recalled = await ok(side.client, "recall", node_id=side.world["task3"]["id"])
-            principle = side.world["principle"]
-            assert principle["title"] in json.dumps(recalled)
-            for other in sides:
-                if other is not side:
-                    assert other.word not in json.dumps(recalled)
-            listed = await ok(side.client, "list_decisions", kind="principle", limit=200)
-            assert [item["id"] for item in listed["items"]] == [principle["id"]]
+            assert [
+                item["decision"]["id"] for item in recalled["project_wide_decisions"]["items"]
+            ] == [wide["id"]]
+            owns(side, others, recalled)
+            # The same in the briefing of work: a free task of its own, looked at and not taken.
+            epic = await ok(
+                side.client, "create_node", actor="ann", kind="epic", title=f"Free {side.word}"
+            )
+            await ok(
+                side.client,
+                "create_node",
+                actor="ann",
+                kind="story",
+                title=f"A free story {side.word}",
+                parent_id=epic["id"],
+            )
+            seen = await ok(
+                side.client, "next_work", actor="agent-x", within_node_id=epic["id"], peek=True
+            )
+            assert seen["found"] and seen["peeked"]
+            briefing = seen["context"]["project_wide_decisions"]
+            assert [item["id"] for item in briefing] == [wide["id"]]
+            assert briefing[0]["confirmation"] == "confirmed"
+            owns(side, others, seen["context"])
+            # It is listed, found and exported by its own project only.
+            listed = await ok(
+                side.client, "list_decisions", project_wide=True, status="active", limit=200
+            )
+            assert [item["id"] for item in listed["items"]] == [wide["id"]]
+            found = await ok(
+                side.client, "search", query="keep it simple", mode="words", types=["decision"]
+            )
+            assert [(item["id"], item["label"][:20]) for item in found["items"]] == [
+                (wide["id"], "Project-wide decisio")
+            ]
+            exported = await export_everything(side.client)
+            assert [d["id"] for d in exported["decisions"] if d["project_wide"]] == [wide["id"]]
+            owns(side, others, exported["decisions"])
 
 
 # -- an id that exists only elsewhere
@@ -254,20 +291,86 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
                 },
                 f"no node with id {there.node}",
             ),
-            ("get_memory", {"memory_id": there.fact}, f"no fact or belief with id {there.fact}"),
+            ("get_fact", {"fact_id": there.fact}, f"no fact with id {there.fact}"),
+            ("fact_history", {"fact_id": there.fact}, f"no fact with id {there.fact}"),
             (
-                "retract_memory",
-                {"actor": "x", "memory_ids": [there.fact], "reason": "r"},
-                f"no fact or belief with id {there.fact}",
+                "decision_history",
+                {"decision_id": there.decision},
+                f"no decision with id {there.decision}",
             ),
             (
-                "link_memory",
-                {"actor": "x", "memory_id": mine["fact1"]["id"], "node_ids": [there.node]},
+                "withdraw_fact",
+                {"actor": "x", "fact_ids": [there.fact], "reason": "r"},
+                f"no fact with id {there.fact}",
+            ),
+            (
+                "supersede_fact",
+                {
+                    "actor": "x",
+                    "replaces": [there.fact],
+                    "reason": "r",
+                    "text": "t",
+                    "source": "s",
+                },
+                f"no fact with id {there.fact}",
+            ),
+            (
+                "withdraw_decision",
+                {"actor": "x", "decision_id": there.decision, "reason": "r"},
+                f"no decision with id {there.decision}",
+            ),
+            (
+                "link_fact",
+                {"actor": "x", "fact_id": mine["fact2"]["id"], "node_ids": [there.node]},
                 f"no node with id {there.node}",
             ),
             (
-                "record_belief",
-                {"actor": "x", "text": "t", "evidence_fact_ids": [there.fact]},
+                "link_decision",
+                {"actor": "x", "decision_id": mine["wide"]["id"], "node_ids": [there.node]},
+                f"no node with id {there.node}",
+            ),
+            (
+                "retain_fact",
+                {"actor": "x", "text": "t", "source": "s", "decision_ids": [there.decision]},
+                f"no decision with id {there.decision}",
+            ),
+            (
+                "retain_fact",
+                {"actor": "x", "text": "t", "source": "s", "rule_ids": [there.rule]},
+                f"no rule with id {there.rule}",
+            ),
+            (
+                "set_confirmation",
+                {
+                    "actor": "x",
+                    "kind": "fact",
+                    "record_id": there.fact,
+                    "confirmation": "confirmed",
+                    "person": "Ada",
+                },
+                f"no fact with id {there.fact}",
+            ),
+            (
+                "set_confirmation",
+                {
+                    "actor": "x",
+                    "kind": "decision",
+                    "record_id": there.decision,
+                    "confirmation": "confirmed",
+                    "person": "Ada",
+                },
+                f"no decision with id {there.decision}",
+            ),
+            (
+                "set_confirmation",
+                {
+                    "actor": "x",
+                    "kind": "fact",
+                    "record_id": there.fact,
+                    "confirmation": "unconfirmed",
+                    "person": "Ada",
+                    "quote": "Not so.",
+                },
                 f"no fact with id {there.fact}",
             ),
             (
@@ -362,16 +465,7 @@ async def test_search_by_words_and_by_meaning_similar_items_overlaps_and_recall_
             # The index of a project holds exactly that project's own embeddable items.
             counts = (await ok(side.client, "server_status"))["counts"]
             embeddable = sum(
-                counts[name]
-                for name in (
-                    "epics",
-                    "stories",
-                    "rules",
-                    "decisions",
-                    "principles",
-                    "facts",
-                    "beliefs",
-                )
+                counts[name] for name in ("epics", "stories", "rules", "decisions", "facts")
             )
             assert report["indexed_total"] == embeddable
             assert (await ok(side.client, "server_status"))["index"]["indexed"] == embeddable
@@ -448,29 +542,32 @@ async def test_the_database_refuses_a_reference_from_one_project_to_another_even
         )
         assert "violates foreign key constraint" in sql_refused(
             "INSERT INTO decision_nodes (project_id, decision_id, node_id) "
-            f"VALUES ({one}, {mine['principle']['id']}, {there.node})"
+            f"VALUES ({one}, {mine['wide']['id']}, {there.node})"
         )
         assert "violates foreign key constraint" in sql_refused(
-            "INSERT INTO memory_nodes (project_id, memory_id, node_id) "
-            f"VALUES ({one}, {mine['fact1']['id']}, {there.node})"
+            "INSERT INTO fact_nodes (project_id, fact_id, node_id) "
+            f"VALUES ({one}, {mine['fact2']['id']}, {there.node})"
         )
-        evidence = sql_refused(
-            "INSERT INTO belief_evidence (project_id, belief_id, fact_id) "
-            f"VALUES ({one}, {mine['belief1']['id']}, {there.fact})"
+        assert "violates foreign key constraint" in sql_refused(
+            "INSERT INTO fact_rules (project_id, fact_id, rule_id) "
+            f"VALUES ({one}, {mine['fact2']['id']}, {there.rule})"
         )
-        assert "must be an active fact or decision" in evidence or "foreign key" in evidence
+        assert "violates foreign key constraint" in sql_refused(
+            "INSERT INTO fact_decisions (project_id, fact_id, decision_id) "
+            f"VALUES ({one}, {mine['fact2']['id']}, {there.decision})"
+        )
         assert "violates foreign key constraint" in sql_refused(
             "INSERT INTO events (project_id, id, node_id, action, actor, after) "
             f"VALUES ({one}, 999999, {there.node}, 'update', 'x', '{{}}')"
         )
         # Replacement cannot cross either: not a fact's, not a decision's.
         assert "violates foreign key constraint" in sql_refused(
-            f"UPDATE memories SET status = 'superseded', superseded_by_id = {there.fact}, "
-            f"status_reason = 'x' WHERE project_id = {one} AND id = {mine['fact1']['id']}"
+            f"UPDATE facts SET status = 'superseded', superseded_by_id = {there.fact}, "
+            f"status_reason = 'x' WHERE project_id = {one} AND id = {mine['fact2']['id']}"
         )
         assert "violates foreign key constraint" in sql_refused(
             f"UPDATE decisions SET status = 'superseded', superseded_by_id = {there.decision} "
-            f"WHERE project_id = {one} AND id = {mine['principle']['id']}"
+            f"WHERE project_id = {one} AND id = {mine['wide']['id']}"
         )
         assert "rule_belongs_to_a_story" in sql_refused(
             f"UPDATE rules SET story_id = {there.story}, version = version + 1 "
@@ -522,6 +619,16 @@ async def test_a_projects_database_role_sees_and_writes_only_its_own_rows_and_no
             as_project=True,
         )
         assert changed.returncode == 0 and changed.stdout.strip() == "", changed.stderr
+        # Nor can the confirmation of another project's fact or decision.
+        for table, record in (("facts", there.fact), ("decisions", there.decision)):
+            confirmed = run_sql(
+                f"UPDATE {table} SET confirmed_by = 'Mallory', confirmed_at = now() "
+                f"WHERE id = {record} RETURNING id",
+                plain=True,
+                project=one,
+                as_project=True,
+            )
+            assert confirmed.returncode == 0 and confirmed.stdout.strip() == "", confirmed.stderr
         # No account, session, key or project is readable by it.
         for table in ("accounts", "sessions", "agent_keys", "projects"):
             assert "permission denied" in sql_refused(
@@ -529,6 +636,52 @@ async def test_a_projects_database_role_sees_and_writes_only_its_own_rows_and_no
             )
         assert await export_everything(b1.client) == before_b1
         assert (await ok(b1.client, "get_node", node_id=there.node))["title"] != "x"
+        assert (await ok(b1.client, "get_fact", fact_id=there.fact))["confirmed_by"] is None
+        assert (await ok(b1.client, "get_decision", decision_id=there.decision))[
+            "confirmed_by"
+        ] is None
+
+
+# -- confirmation is each project's own
+
+
+async def test_confirmation_is_each_projects_own_and_a_foreign_record_cannot_be_confirmed() -> None:
+    async with three_projects() as (a1, a2, b1, there):
+        before_b1 = await export_everything(b1.client)
+        # Every project's world has a fact and a decision of the same numbers, none confirmed.
+        fact, decision = a1.world["fact2"], a1.world["decision2"]
+        assert fact["id"] == a2.world["fact2"]["id"] == b1.world["fact2"]["id"]
+        assert decision["id"] == a2.world["decision2"]["id"] == b1.world["decision2"]["id"]
+
+        confirmed_fact = await confirm(a1.client, "fact", fact, person="Ada")
+        confirmed_decision = await confirm(a1.client, "decision", decision, person="Ada")
+
+        assert confirmed_fact["confirmation"] == confirmed_decision["confirmation"] == "confirmed"
+        for side in (a2, b1):
+            other_fact = await ok(side.client, "get_fact", fact_id=fact["id"])
+            other_decision = await ok(side.client, "get_decision", decision_id=decision["id"])
+            for record in (other_fact, other_decision):
+                assert record["confirmation"] == "unconfirmed" and record["confirmed_by"] is None
+        assert await export_everything(b1.client) == before_b1
+        # A record that exists only in another project is refused, and the other project keeps
+        # what it had.
+        for kind, record_id in (("fact", there.fact), ("decision", there.decision)):
+            said = await refused(
+                a1.client,
+                "set_confirmation",
+                actor="Ada",
+                kind=kind,
+                record_id=record_id,
+                confirmation="confirmed",
+                person="Ada",
+            )
+            assert f"no {kind} with id {record_id}" in said
+        assert await export_everything(b1.client) == before_b1
+        # The history of the one that was confirmed says so, in its own project only.
+        history = await ok(a1.client, "fact_history", fact_id=fact["id"])
+        assert [item["action"] for item in history["items"]] == ["fact_recorded", "fact_confirmed"]
+        other = await ok(a2.client, "fact_history", fact_id=fact["id"])
+        assert [item["action"] for item in other["items"]] == ["fact_recorded"]
 
 
 # -- one project's export loads into another

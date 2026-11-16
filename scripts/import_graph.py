@@ -1,5 +1,6 @@
 """Load a file written by export_graph.py into a running Vrum that is empty, keeping every id, date,
-origin and event. All of it is loaded or none of it. A project that already holds anything refuses.
+confirmation and event. All of it is loaded or none of it. A project that already holds anything
+refuses.
 
     VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/import_graph.py \\
         http://127.0.0.1:8000/mcp vrum-export.json

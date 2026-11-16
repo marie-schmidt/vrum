@@ -12,8 +12,8 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
+    confirm,
     embeddings_stopped,
-    make_belief,
     make_decision,
     make_fact,
     make_rule,
@@ -100,24 +100,48 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
     )
     rule = await make_rule(client, "A rule", body=f"Never skip {word}.", story_id=story["id"])
     decision = await make_decision(client, "A decision", text=f"We choose {word}.")
-    principle = await make_decision(client, "A principle", kind="principle", text=f"Always {word}.")
+    wide = await make_decision(client, "A wide one", project_wide=True, text=f"Always {word}.")
+    await confirm(client, "decision", wide)
     fact = await make_fact(client, f"The {word} service is slow.")
-    belief = await make_belief(client, [fact], f"Probably {word} needs a cache.")
+    confirmed_fact = await make_fact(client, f"The {word} queue is short.")
+    await confirm(client, "fact", confirmed_fact)
+    # A confirmed fact that was replaced, and one that was withdrawn: both are still found, as
+    # what they now are, and the replaced one keeps the confirmation it had.
+    old_fact = await make_fact(client, f"The {word} cache is cold.")
+    await confirm(client, "fact", old_fact)
+    new_fact = (
+        await ok(
+            client,
+            "supersede_fact",
+            actor="a",
+            replaces=[old_fact["id"]],
+            reason="Measured again.",
+            text=f"The {word} cache is warm.",
+            source="A measurement",
+            said_by="Marie",
+            quote="It has warmed up.",
+        )
+    )["replacement"]
+    wrong_fact = await make_fact(client, f"The {word} office has a dog.")
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[wrong_fact["id"]], reason="A cat.")
     expected = {
         ("epic", epic["id"]),
         ("story", story["id"]),
         ("task", task["id"]),
         ("rule", rule["id"]),
         ("decision", decision["id"]),
-        ("principle", principle["id"]),
+        ("decision", wide["id"]),
         ("fact", fact["id"]),
-        ("belief", belief["id"]),
+        ("fact", confirmed_fact["id"]),
+        ("fact", old_fact["id"]),
+        ("fact", new_fact["id"]),
+        ("fact", wrong_fact["id"]),
     }
 
     page = await search(client, word, mode="words", limit=200)
 
     results = by_item(page)
-    assert set(results) == expected and page["total"] == 8
+    assert set(results) == expected and page["total"] == 11
     for item in results.values():
         assert item["matched"] == "words" and item["similarity"] is None
         assert item["why"] == f"exact words: {word}" and item["words_matched"] == [word]
@@ -133,18 +157,40 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
         "ready"
     }
     assert results[("rule", rule["id"])]["status"] == "held"
-    # Each result carries its origin and a label that says what it is.
-    assert results[("decision", decision["id"])]["origin"] == "decided"
-    assert "Decision decided by Marie" in results[("decision", decision["id"])]["label"]
-    assert "Principle decided by Marie" in results[("principle", principle["id"])]["label"]
-    assert results[("fact", fact["id"])]["origin"] == "stated"
-    assert "Fact (stated)" in results[("fact", fact["id"])]["label"]
-    assert results[("belief", belief["id"])]["origin"] == "stated"
-    assert "Suggestion" in results[("belief", belief["id"])]["label"]
-    assert results[("belief", belief["id"])]["suggestion"] is True
-    assert results[("decision", decision["id"])]["suggestion"] is False
-    assert results[("fact", fact["id"])]["suggestion"] is False
-    assert results[("fact", fact["id"])]["title"].startswith("The ")
+    # Work and requirements are labelled as what they are and have no confirmation.
+    for key, label in (
+        (("epic", epic["id"]), "Epic"),
+        (("story", story["id"]), "Story"),
+        (("task", task["id"]), "Task"),
+        (("rule", rule["id"]), "Requirement"),
+    ):
+        assert results[key]["label"] == label and results[key]["confirmation"] is None, key
+    # A decision or fact says what it is, whether it still counts and whether a person looked at
+    # it, in its label and in its confirmation field.
+    plain = results[("decision", decision["id"])]
+    assert plain["label"] == "Decision, not confirmed by a person"
+    assert (plain["status"], plain["confirmation"]) == ("active", "unconfirmed")
+    wide_result = results[("decision", wide["id"])]
+    assert wide_result["label"].startswith("Project-wide decision, confirmed by Marie on ")
+    assert (wide_result["status"], wide_result["confirmation"]) == ("active", "confirmed")
+    unconfirmed = results[("fact", fact["id"])]
+    assert unconfirmed["label"] == "Fact, not confirmed by a person. Source: The team call"
+    assert (unconfirmed["status"], unconfirmed["confirmation"]) == ("active", "unconfirmed")
+    assert unconfirmed["title"].startswith("The ")
+    assert results[("fact", confirmed_fact["id"])]["label"].startswith(
+        "Fact, confirmed by Marie on "
+    )
+    assert results[("fact", confirmed_fact["id"])]["confirmation"] == "confirmed"
+    replaced = results[("fact", old_fact["id"])]
+    assert replaced["label"].startswith("Superseded fact, confirmed by Marie on ")
+    assert (replaced["status"], replaced["confirmation"]) == ("superseded", "confirmed")
+    replacement = results[("fact", new_fact["id"])]
+    assert replacement["label"].startswith("Fact, not confirmed by a person")
+    assert (replacement["status"], replacement["confirmation"]) == ("active", "unconfirmed")
+    withdrawn = results[("fact", wrong_fact["id"])]
+    assert withdrawn["label"].startswith("Withdrawn fact, not confirmed by a person")
+    assert (withdrawn["status"], withdrawn["confirmation"]) == ("withdrawn", "unconfirmed")
+    assert not any(item["suggestion"] for item in results.values())
 
     # The counts equal what the list tools return for the same words.
     nodes = [
@@ -155,16 +201,21 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
     lists = {
         **{kind: [n for n in nodes if n["kind"] == kind] for kind in ("epic", "story", "task")},
         "rule": await listing(client, "list_rules"),
-        "decision": await listing(client, "list_decisions", kind="decision"),
-        "principle": await listing(client, "list_decisions", kind="principle"),
-        "fact": await listing(client, "list_memories", type="fact"),
-        "belief": await listing(client, "list_memories", type="belief"),
+        "decision": await listing(client, "list_decisions"),
+        "fact": await listing(client, "list_facts"),
     }
+    expected_counts = {"epic": 1, "story": 1, "task": 1, "rule": 1, "decision": 2, "fact": 5}
     for item_type, items in lists.items():
         containing = [item for item in items if word in text_of(item)]
-        assert page["counts_by_type"][item_type] == len(containing) == 1, item_type
-    assert page["counts_by_type"] == {kind: 1 for kind in sorted(lists)}
-    assert page["counts_by_status"] == {"active": 4, "held": 1, "ready": 3}
+        assert page["counts_by_type"][item_type] == len(containing), item_type
+    assert page["counts_by_type"] == dict(sorted(expected_counts.items()))
+    assert page["counts_by_status"] == {
+        "active": 5,
+        "held": 1,
+        "ready": 3,
+        "superseded": 1,
+        "withdrawn": 1,
+    }
 
     # Filters narrow the results and leave the counts as they were, to show what filtering gives.
     narrowed = await search(client, word, mode="words", types=["story", "task"])
@@ -174,20 +225,33 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
     assert set(by_item(held)) == {("rule", rule["id"])} and held["counts_by_status"]["ready"] == 3
     both = await search(client, word, mode="words", types=["story", "rule"], statuses=["held"])
     assert set(by_item(both)) == {("rule", rule["id"])}
+    # Context records can be told apart by what they are and where they stand.
+    records = await search(client, word, mode="words", types=["decision", "fact"])
+    assert records["total"] == 7 and records["counts_by_type"] == page["counts_by_type"]
+    ended = await search(client, word, mode="words", statuses=["superseded", "withdrawn"])
+    assert set(by_item(ended)) == {("fact", old_fact["id"]), ("fact", wrong_fact["id"])}
+    in_force = await search(client, word, mode="words", types=["fact"], statuses=["active"])
+    assert set(by_item(in_force)) == {
+        ("fact", fact["id"]),
+        ("fact", confirmed_fact["id"]),
+        ("fact", new_fact["id"]),
+    }
+    assert in_force["counts_by_status"] == page["counts_by_status"]
 
     # Pages of three cover everything once, in the same order as one page of everything.
     seen: list[tuple[str, int]] = []
     offset: int | None = 0
     while offset is not None:
         part = await search(client, word, mode="words", limit=3, offset=offset)
-        assert part["total"] == 8
+        assert part["total"] == 11
         seen.extend((item["item_type"], item["id"]) for item in part["items"])
         offset = part["next_offset"]
     assert seen == [(item["item_type"], item["id"]) for item in page["items"]]
-    assert len(set(seen)) == 8
+    assert len(set(seen)) == 11
 
     for arguments, expected_message in (
-        ({"types": ["epics"]}, "types must be one of epic, story, task"),
+        ({"types": ["epics"]}, "types must be one of epic, story, task, rule, decision, fact"),
+        ({"types": ["belief"]}, "types must be one of epic, story, task, rule, decision, fact"),
         ({"statuses": ["open"]}, "statuses must be one of new, ready"),
         ({"mode": "fuzzy"}, "mode must be one of both, words, meaning"),
         ({"limit": 0}, "limit must be a whole number from 1 to 200"),
@@ -325,60 +389,60 @@ async def test_a_paraphrase_is_found_by_meaning_and_labelled_a_suggestion(client
     )
 
 
-async def test_a_fact_and_a_belief_are_found_by_words_and_meaning_with_their_origin(
+async def test_facts_and_decisions_are_found_by_words_and_meaning_with_their_confirmation(
     client: Client,
 ) -> None:
     word = unique_word()
     fact = await make_fact(client, f"Customers receive an invoice by email {word}")
-    belief = await make_belief(client, [fact], f"Clients receive a bill by mail {word}")
-    # Nothing in the product writes a model's output yet (that is M5C), so these two are as a
-    # model would leave them, written straight into the database.
-    extracted = run_sql(
-        "INSERT INTO memories (type, kind, text, source, origin, recorded_by) VALUES "
-        f"('fact', 'world', 'The customer is sent an invoice by email {word}', "
-        "'a quoted passage', 'extracted', 'agent-1') RETURNING id",
-        plain=True,
+    confirmed = await make_fact(client, f"The customer is sent an invoice by email {word}")
+    await confirm(client, "fact", confirmed)
+    decision = await make_decision(
+        client, f"Mail the bill {word}", text="Clients receive a bill by mail", reason="Clients pay"
     )
-    assert extracted.returncode == 0, extracted.stderr
-    extracted_id = int(extracted.stdout.splitlines()[0])
-    derived = run_sql(
-        "WITH b AS (INSERT INTO memories (type, text, origin, recorded_by) VALUES "
-        f"('belief', 'The client is mailed a bill {word}', 'derived', 'model') RETURNING id) "
-        f"INSERT INTO belief_evidence (belief_id, fact_id) SELECT id, {fact['id']} FROM b "
-        "RETURNING belief_id",
-        plain=True,
+    wide = await make_decision(
+        client,
+        f"Always mail the bill {word}",
+        text="The client is mailed a bill",
+        reason="Clients pay",
+        project_wide=True,
     )
-    assert derived.returncode == 0, derived.stderr
-    derived_id = int(derived.stdout.splitlines()[0])
+    await confirm(client, "decision", wide)
+    gone = await make_fact(client, f"The client is mailed a bill {word}")
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[gone["id"]], reason="Not so.")
     await reindexed(client)
+    found = {
+        ("fact", fact["id"]): ("active", "unconfirmed"),
+        ("fact", confirmed["id"]): ("active", "confirmed"),
+        ("decision", decision["id"]): ("active", "unconfirmed"),
+        ("decision", wide["id"]): ("active", "confirmed"),
+        ("fact", gone["id"]): ("withdrawn", "unconfirmed"),
+    }
 
     by_words = by_item(await search(client, word, mode="words", limit=50))
     by_meaning = by_item(
         await search(client, "Clients get a bill by mail", mode="meaning", limit=50)
     )
 
-    for key in (
-        ("fact", fact["id"]),
-        ("belief", belief["id"]),
-        ("fact", extracted_id),
-        ("belief", derived_id),
-    ):
+    for key, (status, confirmation) in found.items():
         assert key in by_words and by_words[key]["matched"] == "words", key
         assert key in by_meaning and by_meaning[key]["matched"] == "meaning", key
         assert by_meaning[key]["similarity"] is not None
+        for results in (by_words, by_meaning):
+            assert (results[key]["status"], results[key]["confirmation"]) == (status, confirmation)
+            assert results[key]["suggestion"] is (results is by_meaning)
+    # Each says what it is in its label, whichever way it was found.
     for results in (by_words, by_meaning):
-        assert results[("fact", fact["id"])]["origin"] == "stated"
-        assert results[("fact", fact["id"])]["suggestion"] is (results is by_meaning)
-        assert results[("belief", belief["id"])]["origin"] == "stated"
-        assert results[("fact", extracted_id)]["origin"] == "extracted"
-        assert "proposed by a language model" in results[("fact", extracted_id)]["label"]
-        assert results[("fact", extracted_id)]["suggestion"] is True
-        assert results[("belief", derived_id)]["origin"] == "derived"
-        assert "drawn up by a language model" in results[("belief", derived_id)]["label"]
-        assert results[("belief", derived_id)]["suggestion"] is True
-    # Never mistaken for a decision: none of them is one, and each says what it is.
-    assert not any(item["origin"] == "decided" for item in by_words.values())
-    assert not any(item["item_type"] in ("decision", "principle") for item in by_words.values())
+        assert results[("fact", fact["id"])]["label"].startswith("Fact, not confirmed by a person")
+        assert results[("fact", confirmed["id"])]["label"].startswith(
+            "Fact, confirmed by Marie on "
+        )
+        assert (
+            results[("decision", decision["id"])]["label"] == "Decision, not confirmed by a person"
+        )
+        assert results[("decision", wide["id"])]["label"].startswith(
+            "Project-wide decision, confirmed by Marie on "
+        )
+        assert results[("fact", gone["id"])]["label"].startswith("Withdrawn fact")
 
 
 async def test_what_matches_both_ways_is_labelled_both_and_comes_first(client: Client) -> None:
@@ -888,7 +952,7 @@ async def test_similar_items_for_an_item_or_a_text_exclude_the_item_and_are_sugg
     decision = await make_decision(
         client, "Bills", text="Customers receive an invoice by email after payment"
     )
-    belief = await make_belief(client, [fact], "Mailing a bill to a client after charging is good")
+    other_fact = await make_fact(client, "Mailing a bill to a client after charging is good")
     await reindexed(client)
 
     page = await ok(client, "similar_items", node_id=firsts[0]["id"], limit=200)
@@ -898,16 +962,16 @@ async def test_similar_items_for_an_item_or_a_text_exclude_the_item_and_are_sugg
     assert ("story", seconds[0]["id"]) in results
     assert ("fact", fact["id"]) in results and ("decision", decision["id"]) in results
     assert all(r["matched"] == "meaning" and r["suggestion"] for r in results.values())
+    assert results[("fact", fact["id"])]["confirmation"] == "unconfirmed"
+    assert results[("story", seconds[0]["id"])]["confirmation"] is None
     assert page["items"][0]["similarity"] >= page["items"][-1]["similarity"]
     assert page["counts_by_type"]["story"] >= 1 and page["index"]["meaning"] == "used"
-    assert ("belief", belief["id"]) in by_item(
-        await ok(client, "similar_items", memory_id=fact["id"], min_similarity=0.2, limit=50)
-    )
+    for_fact = await ok(client, "similar_items", fact_id=fact["id"], min_similarity=0.2, limit=50)
+    assert ("fact", other_fact["id"]) in by_item(for_fact)
+    assert ("fact", fact["id"]) not in by_item(for_fact)
 
-    only = await ok(
-        client, "similar_items", node_id=firsts[0]["id"], types=["decision", "fact", "belief"]
-    )
-    assert {i["item_type"] for i in only["items"]} <= {"decision", "fact", "belief"}
+    only = await ok(client, "similar_items", node_id=firsts[0]["id"], types=["decision", "fact"])
+    assert {i["item_type"] for i in only["items"]} <= {"decision", "fact"}
     assert ("decision", decision["id"]) in by_item(only)
     for_text = await ok(
         client, "similar_items", text="Mail every client a bill after charge", limit=50
@@ -934,10 +998,11 @@ async def test_similar_items_for_an_item_or_a_text_exclude_the_item_and_are_sugg
     for arguments, expected in (
         ({}, "Give exactly one of node_id"),
         ({"node_id": 1, "text": "x"}, "Give exactly one of node_id"),
+        ({"fact_id": 1, "decision_id": 1}, "Give exactly one of node_id"),
         ({"node_id": 987654321}, "There is no node with id 987654321"),
-        ({"rule_id": 987654321}, "There is no rule with id 987654321"),
+        ({"rule_id": 987654321}, "There is no requirement with id 987654321"),
         ({"decision_id": 987654321}, "There is no decision with id 987654321"),
-        ({"memory_id": 987654321}, "There is no fact or belief with id 987654321"),
+        ({"fact_id": 987654321}, "There is no fact with id 987654321"),
         ({"text": "  "}, "text cannot be empty"),
         ({"text": "x", "types": ["story", "idea"]}, "types must be one of"),
         ({"text": "x", "min_similarity": -0.1}, "min_similarity must be a number from 0 to 1"),
@@ -962,15 +1027,30 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
         reason="Clients pay",
     )
     alike_fact = await make_fact(client, "A customer receives an invoice by email after payment")
-    alike_belief = await make_belief(
-        client, [alike_fact], "Clients receive a bill by mail after charge"
-    )
+    confirmed_alike = await make_fact(client, "Clients receive a bill by mail after charge")
+    await confirm(client, "fact", confirmed_alike)
     unrelated = await make_fact(client, "Dark theme for the mobile app")
-    principle = await make_decision(
-        client, "Standing", kind="principle", text="Customers receive an invoice by email"
+    wide = await make_decision(
+        client,
+        "Standing",
+        text="Customers receive an invoice by email",
+        project_wide=True,
     )
-    retracted = await make_fact(client, "A client receives a bill by mail after payment")
-    await ok(client, "retract_memory", actor="a", memory_ids=[retracted["id"]], reason="Wrong")
+    withdrawn = await make_fact(client, "A client receives a bill by mail after payment")
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[withdrawn["id"]], reason="Wrong")
+    replaced = await make_decision(
+        client, "Old billing mail", text="Customers get a bill by mail after payment"
+    )
+    await ok(
+        client,
+        "supersede_decision",
+        actor="a",
+        decision_id=replaced["id"],
+        title="Dark theme",
+        text="A dark theme for the mobile app",
+        reason="Changed",
+        decided_by="Marie",
+    )
     await reindexed(client)
 
     plain = await ok(client, "recall", node_id=story["id"])
@@ -981,20 +1061,34 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
     similar = result["similar"]
     found = by_item({"items": similar["items"]})
     assert ("decision", alike_decision["id"]) in found
-    assert ("fact", alike_fact["id"]) in found and ("belief", alike_belief["id"]) in found
+    assert ("fact", alike_fact["id"]) in found and ("fact", confirmed_alike["id"]) in found
     assert all(item["suggestion"] and item["matched"] == "meaning" for item in found.values())
-    # Whatever is linked, a principle, something unrelated and something retracted are not here.
+    # A suggestion says whether a person confirmed it, like everything else a record shows.
+    assert found[("fact", alike_fact["id"])]["confirmation"] == "unconfirmed"
+    assert found[("fact", confirmed_alike["id"])]["confirmation"] == "confirmed"
+    # What is linked, a project-wide decision (it has its own section), something unrelated,
+    # something withdrawn and something replaced are not here.
     for left_out in (
         ("decision", linked_decision["id"]),
         ("fact", linked_fact["id"]),
-        ("principle", principle["id"]),
+        ("decision", wide["id"]),
         ("fact", unrelated["id"]),
-        ("fact", retracted["id"]),
+        ("fact", withdrawn["id"]),
+        ("decision", replaced["id"]),
     ):
         assert left_out not in found
     assert similar["count"] == len(similar["items"]) and similar["index"]["meaning"] == "used"
+    assert wide["id"] in {
+        item["decision"]["id"] for item in result["project_wide_decisions"]["items"]
+    }
     # The exact sections are what they were without it.
-    for name in ("active_decisions", "facts", "beliefs", "stale_beliefs", "past_memories"):
+    for name in (
+        "active_decisions",
+        "project_wide_decisions",
+        "facts",
+        "past_decisions",
+        "past_facts",
+    ):
         assert result[name] == plain[name]
 
     # With the service stopped, a story that is not indexed has no vector to compare, so it gets
@@ -1004,7 +1098,7 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
         down = await ok(client, "recall", node_id=fresh["id"], with_similar=True)
         assert down["similar"]["items"] == []
         assert down["similar"]["index"]["meaning"] == "service_unreachable"
-        assert down["active_principles"]["count"] >= 1
+        assert down["project_wide_decisions"]["count"] >= 1
 
 
 # -- nothing but the reindex job writes to the index ------------------------------------------

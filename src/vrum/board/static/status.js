@@ -1,7 +1,7 @@
-// Status: how the server is. It shows what `server_status` returns and nothing else about the
-// server: the versions, how much of each kind of thing it holds, the state of the index and of the
-// services it uses, and a download of the whole export. The token and the database password are
-// not here, because the server never says them. Import and backup are not done from a page.
+// Status and export: how the server is. It shows what `server_status` returns and nothing else about
+// the server: the versions, how much of each kind of thing it holds, the state of the index and of
+// the embedding service, and a download of the whole export. The database password is not here,
+// because the server never says it. Import and backup are not done from a page.
 
 import { Refusal, call } from './api.js';
 import { h, moment, plural, put } from './dom.js';
@@ -12,11 +12,9 @@ const SIZES = [
   ['stories', 'Stories'],
   ['tasks', 'Tasks'],
   ['links', 'Links'],
-  ['rules', 'Rules'],
+  ['rules', 'Requirements'],
   ['decisions', 'Decisions'],
-  ['principles', 'Principles'],
   ['facts', 'Facts'],
-  ['beliefs', 'Beliefs'],
   ['events', 'Changes in the history'],
 ];
 
@@ -40,8 +38,8 @@ export function mount(element) {
   root = element;
   put(
     root,
-    h('h1', {}, 'Status'),
-    h('p', { class: 'help' }, 'How the server is, as the server says it. It never shows the token or the database password.'),
+    h('h1', {}, 'Status and export'),
+    h('p', { class: 'help' }, 'How the server is, as the server says it. It never shows the database password.'),
     h('p', { class: 'problem', role: 'alert', id: 'status-problem' }),
     h('div', { id: 'status-body' }, h('p', { class: 'quiet' }, 'Asking the server…')),
     exportSection(),
@@ -123,12 +121,6 @@ function draw(status) {
         ),
       ),
     ),
-    h(
-      'section',
-      { id: 'model' },
-      h('h2', {}, 'Language model'),
-      h('p', { id: 'language-model' }, status.language_model ? `${status.language_model} (its key is never shown here)` : 'None is set up. Asking questions, proposing facts and checking beliefs are not available; everything else works.'),
-    ),
   );
 }
 
@@ -167,7 +159,7 @@ function exportSection() {
     'section',
     { id: 'export' },
     h('h2', {}, 'Download everything'),
-    h('p', {}, 'One file with every epic, story, task, link, rule, decision, principle, fact, belief and the whole history, to keep or to load into an empty server. It is the same as the export an agent reads.'),
+    h('p', {}, 'One file with every epic, story, task, link, requirement, decision, fact and the whole history, to keep or to load into an empty project. It is the same as the export an agent reads.'),
     button,
     note,
     problem,
@@ -177,7 +169,7 @@ function exportSection() {
 // Every page of the export put together, as the file the scripts write. It stops, saying so, if the
 // graph changed while it was being read, because what was read would not fit together.
 async function readExport(onPage) {
-  const document_ = { format: null, version: null, counts: null, nodes: [], links: [], rules: [], decisions: [], memories: [], events: [] };
+  const document_ = { format: null, version: null, counts: null };
   let after = null;
   let pages = 0;
   do {
@@ -185,14 +177,15 @@ async function readExport(onPage) {
     document_.format = page.format;
     document_.version = page.version;
     if (page.counts) document_.counts = page.counts;
-    if (page.section) document_[page.section].push(...page.items);
+    if (page.section) (document_[page.section] ??= []).push(...page.items);
     after = page.next_after;
     pages += 1;
     onPage(pages);
   } while (after);
   for (const name of Object.keys(document_.counts || {})) {
-    if (document_[name].length !== document_.counts[name]) {
-      throw new Refusal(`The graph changed while it was being read (${name}: ${document_.counts[name]} at the start, ${document_[name].length} read). Download it again when nothing is writing.`);
+    const read = (document_[name] ??= []).length;
+    if (read !== document_.counts[name]) {
+      throw new Refusal(`The graph changed while it was being read (${name}: ${document_.counts[name]} at the start, ${read} read). Download it again when nothing is writing.`);
     }
   }
   return document_;

@@ -1,0 +1,125 @@
+/* The Graph: presets and presentations, the map, the work list, the context list and requirements.
+   Owned by the graph work. Nothing is told by colour alone: kinds are shapes, confirmation is a tick
+   and a dashed outline, and an ended record is crossed out. */
+
+.graph-page { display: grid; gap: 0.8rem; }
+.graph-page .toolbar { margin-bottom: 0; }
+.graph-controls { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: end; }
+.graph-controls fieldset { border: 2px solid var(--ink); padding: 0.2rem 0.6rem 0.4rem; margin: 0; }
+.graph-controls legend { font-weight: 700; font-size: 0.82rem; padding: 0 0.3rem; }
+.graph-controls label.check { display: inline-flex; gap: 0.25rem; align-items: center; margin-right: 0.6rem; font-weight: 500; }
+.filters > summary { cursor: pointer; font-weight: 700; padding: 0.2rem 0; }
+.filters .graph-controls { margin-top: 0.4rem; }
+.gv-work-filter { display: grid; gap: 0.3rem; }
+.gv-work-filter .filter { flex: 1 1 auto; }
+
+/* Work / Context / Everything, and Map / List: one button of each group is pressed */
+.gv-seg { display: inline-flex; border: 2px solid var(--ink); background: var(--white); }
+.gv-seg button { border: none; border-radius: 0; background: transparent; padding: 0.25rem 0.8rem; font-weight: 600; }
+.gv-seg button + button { border-left: 2px solid var(--ink); }
+.gv-seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.gv-seg button[aria-pressed="true"]::before { content: "✓ "; }
+.gv-seg button:focus-visible { outline-offset: -4px; }
+
+/* The map */
+.graph-body { display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: 0.8rem; }
+.graph-stage { position: relative; border: 2px solid var(--ink); background: var(--white); }
+.graph-stage svg { display: block; width: 100%; height: 68vh; min-height: 24rem; cursor: grab; touch-action: none; }
+.graph-stage .zoom { position: absolute; right: 0.5rem; top: 0.5rem; display: grid; gap: 0.25rem; }
+.graph-notice { margin: 0; padding: 0.4rem 0.6rem; background: var(--paper-2); border: 2px solid var(--ink); }
+.graph-notice:empty { display: none; }
+.graph-side { display: grid; gap: 0.8rem; align-content: start; max-height: 74vh; overflow: auto; }
+.graph-side ul { list-style: none; margin: 0.3rem 0; padding: 0; display: grid; gap: 0.2rem; }
+.graph-side button { width: 100%; text-align: left; }
+.legend { font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; }
+.legend svg { vertical-align: middle; }
+.dot { cursor: pointer; }
+.dot .shape { stroke: var(--ink); stroke-width: 2; }
+.dot.pinned .shape { stroke-width: 4; }
+.dot.chosen .shape { stroke: var(--vermilion); stroke-width: 4; }
+.dot.outside { opacity: 0.55; }
+.dot.unconfirmed .shape { stroke-dasharray: 3 2; }
+.dot.ended { opacity: 0.6; }
+.dot.ended .shape { stroke-dasharray: 1 3; stroke-linecap: round; }
+.dot .mark { pointer-events: none; }
+.dot .confirmed-mark { font: 700 12px var(--sans); fill: var(--green); stroke: var(--white); stroke-width: 3px; paint-order: stroke; }
+.dot .ended-mark { fill: none; stroke: var(--ink); stroke-width: 2; }
+.dot text { font: 11px var(--sans); fill: var(--ink); paint-order: stroke; stroke: var(--white); stroke-width: 3px; pointer-events: none; }
+.dot:focus-visible .shape { stroke: var(--vermilion); stroke-width: 5; }
+.edge { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
+.edge[data-type="hierarchy"] { stroke: var(--line); stroke-width: 1.5; }
+.edge[data-type="needs_first"] { stroke: var(--vermilion); stroke-width: 2.5; }
+.edge[data-type="supersedes"], .edge[data-type="replaces"] { stroke-dasharray: 12 5; }
+.edge[data-type="duplicates"] { stroke-dasharray: 2 4; stroke-width: 2.5; }
+.edge[data-type="relates_to"] { stroke-dasharray: 5 4; }
+.edge[data-type="concerns"], .edge[data-type="placed"] { stroke: var(--ink-2); stroke-dasharray: 8 3 2 3; stroke-width: 1; }
+.edge[data-type="mention"] { stroke: var(--green); stroke-dasharray: 1 5; stroke-width: 2.5; stroke-linecap: round; }
+.edge[data-type="collapsed"] { stroke: var(--ink-2); }
+.edge-label { font: 10px var(--sans); fill: var(--ink-2); paint-order: stroke; stroke: var(--white); stroke-width: 3px; pointer-events: none; }
+.arrow-needs { fill: var(--vermilion); }
+.arrow-sup { fill: var(--ink-2); }
+
+/* The list: the work tree, then the context sections */
+.gv-list { display: grid; gap: 1.2rem; }
+.gv-section { border-top: 3px solid var(--ink); padding-top: 0.5rem; }
+.gv-section-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; margin-bottom: 0.4rem; }
+.gv-section-head .spacer { flex: 1; }
+.gv-count { color: var(--ink-2); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+.gv-filters { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: end; margin-bottom: 0.6rem; }
+.gv-field { display: grid; }
+.gv-field input[type=search] { min-width: 14rem; }
+.gv-context { display: grid; gap: 1.2rem; }
+.gv-rows { display: grid; gap: 0.5rem; }
+.gv-none { padding: 0.8rem 0; color: var(--ink-2); list-style: none; }
+.gv-more { list-style: none; }
+.gv-summary { margin: 0.2rem 0 0.6rem; }
+.gv-record.selected { box-shadow: 0 0 0 3px var(--vermilion); }
+.gv-actions { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; margin: 0.4rem 0; }
+.gv-actions .confirmation-control { flex: 1 1 18rem; }
+.gv-connections, .mentioned-in { margin: 0.3rem 0; font-size: 0.9rem; }
+.gv-connections > summary, .mentioned-in > summary { cursor: pointer; font-weight: 600; }
+.gv-link { text-align: left; }
+
+/* Requirements, by story */
+.gv-record.requirement { list-style: none; background: var(--white); border: 2px solid var(--ink); border-left-width: 8px; padding: 0.5rem 0.7rem; cursor: grab; overflow-wrap: anywhere; }
+.gv-record.requirement.status-dropped { border-style: dashed; border-left-style: solid; color: var(--ink-2); background: var(--paper-2); }
+.gv-record-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.3rem; }
+.gv-open { font-weight: 700; text-align: left; }
+.gv-group { border-top: 2px solid var(--line); margin-top: 0.8rem; padding-top: 0.4rem; }
+.gv-group.unplaced { border-top-color: var(--vermilion); }
+.gv-group h3 { font-size: 1rem; margin-bottom: 0.4rem; }
+.gv-group-head.over, .gv-bare-story.over { outline: 3px dashed var(--vermilion); outline-offset: 2px; background: #f0c9bb55; }
+.gv-without { margin-top: 0.8rem; }
+.gv-without > summary { cursor: pointer; font-weight: 700; }
+.gv-bare-story { padding: 0.2rem 0; list-style: none; }
+
+/* The work tree */
+.gv-tree, .gv-tree ul { list-style: none; margin: 0; padding: 0; }
+.gv-tree ul { padding-left: 1.4rem; border-left: 2px solid var(--line); margin-left: 0.7rem; }
+.gv-tree li[role=treeitem] { margin: 0.15rem 0; }
+.gv-tree li[role=treeitem]:focus { outline: none; }
+.gv-tree li[role=treeitem]:focus > .gv-row { outline: 3px solid var(--vermilion); outline-offset: 1px; }
+.gv-tree li.selected > .gv-row { box-shadow: 0 0 0 3px var(--vermilion); }
+.gv-tree li.outside > .gv-row { opacity: 0.6; }
+.gv-row { display: flex; flex-wrap: wrap; gap: 0.2rem 0.4rem; align-items: center; padding: 0.2rem 0.4rem; background: var(--white); border: 1px solid var(--line); cursor: pointer; }
+.gv-node.type-epic > .gv-row { background: var(--paper-2); border: 2px solid var(--ink); font-weight: 700; }
+.gv-twisty { width: 1.6rem; padding: 0; border: none; background: none; font-size: 1rem; text-align: center; }
+.gv-twisty.none { display: inline-block; }
+.gv-label { flex: 1 1 12rem; overflow-wrap: anywhere; }
+.gv-label .id { color: var(--ink-2); font-weight: 400; }
+.gv-progress { font-size: 0.82rem; }
+.gv-claim { font-size: 0.82rem; }
+.gv-claim.lapsed { color: var(--amber); font-weight: 600; }
+.gv-ties-line { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0.1rem 1rem; padding-left: 2rem; font-size: 0.85rem; color: var(--ink-2); }
+.gv-ties-line:empty { display: none; }
+.gv-row > .gv-connections { flex-basis: 100%; padding-left: 2rem; }
+.gv-tree .gv-empty { padding: 2rem 0; color: var(--ink-2); }
+
+@media (max-width: 60rem) {
+  .graph-body { grid-template-columns: minmax(0, 1fr); }
+  .graph-side { max-height: none; }
+}
+
+/* With the detail panel open the page is narrower: the notes go under the drawing. */
+#layout.with-panel .graph-body { grid-template-columns: minmax(0, 1fr); }
+#layout.with-panel .graph-side { max-height: none; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }

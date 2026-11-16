@@ -1,18 +1,32 @@
 // The Kanban board: one column for each status, one lane for each epic. A card is a story or a task.
 // Dragging a card to another column of its lane changes its status, and every card has a menu that
 // does the same from the keyboard. Both ask the server, which decides; the board shows its answer.
+// Above it is a strip of what needs attention (each number is the answer of the same filter or
+// report an agent can ask for, and a link to the cards it counts), and a filter box (`q`, the same
+// filter language as list_nodes) that keeps only the cards it asks for. A card opens in the
+// detail panel (`sel=node:<id>`).
 
 import { Refusal, call } from './api.js';
-import { actor, notify, ui } from './ctx.js';
-import { clear, day, h, moment } from './dom.js';
+import { actor, notify, parseSel, ui, viewLink } from './ctx.js';
+import { clear, day, h, moment, put } from './dom.js';
 import { openCreate } from './create.js';
+import { filterBar, loadRows } from './filterbar.js';
 import { KIND, SETTABLE, STATUS, STATUSES, columnNote, kindChip, priorityChip, statusChip } from './labels.js';
 import { epicOf, epics, store, sync, titleOf } from './store.js';
 
+// What "ready work nobody holds" means: the filter that gives exactly the tool's answer.
+const FREE = 'kind:story,task status:ready -claimed';
+
 let root = null;
 let body = null; // where the lanes are drawn
+let strip = null; // where the numbers that need attention are
+let bar = null; // the filter box
+let found = null; // the ids the filter asks for, or null when there is no filter
 let params = new URLSearchParams();
 let dragging = false;
+let looking = 0; // the filter being read
+let counting = 0; // the numbers being read
+let clock = null;
 
 const PRIORITY_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
 const byPriority = (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.id - b.id;
@@ -20,23 +34,44 @@ const byPriority = (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.prior
 export function mount(element, initial) {
   root = element;
   params = initial;
-  clear(root).append(toolbar(), (body = h('div', { class: 'board', id: 'board' })));
+  found = null;
+  bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
+  clear(root).append(
+    (strip = h('section', { id: 'attention', class: 'attention', 'aria-label': 'What needs attention' }, h('p', { class: 'quiet' }, 'Reading the numbers…'))),
+    toolbar(),
+    bar.help,
+    bar.problem,
+    (body = h('div', { class: 'board', id: 'board' })),
+  );
   draw();
+  look();
+  count();
+  // A claim that runs out or a day that ends changes a number with nothing written, so the
+  // numbers are read again every so often as well as when something changes.
+  clock = setInterval(count, Math.max(10, store.info.poll_seconds * 3) * 1000);
 }
 
 export function unmount() {
   closeMenu();
+  clearInterval(clock);
+  clock = null;
+  looking += 1;
+  counting += 1;
   root = null;
   body = null;
+  strip = null;
 }
 
 export function update(next) {
-  const filterChanged = (next.get('epic') || '') !== (params.get('epic') || '');
+  const before = params;
   params = next;
   if (!root) return;
   const select = root.querySelector('#epic-filter');
   if (select) select.value = params.get('epic') || '';
-  if (filterChanged) draw();
+  if ((next.get('q') || '') !== (before.get('q') || '')) {
+    bar.setValue(params.get('q') || '');
+    look();
+  } else if ((next.get('epic') || '') !== (before.get('epic') || '')) draw();
   else markSelected();
 }
 
@@ -44,7 +79,9 @@ export function refresh() {
   if (!root || dragging) return;
   const select = root.querySelector('#epic-filter');
   if (select) fillEpicChoices(select);
-  draw();
+  if (params.get('q')) look();
+  else draw();
+  count();
 }
 
 // -- the top of the page ---------------------------------------------------------------------------
@@ -67,8 +104,9 @@ function toolbar() {
     h('h1', {}, 'Board'),
     h('label', { for: 'epic-filter' }, 'Show'),
     select,
+    bar.form,
     h('button', { type: 'button', class: 'primary', id: 'new-item', onclick: () => openCreate({ kind: 'epic' }) }, 'New item'),
-    h('button', { type: 'button', id: 'show-coverage', onclick: () => ui.navigate({ panel: 'coverage', card: null }) }, 'Coverage'),
+    h('button', { type: 'button', id: 'show-coverage', onclick: () => ui.navigate({ panel: 'coverage', sel: null }) }, 'Coverage'),
     h(
       'p',
       { class: 'help' },
@@ -77,19 +115,94 @@ function toolbar() {
   );
 }
 
+// -- what needs attention ---------------------------------------------------------------------------
+
+// How many items answer a filter, as list_nodes counts them.
+const howMany = async (query) => (await call('list_nodes', { query, limit: 1 })).total;
+
+async function count() {
+  const mine = ++counting;
+  try {
+    const [free, blocked, overdue, lapsed, coverage] = await Promise.all([
+      howMany(FREE),
+      howMany('status:blocked'),
+      howMany('is:overdue'),
+      howMany('is:lapsed'),
+      call('coverage_report', { show: 'both', limit: 1 }),
+    ]);
+    if (mine !== counting || !root) return;
+    drawStrip({ free, blocked, overdue, lapsed, unplaced: coverage.unplaced_rule_count, bare: coverage.story_without_rules_count });
+  } catch (error) {
+    if (mine !== counting || !root) return;
+    if (!(error instanceof Refusal)) throw error;
+    put(strip, h('p', { class: 'problem', role: 'alert' }, error.message));
+  }
+}
+
+function tile(key, label, value, page, choices) {
+  return h(
+    'li',
+    {},
+    viewLink(page, choices, { class: `attention-item${value === 0 ? ' none' : ''}`, dataset: { key, value: String(value) } }, h('span', { class: 'number' }, String(value)), h('span', { class: 'label' }, ` ${label}`)),
+  );
+}
+
+function drawStrip(numbers) {
+  const here = { epic: null, sel: null, panel: null };
+  put(
+    strip,
+    h('h2', { class: 'attention-title' }, 'Needs attention'),
+    h(
+      'ul',
+      { class: 'plain attention-list' },
+      tile('free', 'ready work nobody holds', numbers.free, 'board', { ...here, q: FREE }),
+      tile('blocked', 'blocked', numbers.blocked, 'board', { ...here, q: 'status:blocked' }),
+      tile('overdue', 'overdue', numbers.overdue, 'board', { ...here, q: 'is:overdue' }),
+      tile('lapsed', 'claims that ran out with no handoff note', numbers.lapsed, 'board', { ...here, q: 'is:lapsed' }),
+      tile('unplaced', 'requirements without a story', numbers.unplaced, 'graph', { view: 'context', as: 'list', q: null, epic: null, panel: null }),
+      tile('bare', 'stories with no requirement', numbers.bare, 'board', { q: null, epic: null, sel: null, panel: 'coverage' }),
+    ),
+  );
+}
+
+// -- the filter -----------------------------------------------------------------------------------------
+
+// The cards the filter asks for, from the server, then the board is drawn from them.
+async function look() {
+  const mine = ++looking;
+  const text = params.get('q') || '';
+  if (!text) {
+    found = null;
+    bar.setProblem('');
+    draw();
+    return;
+  }
+  const rows = await loadRows(text, bar);
+  if (mine !== looking || !root) return;
+  if (rows !== null) found = new Set(rows.map((node) => node.id));
+  draw();
+}
+
 // -- drawing the lanes --------------------------------------------------------------------------
 
 function draw() {
   if (!body) return;
   const focused = document.activeElement?.dataset?.focusKey;
   const only = params.get('epic');
-  const lanes = epics().filter((epic) => !only || String(epic.id) === only);
+  const kept = (node) => found === null || found.has(node.id);
+  const inEpic = new Map();
+  for (const node of store.nodes.values()) {
+    if (node.kind === 'epic') continue;
+    const epic = epicOf(node);
+    if (epic) inEpic.set(epic.id, [...(inEpic.get(epic.id) || []), node]);
+  }
+  const lanes = epics().filter((epic) => (!only || String(epic.id) === only) && (found === null || kept(epic) || (inEpic.get(epic.id) || []).some(kept)));
   body.replaceChildren(
     columnHeads(),
-    ...lanes.map(lane),
+    ...lanes.map((epic) => lane(epic, (inEpic.get(epic.id) || []).filter(kept))),
     ...(lanes.length
       ? []
-      : [h('p', { class: 'empty' }, only ? 'That epic is not there.' : 'Nothing here yet. Create an epic, or ask an agent to make a plan.')]),
+      : [h('p', { class: 'empty', id: 'board-empty' }, only ? 'That epic is not there, or nothing in it matches the filter.' : found !== null ? 'Nothing matches this filter.' : 'Nothing here yet. Create an epic, or ask an agent to make a plan.')]),
   );
   markSelected();
   if (focused) body.querySelector(`[data-focus-key="${focused}"]`)?.focus();
@@ -110,14 +223,13 @@ function columnHeads() {
   );
 }
 
-function lane(epic) {
-  const items = [...store.nodes.values()].filter((node) => node.kind !== 'epic' && epicOf(node)?.id === epic.id);
+function lane(epic, items) {
   const total = epic.progress_total ?? 0;
   const head = h(
     'header',
     { class: 'lane-head' },
     kindChip('epic'),
-    h('button', { type: 'button', class: 'lane-title link', 'data-focus-key': epic.id, onclick: () => ui.navigate({ card: epic.id, panel: null }) }, `#${epic.id} ${epic.title}`),
+    h('button', { type: 'button', class: 'lane-title link', 'data-focus-key': epic.id, onclick: () => ui.navigate({ sel: `node:${epic.id}`, panel: null }) }, `#${epic.id} ${epic.title}`),
     statusChip(epic.status),
     priorityChip(epic.priority),
     h('span', { class: 'progress-line' }, `${epic.progress_done ?? 0} of ${total} ${total === 1 ? 'task' : 'tasks'} done`, h('progress', { max: Math.max(total, 1), value: epic.progress_done ?? 0, 'aria-label': `Tasks done in ${epic.title}` })),
@@ -188,12 +300,12 @@ function card(node) {
       dataset: { id: node.id, kind: node.kind, status: node.status, focusKey: node.id },
       'aria-label': `${KIND[node.kind].label} ${node.id}: ${node.title}. ${STATUS[node.status].label}.`,
       onclick: (event) => {
-        if (!event.target.closest('button')) ui.navigate({ card: node.id, panel: null });
+        if (!event.target.closest('button')) ui.navigate({ sel: `node:${node.id}`, panel: null });
       },
       onkeydown: (event) => {
         if (event.target === element && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          ui.navigate({ card: node.id, panel: null });
+          ui.navigate({ sel: `node:${node.id}`, panel: null });
         }
       },
       ondragstart: (event) => {
@@ -223,9 +335,11 @@ function card(node) {
 
 function markSelected() {
   if (!body) return;
-  const chosen = params.get('card');
-  body.querySelectorAll('.card.selected').forEach((el) => el.classList.remove('selected'));
-  if (chosen) body.querySelector(`.card[data-id="${chosen}"]`)?.classList.add('selected');
+  const chosen = parseSel(params.get('sel'));
+  body.querySelectorAll('.card.selected, .lane.selected').forEach((el) => el.classList.remove('selected'));
+  if (!chosen || chosen.kind !== 'node') return;
+  body.querySelector(`.card[data-id="${chosen.id}"]`)?.classList.add('selected');
+  body.querySelector(`.lane[data-epic="${chosen.id}"]`)?.classList.add('selected');
 }
 
 // -- changing a status ------------------------------------------------------------------------------

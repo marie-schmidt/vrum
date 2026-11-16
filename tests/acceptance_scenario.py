@@ -1,7 +1,8 @@
 """The acceptance scenario (./acceptance.sh): one story of a small team using Vrum, told through a
-real MCP client against the real containers, in which every proof of every milestone is shown to
-hold. It reads like the product being used: arrive, plan, work in parallel, decide, remember, find,
-ask a model, be careful with secrets, and move the whole graph to another place.
+real MCP client and a real headless browser against the real containers, in which every proof of
+every milestone is shown to hold. It reads like the product being used: arrive, plan, work in
+parallel, decide and remember, find, be careful with secrets, see it all on the board, and move
+the whole graph to another place.
 
 It is not the test suite (./check.sh runs hundreds of cases, each going deeper into one thing). It
 is the shorter walk a person can read in a few minutes and trust: each line it prints is one proof,
@@ -9,8 +10,9 @@ in plain words, with the number or the refusal that shows it. The first thing th
 stops it with a plain message.
 
 The stack it runs against is the check stack: the real database and server, plus the scripted
-embedding service and language model of compose.check.yaml, so no model has to be downloaded and the
-answers are the same every run. M8 (the real-data trial) is skipped until a ledger path is given."""
+embedding service of compose.check.yaml, so no model has to be downloaded and the answers are the
+same every run. There is no language model anywhere. M8 (the real-data trial) is skipped until a
+ledger path is given."""
 
 import asyncio
 import copy
@@ -31,9 +33,9 @@ from mcp.shared.exceptions import MCPError
 from tests.helpers import (
     REPO_ROOT,
     compose,
+    confirm,
     connect,
     day,
-    make_belief,
     make_decision,
     make_fact,
     ok,
@@ -43,9 +45,9 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import make_project, register, the_project
 
 URL = os.environ.get("VRUM_TEST_URL", "")
-NO_MODEL_URL = os.environ.get("VRUM_NO_MODEL_TEST_URL", "")
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
 PROOFS: list[tuple[str, str]] = []
@@ -176,8 +178,95 @@ async def set_status(client: Client, node: dict[str, Any], status: str) -> dict[
 
 
 # ---------------------------------------------------------------------------------------------
-# 1. Arriving: the server is up, and only an agent key for a project gets in (M0, M6, M15)
+# 1. Arriving: the server is up, and only an agent key for a project gets in (M0, M6, M15, M16)
 # ---------------------------------------------------------------------------------------------
+
+# What M16 took out: server-side generation, and the belief and principle workflows around it.
+GENERATION_TOOLS = re.compile(
+    r"extract_facts|consolidate_memory|find_contradictions|reflect|belief|principle|memor",
+    re.IGNORECASE,
+)
+GENERATION_WORDS = re.compile(
+    r"language[ _]model|\bLLM_|extract_facts|consolidate_memory|find_contradictions|\breflect\b"
+    r"|belief|principle|\bAsk (box|page)\b|ask\.js",
+    re.IGNORECASE,
+)
+
+
+def board_files() -> dict[str, str]:
+    """Every file the board's page loads, followed from the page itself: the page, its style
+    sheets and its scripts, and the scripts those import."""
+    base = URL.removesuffix("/mcp")
+    found: dict[str, str] = {}
+    todo = ["/board"]
+    while todo:
+        path = todo.pop()
+        if path in found:
+            continue
+        status, body = http_request(f"{base}{path}", method="GET", body=None)
+        if status != 200:
+            raise Failed(f"M16: the board's own file {path} did not load ({status})")
+        text = body.decode("utf-8")
+        found[path] = text
+        todo += re.findall(r"""(?:src|href)="(/board/[\w./-]+\.(?:js|css))\"""", text)
+        todo += [f"/board/{name}" for name in re.findall(r"""from '\./([\w.-]+\.js)'""", text)]
+    return found
+
+
+async def no_language_model(
+    tools: list[str], instructions: str, server: dict[str, Any], services: set[str]
+) -> None:
+    """M16's first proof: nothing in the live product generates text or asks or sets up a model."""
+    environment = compose("exec", "-T", "app", "env").stdout
+    settings = [line for line in environment.splitlines() if line.startswith("LLM_")]
+    proof(
+        "M16",
+        "the stack started with no language-model configuration and no generation service: it "
+        "is the database, the server and the embedding service, and the server's environment "
+        "sets no model",
+        services == {"app", "db", "scripted-embeddings"} and not settings and environment,
+        ", ".join(sorted(services)),
+    )
+    proof(
+        "M16",
+        "the live tool list has no generation tool and no belief, principle or memory tool, and "
+        "neither the instructions agents are given nor server_status say anything of a model",
+        len(tools) == 53
+        and not [name for name in tools if GENERATION_TOOLS.search(name)]
+        and not GENERATION_WORDS.search(instructions)
+        and "language_model" not in json.dumps(server),
+        f"{len(tools)} tools",
+    )
+    info = the_project().owner.call("GET", "/board/api/info")
+    files = board_files()
+    scripts = {path: text for path, text in files.items() if path.endswith((".js", "board"))}
+    leaks = [path for path, text in scripts.items() if GENERATION_WORDS.search(text)]
+    proof(
+        "M16",
+        "the board has no Ask and names no language model: what it is told about the server and "
+        "every page and script it loads are free of them",
+        info.status == 200
+        and "language" not in json.dumps(info.body)
+        and not leaks
+        and len(scripts) > 20,
+        f"{len(scripts)} files read" + (f", but {leaks}" if leaks else ""),
+    )
+    docs = [REPO_ROOT / name for name in ("README.md", ".env.example", "compose.yaml")]
+    docs.append(REPO_ROOT / "compose.check.yaml")
+    unwanted = [
+        f"{path.name}: {line.strip()[:60]}"
+        for path in docs
+        for line in path.read_text().splitlines()
+        if (GENERATION_WORDS.search(line) and "language model" not in line.lower())
+        or ("language model" in line.lower() and "never" not in line.lower())
+    ]
+    proof(
+        "M16",
+        "the configuration examples and the documented setup set up no language model and "
+        "describe no Ask, belief or principle workflow",
+        not unwanted and all(path.exists() for path in docs),
+        "README, .env.example and both compose files read",
+    )
 
 
 async def arriving() -> None:
@@ -195,7 +284,7 @@ async def arriving() -> None:
     proof("M0", "GET /health answers ok with no key", (status, body) == (200, b'{"status":"ok"}'))
     async with connect(URL, the_token()) as client:
         tools = [tool.name for tool in (await client.list_tools()).tools]
-        proof("M0", "a real MCP client lists the tools", len(tools) >= 55, f"{len(tools)} tools")
+        proof("M0", "a real MCP client lists the tools", len(tools) == 53, f"{len(tools)} tools")
         server = await ok(client, "server_status")
         proof(
             "M0",
@@ -209,6 +298,9 @@ async def arriving() -> None:
             "the instructions the client shows name only tools that exist",
             named and named <= set(tools),
             f"{len(named)} tools named",
+        )
+        await no_language_model(
+            tools, client.instructions or "", server, {state["Service"] for state in states}
         )
     wrong = "vrk_a-wrong-key-" + unique_word() + "-0123456789"
     for label, key in (("no key", None), ("a wrong key", wrong)):
@@ -644,26 +736,33 @@ async def working_together() -> None:
             client, "supersede_decision", actor="m", decision_id=old["id"], title="The new way",
             text="Do it the new way", reason="It changed", decided_by="Marie",
         )  # fmt: skip
-        principle = await make_decision(client, "Always be careful", kind="principle")
+        wide = await make_decision(client, "Always be careful", project_wide=True)
+        known = await make_fact(client, "Invoices are sent by email", node_ids=[story["id"]])
         take = await ok(
             client, "next_work", actor="ann", within_node_id=epic["id"], context_chars=1_000_000
         )
         context = take["context"]
-        principles = await ok(
-            client, "list_decisions", kind="principle", status="active", limit=200
+        project_wide = await ok(
+            client, "list_decisions", project_wide=True, status="active", limit=200
         )
         proof(
             "M5B",
             "the context holds exactly the parent chain, the story's rules, the linked active "
-            "decisions (a superseded one only in its own section) and all active principles",
+            "decisions and facts (a replaced decision only in its own section) and every active "
+            "project-wide decision",
             take["work"]["id"] == first["id"]
             and [(p["kind"], p["id"]) for p in context["parents"]]
             == [("epic", epic["id"]), ("story", story["id"])]
             and ids(context["rules"]) == [rule["id"]]
             and set(ids(context["active_decisions"])) == {on_epic["id"], new_way["id"]}
-            and ids(context["superseded_decisions"]) == [old["id"]]
-            and set(ids(context["active_principles"])) == set(ids(principles["items"]))
-            and principle["id"] in ids(context["active_principles"]),
+            and ids(context["past_decisions"]) == [old["id"]]
+            and ids(context["facts"]) == [known["id"]]
+            and set(ids(context["project_wide_decisions"])) == set(ids(project_wide["items"]))
+            and wide["id"] in ids(context["project_wide_decisions"])
+            and all(
+                d["confirmation"] == "unconfirmed"
+                for d in (*context["active_decisions"], *context["facts"])
+            ),
         )
         events_before = await history(client, first)
         for blank in ("", "   "):
@@ -1000,25 +1099,25 @@ async def requirements_and_decisions() -> None:
         mine = await make_decision(client, "About this story", node_ids=[story["id"]])
         elsewhere = await make_decision(client, "About the other story", node_ids=[other["id"]])
         unlinked = await make_decision(client, "About nothing in particular")
-        linked_principle = await make_decision(
-            client, "A linked principle", kind="principle", node_ids=[story["id"]]
+        linked_wide = await make_decision(
+            client, "A linked project-wide one", project_wide=True, node_ids=[story["id"]]
         )
-        free_principle = await make_decision(client, "A free principle", kind="principle")
+        free_wide = await make_decision(client, "A free project-wide one", project_wide=True)
         recalled = await ok(client, "recall", node_id=story["id"])
-        every_principle = await ok(
-            client, "list_decisions", kind="principle", status="active", limit=200
+        every_wide = await ok(
+            client, "list_decisions", project_wide=True, status="active", limit=200
         )
         proof(
             "M4",
-            "recalling a story returns its linked active decisions and all active principles",
+            "recalling a story returns its linked active decisions and every active project-wide "
+            "decision, linked or not",
             ids(entries(recalled["active_decisions"], "decision")) == [mine["id"]]
             and elsewhere["id"] not in ids(entries(recalled["active_decisions"], "decision"))
             and unlinked["id"] not in ids(entries(recalled["active_decisions"], "decision"))
-            and ids(entries(recalled["active_principles"], "decision"))
-            == ids(every_principle["items"])
-            and {linked_principle["id"], free_principle["id"]}
-            <= set(ids(every_principle["items"])),
-            f"{len(every_principle['items'])} principles in force",
+            and ids(entries(recalled["project_wide_decisions"], "decision"))
+            == ids(every_wide["items"])
+            and {linked_wide["id"], free_wide["id"]} <= set(ids(every_wide["items"])),
+            f"{len(every_wide['items'])} project-wide decisions in force",
         )  # fmt: skip
         new = await ok(
             client, "supersede_decision", actor="agent-2", decision_id=mine["id"],
@@ -1027,7 +1126,7 @@ async def requirements_and_decisions() -> None:
         )  # fmt: skip
         after = await ok(client, "recall", node_id=story["id"])
         old = await ok(client, "get_decision", decision_id=mine["id"])
-        superseded = entries(after["superseded_decisions"], "decision")
+        superseded = entries(after["past_decisions"], "decision")
         proof(
             "M4",
             "a superseded decision is shown as such and not as active, with what replaced it",
@@ -1039,8 +1138,13 @@ async def requirements_and_decisions() -> None:
         quiet = await ok(client, "recall", node_id=await new_story(client))
         proof(
             "M4",
-            "nothing is invented: a story with no decisions gets none",
-            quiet["active_decisions"]["count"] == 0 and quiet["superseded_decisions"]["count"] == 0,
+            "nothing is invented: a story with no decisions of its own gets none, and nothing but "
+            "what applies throughout the project",
+            quiet["active_decisions"]["count"] == 0
+            and quiet["past_decisions"]["count"] == 0
+            and quiet["facts"]["count"] == 0
+            and ids(entries(quiet["project_wide_decisions"], "decision"))
+            == ids(every_wide["items"]),
         )
 
 
@@ -1065,7 +1169,8 @@ async def new_story(client: Client) -> int:
 
 
 # ---------------------------------------------------------------------------------------------
-# 5. Remembering: facts, beliefs and what happens when one stops being true (M4A)
+# 5. Remembering: facts and decisions, who reviewed them, and what happens when one is wrong
+#    (M4A, and the two records of M16)
 # ---------------------------------------------------------------------------------------------
 
 
@@ -1074,9 +1179,16 @@ def database_refuses(sql: str, says: str) -> bool:
     return attempt.returncode != 0 and says in attempt.stderr
 
 
+def mine() -> str:
+    """What a statement run as the database's owner must say to touch the shared test project and
+    nothing else: each project numbers its own records, so ids collide between projects."""
+    return f"project_id = {the_project().id}"
+
+
 async def remembering() -> None:
     chapter(
-        "Remembering: facts with sources, beliefs with evidence, and what happens when one is wrong"
+        "Remembering: facts with sources, decisions with reasons, who reviewed them, "
+        "and what happens when one is wrong"
     )
     async with connect(URL, the_token()) as client:
         epic, story, other = await stories(client, 2)
@@ -1084,127 +1196,60 @@ async def remembering() -> None:
             client, "create_node", actor="m", kind="task", title="A task", parent_id=story["id"]
         )
         rule = await ok(client, "create_rule", actor="m", title="A rule", story_id=story["id"])
-        decision = await make_decision(client, "Run tests on every push", node_ids=[story["id"]])
 
         # -- facts
         fact = await make_fact(
-            client, "The tests take an hour.", node_ids=[story["id"]], source="The Monday call",
-            happened_on="2026-11-01",
-        )  # fmt: skip
-        second = await make_fact(client, "Most of that is one suite.")
+            client, "The tests take an hour.", node_ids=[story["id"]], source="The Monday call"
+        )
+        by_a_person = await make_fact(client, "Said by Marie herself", actor="Marie")
         recalled = await ok(client, "recall", node_id=story["id"])
-        shown = entries(recalled["facts"], "memory")
+        shown = entries(recalled["facts"], "fact")
         proof(
             "M4A",
             "a fact retained against a story is in its recall under facts with its source, "
-            "origin, recorder and both dates, and never under decisions",
+            "recorder and time, shown as not confirmed by a person, and never under decisions",
             ids(shown) == [fact["id"]]
-            and (shown[0]["source"], shown[0]["origin"], shown[0]["recorded_by"])
-            == ("The Monday call", "stated", "agent-1")
-            and shown[0]["happened_on"] == "2026-11-01"
+            and (shown[0]["source"], shown[0]["recorded_by"], shown[0]["confirmation"])
+            == ("The Monday call", "agent-1", "unconfirmed")
             and shown[0]["recorded_at"]
+            and shown[0]["label"].startswith("Fact, not confirmed by a person")
             and fact["id"] not in ids(entries(recalled["active_decisions"], "decision")),
-            f"happened {shown[0]['happened_on']}, recorded {shown[0]['recorded_at'][:10]}",
+            f'"{shown[0]["label"]}", recorded {shown[0]["recorded_at"][:10]}',
+        )
+        proof(
+            "M16",
+            "recording a fact never confirms it, even when the agent that records it is called by "
+            "a person's name",
+            (by_a_person["recorded_by"], by_a_person["confirmation"], by_a_person["confirmed_by"])
+            == ("Marie", "unconfirmed", None),
         )
         await refusal(
             client, "M4A", "a fact with a blank source is refused", "retain_fact",
             "A fact needs its source", actor="a", text="Something", source="  ",
         )  # fmt: skip
 
-        # -- beliefs
-        belief = await make_belief(
-            client, [fact, second], "Splitting that suite would speed up every push.",
-            node_ids=[story["id"]],
+        # -- who reviewed it, and when
+        await refusal(
+            client, "M16", "confirming needs the named person who reviewed it", "set_confirmation",
+            "A confirmation needs the person who reviewed the record", actor="Marie", kind="fact",
+            record_id=fact["id"], confirmation="confirmed", person=" ",
         )  # fmt: skip
+        reviewed = await confirm(client, "fact", fact, "Marie", quote="I read the timing")
         recalled = await ok(client, "recall", node_id=story["id"])
+        (now,) = entries(recalled["facts"], "fact")
+        history_of = (await ok(client, "fact_history", fact_id=fact["id"]))["items"]
         proof(
             "M4A",
-            "a belief with two facts as evidence reports two pieces of evidence and appears under "
-            "beliefs, labelled a suggestion",
-            belief["evidence_count"] == 2
-            and ids(entries(recalled["beliefs"], "memory")) == [belief["id"]]
-            and "Suggestion" in belief["label"]
-            and "not a decision" in belief["label"],
-            belief["label"],
-        )
-        no_evidence = await refused(client, "record_belief", actor="a", text="Because")
-        missing = await refused(
-            client, "record_belief", actor="a", text="Because", evidence_fact_ids=[987654321]
-        )
-        on_belief = await refused(
-            client, "record_belief", actor="a", text="Because", evidence_fact_ids=[belief["id"]]
-        )
-        proof(
-            "M4A",
-            "a belief with no evidence, with evidence that does not exist, or with another belief "
-            "as evidence is refused in plain words",
-            "A belief needs evidence" in no_evidence
-            and "There is no fact with id 987654321" in missing
-            and "a belief cannot be evidence for another belief" in on_belief,
-            f'"{clip(on_belief, 80)}"',
-        )
-
-        # -- going stale
-        wrong = await make_fact(client, "The suite is the slow part.", node_ids=[story["id"]])
-        outdated = await make_fact(client, "The suite has 400 tests.", node_ids=[story["id"]])
-        on_wrong = await make_belief(client, [wrong], "Split the suite", node_ids=[story["id"]])
-        on_outdated = await make_belief(
-            client, [outdated], "Trim the suite", node_ids=[story["id"]]
-        )
-        change = await ok(
-            client, "retract_memory", actor="a", memory_ids=[wrong["id"]],
-            reason="The benchmark ran on the wrong branch",
-        )  # fmt: skip
-        await ok(
-            client, "supersede_memory", actor="a", replaces=[outdated["id"]],
-            reason="Counted again", text="The suite has 450 tests.", source="A recount",
-        )  # fmt: skip
-        stale_a = await ok(client, "get_memory", memory_id=on_wrong["id"])
-        stale_b = await ok(client, "get_memory", memory_id=on_outdated["id"])
-        recalled = await ok(client, "recall", node_id=story["id"])
-        proof(
-            "M4A",
-            "retracting one of the facts makes the belief stale, shown apart and never as active, "
-            "with the reason; so does superseding one",
-            change["stale_belief_ids"] == [on_wrong["id"]]
-            and stale_a["stale"] and stale_b["stale"]
-            and stale_a["stale_because"]
-            == [f"fact {wrong['id']} was retracted: The benchmark ran on the wrong branch"]
-            and {on_wrong["id"], on_outdated["id"]}
-            <= set(ids(entries(recalled["stale_beliefs"], "memory")))
-            and not {on_wrong["id"], on_outdated["id"]}
-            & set(ids(entries(recalled["beliefs"], "memory"))),
-            stale_b["stale_because"][0][:70],
-        )  # fmt: skip
-        gone = await get_memory(client, outdated)
-        proof(
-            "M4A",
-            "a superseded fact shows as superseded, with its replacement",
-            gone["status"] == "superseded"
-            and gone["superseded_by_id"]
-            and gone["text"] == outdated["text"],
-        )
-        confirmed = await ok(
-            client, "confirm_belief", actor="agent-1", memory_id=belief["id"], confirmed_by="Marie"
-        )
-        proof(
-            "M4A",
-            "confirming a belief records who and when",
-            confirmed["confirmed_by"] == "Marie" and confirmed["confirmed_at"],
-            f"by Marie at {confirmed['confirmed_at'][:16]}",
-        )
-        promoted = await ok(
-            client, "promote_belief", actor="agent-1", memory_id=belief["id"],
-            title="Split the test suite", reason="It is the slow part.", decided_by="Marie",
-        )  # fmt: skip
-        again = await get_memory(client, belief)
-        proof(
-            "M4A",
-            "promoting it records a decision by that person that links back to the belief",
-            promoted["decided_by"] == "Marie"
-            and promoted["promoted_from_id"] == belief["id"]
-            and again["promoted_decision_ids"] == [promoted["id"]]
-            and "Suggestion" in again["label"],
+            "confirming a fact with set_confirmation records who and when, and recall then shows "
+            "it; the agent that made the call is kept apart from the person",
+            (reviewed["confirmation"], reviewed["confirmed_by"]) == ("confirmed", "Marie")
+            and reviewed["confirmed_at"]
+            and (now["confirmation"], now["confirmed_by"], now["confirmed_at"])
+            == ("confirmed", "Marie", reviewed["confirmed_at"])
+            and now["label"].startswith("Fact, confirmed by Marie on ")
+            and (history_of[-1]["action"], history_of[-1]["actor"]) == ("fact_confirmed", "agent-1")
+            and history_of[-1]["after"]["confirmed_by"] == "Marie",
+            f"by Marie at {reviewed['confirmed_at'][:16]}",
         )
 
         # -- the exact links, and nothing else
@@ -1213,60 +1258,90 @@ async def remembering() -> None:
         on_rule = await make_fact(client, "Linked to the rule", rule_ids=[rule["id"]])
         loose = await make_fact(client, "Linked to nothing")
         recalled = await ok(client, "recall", node_id=story["id"])
-        seen = set(ids(entries(recalled["facts"], "memory")))
+        seen = set(ids(entries(recalled["facts"], "fact")))
         proof(
             "M4A",
             "the recall holds exactly what the exact links give and nothing else",
             fact["id"] in seen
             and not {elsewhere["id"], on_task["id"], on_rule["id"], loose["id"]} & seen,
-            f"{len(seen)} facts linked to this story",
+            f"{len(seen)} fact linked to this story",
+        )
+
+        # -- replaced and withdrawn
+        outdated = await make_fact(client, "The suite has 400 tests.", node_ids=[story["id"]])
+        wrong = await make_fact(client, "The suite is the slow part.", node_ids=[story["id"]])
+        change = await ok(
+            client, "supersede_fact", actor="a", replaces=[outdated["id"]],
+            reason="Counted again", text="The suite has 450 tests.", source="A recount",
+        )  # fmt: skip
+        await ok(
+            client, "withdraw_fact", actor="a", fact_ids=[wrong["id"]],
+            reason="The benchmark ran on the wrong branch",
+        )  # fmt: skip
+        old = await ok(client, "get_fact", fact_id=outdated["id"])
+        gone = await ok(client, "get_fact", fact_id=wrong["id"])
+        recalled = await ok(client, "recall", node_id=story["id"])
+        past = {f["id"]: f for f in entries(recalled["past_facts"], "fact")}
+        in_force = set(ids(entries(recalled["facts"], "fact")))
+        proof(
+            "M4A",
+            "a superseded fact shows as superseded with its replacement and a withdrawn one as "
+            "withdrawn with its reason, among the past facts and never among those in force",
+            (old["status"], old["superseded_by_id"], old["text"])
+            == ("superseded", change["replacement"]["id"], outdated["text"])
+            and (gone["status"], gone["status_reason"])
+            == ("withdrawn", "The benchmark ran on the wrong branch")
+            and set(past) == {outdated["id"], wrong["id"]}
+            and not set(past) & in_force
+            and change["replacement"]["id"] in in_force
+            and "Superseded fact" in past[outdated["id"]]["label"]
+            and "Withdrawn fact" in past[wrong["id"]]["label"],
+            f"{old['label']}; {gone['label']}",
         )
 
         # -- replacing several at once
-        base = await make_fact(client, "The basis")
-        one, two, three = [await make_belief(client, [base], f"Belief {n}") for n in range(3)]
-        new_fact = await make_fact(client, "What changed")
+        one, two, three = [await make_fact(client, f"Fact {n}") for n in range(3)]
         both = await ok(
-            client, "supersede_memory", actor="agent-1", replaces=[one["id"], two["id"]],
+            client, "supersede_fact", actor="agent-1", replaces=[one["id"], two["id"]],
             reason="Marie says it is the other way round", text="The opposite of the first two",
-            evidence_fact_ids=[new_fact["id"]],
+            source="Marie, in the planning call",
         )  # fmt: skip
         new = both["replacement"]
-        states = [(await get_memory(client, b))["status"] for b in (one, two, three)]
+        states = [
+            (await ok(client, "get_fact", fact_id=f["id"]))["status"] for f in (one, two, three)
+        ]
         proof(
             "M4A",
-            "a new belief that contradicts two of three replaces both in one supersede_memory "
-            "call, each old one shows as superseded by it, and the third is untouched",
+            "a new fact that contradicts two of three replaces both in one supersede_fact call, "
+            "each old one shows as superseded by it, and the third is untouched",
             both["superseded_ids"] == [one["id"], two["id"]]
             and states == ["superseded", "superseded", "active"]
-            and (await get_memory(client, one))["superseded_by_id"] == new["id"],
+            and (await ok(client, "get_fact", fact_id=one["id"]))["superseded_by_id"] == new["id"],
         )
-        four, five = (
-            await make_belief(client, [base], "Four"),
-            await make_belief(client, [base], "Five"),
-        )
-        await ok(
-            client, "retract_memory", actor="a", memory_ids=[five["id"]], reason="It was wrong"
-        )
+        four, five = await make_fact(client, "Four"), await make_fact(client, "Five")
+        await ok(client, "withdraw_fact", actor="a", fact_ids=[five["id"]], reason="It was wrong")
+        before = rows("facts", "events")
         message = await refused(
-            client, "supersede_memory", actor="a", replaces=[four["id"], five["id"]], reason="r",
-            text="Replacement", evidence_fact_ids=[base["id"]],
+            client, "supersede_fact", actor="a", replaces=[four["id"], five["id"]], reason="r",
+            text="Replacement", source="s",
         )  # fmt: skip
         proof(
             "M4A",
-            "a listed belief that is already retracted refuses the whole call and changes nothing",
-            f"Belief {five['id']} was retracted (It was wrong), so it cannot be replaced" in message
-            and (await get_memory(client, four))["status"] == "active",
+            "a listed fact that is already withdrawn refuses the whole call and changes nothing",
+            f"Fact {five['id']} was withdrawn (It was wrong), so it cannot be replaced" in message
+            and "Nothing was changed" in message
+            and (await ok(client, "get_fact", fact_id=four["id"]))["status"] == "active"
+            and rows("facts", "events") == before,
             f'"{clip(message, 80)}"',
         )
-        thirty = [await make_belief(client, [base], f"Thirty {n}") for n in range(30)]
+        thirty = [await make_fact(client, f"Thirty {n}") for n in range(30)]
         many = await ok(
-            client, "supersede_memory", actor="a", replaces=ids(thirty), reason="All of them",
-            text="One belief instead", evidence_fact_ids=[base["id"]],
+            client, "supersede_fact", actor="a", replaces=ids(thirty), reason="All of them",
+            text="One fact instead", source="s",
         )  # fmt: skip
         proof(
             "M4A",
-            "a call that replaces 30 beliefs at once works",
+            "a call that replaces 30 facts at once works",
             many["superseded_ids"] == ids(thirty),
         )
 
@@ -1286,7 +1361,7 @@ async def remembering() -> None:
         first_total = None
         while True:
             page = await ok(
-                client, "list_memories", within_node_id=e2["id"], limit=25, after_id=cursor
+                client, "list_facts", within_node_id=e2["id"], limit=25, after_id=cursor
             )
             first_total = page["total"] if first_total is None else first_total
             walked += ids(page["items"])
@@ -1294,101 +1369,225 @@ async def remembering() -> None:
             cursor = page["next_after_id"]
             if cursor is None:
                 break
-        everything = await ok(client, "list_memories", within_node_id=e2["id"], limit=200)
+        everything = await ok(client, "list_facts", within_node_id=e2["id"], limit=200)
         proof(
             "M4A",
-            "list_memories over 60 items, in pages, returns every one exactly once and a count "
-            "that matches; within an epic it returns what concerns its stories, tasks and rules "
-            "and nothing else",
+            "list_facts over 60 facts, in pages, returns every one exactly once and a count that "
+            "matches; within an epic it returns what concerns its stories, tasks and rules and "
+            "nothing else",
             len(walked) == len(set(walked)) == first_total == 60 == len(everything["items"])
             and pages == 3,
             f"{pages} pages of 25",
         )
 
-        # -- retracting with what rests on it, and a person's word
-        w, k = await make_fact(client, "Wrong again"), await make_fact(client, "Not involved")
-        resting = await make_belief(client, [w, k], "Rests on both")
-        lone = await make_belief(client, [k], "Rests only on the other fact")
-        listed = await ok(client, "list_memories", rests_on_memory_id=w["id"], limit=50)
-        cascade = await ok(
-            client, "retract_memory", actor="a", memory_ids=[w["id"]], reason="Never happened",
-            with_dependent_beliefs=True,
-        )  # fmt: skip
-        proof(
-            "M4A",
-            "list_memories with rests_on lists the beliefs resting on a fact; retracting it with "
-            "with_dependent_beliefs retracts them too, with the same reason, and no others",
-            ids(listed["items"]) == [resting["id"]]
-            and cascade["dependent_beliefs_retracted_ids"] == [resting["id"]]
-            and (await get_memory(client, resting))["status_reason"] == "Never happened"
-            and (await get_memory(client, lone))["status"] == "active",
-        )
-        fact_b = await make_fact(client, "The basis of a confirmed belief")
-        sure = await make_belief(client, [fact_b], "A confirmed conclusion")
-        await ok(client, "confirm_belief", actor="a", memory_id=sure["id"], confirmed_by="Marie")
+        # -- a person's word, for what a person confirmed
+        sure = await make_fact(client, "A statement Marie confirmed")
+        await confirm(client, "fact", sure, "Marie")
         message = await refused(
-            client, "retract_memory", actor="agent-2", memory_ids=[sure["id"]], reason="r"
+            client, "withdraw_fact", actor="agent-2", fact_ids=[sure["id"]], reason="r"
+        )
+        under_her_name = await refused(
+            client, "withdraw_fact", actor="Marie", fact_ids=[sure["id"]], reason="r"
         )
         await ok(
-            client, "retract_memory", actor="agent-2", memory_ids=[sure["id"]],
+            client, "withdraw_fact", actor="agent-2", fact_ids=[sure["id"]],
             reason="She changed her mind",
             said_by="Marie", quote="In the planning call: 'no longer how we think about it'",
         )  # fmt: skip
-        last = (await ok(client, "memory_history", memory_id=sure["id"]))["items"][-1]
-        suggestion = await make_belief(client, [fact_b], "Just an idea")
+        last = (await ok(client, "fact_history", fact_id=sure["id"]))["items"][-1]
+        ended = await ok(client, "get_fact", fact_id=sure["id"])
+        idea = await make_fact(client, "Just an idea")
         alone = await ok(
-            client, "retract_memory", actor="agent-3", memory_ids=[suggestion["id"]], reason="r"
+            client, "withdraw_fact", actor="agent-3", fact_ids=[idea["id"]], reason="r"
         )
         proof(
             "M4A",
-            "replacing or retracting a confirmed belief needs said_by and quote and then works, "
-            "with both the person and the agent in the history; an agent alone can retract a "
-            "belief nobody confirmed",
-            f"belief {sure['id']} (confirmed by Marie) was confirmed by a person" in message
+            "replacing or withdrawing a confirmed fact needs said_by and quote, and then works "
+            "with both the person and the agent in the history; an agent alone can withdraw a "
+            "fact nobody confirmed",
+            f"fact {sure['id']} (confirmed by Marie)" in message
+            and "needs that person's word" in message
             and "said_by" in message
+            and f"fact {sure['id']} (confirmed by Marie)" in under_her_name
             and (last["actor"], last["after"]["said_by"]) == ("agent-2", "Marie")
-            and alone["retracted_ids"] == [suggestion["id"]],
+            and alone["withdrawn_ids"] == [idea["id"]],
             f'"{clip(message, 80)}"',
         )
-        replaced_promoted = await ok(
-            client, "supersede_memory", actor="a", replaces=[belief["id"]],
-            reason="New evidence", text="We should split it after all.",
-            evidence_fact_ids=[fact["id"]], said_by="Marie", quote="Yes, still confirmed by me",
-        )  # fmt: skip
-        same = await ok(client, "get_decision", decision_id=promoted["id"])
         proof(
-            "M4A",
-            "replacing the promoted belief reports the decision, which stays as it was",
-            replaced_promoted["promoted_decision_ids"] == [promoted["id"]]
-            and same["status"] == "active"
-            and same["text"] == promoted["text"],
+            "M16",
+            "a record keeps the confirmation it had when it ends: a confirmed fact that is "
+            "withdrawn is shown as withdrawn and still as confirmed by Marie, and no name alone "
+            "got past the refusal",
+            (ended["status"], ended["confirmation"], ended["confirmed_by"])
+            == ("withdrawn", "confirmed", "Marie")
+            and ended["label"].startswith("Withdrawn fact, confirmed by Marie on ")
+            and f"fact {sure['id']} (confirmed by Marie)" in under_her_name,
+            ended["label"],
         )
 
         # -- the database on its own
         target = (await make_fact(client, "Kept as a record"))["id"]
-        live_belief = await make_belief(client, [await make_fact(client, "A basis")], "A live one")
+        decided = (await make_decision(client, "Kept as a record too"))["id"]
         proof(
             "M4A",
-            "the database refuses, on its own, edits and deletes of facts and beliefs, a belief "
-            "without evidence, and evidence that is a belief",
+            "the database refuses, on its own, edits and deletes of facts and of decisions",
             database_refuses(
-                f"UPDATE memories SET text = 'x' WHERE id = {target}", "cannot be edited"
-            )
-            and database_refuses(f"DELETE FROM memories WHERE id = {target}", "cannot be deleted")
-            and database_refuses(
-                "INSERT INTO memories (type, text, recorded_by) VALUES ('belief', 'x', 'x')",
-                "A belief needs evidence",
+                f"UPDATE facts SET text = 'x' WHERE {mine()} AND id = {target}",
+                "cannot be edited",
             )
             and database_refuses(
-                "WITH b AS (INSERT INTO memories (type, text, recorded_by) "
-                "VALUES ('belief', 'x', 'x') RETURNING id) "
-                "INSERT INTO belief_evidence (belief_id, fact_id) "
-                f"SELECT id, {live_belief['id']} FROM b",
-                "evidence_is_never_a_belief",
+                f"DELETE FROM facts WHERE {mine()} AND id = {target}", "cannot be deleted"
+            )
+            and database_refuses(
+                f"UPDATE decisions SET text = 'x' WHERE {mine()} AND id = {decided}",
+                "cannot be edited",
+            )
+            and database_refuses(
+                f"DELETE FROM decisions WHERE {mine()} AND id = {decided}", "cannot be deleted"
             ),
         )
-        assert epic and decision
 
+        # -- M16: a decision, its reason and who decided it, found the same everywhere
+        choice = await make_decision(
+            client, "Use a table, not a queue", node_ids=[story["id"]], rule_ids=[rule["id"]],
+            reason="The queue was more than we need.", decided_by="Ann",
+        )  # fmt: skip
+        every_decision: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            page = await ok(client, "list_decisions", limit=200, after_id=cursor)
+            every_decision += page["items"]
+            cursor = page["next_after_id"]
+            if cursor is None:
+                break
+        in_list = [d for d in every_decision if story["id"] in d["node_ids"]]
+        recalled = await ok(client, "recall", node_id=story["id"])
+        in_recall = entries(recalled["active_decisions"], "decision")
+        on_the_rule = entries(
+            (await ok(client, "recall", rule_id=rule["id"]))["active_decisions"], "decision"
+        )
+        facts_in_recall = {f["id"]: f for f in entries(recalled["facts"], "fact")}
+        checks = {
+            "its reason and decider": (choice["reason"], choice["decided_by"])
+            == ("The queue was more than we need.", "Ann")
+            and bool(choice["recorded_at"]),
+            "what it concerns": (choice["node_ids"], choice["rule_ids"])
+            == ([story["id"]], [rule["id"]]),
+            "get": await ok(client, "get_decision", decision_id=choice["id"]) == choice,
+            "list": in_list == [choice],
+            "recall of the story": in_recall == [choice],
+            "recall of the requirement": on_the_rule == [choice],
+            "the fact": facts_in_recall.get(fact["id"])
+            == await ok(client, "get_fact", fact_id=fact["id"]),
+        }
+        wrong_ones = [name for name, held in checks.items() if not held]
+        proof(
+            "M16",
+            "a fact with its source and a decision with its reason and named decider, linked to "
+            "work, are found with the same ids and fields by get, by list and by exact recall",
+            not wrong_ones,
+            f"differs: {', '.join(wrong_ones)}"
+            if wrong_ones
+            else f"decision {choice['id']} decided by Ann, fact {fact['id']} from {fact['source']}",
+        )
+        decided_ok = await confirm(client, "decision", choice, "Marie", quote="Yes, that was it")
+        events = (await ok(client, "decision_history", decision_id=choice["id"]))["items"]
+        proof(
+            "M16",
+            "a decision is confirmed through the same operation, with who confirmed it and when, "
+            "attributed to the agent that made the call and logged",
+            (decided_ok["confirmation"], decided_ok["confirmed_by"]) == ("confirmed", "Marie")
+            and decided_ok["confirmed_at"]
+            and (events[-1]["action"], events[-1]["actor"]) == ("decision_confirmed", "agent-1")
+            and events[-1]["at"],
+            f"confirmed by Marie at {decided_ok['confirmed_at'][:16]}",
+        )
+        no_word = await refused(
+            client, "supersede_decision", actor="Marie", decision_id=choice["id"],
+            title="Use a queue after all", text="A queue.", reason="It scales.", decided_by="Ann",
+        )  # fmt: skip
+        before = rows("decisions", "facts", "events")
+        blank_reason = await refused(
+            client, "record_decision", actor="a", title="No reason", text="x", reason="  ",
+            decided_by="Marie", node_ids=[story["id"]],
+        )  # fmt: skip
+        blank_source = await refused(
+            client, "retain_fact", actor="a", text="x", source="", node_ids=[story["id"]]
+        )
+        proof(
+            "M16",
+            "a blank source or reason, and a change to a confirmed decision under a person's name "
+            "alone, are refused in plain words and write nothing, not even a link",
+            "A decision needs a reason" in blank_reason
+            and "A fact needs its source" in blank_source
+            and f"decision {choice['id']} (confirmed by Marie)" in no_word
+            and "needs that person's word" in no_word
+            and rows("decisions", "facts", "events") == before
+            and (await ok(client, "get_decision", decision_id=choice["id"]))["status"] == "active",
+            f'"{clip(no_word, 80)}"',
+        )
+        changed = await ok(
+            client, "supersede_decision", actor="agent-2", decision_id=choice["id"],
+            title="Use a queue after all", text="A queue, as first thought.",
+            reason="It scales better.", decided_by="Ann",
+            said_by="Marie", quote="Let us use a queue",
+        )  # fmt: skip
+        dropped = await make_decision(client, "A dropped idea", node_ids=[story["id"]])
+        await ok(
+            client, "withdraw_decision", actor="agent-2", decision_id=dropped["id"],
+            reason="No longer needed",
+        )  # fmt: skip
+        first = await ok(client, "get_decision", decision_id=choice["id"])
+        second_one = await ok(client, "get_decision", decision_id=dropped["id"])
+        recalled = await ok(client, "recall", node_id=story["id"])
+        past_decisions = {d["id"]: d for d in entries(recalled["past_decisions"], "decision")}
+        proof(
+            "M16",
+            "replacing and withdrawing keep the old decisions as records: the replaced one is "
+            "superseded but still confirmed by Marie, the new one starts unconfirmed, and the "
+            "withdrawn one says why",
+            (first["status"], first["confirmation"], first["confirmed_by"])
+            == ("superseded", "confirmed", "Marie")
+            and (changed["status"], changed["confirmation"], changed["supersedes_ids"])
+            == ("active", "unconfirmed", [choice["id"]])
+            and (second_one["status"], second_one["status_reason"])
+            == ("withdrawn", "No longer needed")
+            and set(past_decisions) == {choice["id"], dropped["id"]}
+            and "Superseded decision, confirmed by Marie" in past_decisions[choice["id"]]["label"]
+            and changed["id"] in ids(entries(recalled["active_decisions"], "decision")),
+            first["label"],
+        )
 
-async def get_memory(client: Client, memory: dict[str, Any]) -> dict[str, Any]:
-    return await ok(client, "get_memory", memory_id=memory["id"])
+        # -- M16: a decision that applies throughout a project, in that project's briefings only
+        wide = await make_decision(client, "Everything is in euros", project_wide=True)
+        stranger = make_project(register())
+        async with connect(URL, stranger.key) as theirs:
+            their_epic, their_story = await stories(theirs, 1)
+            await ok(
+                theirs, "create_node", actor="m", kind="task", title="Theirs",
+                parent_id=their_story["id"],
+            )  # fmt: skip
+            their_brief = await ok(
+                theirs, "next_work", actor="x", within_node_id=their_epic["id"], peek=True
+            )
+            their_recall = await ok(theirs, "recall", node_id=their_story["id"])
+            their_list = await ok(theirs, "list_decisions", limit=200)
+        brief = await ok(client, "next_work", actor="x", within_node_id=epic["id"], peek=True)
+        recalled = await ok(client, "recall", node_id=story["id"])
+        recalled_other = await ok(client, "recall", node_id=other["id"])
+        proof(
+            "M16",
+            "a project-wide decision is in every recall and every next_work briefing of its "
+            "project, linked to nothing, and in no other project's",
+            wide["project_wide"] is True
+            and (wide["node_ids"], wide["rule_ids"]) == ([], [])
+            and wide["id"] in ids(brief["context"]["project_wide_decisions"])
+            and wide["id"] in ids(entries(recalled["project_wide_decisions"], "decision"))
+            and wide["id"] in ids(entries(recalled_other["project_wide_decisions"], "decision"))
+            and wide["id"] not in ids(entries(recalled["active_decisions"], "decision"))
+            and their_brief["context"]["project_wide_decisions"] == []
+            and their_recall["project_wide_decisions"]["count"] == 0
+            and their_list["items"] == [],
+            "yours holds it, theirs holds none",
+        )
+        assert epic and rule

@@ -21,10 +21,9 @@ from mcp import Client
 from mcp.shared.exceptions import MCPError
 
 from tests.helpers import (
-    ScriptedModel,
     compose,
+    confirm,
     connect,
-    make_belief,
     make_decision,
     make_fact,
     ok,
@@ -131,7 +130,7 @@ def count_everything() -> str:
     result = run_sql(
         "SELECT (SELECT count(*) FROM nodes) || '/' || (SELECT count(*) FROM links) || '/' || "
         "(SELECT count(*) FROM rules) || '/' || (SELECT count(*) FROM decisions) || '/' || "
-        "(SELECT count(*) FROM memories) || '/' || (SELECT count(*) FROM claims) || '/' || "
+        "(SELECT count(*) FROM facts) || '/' || (SELECT count(*) FROM claims) || '/' || "
         "(SELECT count(*) FROM events)",
         plain=True,
         as_project=True,
@@ -149,20 +148,16 @@ def stored_anywhere(text: str) -> int:
         f"+ (SELECT count(*) FROM nodes WHERE title LIKE {like} OR body LIKE {like}) "
         f"+ (SELECT count(*) FROM rules WHERE title LIKE {like} OR body LIKE {like}) "
         f"+ (SELECT count(*) FROM decisions WHERE title LIKE {like} OR text LIKE {like} "
-        f"OR reason LIKE {like} OR decided_by LIKE {like}) "
-        f"+ (SELECT count(*) FROM memories WHERE text LIKE {like} OR source LIKE {like} "
-        f"OR status_reason LIKE {like} OR confirmed_by LIKE {like}) "
+        f"OR reason LIKE {like} OR decided_by LIKE {like} OR status_reason LIKE {like} "
+        f"OR confirmed_by LIKE {like}) "
+        f"+ (SELECT count(*) FROM facts WHERE text LIKE {like} OR source LIKE {like} "
+        f"OR status_reason LIKE {like} OR confirmed_by LIKE {like} OR recorded_by LIKE {like}) "
         f"+ (SELECT count(*) FROM claims WHERE actor LIKE {like})",
         plain=True,
         project=None,
     )
     assert result.returncode == 0, result.stderr
     return int(result.stdout.strip())
-
-
-@pytest.fixture
-def no_model_url() -> str:
-    return os.environ["VRUM_NO_MODEL_TEST_URL"]
 
 
 # -- the agent key -------------------------------------------------------------------------------
@@ -182,11 +177,10 @@ def a_revoked_key() -> str:
     return str(made.body["secret"])
 
 
-@pytest.mark.parametrize("which", ["with_model", "without_model"])
 async def test_a_request_with_no_key_or_a_wrong_one_is_refused_in_plain_words(
-    which: str, server_url: str, no_model_url: str
+    server_url: str,
 ) -> None:
-    url = server_url if which == "with_model" else no_model_url
+    url = server_url
     wrong = "vrk_wrong-" + unique_word()
     revoked = a_revoked_key()
     none = "needs an agent key for a project, and none was sent"
@@ -387,14 +381,12 @@ async def a_world(client: Client) -> dict[str, Any]:
     rule = await ok(client, "create_rule", actor="ann", title="A rule", story_id=story["id"])
     decision = await make_decision(client, "A decision", node_ids=[story["id"]])
     fact = await make_fact(client, "A fact")
-    belief = await make_belief(client, [fact], "A belief")
     return {
         "story": story,
         "task": task,
         "rule": rule,
         "decision": decision,
         "fact": fact,
-        "belief": belief,
     }
 
 
@@ -402,7 +394,7 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
     """(tool, a function from a text to the arguments with that text in the field, the field the
     refusal should name)."""
     story, task, rule = world["story"]["id"], world["task"]["id"], world["rule"]["id"]
-    decision, fact, belief = world["decision"]["id"], world["fact"]["id"], world["belief"]["id"]
+    decision, fact = world["decision"]["id"], world["fact"]["id"]
 
     def plan(secret: str, where: str) -> dict[str, Any]:
         items = [
@@ -426,7 +418,15 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
     record = {"actor": "a", "title": "t", "text": "x", "reason": "r", "decided_by": "Marie"}
     replace = {**record, "decision_id": decision}
     supersede = {"actor": "a", "replaces": [fact], "reason": "r", "text": "x", "source": "x"}
-    promote = {"actor": "a", "memory_id": belief, "title": "t", "reason": "r", "decided_by": "M"}
+    withdraw_decision = {"actor": "a", "decision_id": decision, "reason": "r"}
+    withdraw_fact = {"actor": "a", "fact_ids": [fact], "reason": "r"}
+    confirm_fact = {"actor": "a", "kind": "fact", "record_id": fact, "confirmation": "confirmed"}
+    unconfirm_decision = {
+        "actor": "a",
+        "kind": "decision",
+        "record_id": decision,
+        "confirmation": "unconfirmed",
+    }
     task_edit = {"actor": "a", "node_id": task, "expected_version": 1}
     rule_edit = {"actor": "a", "rule_id": rule, "expected_version": 1}
     claimed = {"actor": "ann", "node_id": task}
@@ -470,27 +470,25 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         edit("supersede_decision", "decided_by", **replace),
         edit("retain_fact", "text", actor="a", source="x"),
         edit("retain_fact", "source", actor="a", text="x"),
-        edit("record_belief", "text", actor="a", evidence_fact_ids=[fact]),
-        edit("supersede_memory", "text", **supersede),
-        edit("supersede_memory", "reason", **supersede),
-        edit("supersede_memory", "source", **supersede),
-        edit("supersede_memory", "said_by", **supersede, quote="q"),
-        edit("retract_memory", "reason", actor="a", memory_ids=[fact]),
-        edit("retract_memory", "quote", actor="a", memory_ids=[fact], reason="r", said_by="Marie"),
-        edit("confirm_belief", "confirmed_by", actor="a", memory_id=belief),
-        edit("promote_belief", "title", **promote),
-        edit("promote_belief", "text", **promote),
-        edit("promote_belief", "reason", **promote),
+        edit("supersede_decision", "said_by", **replace, quote="q"),
+        edit("withdraw_decision", "reason", actor="a", decision_id=decision),
+        edit("withdraw_decision", "quote", **withdraw_decision, said_by="Marie"),
+        edit("supersede_fact", "text", **supersede),
+        edit("supersede_fact", "reason", **supersede),
+        edit("supersede_fact", "source", **supersede),
+        edit("supersede_fact", "said_by", **supersede, quote="q"),
+        edit("withdraw_fact", "reason", actor="a", fact_ids=[fact]),
+        edit("withdraw_fact", "quote", **withdraw_fact, said_by="Marie"),
+        edit("set_confirmation", "person", **confirm_fact),
+        edit("set_confirmation", "quote", **confirm_fact, person="Marie"),
+        edit("set_confirmation", "person", **unconfirm_decision, quote="q"),
+        edit("set_confirmation", "quote", **unconfirm_decision, person="Marie"),
         edit("finish_work", "note", **claimed, outcome="done"),
         edit("release_claim", "note", **claimed),
         edit("claim_node", "actor", node_id=task),
         edit("add_link", "actor", source_id=story, target_id=task, link_type="relates_to"),
         edit("search", "query"),
         edit("similar_items", "text"),
-        edit("extract_facts", "text", actor="a"),
-        edit("consolidate_memory", "query", actor="a"),
-        edit("find_contradictions", "statement", actor="a"),
-        edit("reflect", "question", actor="a"),
     ]
 
 
@@ -500,7 +498,7 @@ async def test_a_secret_in_any_free_text_field_is_refused_and_nothing_is_stored_
     world = await a_world(client)
     secret = a_secret()
     cases = secret_cases(world)
-    assert len(cases) >= 45
+    assert len(cases) >= 40
     task_before = await ok(client, "get_node", node_id=world["task"]["id"])
     before = count_everything()
 
@@ -509,6 +507,7 @@ async def test_a_secret_in_any_free_text_field_is_refused_and_nothing_is_stored_
         where = f"{tool} with {path}"
         assert f"The {path} field contains what looks like a GitHub token" in message, where
         assert "was not stored" in message and "nothing was changed" in message, where
+        assert "was not sent to any other service" in message, where
         assert "Take the secret out and try again" in message, where
         assert secret not in message and secret[:12] not in message, where
 
@@ -529,34 +528,8 @@ async def test_ordinary_text_that_talks_about_secrets_is_not_refused(client: Cli
 
     assert (await ok(client, "get_node", node_id=node["id"]))["body"] == text
     assert fact["text"] == text
-
-
-async def test_a_secret_a_model_proposes_is_refused_when_it_is_written_and_nothing_is_kept(
-    client: Client, model: ScriptedModel
-) -> None:
-    marker = unique_word()
-    secret = a_secret()
-    text = f"The nightly export {marker} runs at 02:00."
-    model.script(
-        marker,
-        {"facts": [{"text": f"The deploy key is {secret}", "kind": "world", "passage": text}]},
-    )
-    before = count_everything()
-
-    message = await refused(client, "extract_facts", actor="ann", text=text, store=True)
-
-    assert "The text field contains what looks like a GitHub token" in message
-    assert secret not in message
-    assert count_everything() == before and stored_anywhere(secret) == 0
-    # The same for a belief a model draws up.
-    fact = await make_fact(client, f"{marker} a fact to draw on")
-    model.script(
-        marker,
-        {"beliefs": [{"text": f"The key is {secret}", "evidence_fact_ids": [fact["id"]]}]},
-    )
-    message = await refused(client, "consolidate_memory", actor="ann", fact_ids=[fact["id"]])
-    assert "contains what looks like a GitHub token" in message and secret not in message
-    assert stored_anywhere(secret) == 0
+    decision = await make_decision(client, "Passwords", text=text, reason=text)
+    assert (decision["text"], decision["reason"]) == (text, text)
 
 
 # -- plain refusals ------------------------------------------------------------------------------
@@ -600,8 +573,8 @@ PAGED = (
     "coverage_report",
     "list_decisions",
     "decision_history",
-    "list_memories",
-    "memory_history",
+    "list_facts",
+    "fact_history",
     "recall",
     "search",
     "similar_items",
@@ -609,11 +582,9 @@ PAGED = (
     "find_mentions",
     "export_graph",
 )
-# find_contradictions goes through its beliefs a batch at a time (batch, after_id).
-BATCHED = ("find_contradictions",)
 # The tools whose lists are not paged, because the list is only as long as what was sent in, or is
-# one item's own links, or is what a model said in one answer. A new tool with a list that is in
-# none of these groups fails the test below, so that it is decided on purpose.
+# one item's own links. A new tool with a list that is in none of these groups fails the test
+# below, so that it is decided on purpose.
 BOUNDED = {
     "create_node",
     "get_node",
@@ -627,18 +598,13 @@ BOUNDED = {
     "link_decision",
     "unlink_decision",
     "supersede_decision",
+    "withdraw_decision",
     "retain_fact",
-    "record_belief",
-    "supersede_memory",
-    "retract_memory",
-    "confirm_belief",
-    "promote_belief",
-    "link_memory",
-    "unlink_memory",
-    "get_memory",
-    "extract_facts",
-    "consolidate_memory",
-    "reflect",
+    "get_fact",
+    "link_fact",
+    "unlink_fact",
+    "supersede_fact",
+    "withdraw_fact",
     "reindex",
     # One entry for each person or agent who has taken work: as many as there are names.
     "who_is_working",
@@ -655,11 +621,11 @@ async def test_every_tool_that_returns_a_list_pages_it_or_is_known_to_be_bounded
         properties = (tool.output_schema or {}).get("properties", {})
         if '"next_' in schema:
             pages.add(tool.name)
-            assert "limit" in tool.input_schema["properties"] or tool.name in BATCHED, tool.name
+            assert "limit" in tool.input_schema["properties"], tool.name
         elif any(spec.get("type") == "array" for spec in properties.values()):
             lists.add(tool.name)
 
-    assert pages == set(PAGED) | set(BATCHED), sorted(pages ^ (set(PAGED) | set(BATCHED)))
+    assert pages == set(PAGED), sorted(pages ^ set(PAGED))
     assert lists <= BOUNDED, f"lists with no paging, not known to be bounded: {lists - BOUNDED}"
 
 
@@ -673,7 +639,7 @@ async def test_a_page_size_outside_one_to_two_hundred_is_refused_in_plain_words(
         "list_links": {"node_id": world["task"]["id"]},
         "rule_history": {"rule_id": world["rule"]["id"]},
         "decision_history": {"decision_id": world["decision"]["id"]},
-        "memory_history": {"memory_id": world["fact"]["id"]},
+        "fact_history": {"fact_id": world["fact"]["id"]},
         "recall": {"node_id": world["story"]["id"]},
         "search": {"query": "anything"},
         "similar_items": {"text": "anything"},
@@ -715,6 +681,10 @@ async def test_the_logs_say_what_happened_and_hold_no_key_no_password_no_session
     shared = the_project()
 
     await ok(client, "create_node", actor=actor, kind="epic", title=f"Title {content}", body=body)
+    # A fact and a decision, and a person's confirmation with their words, are not logged either.
+    recorded = await make_fact(client, f"A fact {content}", source=f"A source {content}")
+    await confirm(client, "fact", recorded, person=f"Reviewer {content}", quote=f"Quote {content}")
+    await make_decision(client, f"Decision {content}", reason=f"Reason {content}")
     await refused(client, "claim_node", actor=actor, node_id=999999999)
     await refused(client, "create_node", actor=actor, kind="epic", title="t", body=secret)
     await refused(client, "create_node", actor=secret, kind="epic", title="t")
@@ -765,28 +735,26 @@ async def test_the_logs_say_what_happened_and_hold_no_key_no_password_no_session
     assert {"no_key", "wrong_key", "too_large"} <= {line["reason"] for line in refusals}
     assert all({"status", "method", "path", "client"} <= line.keys() for line in refusals)
     assert any(line["event"] == "server_started" for line in lines)
-    # What must never be in them is in none of them, on either server.
-    for service in ("app", "app-no-model"):
-        text = log if service == "app" else log_of(service)
-        for forbidden in (
-            the_token(),
-            revoked,
-            own.key,
-            shared.owner.password,
-            shared.owner.cookie,
-            shared.owner.csrf,
-            person.password,
-            wrong_password,
-            person.cookie,
-            person.csrf,
-            signed_in.cookie,
-            signed_in.csrf,
-            os.environ["VRUM_DB_PASSWORD"],
-            wrong,
-            secret,
-            secret[:12],
-            content,
-            "Authorization",
-            "Bearer",
-        ):
-            assert forbidden not in text, f"the {service} log holds {forbidden[:8]}..."
+    # What must never be in them is in none of them.
+    for forbidden in (
+        the_token(),
+        revoked,
+        own.key,
+        shared.owner.password,
+        shared.owner.cookie,
+        shared.owner.csrf,
+        person.password,
+        wrong_password,
+        person.cookie,
+        person.csrf,
+        signed_in.cookie,
+        signed_in.csrf,
+        os.environ["VRUM_DB_PASSWORD"],
+        wrong,
+        secret,
+        secret[:12],
+        content,
+        "Authorization",
+        "Bearer",
+    ):
+        assert forbidden not in log, f"the log holds {forbidden[:8]}..."

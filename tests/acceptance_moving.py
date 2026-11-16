@@ -1,6 +1,7 @@
-"""Chapter 9 of the acceptance scenario: moving the whole graph out and back (M7). It is last
-because it destroys the database it started with, twice: once to restore a backup into a fresh
-container, and once to load an export into a fresh, empty server."""
+"""Chapter 14 of the acceptance scenario: moving the whole graph out and back (M7, and M16's proof
+that facts, decisions, their confirmation and their history survive the trip). It is last because
+it destroys the database it started with, twice: once to restore a backup into a fresh container,
+and once to load an export into a fresh, empty server."""
 
 import copy
 import os
@@ -14,11 +15,29 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from tests.acceptance_scenario import URL, chapter, clip, proof
-from tests.helpers import REPO_ROOT, connect, export_everything, ok, refused, rich_world, the_token
+from tests.acceptance_scenario import URL, chapter, clip, proof, tree
+from tests.helpers import (
+    REPO_ROOT,
+    confirm,
+    connect,
+    export_everything,
+    make_fact,
+    ok,
+    refused,
+    rich_world,
+    the_token,
+)
 from tests.world import make_project, register, server_base
 
-SECTIONS = ("nodes", "links", "rules", "decisions", "memories", "events")
+SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
+# What an agent is briefed with before it starts work, and what M16 took out of it.
+BRIEFING = ("active_decisions", "project_wide_decisions", "facts", "past_decisions")
+GONE_FROM_BRIEFINGS = {
+    "beliefs",
+    "stale_beliefs_left_out",
+    "active_principles",
+    "superseded_decisions",
+}
 
 
 def run(
@@ -67,15 +86,13 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     """One file per item, and every connection in the graph a reference at both ends, to a file
     that exists. Returns (files, references, connections)."""
     files = {p.stem: p.read_text(encoding="utf-8") for p in folder.rglob("*.md")}
-    items = sum(len(document[name]) for name in ("nodes", "rules", "decisions", "memories"))
+    items = sum(len(document[name]) for name in ("nodes", "rules", "decisions", "facts"))
     assert len(files) == items, f"{len(files)} files for {items} items"
     stem_of: dict[tuple[str, int], str] = {}
     for stem in files:
         kind, number, _ = stem.split("-", 2)
         stem_of[(kind, int(number))] = stem
     node_kind = {n["id"]: n["kind"] for n in document["nodes"]}
-    memory_kind = {m["id"]: m["type"] for m in document["memories"]}
-    decision_kind = {d["id"]: d["kind"] for d in document["decisions"]}
     pairs: list[tuple[tuple[str, int], tuple[str, int]]] = []
     for n in document["nodes"]:
         if n["parent_id"] is not None:
@@ -87,23 +104,18 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
         if rule["story_id"] is not None:
             pairs.append((("rule", rule["id"]), ("story", rule["story_id"])))
     for d in document["decisions"]:
-        here = (d["kind"], d["id"])
+        here = ("decision", d["id"])
         pairs += [(here, (node_kind[x], x)) for x in d["node_ids"]]
         pairs += [(here, ("rule", x)) for x in d["rule_ids"]]
         if d["superseded_by_id"] is not None:
-            pairs.append((here, (decision_kind[d["superseded_by_id"]], d["superseded_by_id"])))
-        if d["promoted_from_id"] is not None:
-            pairs.append((here, (memory_kind[d["promoted_from_id"]], d["promoted_from_id"])))
-    for m in document["memories"]:
-        here = (m["type"], m["id"])
-        pairs += [(here, (node_kind[x], x)) for x in m["node_ids"]]
-        pairs += [(here, ("rule", x)) for x in m["rule_ids"]]
-        pairs += [(here, (decision_kind[x], x)) for x in m["decision_ids"]]
-        if m["superseded_by_id"] is not None:
-            pairs.append((here, (memory_kind[m["superseded_by_id"]], m["superseded_by_id"])))
-        for e in m["evidence"]:
-            there = ("fact", e["id"]) if e["type"] == "fact" else (decision_kind[e["id"]], e["id"])
-            pairs.append((here, there))
+            pairs.append((here, ("decision", d["superseded_by_id"])))
+    for f in document["facts"]:
+        here = ("fact", f["id"])
+        pairs += [(here, (node_kind[x], x)) for x in f["node_ids"]]
+        pairs += [(here, ("rule", x)) for x in f["rule_ids"]]
+        pairs += [(here, ("decision", x)) for x in f["decision_ids"]]
+        if f["superseded_by_id"] is not None:
+            pairs.append((here, ("fact", f["superseded_by_id"])))
     for source, target in pairs:
         assert stem_of[target] in references_in(files[stem_of[source]]), (source, target)
         assert stem_of[source] in references_in(files[stem_of[target]]), (target, source)
@@ -115,12 +127,84 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     return len(files), total, len(pairs)
 
 
+def reads_as_two_records(folder: Path, world: dict[str, dict[str, Any]], mention: int) -> bool:
+    """The Markdown copy tells the two records apart in plain words: a fact and a decision (one
+    kind of each, with the project-wide flag and no principle), whether a person confirmed them,
+    and where they stand, and it follows what a text refers to."""
+    files = {p.stem: p.read_text(encoding="utf-8") for p in folder.rglob("*.md")}
+
+    def text_of(kind: str, number: int) -> str:
+        return next(t for s, t in files.items() if s.startswith(f"{kind}-{number}-"))
+
+    def stem_of(kind: str, number: int) -> str:
+        return next(s for s in files if s.startswith(f"{kind}-{number}-"))
+
+    return (
+        {p.name for p in folder.iterdir() if p.is_dir()}
+        <= {"epics", "stories", "tasks", "rules", "decisions", "facts"}
+        and "- Confirmation: confirmed by Marie on " in text_of("fact", world["fact1"]["id"])
+        and "- Confirmation: not confirmed by a person" in text_of("fact", world["fact2"]["id"])
+        and f"- Status: superseded by [[{stem_of('fact', world['fact4']['id'])}]]. Why: Measured"
+        in text_of("fact", world["fact3"]["id"])
+        and "- Status: withdrawn. Why: They expire in an hour."
+        in text_of("fact", world["fact6"]["id"])
+        and ", as it was when it ended" in text_of("fact", world["fact6"]["id"])
+        and "- Kind: project-wide decision" in text_of("decision", world["wide"]["id"])
+        and "## Reason" in text_of("decision", world["decision2"]["id"])
+        and f"[[{stem_of('story', world['story1']['id'])}]]" in text_of("fact", mention)
+        and f"[[{stem_of('decision', world['wide']['id'])}]]" in text_of("fact", mention)
+        and not re.search(r"belief|principle", "\n".join(files.values()), re.IGNORECASE)
+    )
+
+
+async def knowledge(
+    client: Any, world: dict[str, dict[str, Any]], story: dict[str, Any], epic: dict[str, Any]
+) -> dict[str, Any]:
+    """What a project tells an agent: who mentions what, what is recalled about a story and what
+    the briefing for the next work holds. Everything in it comes from the records themselves."""
+    mentions = {
+        name: (await ok(client, "find_mentions", limit=200, **target))["items"]
+        for name, target in (
+            ("story", {"node_id": world["story1"]["id"]}),
+            ("project-wide decision", {"decision_id": world["wide"]["id"]}),
+        )
+    }
+    recall = await ok(client, "recall", node_id=story["id"], limit=50)
+    briefing = await ok(client, "next_work", actor="briefing", within_node_id=epic["id"], peek=True)
+    return {
+        "mentions": mentions,
+        "recall": recall,
+        "briefing": {name: briefing["context"][name] for name in BRIEFING},
+        "keys": sorted(briefing["context"]),
+    }
+
+
+async def histories(client: Any, world: dict[str, dict[str, Any]]) -> dict[str, list[Any]]:
+    """The history of each record that ended or was confirmed, as the tools tell it."""
+    found: dict[str, list[Any]] = {}
+    for name in ("fact1", "fact3", "fact6", "fact5"):
+        found[name] = (await ok(client, "fact_history", fact_id=world[name]["id"]))["items"]
+    for name in ("decision1", "decision2", "decision3", "wide"):
+        found[name] = (await ok(client, "decision_history", decision_id=world[name]["id"]))["items"]
+    return found
+
+
 async def moving() -> None:
     chapter("Moving the data: a Markdown copy, a backup, an export, and a fresh server")
     work = Path(tempfile.mkdtemp(prefix="vrum-acceptance-"))
     async with connect(URL, the_token()) as client:
-        await rich_world(client)
+        world = await rich_world(client)
+        epic, story, _ = await tree(client, 1)
+        mention = await make_fact(
+            client,
+            f"Follows [[node:{world['story1']['id']}]] and [[decision:{world['wide']['id']}]]",
+            node_ids=[story["id"]],
+            source="The design review",
+        )
+        await confirm(client, "fact", mention, "Marie")
         original = await export_everything(client)
+        told = await knowledge(client, world, story, epic)
+        past = await histories(client, world)
     summary = counts(original)
 
     # -- the Markdown copy
@@ -134,12 +218,21 @@ async def moving() -> None:
     )
     proof(
         "M7",
-        "in the Markdown export there is one file per item, and every link, rule placement, "
-        "decision link and belief evidence appears as a reference, at both ends, to a file that "
-        "exists; made again, the same files",
+        "in the Markdown export there is one file per item, and every link, requirement "
+        "placement and decision and fact link appears as a reference, at both ends, to a file "
+        "that exists; made again, the same files",
         same and files > 0 and connections > 0,
         f"{files} files for {files} items, {references} references, {connections} connections "
         f"checked at both ends. {clip(made.stdout, 40)}",
+    )
+    proof(
+        "M16",
+        "the Markdown copy reflects the two records: facts and decisions in plain words, each "
+        "saying whether a person confirmed it (an ended one as it was when it ended), a "
+        "project-wide decision and a replacement said so, a reference in a text is a link, and "
+        "no belief or principle appears",
+        reads_as_two_records(notes, world, mention["id"]),
+        "folders: " + ", ".join(sorted(p.name for p in notes.iterdir() if p.is_dir())),
     )
 
     # -- backup, destroy the volume, restore into a fresh container
@@ -214,6 +307,8 @@ async def moving() -> None:
     async with connect(URL, empty_project.key) as client:
         after = await export_everything(client)
         top = max(n["id"] for n in original["nodes"])
+        now_told = await knowledge(client, world, story, epic)
+        now_past = await histories(client, world)
         new = await ok(client, "create_node", actor="ann", kind="epic", title="After the import")
         second = await refused(client, "import_graph", actor="ann", document=original)
     proof(
@@ -225,5 +320,53 @@ async def moving() -> None:
         and "already holds data" in second
         and "Imported" in loaded.stdout,
         f"{counts(original)}; {exported.stat().st_size:,} bytes; next node {new['id']} after {top}",
+    )
+    actions = {e["action"] for e in original["events"]}
+    wide = next(d for d in after["decisions"] if d["id"] == world["wide"]["id"])
+    ended = next(f for f in after["facts"] if f["id"] == world["fact6"]["id"])
+    superseded = next(f for f in after["facts"] if f["id"] == world["fact3"]["id"])
+    proof(
+        "M16",
+        "a project's facts, decisions, confirmations, replacements and withdrawals, links and "
+        "references go through export and import into a fresh project and come back as they "
+        "were: the records, their histories, and what the tools say of who mentions what",
+        {
+            "fact_confirmed",
+            "fact_superseded",
+            "fact_withdrawn",
+            "decision_confirmed",
+            "decision_superseded",
+            "decision_withdrawn",
+            "fact_linked",
+        }
+        <= actions
+        and (wide["project_wide"], wide["confirmed_by"]) == (True, "Marie")
+        and (ended["status"], ended["confirmed_by"]) == ("withdrawn", "Marie")
+        and (superseded["status"], superseded["superseded_by_id"])
+        == ("superseded", world["fact4"]["id"])
+        and now_past == past
+        and now_told["mentions"] == told["mentions"]
+        and any(m["source"]["item_type"] == "fact" for m in told["mentions"]["story"])
+        and now_told["recall"] == told["recall"],
+        f"{len(after['facts'])} facts and {len(after['decisions'])} decisions, "
+        f"{sum(len(h) for h in past.values())} history entries compared",
+    )
+    proof(
+        "M16",
+        "the agent briefing in the fresh project is the one of the project it came from, made of "
+        "the two records only: active decisions, project-wide decisions, facts and past "
+        "decisions, each saying whether a person confirmed it",
+        now_told["briefing"] == told["briefing"]
+        and set(BRIEFING) <= set(now_told["keys"])
+        and not GONE_FROM_BRIEFINGS & set(now_told["keys"])
+        and world["wide"]["id"] in [d["id"] for d in now_told["briefing"]["project_wide_decisions"]]
+        and next(
+            d
+            for d in now_told["briefing"]["project_wide_decisions"]
+            if d["id"] == world["wide"]["id"]
+        )["confirmed_by"]
+        == "Marie"
+        and [f["confirmed_by"] for f in now_told["briefing"]["facts"]] == ["Marie"],
+        f"{len(now_told['keys'])} parts, none of the old ones",
     )
     shutil.rmtree(work, ignore_errors=True)

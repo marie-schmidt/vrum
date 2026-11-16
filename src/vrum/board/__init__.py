@@ -44,9 +44,15 @@ READ_TOOLS = (
     "node_history",
     "list_links",
     "list_rules",
+    "get_rule",
+    "rule_history",
     "coverage_report",
     "list_decisions",
-    "list_memories",
+    "get_decision",
+    "decision_history",
+    "list_facts",
+    "get_fact",
+    "fact_history",
     "recall",
     "search",
     "similar_items",
@@ -58,9 +64,6 @@ READ_TOOLS = (
     "who_is_working",
     "server_status",
 )
-# find_contradictions and reflect only propose or answer (they change nothing in the graph), but
-# they ask the language model and write a record that they did, as a person's change does, so
-# they take a name too and sit with the writes.
 WRITE_TOOLS = (
     "create_node",
     "update_node",
@@ -77,18 +80,15 @@ WRITE_TOOLS = (
     "move_rule",
     "record_decision",
     "supersede_decision",
+    "withdraw_decision",
     "link_decision",
     "unlink_decision",
     "retain_fact",
-    "record_belief",
-    "supersede_memory",
-    "retract_memory",
-    "confirm_belief",
-    "promote_belief",
-    "link_memory",
-    "unlink_memory",
-    "find_contradictions",
-    "reflect",
+    "supersede_fact",
+    "withdraw_fact",
+    "link_fact",
+    "unlink_fact",
+    "set_confirmation",
 )
 BOARD_TOOLS = frozenset(READ_TOOLS + WRITE_TOOLS)
 
@@ -430,7 +430,6 @@ def add_board(
         return _json(
             {
                 "poll_seconds": settings.board_poll_seconds,
-                "language_model": settings.llm.model if settings.llm else None,
                 "session_hours": SESSION_HOURS,
             }
         )

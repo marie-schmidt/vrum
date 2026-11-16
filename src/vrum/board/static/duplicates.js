@@ -1,22 +1,29 @@
-// The Overlaps page: pairs of stories (or epics, or rules) in different epics that look like the same
-// thing, with their scores from the index, most alike first, and the two items side by side. A person
-// can change the threshold, and can mark a pair as `duplicates` or `relates_to` with one click, which
-// is the same add_link an agent calls. Nothing is ever linked unless a person clicks.
+// Possible duplicates, a mode of the search drawer (`dups=1`): pairs of stories (or epics, or
+// requirements) in different epics that look like the same thing, with their scores from the
+// index, most alike first, and the two items side by side. A person can change the threshold and
+// the epics, and can mark a pair as `duplicates` or `relates_to` with one click, which is the same
+// add_link an agent calls. Looking never writes: nothing is linked unless a person clicks one of
+// the buttons of a pair, and one click makes exactly one link. The choices are in the address:
+// dup_type, dup_min, dup_epics and dup_unlinked.
 
 import { Refusal, call, callAll } from './api.js';
-import { actor, notify, ui } from './ctx.js';
+import { actor, notify, recordLink, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
-import { KIND, LINK, STATUS } from './labels.js';
+import { KIND, STATUS } from './labels.js';
 import { renderMarkdown } from './markdown.js';
-import { hrefFor, needTargets } from './references.js';
-import { ensure, store, sync } from './store.js';
+import { ensure, ensureContext, store, sync } from './store.js';
 
 const PAGE = 20;
 const TYPES = [
   ['story', 'Stories'],
   ['epic', 'Epics'],
-  ['rule', 'Rules'],
+  ['rule', 'Requirements'],
 ];
+const MARKS = {
+  duplicates: { button: 'Mark as duplicates', done: 'Already marked as duplicates', told: 'duplicates' },
+  relates_to: { button: 'Mark as related', done: 'Already marked as related', told: 'related' },
+};
+const ASKING = ['dup_type', 'dup_min', 'dup_epics', 'dup_unlinked'];
 
 let root = null;
 let params = new URLSearchParams();
@@ -31,53 +38,52 @@ let generation = 0;
 let loadedFor = '';
 
 const keyOf = (item) => `${item.item_type}:${item.id}`;
+const asking = (from) => ASKING.map((name) => from.get(name) || '').join('|');
+const itemType = () => (TYPES.some(([value]) => value === params.get('dup_type')) ? params.get('dup_type') : 'story');
 
-// -- the page -------------------------------------------------------------------------------------
+// -- the view -------------------------------------------------------------------------------------
 
 export function mount(element, initial) {
   root = element;
   params = initial;
   pairs = [];
   loadedFor = '';
-  const type = h('select', { id: 'overlap-type', 'aria-label': 'What to compare', onchange: () => ui.navigate({ type: type.value === 'story' ? null : type.value }) }, TYPES.map(([value, label]) => h('option', { value }, label)));
-  const min = h('input', { id: 'overlap-min', type: 'number', min: 0, max: 1, step: 0.01, 'aria-describedby': 'overlap-help' });
-  const epics = h('input', { id: 'overlap-epics', type: 'text', value: params.get('epics') || '', placeholder: 'such as 3, 7', 'aria-describedby': 'overlap-help' });
-  const unlinked = h('input', { id: 'overlap-unlinked', type: 'checkbox', checked: params.get('unlinked') === '1', onchange: () => ui.navigate({ unlinked: unlinked.checked ? '1' : null }) });
+  const type = h('select', { id: 'dup-type', 'aria-label': 'What to compare', onchange: () => ui.navigate({ dup_type: type.value === 'story' ? null : type.value }) }, TYPES.map(([value, label]) => h('option', { value }, label)));
+  const min = h('input', { id: 'dup-min', type: 'number', min: 0, max: 1, step: 0.01, 'aria-describedby': 'dup-help' });
+  const epics = h('input', { id: 'dup-epics', type: 'text', value: params.get('dup_epics') || '', placeholder: 'such as 3, 7', 'aria-describedby': 'dup-help' });
+  const unlinked = h('input', { id: 'dup-unlinked', type: 'checkbox', checked: params.get('dup_unlinked') === '1', onchange: () => ui.navigate({ dup_unlinked: unlinked.checked ? '1' : null }) });
   parts = {
     type,
     min,
     epics,
     unlinked,
-    summary: h('p', { class: 'count', id: 'count', role: 'status' }),
-    note: h('p', { class: 'quiet', id: 'overlap-note' }),
-    problem: h('p', { class: 'problem', role: 'alert', id: 'overlap-problem' }),
-    list: h('div', { id: 'pairs' }),
+    summary: h('p', { class: 'count', id: 'dup-count', role: 'status' }),
+    note: h('p', { class: 'quiet', id: 'dup-note' }),
+    problem: h('p', { class: 'problem', role: 'alert', id: 'dup-problem' }),
+    list: h('div', { id: 'dup-pairs' }),
   };
-  put(root,
+  put(
+    root,
     h(
-      'div',
-      { class: 'toolbar' },
-      h('h1', {}, 'Overlaps'),
-      h(
-        'form',
-        {
-          class: 'filter',
-          onsubmit: (event) => {
-            event.preventDefault();
-            ui.navigate({ min: min.value === '' ? null : min.value, epics: epics.value.trim() || null });
-          },
+      'form',
+      {
+        class: 'drawer-form dup-form',
+        onsubmit: (event) => {
+          event.preventDefault();
+          ui.navigate({ dup_min: min.value === '' ? null : min.value, dup_epics: epics.value.trim() || null });
         },
-        h('label', { for: 'overlap-type' }, 'Compare'),
-        type,
-        h('label', { for: 'overlap-min' }, 'How alike they must be (0 to 1)'),
-        min,
-        h('label', { for: 'overlap-epics' }, 'Only pairs with something in epics (ids)'),
-        epics,
-        h('label', { class: 'check', for: 'overlap-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
-        h('button', { type: 'submit', id: 'apply-threshold' }, 'Apply'),
-        h('button', { type: 'button', id: 'reset-threshold', onclick: () => ui.navigate({ min: null, epics: null, unlinked: null }) }, 'Start again'),
+      },
+      h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
+      h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike they must be (0 to 1)'), min),
+      h('div', { class: 'field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (ids)'), epics),
+      h('label', { class: 'check', for: 'dup-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
+      h(
+        'div',
+        { class: 'buttons' },
+        h('button', { type: 'submit', class: 'primary', id: 'dup-apply' }, 'Apply'),
+        h('button', { type: 'button', id: 'dup-reset', onclick: () => ui.navigate({ dup_min: null, dup_epics: null, dup_unlinked: null }) }, 'Start again'),
       ),
-      h('p', { class: 'help', id: 'overlap-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
+      h('p', { class: 'help', id: 'dup-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
     ),
     parts.problem,
     parts.summary,
@@ -90,9 +96,8 @@ export function mount(element, initial) {
 export function unmount() {
   generation += 1;
   root = null;
+  parts = {};
 }
-
-const asking = (from) => `${from.get('type') || 'story'}|${from.get('min') || ''}|${from.get('epics') || ''}|${from.get('unlinked') || ''}`;
 
 export function update(next) {
   params = next;
@@ -104,15 +109,17 @@ export function refresh() {
   if (root) load(false);
 }
 
+export function again() {
+  if (root) load(true);
+}
+
 // -- reading from the server ---------------------------------------------------------------------
 
-const itemType = () => (TYPES.some(([value]) => value === params.get('type')) ? params.get('type') : 'story');
-
 // Numbers go as numbers; anything else goes as it is, so that the server says what is wrong with it.
-const epicIds = () => (params.get('epics') || '').split(/[\s,]+/).filter(Boolean).map((id) => (/^\d+$/.test(id) ? Number(id) : id));
+const epicIds = () => (params.get('dup_epics') || '').split(/[\s,]+/).filter(Boolean).map((id) => (/^\d+$/.test(id) ? Number(id) : id));
 
 async function read(offset, size = PAGE) {
-  const asked = params.get('min');
+  const asked = params.get('dup_min');
   const epics = epicIds();
   return call('find_overlaps', {
     item_type: itemType(),
@@ -123,7 +130,7 @@ async function read(offset, size = PAGE) {
   });
 }
 
-// Every pair there is, for the page that leaves out the ones somebody has already marked.
+// Every pair there is, for the view that leaves out the ones somebody has already marked.
 async function readEvery() {
   const first = await read(0, 200);
   const every = [...first.items];
@@ -135,8 +142,8 @@ async function readEvery() {
   return { first, every };
 }
 
-// The words of the items in these pairs, for the side-by-side view: the nodes with their details in
-// one filtered read, and the rules from the rules the board already holds.
+// The words of the items in these pairs, for the side-by-side view: the work items with their
+// details in one filtered read, and the requirements from those the board already holds.
 async function describe(items) {
   const wanted = items.filter((item) => !bodies.has(keyOf(item)));
   const nodes = wanted.filter((item) => item.item_type !== 'rule').map((item) => item.id);
@@ -147,6 +154,8 @@ async function describe(items) {
     await ensure('rules');
     for (const rule of store.rules) bodies.set(`rule:${rule.id}`, rule.body || '');
   }
+  // What the texts refer to is named by the same lists, so a reference is not taken for missing.
+  if ([...bodies.values()].some((text) => text.includes('[['))) await ensureContext();
 }
 
 async function load(fresh) {
@@ -154,7 +163,7 @@ async function load(fresh) {
   const type = itemType();
   loadedFor = asking(params);
   parts.type.value = type;
-  if (fresh) parts.epics.value = params.get('epics') || '';
+  if (fresh) parts.epics.value = params.get('dup_epics') || '';
   if (fresh) {
     parts.summary.textContent = 'Looking…';
     bodies = new Map();
@@ -162,7 +171,7 @@ async function load(fresh) {
   try {
     let first;
     let all;
-    if (params.get('unlinked') === '1') {
+    if (params.get('dup_unlinked') === '1') {
       // Every page is read and the pairs somebody has marked are left out; the rest are shown a
       // page at a time from what was read.
       const found = await readEvery();
@@ -194,9 +203,8 @@ async function load(fresh) {
     threshold = first.threshold;
     parts.problem.textContent = '';
     parts.note.textContent = first.index.note;
-    if (fresh) parts.min.value = params.get('min') ?? String(threshold);
+    if (fresh) parts.min.value = params.get('dup_min') ?? String(threshold);
     await describe(all.flatMap((pair) => [pair.first, pair.second]));
-    await needTargets(...bodies.values());
   } catch (error) {
     if (mine !== generation || !root) return;
     if (!(error instanceof Refusal)) throw error;
@@ -224,19 +232,20 @@ async function more() {
   }
   pairs = [...pairs, ...items];
   await describe(items.flatMap((pair) => [pair.first, pair.second]));
-  draw();
+  if (mine === generation && root) draw();
 }
 
 // -- drawing --------------------------------------------------------------------------------------
 
 function draw() {
-  const only = params.get('unlinked') === '1';
+  const only = params.get('dup_unlinked') === '1';
   parts.summary.textContent = total
     ? `${plural(total, 'pair')} at ${threshold} or more alike${only ? ', none of them marked yet' : ''}${pairs.length < total ? `; ${pairs.length} shown` : ''}.`
     : `No pairs are ${threshold} or more alike${only ? ' that nobody has marked yet' : ''}.`;
-  put(parts.list,
+  put(
+    parts.list,
     total ? h('ul', { class: 'plain pairs' }, pairs.map(pairRow)) : null,
-    nextOffset !== null ? h('p', {}, h('button', { type: 'button', id: 'show-more', onclick: more }, 'Show more pairs')) : null,
+    nextOffset !== null ? h('p', {}, h('button', { type: 'button', id: 'dup-more', onclick: more }, 'Show more pairs')) : null,
   );
 }
 
@@ -247,28 +256,29 @@ function side(item) {
     'div',
     { class: 'side', dataset: { type: item.item_type, id: item.id } },
     h('div', { class: 'entry-head' }, h('span', { class: `chip kind kind-${item.item_type}` }, h('span', { 'aria-hidden': 'true' }, KIND[item.item_type].sign), ` ${KIND[item.item_type].label} #${item.id}`), h('span', { class: 'chip' }, STATUS[item.status]?.label || item.status)),
-    h('h3', {}, h('a', { href: hrefFor(kind, item.id) }, item.title)),
+    h('h4', {}, recordLink(kind, item.id, {}, item.title)),
     item.epic_id !== null ? h('p', { class: 'quiet' }, `In epic #${item.epic_id} ${item.epic_title || ''}`.trim()) : null,
     text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.'),
   );
 }
 
+// One click, one link: the same add_link an agent calls.
 async function link(pair, type) {
   try {
     await call('add_link', { actor: actor(), source_id: pair.first.id, target_id: pair.second.id, link_type: type });
-    notify(`Marked #${pair.first.id} and #${pair.second.id} as “${LINK[type].label}”.`);
+    notify(`Marked #${pair.first.id} and #${pair.second.id} as ${MARKS[type].told}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });
   }
   await sync();
-  load(false);
+  if (root) load(false);
 }
 
 function pairRow(pair) {
   const linkable = pair.first.item_type !== 'rule';
   const buttons = linkable
-    ? ['duplicates', 'relates_to'].map((type) =>
+    ? Object.keys(MARKS).map((type) =>
         h(
           'button',
           {
@@ -277,14 +287,14 @@ function pairRow(pair) {
             disabled: pair.already_linked.includes(type),
             onclick: () => link(pair, type),
           },
-          pair.already_linked.includes(type) ? `Already marked: ${LINK[type].label}` : type === 'duplicates' ? 'Mark as duplicates' : 'Mark as relates to',
+          pair.already_linked.includes(type) ? MARKS[type].done : MARKS[type].button,
         ),
       )
-    : [h('span', { class: 'quiet' }, 'Rules cannot be linked to each other. Open both to compare them.')];
+    : [h('span', { class: 'quiet' }, 'Requirements cannot be linked to each other. Open both to compare them.')];
   return h(
     'li',
     { class: 'pair', dataset: { first: pair.first.id, second: pair.second.id, similarity: pair.similarity } },
-    h('p', { class: 'score' }, h('strong', {}, pair.similarity.toFixed(3)), ' alike', pair.already_linked.length ? h('span', { class: 'chip' }, `already linked: ${pair.already_linked.map((type) => LINK[type]?.label || type).join(', ')}`) : null),
+    h('p', { class: 'score' }, h('strong', {}, pair.similarity.toFixed(3)), ' alike', pair.already_linked.length ? h('span', { class: 'chip' }, `already linked: ${pair.already_linked.map((type) => MARKS[type]?.told || type).join(', ')}`) : null),
     h('div', { class: 'sides' }, side(pair.first), side(pair.second)),
     h('div', { class: 'buttons' }, ...buttons),
   );

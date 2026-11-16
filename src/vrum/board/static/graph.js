@@ -1,31 +1,64 @@
-// The graph view: the same work drawn as dots and lines. It reads what the board has already
-// loaded, so it shows the same items the Kanban does, and it keeps no data of its own. The drawing
-// is SVG made here; nothing is loaded from the internet.
+// The Graph page: the project's work and context, as a map of dots and lines or as a list. Work
+// shows the hierarchy and the dependencies; Context shows requirements, decisions and facts and the
+// work they concern; Everything shows both. The map and the list are two presentations of the
+// same scope, drawn from what the board has already loaded (the store), so they show the same
+// records and the same relationships and the page keeps no data of its own. Choosing a record, in
+// either one, shows it in the shared detail panel. The drawing is SVG made here; nothing is loaded
+// from the internet.
 
+import { Refusal } from './api.js';
 import { ui } from './ctx.js';
-import { announce, clear, h, plural, s } from './dom.js';
-import { EDGE, EXTRAS, LINK_SWITCHES, chosenKey, needs, neighboursOf, settings, universe, view } from './graph-data.js';
-import { KIND, STATUS, STATUSES } from './labels.js';
+import { announce, clear, h, plural, put, s } from './dom.js';
+import { filterBar, loadRows } from './filterbar.js';
+import { createContextList } from './context-list.js';
+import {
+  EDGE,
+  LINK_SWITCHES,
+  PRESENTATIONS,
+  PRESETS,
+  PRESET_WORDS,
+  TYPES,
+  chosenKey,
+  drawable,
+  needs,
+  neighboursOf,
+  relationWords,
+  settings,
+  showsContext,
+  showsWork,
+  universe,
+  view,
+  wordsFor,
+} from './graph-data.js';
+import { STATUS, STATUSES } from './labels.js';
 import { createLayout } from './layout.js';
-import { renderMarkdown } from './markdown.js';
-import { ensure, store } from './store.js';
+import { openRecord } from './records.js';
+import { ensure, epics, store } from './store.js';
+import { createWorkList } from './work-list.js';
 
 const layout = createLayout();
-const EXTRA_LABELS = { rules: 'Rules', decisions: 'Decisions and principles', facts: 'Facts', beliefs: 'Beliefs' };
-const STATUS_FILL = { new: '#e9e2d2', ready: '#fffdf8', in_progress: '#c8321a', blocked: '#8a5a00', done: '#2f6b4f', dropped: '#cbc2ae', active: '#e9e2d2', held: '#e9e2d2', settled: '#fffdf8', stale: '#8a5a00' };
-const KIND_FILL = { epic: '#16130f', story: '#c8321a', task: '#fffdf8', rule: '#e9e2d2', decision: '#f0c9bb', principle: '#f0c9bb', fact: '#dce8df', belief: '#fffdf8' };
+const STATUS_FILL = { new: '#e9e2d2', ready: '#fffdf8', in_progress: '#c8321a', blocked: '#8a5a00', done: '#2f6b4f', dropped: '#cbc2ae', held: '#e9e2d2', settled: '#fffdf8', active: '#e9e2d2', superseded: '#cbc2ae', withdrawn: '#cbc2ae' };
+const KIND_FILL = { epic: '#16130f', story: '#c8321a', task: '#fffdf8', rule: '#e9e2d2', decision: '#f0c9bb', fact: '#dce8df' };
 const EPIC_FILLS = ['#c8321a', '#2f6b4f', '#8a5a00', '#3b5b92', '#7a3b7a', '#16130f', '#5b8a8a', '#a0522d'];
 
 let root = null;
 let params = new URLSearchParams();
 let cfg = settings(params);
-let all = { dots: new Map(), edges: [] };
-let shown = { dots: new Map(), edges: [], collapsed: false, notice: '' };
+let all = { dots: new Map(), edges: [] }; // everything the preset allows
+let shown = { dots: new Map(), edges: [], collapsed: false, notice: '' }; // what the scope keeps
+let drawn = shown; // what the map draws of it
 let parts = {}; // the elements
+let lists = null; // the work list and the context list, kept while the page is open
+let bar = null; // the work filter
 let zoom = { x: 0, y: 0, k: 1 };
 let frame = 0;
 let generation = 0;
+let settled = false; // a draw has finished and none is under way
 let lastShape = '';
+let scrolledTo = null; // the record the list was last brought to
+let inList = false; // the list was the last thing drawn
+let appliedQ = ''; // the work filter the filter box last took from the address
+let problem = ''; // what the server said when something could not be loaded
 let dotEls = new Map();
 let edgeEls = [];
 
@@ -34,7 +67,11 @@ let edgeEls = [];
 export function mount(element, initial) {
   root = element;
   params = initial;
+  cfg = settings(params);
+  appliedQ = cfg.q;
   lastShape = '';
+  scrolledTo = null;
+  settled = false;
   build();
   draw();
 }
@@ -43,17 +80,34 @@ export function unmount() {
   generation += 1;
   if (frame) cancelAnimationFrame(frame);
   frame = 0;
+  lists?.context.destroy();
+  lists = null;
   root = null;
 }
 
+// Only the choice changed (the address got a new `sel`): mark it again, and draw nothing else.
+// Anything else the address holds draws it again.
 export function update(next) {
   params = next;
-  if (root) draw();
+  if (!root) return;
+  const before = cfg;
+  cfg = settings(params);
+  const endedChoice = [before.sel, cfg.sel].some((sel) => sel && all.dots.get(sel.key)?.ended && !cfg.ended);
+  if (settled && shapeKey(before) === shapeKey(cfg) && !endedChoice) {
+    syncControls();
+    markChoice();
+  } else {
+    draw();
+  }
 }
 
 export function refresh() {
-  if (root) draw();
+  if (root && !lists.context.busy()) draw();
 }
+
+// What the drawing depends on, apart from the choice (which only matters in the local scope).
+const shapeKey = (c) =>
+  [c.view, c.as, c.scope, c.epic, c.depth, c.q, c.colour, c.mentions, c.ended, [...c.hideKind].sort(), [...c.hideStatus].sort(), [...c.hideLink].sort(), c.scope === 'local' ? c.sel?.key : ''].join('|');
 
 function check(name, label, checked, onchange) {
   return h('label', { class: 'check' }, h('input', { type: 'checkbox', name, checked, onchange }), ` ${label}`);
@@ -70,19 +124,29 @@ function toggle(name, value, on) {
   ui.navigate({ [name]: [...now].sort().join(',') || null });
 }
 
-function build() {
-  const scope = h(
-    'select',
-    { id: 'scope', onchange: () => ui.navigate({ scope: scope.value === 'epic' ? null : scope.value }) },
-    h('option', { value: 'epic' }, 'One epic'),
-    h('option', { value: 'all' }, 'Everything'),
-    h('option', { value: 'local' }, 'Around the chosen item'),
+// A set of buttons of which one is chosen, in the address: they are plain buttons, so the keyboard
+// works as it does for any button. The group is `group`, and each button is `${prefix}-${value}`.
+function segmented(group, prefix, label, names, change) {
+  return h(
+    'div',
+    { id: group, class: 'gv-seg', role: 'group', 'aria-label': label },
+    names.map(([value, words]) => h('button', { type: 'button', id: `${prefix}-${value}`, 'data-value': value, 'aria-pressed': 'false', onclick: () => change(value) }, words)),
   );
-  const epicSelect = h('select', { id: 'graph-epic', onchange: () => ui.navigate({ epic: epicSelect.value || null }) });
-  const depth = h(
+}
+
+function build() {
+  const views = segmented('graph-views', 'graph-view', 'What to show', PRESETS.map((name) => [name, PRESET_WORDS[name]]), (value) => ui.navigate({ view: value }));
+  const presentations = segmented('graph-presentations', 'graph-as', 'How to show it', PRESENTATIONS.map((name) => [name, name === 'map' ? 'Map' : 'List']), (value) => ui.navigate({ as: value }));
+
+  const epicSelect = h('select', { id: 'graph-epic', onchange: () => ui.navigate({ epic: epicSelect.value || null, scope: null }) });
+  const reach = h(
     'select',
-    { id: 'depth', onchange: () => ui.navigate({ depth: depth.value === '1' ? null : depth.value }) },
-    [1, 2, 3].map((n) => h('option', { value: n }, `${n} ${n === 1 ? 'step' : 'steps'}`)),
+    {
+      id: 'graph-reach',
+      onchange: () => ui.navigate({ scope: reach.value ? 'local' : null, depth: reach.value && reach.value !== '1' ? reach.value : null }),
+    },
+    h('option', { value: '' }, 'The whole scope'),
+    [1, 2, 3].map((n) => h('option', { value: n }, `${n} ${n === 1 ? 'step' : 'steps'} around the chosen record`)),
   );
   const colour = h(
     'select',
@@ -91,55 +155,54 @@ function build() {
     h('option', { value: 'status' }, 'Status'),
     h('option', { value: 'epic' }, 'Epic'),
   );
+  bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
 
   const controls = h(
     'form',
     { class: 'graph-controls', onsubmit: (event) => event.preventDefault(), 'aria-label': 'What the graph shows' },
-    h('div', { class: 'field' }, h('label', { for: 'scope' }, 'Show'), scope),
-    h('div', { class: 'field', id: 'epic-field' }, h('label', { for: 'graph-epic' }, 'Epic'), epicSelect),
-    h('div', { class: 'field', id: 'depth-field' }, h('label', { for: 'depth' }, 'Reach'), depth),
-    h('div', { class: 'field' }, h('label', { for: 'colour' }, 'Colour by'), colour),
+    h('div', { class: 'field' }, h('label', { for: 'graph-epic' }, 'Epic'), epicSelect),
+    h('div', { class: 'field' }, h('label', { for: 'graph-reach' }, 'Reach'), reach),
+    h('div', { class: 'field map-only' }, h('label', { for: 'colour' }, 'Colour by'), colour),
     h(
       'fieldset',
       {},
-      h('legend', {}, 'Also show'),
-      EXTRAS.map((name) => check(`show-${name}`, EXTRA_LABELS[name], false, (event) => toggle('show', name, event.target.checked))),
-      check('overlaps', 'Suggested overlaps', false, (event) => ui.navigate({ overlaps: event.target.checked ? '1' : null })),
-      check('mentions', 'Mentions: [[references]] written in the text', false, (event) => ui.navigate({ mentions: event.target.checked ? '1' : null })),
+      h('legend', {}, 'Also'),
+      h('span', { class: 'map-only' }, check('ended', 'Show replaced, withdrawn and dropped', false, (event) => ui.navigate({ ended: event.target.checked ? '1' : null }))),
+      check('mentions', 'References: show [[references]] written in the text', false, (event) => ui.navigate({ mentions: event.target.checked ? '1' : null })),
     ),
+  );
+  const filters = h(
+    'details',
+    { id: 'filters', class: 'filters' },
+    h('summary', {}, 'Filters: kinds, statuses and lines'),
     h(
-      'details',
-      { id: 'filters', class: 'filters' },
-      h('summary', {}, 'Filters: kinds, statuses and lines'),
+      'div',
+      { class: 'graph-controls' },
       h(
-        'div',
-        { class: 'graph-controls' },
-        h(
-          'fieldset',
-          {},
-          h('legend', {}, 'Kinds'),
-          ['epic', 'story', 'task'].map((name) => check(`kind-${name}`, KIND[name].label, true, (event) => toggle('hide_kind', name, !event.target.checked))),
-        ),
-        h(
-          'fieldset',
-          {},
-          h('legend', {}, 'Statuses'),
-          STATUSES.map((name) => check(`status-${name}`, STATUS[name].label, true, (event) => toggle('hide_status', name, !event.target.checked))),
-        ),
-        h(
-          'fieldset',
-          {},
-          h('legend', {}, 'Lines'),
-          LINK_SWITCHES.map(([name, label]) => check(`link-${name}`, label, true, (event) => toggle('hide_link', name, !event.target.checked))),
-        ),
+        'fieldset',
+        {},
+        h('legend', {}, 'Kinds'),
+        Object.entries(TYPES).map(([name, type]) => check(`kind-${name}`, type.label, true, (event) => toggle('hide_kind', name, !event.target.checked))),
+      ),
+      h(
+        'fieldset',
+        {},
+        h('legend', {}, 'Work statuses'),
+        STATUSES.map((name) => check(`status-${name}`, STATUS[name].label, true, (event) => toggle('hide_status', name, !event.target.checked))),
+      ),
+      h(
+        'fieldset',
+        {},
+        h('legend', {}, 'Lines'),
+        LINK_SWITCHES.map(([name, label]) => check(`link-${name}`, label, true, (event) => toggle('hide_link', name, !event.target.checked))),
       ),
     ),
   );
 
   const svg = s(
     'svg',
-    { id: 'graph-svg', role: 'group', 'aria-label': 'The graph. Use the lists beside it to choose items from the keyboard.' },
-    s('defs', {}, marker('arrow-needs', '#c8321a'), marker('arrow-sup', '#4a443b')),
+    { id: 'graph-svg', role: 'group', 'aria-label': 'The map. Tab moves between the dots; Enter chooses one and P pins it. The list shows the same records as text.' },
+    s('defs', {}, marker('arrow-needs', 'needs'), marker('arrow-sup', 'sup')),
     s('g', { id: 'viewport' }, s('g', { id: 'edges' }), s('g', { id: 'dots' })),
   );
   svg.addEventListener('pointerdown', pointerDown);
@@ -164,48 +227,52 @@ function build() {
       h('button', { type: 'button', id: 'release', onclick: releasePins }, 'Release pins'),
     ),
   );
-  const filter = h('input', { id: 'graph-find', type: 'search', 'aria-label': 'Find an item in the list', placeholder: 'Find an item…', autocomplete: 'off', oninput: drawItems });
+
+  lists = { work: createWorkList(), context: createContextList() };
   parts = {
-    scope,
+    views,
+    presentations,
     epicSelect,
-    depth,
+    reach,
     colour,
     svg,
     viewport: svg.querySelector('#viewport'),
     edgesG: svg.querySelector('#edges'),
     dotsG: svg.querySelector('#dots'),
     notice: h('p', { class: 'graph-notice', id: 'graph-notice', role: 'status' }),
-    chosen: h('section', { id: 'graph-chosen', 'aria-label': 'The chosen item' }),
-    neighbours: h('section', { id: 'graph-neighbours', 'aria-label': 'Neighbours of the chosen item' }),
-    items: h('ul', { id: 'graph-items', class: 'listbox' }),
-    filter,
+    chosen: h('section', { id: 'graph-chosen', 'aria-label': 'The chosen record' }),
+    neighbours: h('section', { id: 'graph-neighbours', 'aria-label': 'What the chosen record is joined to' }),
+    map: h('div', { class: 'graph-body', id: 'graph-map' }),
+    list: h('div', { class: 'gv-list', id: 'graph-list' }),
+    workSection: h('section', { class: 'gv-section', id: 'work-list-section', 'aria-labelledby': 'work-list-heading' }, h('header', { class: 'gv-section-head' }, h('h2', { id: 'work-list-heading' }, 'Work')), lists.work.element),
+    epicSignature: '',
   };
+  parts.map.append(stage, h('div', { class: 'graph-side' }, parts.chosen, parts.neighbours, legend()));
+  parts.list.append(parts.workSection, lists.context.element);
   clear(root).append(
     h(
       'div',
-      { class: 'graph-page' },
-      h('div', { class: 'toolbar' }, h('h1', {}, 'Graph')),
-      controls,
-      parts.notice,
+      { class: 'graph-page', id: 'graph-page' },
       h(
         'div',
-        { class: 'graph-body' },
-        stage,
-        h(
-          'div',
-          { class: 'graph-side' },
-          parts.chosen,
-          parts.neighbours,
-          h('section', {}, h('h3', {}, 'Items in view'), h('label', { for: 'graph-find', class: 'sr-only' }, 'Find an item'), filter, parts.items),
-          legend(),
-        ),
+        { class: 'toolbar' },
+        h('h1', {}, 'Graph'),
+        views,
+        presentations,
+        h('p', { class: 'help' }, 'Work is the epics, stories and tasks and what needs what. Context is the requirements, decisions and facts and the work they concern. Everything is both. The map draws them as dots and lines; the list writes the same thing out, to read and to change.'),
       ),
+      controls,
+      h('div', { class: 'gv-work-filter' }, bar.form, bar.help, bar.problem),
+      filters,
+      parts.notice,
+      parts.map,
+      parts.list,
     ),
   );
 }
 
-function marker(id, fill) {
-  return s('marker', { id, viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L10,5 L0,10 z', fill }));
+function marker(id, kind) {
+  return s('marker', { id, viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L10,5 L0,10 z', class: `arrow arrow-${kind}` }));
 }
 
 function legend() {
@@ -213,32 +280,132 @@ function legend() {
   return h(
     'section',
     { class: 'legend', 'aria-label': 'What the shapes and lines mean' },
-    h('span', {}, '■ epic'),
-    h('span', {}, '● story'),
-    h('span', {}, '◆ task'),
-    h('span', {}, '▲ rule'),
-    h('span', {}, '⬢ decision or principle'),
-    h('span', {}, '▪ fact'),
-    h('span', {}, '▢ belief (a suggestion)'),
-    ['hierarchy', 'needs_first', 'supersedes', 'duplicates', 'relates_to', 'concerns', 'overlap'].map((type) => h('span', {}, line(type), ` ${EDGE[type].label}`)),
+    Object.values(TYPES).map((type) => h('span', {}, `${type.sign} ${type.label.toLowerCase()}`)),
+    h('span', {}, '✓ confirmed by a person'),
+    h('span', {}, '┄ dashed outline: unconfirmed'),
+    h('span', {}, '✕ crossed out: replaced, withdrawn or dropped'),
+    ['hierarchy', 'needs_first', 'supersedes', 'duplicates', 'relates_to', 'placed', 'concerns', 'replaces', 'mention'].map((type) => h('span', {}, line(type), ` ${EDGE[type].label}`)),
   );
 }
 
 // -- working out what to draw ---------------------------------------------------------------------
 
+// The work the filter asks for, as the server reads it, or null for no filter (or one it could not
+// read: its words are under the filter box).
+async function matchedWork(text) {
+  if (!text) {
+    bar.setProblem('');
+    return null;
+  }
+  const rows = await loadRows(text, bar);
+  return rows ? new Set(rows.map((row) => row.id)) : null;
+}
+
 async function draw() {
   const mine = ++generation;
+  settled = false;
   cfg = settings(params);
   syncControls();
-  for (const name of needs(cfg)) await ensure(name);
+  problem = '';
+  try {
+    for (const name of needs(cfg)) await ensure(name);
+  } catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    problem = error.message;
+  }
+  const matched = await matchedWork(cfg.q);
   if (mine !== generation || !root) return;
   all = universe(cfg);
-  shown = view(cfg, all);
-  const dots = [...shown.dots.values()];
-  layout.set(dots, shown.edges);
+  shown = view(cfg, all, matched);
+  drawn = drawable(cfg, shown);
+  const map = cfg.as === 'map';
+  parts.map.hidden = !map;
+  parts.list.hidden = map;
+  if (map) drawMap();
+  else drawList();
+  drawNotice();
+  settled = true;
+}
+
+function syncControls() {
+  for (const group of [parts.views, parts.presentations]) {
+    const current = group === parts.views ? cfg.view : cfg.as;
+    for (const button of group.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.value === current));
+  }
+  const choices = epics().sort((a, b) => a.id - b.id);
+  const signature = choices.map((epic) => `${epic.id}:${epic.title}`).join('|');
+  if (signature !== parts.epicSignature) {
+    parts.epicSignature = signature;
+    parts.epicSelect.replaceChildren(h('option', { value: '' }, 'All epics'), ...choices.map((epic) => h('option', { value: epic.id }, `#${epic.id} ${epic.title}`)));
+  }
+  parts.epicSelect.value = cfg.epic ? String(cfg.epic) : '';
+  parts.reach.value = cfg.scope === 'local' ? String(cfg.depth) : '';
+  parts.colour.value = cfg.colour;
+  // The filter box takes what the address says only when the address changed, so that words
+  // typed and not yet applied are still there after switching preset or presentation.
+  if (cfg.q !== appliedQ) {
+    appliedQ = cfg.q;
+    bar.setValue(cfg.q);
+  }
+  root.querySelector('[name="ended"]').checked = cfg.ended;
+  root.querySelector('[name="mentions"]').checked = cfg.mentions;
+  for (const name of Object.keys(TYPES)) root.querySelector(`[name="kind-${name}"]`).checked = !cfg.hideKind.has(name);
+  for (const name of STATUSES) root.querySelector(`[name="status-${name}"]`).checked = !cfg.hideStatus.has(name);
+  for (const [name] of LINK_SWITCHES) root.querySelector(`[name="link-${name}"]`).checked = !cfg.hideLink.has(name);
+  if (cfg.hideKind.size || cfg.hideStatus.size || cfg.hideLink.size) root.querySelector('#filters').open = true;
+  for (const element of root.querySelectorAll('.map-only')) element.hidden = cfg.as !== 'map';
+  const page = root.querySelector('#graph-page');
+  page.dataset.view = cfg.view;
+  page.dataset.as = cfg.as;
+}
+
+// What the person is told about what is shown: what the scope says, how much there is, anything
+// that could not be loaded, and a chosen record that the scope leaves out.
+function drawNotice() {
+  const chosen = chosenKey(cfg);
+  const missing = chosen && all.dots.has(chosen) && !shown.dots.has(chosen);
+  const counts = cfg.as === 'map' && !shown.collapsed ? `${plural(drawn.dots.size, 'dot')}, ${plural(drawn.edges.length, 'line')}.` : '';
+  put(
+    parts.notice,
+    [shown.notice, counts, problem].filter(Boolean).join(' '),
+    missing
+      ? [' ', `The chosen ${TYPES[all.dots.get(chosen).type].label.toLowerCase()} is outside this scope. `, h('button', { type: 'button', class: 'link', id: 'show-whole-project', onclick: () => ui.navigate({ epic: null, scope: null, q: null }) }, 'Show the whole project')]
+      : null,
+  );
+}
+
+// -- the list -------------------------------------------------------------------------------------
+
+function drawList() {
+  const ctx = { cfg, all, shown };
+  parts.workSection.hidden = !showsWork(cfg);
+  lists.context.element.hidden = !showsContext(cfg);
+  if (showsWork(cfg)) lists.work.draw(ctx);
+  if (showsContext(cfg)) lists.context.draw(ctx);
+  // Coming to the list from the map, the chosen record is brought into view again.
+  if (!inList) scrolledTo = null;
+  inList = true;
+  scrollToChoice();
+}
+
+// Brings the chosen record into view once, when it is a new choice, not on every refresh.
+function scrollToChoice() {
+  const key = chosenKey(cfg);
+  if (key === scrolledTo) return;
+  scrolledTo = key;
+  const item = key ? root.querySelector(`#graph-list [data-key="${key}"]`) : null;
+  item?.scrollIntoView({ block: 'nearest' });
+}
+
+// -- the map --------------------------------------------------------------------------------------
+
+function drawMap() {
+  inList = false;
+  const dots = [...drawn.dots.values()];
+  layout.set(dots, drawn.edges);
   layout.settle(dots.length > 400 ? 120 : 260);
-  render();
-  const shape = [cfg.scope, shown.epicId, cfg.depth, chosenKey(cfg), shown.collapsed, dots.length > 0].join('|');
+  renderMap();
+  const shape = [cfg.view, cfg.scope, drawn.epicId, cfg.depth, cfg.q, cfg.scope === 'local' ? chosenKey(cfg) : '', drawn.collapsed, dots.length > 0].join('|');
   if (shape !== lastShape) {
     lastShape = shape;
     fit();
@@ -249,31 +416,14 @@ async function draw() {
   else parts.svg.dataset.settled = 'true';
 }
 
-function syncControls() {
-  parts.scope.value = cfg.scope;
-  const epics = [...store.nodes.values()].filter((node) => node.kind === 'epic').sort((a, b) => a.id - b.id);
-  parts.epicSelect.replaceChildren(...epics.map((epic) => h('option', { value: epic.id }, `#${epic.id} ${epic.title}`)));
-  parts.epicSelect.value = String(cfg.epic && store.nodes.get(cfg.epic)?.kind === 'epic' ? cfg.epic : (epics[0]?.id ?? ''));
-  parts.depth.value = String(cfg.depth);
-  parts.colour.value = cfg.colour;
-  root.querySelector('#epic-field').hidden = cfg.scope !== 'epic';
-  root.querySelector('#depth-field').hidden = cfg.scope !== 'local';
-  for (const name of EXTRAS) root.querySelector(`[name="show-${name}"]`).checked = cfg.show.has(name);
-  root.querySelector('[name="overlaps"]').checked = cfg.overlaps;
-  root.querySelector('[name="mentions"]').checked = cfg.mentions;
-  for (const name of ['epic', 'story', 'task']) root.querySelector(`[name="kind-${name}"]`).checked = !cfg.hideKind.has(name);
-  for (const name of STATUSES) root.querySelector(`[name="status-${name}"]`).checked = !cfg.hideStatus.has(name);
-  for (const [name] of LINK_SWITCHES) root.querySelector(`[name="link-${name}"]`).checked = !cfg.hideLink.has(name);
-  if (cfg.hideKind.size || cfg.hideStatus.size || cfg.hideLink.size) root.querySelector('#filters').open = true;
-}
-
-// -- drawing --------------------------------------------------------------------------------------
-
 function fillOf(dot) {
-  if (cfg.colour === 'status') return STATUS_FILL[dot.status] || '#fffdf8';
+  if (cfg.colour === 'status') {
+    if (dot.type === 'decision' || dot.type === 'fact') return dot.ended ? STATUS_FILL.withdrawn : dot.confirmation === 'confirmed' ? KIND_FILL.fact : '#fffdf8';
+    return STATUS_FILL[dot.status] || '#fffdf8';
+  }
   if (cfg.colour === 'epic') {
-    const epics = [...store.nodes.values()].filter((node) => node.kind === 'epic').sort((a, b) => a.id - b.id);
-    const at = epics.findIndex((epic) => epic.id === dot.epicId);
+    const choices = epics().sort((a, b) => a.id - b.id);
+    const at = choices.findIndex((epic) => epic.id === dot.epicId);
     return at < 0 ? '#e9e2d2' : EPIC_FILLS[at % EPIC_FILLS.length];
   }
   return KIND_FILL[dot.type] || '#fffdf8';
@@ -292,43 +442,49 @@ function shapeOf(dot) {
     case 'rule':
       return s('polygon', { ...base, points: '0,-10 10,8 -10,8' });
     case 'decision':
-    case 'principle':
-      return s('polygon', { ...base, points: '-10,0 -5,-9 5,-9 10,0 5,9 -5,9', class: `shape ${dot.type}` });
-    case 'fact':
-      return s('rect', { ...base, x: -7, y: -7, width: 14, height: 14 });
+      return s('polygon', { ...base, points: '-10,0 -5,-9 5,-9 10,0 5,9 -5,9' });
     default:
-      return s('rect', { ...base, x: -8, y: -8, width: 16, height: 16, rx: 4, 'stroke-dasharray': '3 2', class: 'shape belief' });
+      // A fact is a page with a folded corner.
+      return s('polygon', { ...base, points: '-7,-8 3,-8 8,-3 8,8 -7,8' });
   }
 }
 
 function describe(dot) {
-  const what = KIND[dot.type]?.label || dot.type;
-  const status = STATUS[dot.status]?.label || dot.status;
-  const detail = dot.collapsed ? `, with ${plural(dot.count, 'item')} under it` : `. ${status}`;
-  return `${what} ${dot.id}: ${dot.title}${detail}${layout.isPinned(dot.key) ? '. Pinned' : ''}`;
+  const detail = dot.collapsed ? `${TYPES[dot.type].label} ${dot.id}: ${dot.title}, with ${plural(dot.count, 'item')} under it` : wordsFor(dot);
+  return `${detail}${layout.isPinned(dot.key) ? ' Pinned.' : ''}`;
 }
 
 function edgeWords(edge) {
   if (edge.type === 'collapsed') return `${plural(edge.count, 'link')} between`;
-  if (edge.type === 'overlap') return `might be the same, ${edge.similarity.toFixed(2)} (a suggestion from the index)`;
   return EDGE[edge.type].label;
 }
 
-function render() {
+// The marks that say more than the shape does, so that nothing is told by colour alone: a tick for
+// a record a person confirmed, a cross for one that has ended.
+function marks(dot) {
+  const found = [];
+  if (dot.confirmation === 'confirmed') found.push(s('text', { class: 'mark confirmed-mark', x: 8, y: -7 }, '✓'));
+  if (dot.ended) found.push(s('path', { class: 'mark ended-mark', d: 'M-9,-9 L9,9 M9,-9 L-9,9' }));
+  return found;
+}
+
+function renderMap() {
   const focused = document.activeElement?.dataset?.key;
   const chosen = chosenKey(cfg);
-  const dots = [...shown.dots.values()];
+  const dots = [...drawn.dots.values()];
   const labelled = dots.length <= 60;
   parts.edgesG.replaceChildren();
   parts.dotsG.replaceChildren();
-  edgeEls = shown.edges.map((edge) => {
+  const quietLabels = new Set(['concerns', 'placed', 'mention', 'hierarchy']);
+  edgeEls = drawn.edges.map((edge) => {
     const text = edgeWords(edge);
     const attrs = { class: 'edge', 'data-type': edge.type, 'data-source': edge.source, 'data-target': edge.target };
     if (edge.type === 'needs_first') attrs['marker-end'] = 'url(#arrow-needs)';
-    if (edge.type === 'supersedes') attrs['marker-end'] = 'url(#arrow-sup)';
-    const line = s('line', attrs, s('title', {}, `${shown.dots.get(edge.source).title} ${text} ${shown.dots.get(edge.target).title}`));
-    const showLabel = edge.type !== 'hierarchy' && (labelled || edge.source === chosen || edge.target === chosen || edge.type === 'overlap' || edge.type === 'collapsed');
-    const label = showLabel ? s('text', { class: 'edge-label', 'text-anchor': 'middle' }, text) : null;
+    if (edge.type === 'supersedes' || edge.type === 'replaces') attrs['marker-end'] = 'url(#arrow-sup)';
+    const line = s('line', attrs, s('title', {}, `${drawn.dots.get(edge.source).title} ${text} ${drawn.dots.get(edge.target).title}`));
+    const near = edge.source === chosen || edge.target === chosen;
+    const showLabel = edge.type === 'collapsed' || near || (labelled && !quietLabels.has(edge.type));
+    const label = showLabel && edge.type !== 'hierarchy' ? s('text', { class: 'edge-label', 'text-anchor': 'middle' }, text) : null;
     parts.edgesG.append(line);
     if (label) parts.edgesG.append(label);
     return { edge, line, label };
@@ -339,20 +495,23 @@ function render() {
     const element = s(
       'g',
       {
-        class: `dot type-${dot.type}${dot.key === chosen ? ' chosen' : ''}${dot.outside ? ' outside' : ''}${layout.isPinned(dot.key) ? ' pinned' : ''}`,
+        class: `dot type-${dot.type}${dot.key === chosen ? ' chosen' : ''}${dot.outside ? ' outside' : ''}${layout.isPinned(dot.key) ? ' pinned' : ''}${dot.ended ? ' ended' : ''}${dot.confirmation ? ` ${dot.confirmation}` : ''}`,
         tabindex: 0,
         role: 'button',
         'aria-label': describe(dot),
         'aria-pressed': dot.key === chosen ? 'true' : 'false',
         'data-key': dot.key,
-        'data-id': dot.id,
+        'data-kind': dot.kind,
         'data-type': dot.type,
+        'data-id': dot.id,
         'data-status': dot.status,
+        'data-confirmation': dot.confirmation || null,
         'data-outside': dot.outside ? 'true' : null,
         'data-collapsed': dot.collapsed ? 'true' : null,
       },
       s('title', {}, describe(dot)),
       shapeOf(dot),
+      ...marks(dot),
       labelled || dot.collapsed || dot.key === chosen ? s('text', { y: dot.collapsed ? 34 : 24, 'text-anchor': 'middle' }, dot.collapsed ? `${dot.title} (${dot.count})` : words) : null,
     );
     element.addEventListener('keydown', (event) => {
@@ -369,12 +528,9 @@ function render() {
     parts.dotsG.append(element);
   }
   if (focused) dotEls.get(focused)?.focus();
-  const overlapNote = cfg.overlaps && store.overlapNote ? ` Suggested overlaps are not available: ${store.overlapNote}` : '';
-  const counts = shown.collapsed ? '' : `${plural(dots.length, 'dot')}, ${plural(shown.edges.length, 'line')}.`;
-  parts.notice.textContent = [shown.notice, counts].filter(Boolean).join(' ') + overlapNote;
   parts.svg.dataset.dots = String(dots.length);
-  parts.svg.dataset.collapsed = shown.collapsed ? 'true' : 'false';
-  drawLists();
+  parts.svg.dataset.collapsed = drawn.collapsed ? 'true' : 'false';
+  drawSide();
 }
 
 function place() {
@@ -387,7 +543,7 @@ function place() {
     const b = layout.at(edge.target);
     if (!a || !b) continue;
     const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-    const back = edge.type === 'needs_first' || edge.type === 'supersedes' ? 14 : 0;
+    const back = ['needs_first', 'supersedes', 'replaces'].includes(edge.type) ? 14 : 0;
     line.setAttribute('x1', a.x.toFixed(1));
     line.setAttribute('y1', a.y.toFixed(1));
     line.setAttribute('x2', (b.x - ((b.x - a.x) / length) * back).toFixed(1));
@@ -472,7 +628,7 @@ function pointerDown(event) {
       choose(target.dataset.key);
     } else if (target && moved) {
       announce('Pinned where you put it. Double-click it, or press P on it, to let it go.');
-      drawLists();
+      drawSide();
     }
   };
   parts.svg.addEventListener('pointermove', move);
@@ -482,103 +638,85 @@ function pointerDown(event) {
 
 function togglePin(key) {
   const pinned = layout.togglePin(key);
+  const dot = drawn.dots.get(key);
   dotEls.get(key)?.classList.toggle('pinned', pinned);
+  if (dot) dotEls.get(key)?.setAttribute('aria-label', describe(dot));
   announce(pinned ? 'Pinned.' : 'Let go.');
   animate();
-  drawLists();
+  drawSide();
 }
 
 function releasePins() {
   layout.releaseAll();
-  dotEls.forEach((element) => element.classList.remove('pinned'));
+  dotEls.forEach((element, key) => {
+    element.classList.remove('pinned');
+    element.setAttribute('aria-label', describe(drawn.dots.get(key)));
+  });
   animate();
-  drawLists();
+  drawSide();
 }
 
 // -- choosing ---------------------------------------------------------------------------------------
 
 function choose(key) {
-  const dot = shown.dots.get(key) || all.dots.get(key);
+  const dot = drawn.dots.get(key) || all.dots.get(key);
   if (!dot) return;
   announce(`Chosen: ${dot.title}`);
   if (dot.collapsed) {
-    ui.navigate({ scope: null, epic: dot.id, card: dot.id, sel: null, panel: null });
-  } else if (dot.isNode) {
-    const moveTo = cfg.scope === 'epic' && dot.epicId && dot.epicId !== shown.epicId ? { epic: dot.epicId } : {};
-    ui.navigate({ card: dot.id, sel: null, panel: null, ...moveTo });
+    ui.navigate({ scope: null, epic: dot.id, sel: key, panel: null });
+  } else if (cfg.scope === 'epic' && dot.epicId && dot.epicId !== shown.epicId) {
+    // A dot of another epic, drawn because it is joined to this one: show that epic.
+    ui.navigate({ epic: dot.epicId, sel: key, panel: null });
   } else {
-    ui.navigate({ sel: key, card: null });
+    openRecord(dot.kind, dot.id);
   }
 }
 
+// Marks the chosen record again, in whichever presentation is showing, without drawing anything.
+function markChoice() {
+  const key = chosenKey(cfg);
+  if (cfg.as === 'map') {
+    for (const [dotKey, element] of dotEls) {
+      element.classList.toggle('chosen', dotKey === key);
+      element.setAttribute('aria-pressed', String(dotKey === key));
+    }
+    drawSide();
+  } else {
+    lists.work.select(key);
+    lists.context.select(key);
+    scrollToChoice();
+  }
+  drawNotice();
+}
+
 function neighbourButton(entry) {
-  const { dot, edge, outgoing } = entry;
-  const relation =
-    edge.type === 'hierarchy'
-      ? outgoing ? 'contains' : 'is in'
-      : edge.type === 'needs_first'
-        ? outgoing ? 'needs first' : 'is needed first by'
-        : edge.type === 'supersedes'
-          ? outgoing ? 'supersedes' : 'is superseded by'
-          : edge.type === 'mention'
-            ? outgoing ? 'mentions' : 'is mentioned by'
-            : EDGE[edge.type].label;
+  const { dot } = entry;
   return h(
     'li',
     {},
-    h('button', { type: 'button', class: 'neighbour', 'data-key': dot.key, onclick: () => choose(dot.key) }, h('strong', {}, relation), ` ${KIND[dot.type].label} #${dot.id} ${dot.title}`),
+    h('button', { type: 'button', class: 'neighbour', 'data-key': dot.key, 'data-relation': entry.edge.type, onclick: () => choose(dot.key) }, h('strong', {}, relationWords(entry)), ` ${TYPES[dot.type].label} #${dot.id} ${dot.title}`),
   );
 }
 
-function drawLists() {
+// Beside the map: the chosen record, which the shared panel shows in full, and what it is joined
+// to, as buttons that choose the other end.
+function drawSide() {
   const key = chosenKey(cfg);
   const dot = key ? all.dots.get(key) : null;
   clear(parts.chosen);
   clear(parts.neighbours);
   if (!dot) {
-    parts.chosen.append(h('h3', {}, 'Chosen item'), h('p', { class: 'quiet' }, 'Choose a dot, or an item from the list, to see its neighbours here.'));
-  } else {
-    const details = [];
-    if (dot.text) details.push(renderMarkdown(dot.text));
-    if (dot.origin) {
-      details.push(h('p', { class: 'quiet' }, `Origin: ${dot.origin}. Recorded by ${dot.by}.${dot.type === 'belief' ? ' A suggestion, not a decision.' : ''}${dot.stale ? ' Stale: its evidence changed.' : ''}`));
-    }
-    if (dot.type === 'decision' || dot.type === 'principle') details.push(h('p', { class: 'quiet' }, `Decided by ${dot.by}.`));
-    // A rule, decision, fact or belief has no card: its page is where it can be read in full and changed.
-    const pages = {
-      rule: ['Rules', `#/rules?rule=${dot.id}`],
-      decision: ['Memory', `#/memory?entry=decision:${dot.id}`],
-      principle: ['Memory', `#/memory?entry=decision:${dot.id}`],
-      fact: ['Memory', `#/memory?entry=fact:${dot.id}`],
-      belief: ['Memory', `#/memory?entry=belief:${dot.id}`],
-    };
-    if (pages[dot.type]) details.push(h('p', {}, h('a', { class: 'open-entry', href: pages[dot.type][1] }, `Open it on the ${pages[dot.type][0]} page`)));
-    parts.chosen.append(
-      h('h3', {}, 'Chosen item'),
-      h('p', {}, h('strong', {}, `${KIND[dot.type].label} #${dot.id}`), ` ${dot.title}`),
-      ...details,
-      h('button', { type: 'button', id: 'pin', onclick: () => togglePin(dot.key) }, layout.isPinned(dot.key) ? 'Unpin this dot' : 'Pin this dot'),
-    );
-    const near = neighboursOf(dot.key, all.edges, all.dots);
-    parts.neighbours.append(
-      h('h3', {}, `Neighbours (${near.length})`),
-      near.length ? h('ul', {}, near.map(neighbourButton)) : h('p', { class: 'quiet' }, 'Nothing is connected to it with the lines that are switched on.'),
-    );
+    parts.chosen.append(h('h3', {}, 'Chosen record'), h('p', { class: 'quiet' }, 'Choose a dot to see what it is joined to. It opens in the panel.'));
+    return;
   }
-  drawItems();
-}
-
-function drawItems() {
-  if (!parts.items) return;
-  const source = shown.dots.size || cfg.scope !== 'local' ? shown.dots : all.dots;
-  const wanted = parts.filter.value.trim().toLowerCase();
-  const chosen = chosenKey(cfg);
-  const matching = [...source.values()].filter((dot) => !wanted || `${dot.id} ${dot.title} ${KIND[dot.type].label}`.toLowerCase().includes(wanted));
-  const most = 500;
-  parts.items.replaceChildren(
-    ...matching.slice(0, most).map((dot) =>
-      h('li', {}, h('button', { type: 'button', class: 'item', 'data-key': dot.key, 'aria-pressed': dot.key === chosen ? 'true' : 'false', onclick: () => choose(dot.key) }, `${KIND[dot.type].label} #${dot.id} ${dot.title}`)),
-    ),
-    ...(matching.length > most ? [h('li', { class: 'quiet' }, `${matching.length - most} more: type to narrow the list.`)] : []),
+  parts.chosen.append(
+    h('h3', {}, 'Chosen record'),
+    h('p', {}, h('strong', {}, `${TYPES[dot.type].label} #${dot.id}`), ` ${dot.title}`),
+    h('button', { type: 'button', id: 'pin', onclick: () => togglePin(dot.key) }, layout.isPinned(dot.key) ? 'Unpin this dot' : 'Pin this dot'),
+  );
+  const near = neighboursOf(dot.key, all.edges, all.dots);
+  parts.neighbours.append(
+    h('h3', {}, `Joined to (${near.length})`),
+    near.length ? h('ul', {}, near.map(neighbourButton)) : h('p', { class: 'quiet' }, 'Nothing is joined to it with the lines that are switched on.'),
   );
 }

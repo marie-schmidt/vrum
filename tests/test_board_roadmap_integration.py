@@ -19,6 +19,7 @@ from tests.board_helpers import (
     bar_of,
     board_url,
     browser_page,
+    database_footprint,
     hold_back_news,
     made,
     on,
@@ -27,7 +28,7 @@ from tests.board_helpers import (
 )
 from tests.board_helpers import drag_bar as drag
 from tests.board_helpers import roadmap_ids as shown
-from tests.helpers import all_nodes, day, ok, refused, the_token, unique_word
+from tests.helpers import all_nodes, day, make_fact, ok, refused, reindexed, the_token, unique_word
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -437,3 +438,193 @@ async def test_the_roadmap_zooms_groups_and_marks_today(client: Client, board: s
         await page.locator("#group").select_option("epic")
         assert "group=" not in page.url
         assert w.problems == [], w.problems
+
+
+# -- the shared detail panel, the drawers and the address ----------------------------------------
+
+
+async def test_a_label_or_a_key_opens_the_shared_panel_and_the_timeline_stays_as_it_was(
+    client: Client, board: str
+) -> None:
+    epic, story, first, second = await window(client)
+    fact = await make_fact(client, f"Planned with care {epic}", node_ids=[first])
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}&group=status")
+        await shown(page, 4, 0)
+        # Two bars are chosen to move together, and the timeline is scrolled a little.
+        await bar_of(page, first).click(modifiers=["Shift"], position={"x": 30, "y": 9})
+        await bar_of(page, second).click(modifiers=["Shift"], position={"x": 30, "y": 9})
+        await expect(page.locator("#count")).to_contain_text("2 chosen to move together")
+        scrolled = await page.evaluate(
+            "() => { const e = document.getElementById('rm-scroll'); e.scrollLeft = 37;"
+            " return e.scrollLeft; }"
+        )
+
+        async def unchanged() -> None:
+            await expect(page.locator("#count")).to_contain_text("2 chosen to move together")
+            await expect(bar_of(page, first)).to_have_attribute("aria-pressed", "true")
+            await expect(bar_of(page, second)).to_have_attribute("aria-pressed", "true")
+            assert await page.locator("#filter").input_value() == f"epic:{epic}"
+            assert await page.locator("#group").input_value() == "status"
+            assert (
+                await page.evaluate("document.getElementById('rm-scroll').scrollLeft") == scrolled
+            )
+
+        # A label opens the item in the panel, named in the address as sel=node:<id>.
+        await page.locator(f".rm-label[data-id='{story}'] button").click()
+        await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        assert f"sel=node:{story}" in page.url and f"q=epic:{epic}" in page.url
+        await unchanged()
+
+        # A key on a bar does the same, and the panel shows what concerns it, as recall says.
+        await bar_of(page, first).focus()
+        await page.keyboard.press("Enter")
+        await expect(page.locator("#card-title")).to_contain_text(f"#{first} ", timeout=SLOW)
+        assert f"sel=node:{first}" in page.url
+        row = page.locator(f"#panel li.record[data-record='fact:{fact['id']}']")
+        await expect(row).to_contain_text(f"Planned with care {epic}")
+        await unchanged()
+
+        # Opening a drawer (activity, then search) leaves the bars, the choice and the scroll alone,
+        # and the panel stays.
+        await page.locator("#activity-open").click()
+        await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible()
+        await unchanged()
+        await page.locator("#global-search").fill(f"Planned with care {epic}")
+        await page.locator("#global-search-go").click()
+        await expect(page.locator("#drawer[data-drawer=search]")).to_be_visible()
+        await expect(page.locator("#card-title")).to_contain_text(f"#{first} ")
+        await unchanged()
+        assert "drawer=search" in page.url and f"sel=node:{first}" in page.url
+
+        # Escape gives up the choice, and a click on a bar opens that item.
+        await bar_of(page, second).focus()
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#count")).not_to_contain_text("chosen")
+        await bar_of(page, second).click(position={"x": 30, "y": 9})
+        await expect(page.locator("#card-title")).to_contain_text(f"#{second} ", timeout=SLOW)
+        assert f"sel=node:{second}" in page.url
+        # Closing the panel takes sel out of the address and leaves the Roadmap where it was.
+        await page.get_by_role("button", name="Close the details").click()
+        await expect(page.locator("#panel")).to_be_hidden()
+        assert "sel=" not in page.url and f"q=epic:{epic}" in page.url
+        await shown(page, 4, 0)
+        assert w.problems == [], w.problems
+
+
+async def test_an_undated_item_is_scheduled_from_the_panel_and_a_late_start_is_refused_there(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Panel dates {word}")
+    story = await made(client, "story", f"Part {word}", epic)
+    await made(client, "task", f"Dated {word}", story, start_on=day(1), target_on=day(5))
+    undated = await made(client, "task", f"Undated {word}", story)
+    said = await refused(
+        client,
+        "update_node",
+        actor="x",
+        node_id=undated,
+        expected_version=1,
+        start_on=day(20),
+        target_on=day(12),
+    )
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}&sel=node:{undated}")
+        await shown(page, 3, 1)
+        await expect(page.locator("#card-title")).to_contain_text(f"#{undated} ", timeout=SLOW)
+
+        # Dates that start after they end are refused by the server, in its words, in the panel.
+        await page.locator("#edit-start").fill(day(20))
+        await page.locator("#edit-target").fill(day(12))
+        await page.get_by_role("button", name="Save changes").click()
+        problem = page.locator("#panel .edit .problem .refusal-text")
+        await expect(problem).to_be_visible(timeout=SLOW)
+        plain(await problem.inner_text(), said)
+        assert (await ok(client, "get_node", node_id=undated))["start_on"] is None
+        await shown(page, 3, 1)
+
+        # Good dates put it on the timeline, at the pixels they give, as one versioned change.
+        await page.locator("#edit-start").fill(day(6))
+        await page.locator("#edit-target").fill(day(11))
+        await page.get_by_role("button", name="Save changes").click()
+        await expect(bar_of(page, undated)).to_have_attribute("data-start", day(6), timeout=SLOW)
+        await expect(bar_of(page, undated)).to_have_attribute("data-end", day(11))
+        assert await shown(page, 4, 0) >= {undated}
+        line = await timeline(page)
+        left = await bar_of(page, undated).evaluate("e => parseFloat(e.style.left)")
+        assert abs(left - (on(day(6)) - line["origin"]).days * line["ppd"]) < 1.5
+        assert await dates(client, undated) == (day(6), day(11))
+        (change,) = await updates(client, undated)
+        assert (change["actor"], change["before"], change["after"]) == (
+            ACTOR,
+            {"start_on": None, "target_on": None, "version": 1},
+            {"start_on": day(6), "target_on": day(11), "version": 2},
+        )
+        # The panel is still the item's, with its new dates, and the address still names it.
+        await expect(page.locator("#panel .card-detail .dates")).to_contain_text(
+            f"Start {day(6)}. Target {day(11)}."
+        )
+        assert f"sel=node:{undated}" in page.url
+        assert w.problems == [] or all("status of 400" in p for p in w.problems), w.problems
+
+
+async def test_a_roadmaps_address_opens_the_same_state_in_a_second_browser_and_stores_nothing(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Kept {word}")
+    story = await made(client, "story", f"Kept story {word}", epic)
+    task = await made(client, "task", f"Kept task {word}", story, start_on=day(1), target_on=day(5))
+    await made(client, "task", f"Undated {word}", story)
+    await make_fact(client, f"About the kept task {word}", node_ids=[task])
+    await reindexed(client)
+    async with browser_page(board, token=the_token()) as first:
+        await first.open(f"#/roadmap?q=epic:{epic}")
+        await shown(first.page, 3, 1)
+        await first.page.locator("[data-zoom=quarter]").click()
+        await expect(first.page.locator(".rm-track")).to_have_attribute("data-zoom", "quarter")
+        await first.page.locator("#group").select_option("status")
+        await expect(first.page.locator(".rm-group").first).to_be_visible(timeout=SLOW)
+        await first.page.locator(f".rm-label[data-id='{task}'] button").click()
+        await expect(first.page.locator("#card-title")).to_contain_text(f"#{task} ", timeout=SLOW)
+        await first.page.locator("#global-search").fill(f"kept task {word}")
+        await first.page.locator("#global-search-go").click()
+        await expect(first.page.locator("#search-results li.result").first).to_be_visible(
+            timeout=SLOW
+        )
+        address = first.page.url
+        for part in ("#/roadmap?", f"q=epic:{epic}", "zoom=quarter", "group=status"):
+            assert part in address, (part, address)
+        assert f"sel=node:{task}" in address and "drawer=search" in address
+        assert the_token() not in address
+        results = await first.page.locator("#search-results li.result").evaluate_all(
+            "els => els.map(e => [e.dataset.type, Number(e.dataset.id)])"
+        )
+        before = database_footprint()
+
+        # A second browser, which has never seen this view, opens the address and sees the same.
+        async with browser_page(board, token=the_token(), name="Someone else") as second:
+            await second.page.goto(address)
+            await shown(second.page, 3, 1)
+            await expect(second.page.locator(".rm-track")).to_have_attribute(
+                "data-zoom", "quarter", timeout=SLOW
+            )
+            assert await second.page.locator("#filter").input_value() == f"epic:{epic}"
+            assert await second.page.locator("#group").input_value() == "status"
+            await expect(second.page.locator("#card-title")).to_contain_text(
+                f"#{task} ", timeout=SLOW
+            )
+            await expect(second.page.locator("#drawer[data-drawer=search]")).to_be_visible()
+            await expect(second.page.locator("#search-results li.result").first).to_be_visible(
+                timeout=SLOW
+            )
+            assert sorted(
+                await second.page.locator("#search-results li.result").evaluate_all(
+                    "els => els.map(e => [e.dataset.type, Number(e.dataset.id)])"
+                )
+            ) == sorted(results)
+            assert second.problems == [], second.problems
+        assert database_footprint() == before

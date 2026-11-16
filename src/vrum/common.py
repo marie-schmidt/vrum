@@ -29,8 +29,7 @@ def refuse_secrets(value: object) -> None:
         field = f"The {path} field" if path else "The text"
         raise Refusal(
             f"{field} contains what looks like {kind}, so it was not stored, was not sent to "
-            "the language model or any other service, and nothing was changed. Take the secret "
-            "out and try again."
+            "any other service, and nothing was changed. Take the secret out and try again."
         )
 
 
@@ -171,25 +170,24 @@ async def record_event(
     other_node_id: int | None = None,
     rule_id: int | None = None,
     decision_id: int | None = None,
-    memory_id: int | None = None,
+    fact_id: int | None = None,
 ) -> None:
-    """Append to the event log. It shows in the history of every node, rule, decision, fact and
-    belief it names: `other_node_id` is the second node of a link, or the story a rule has just
-    left.
+    """Append to the event log. It shows in the history of every node, rule, decision and fact it
+    names: `other_node_id` is the second node of a link, or the story a rule has just left.
 
     Every write records an event with the text it wrote, so this is where text with a secret in a
-    well-known format is refused whatever path it came by (a model's proposal, for one). The
-    refusal rolls the whole write back."""
+    well-known format is refused whatever path it came by. The refusal rolls the whole write
+    back."""
     refuse_secrets({"actor": actor, **after})
     await conn.execute(
-        "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, memory_id, action, "
+        "INSERT INTO events (node_id, other_node_id, rule_id, decision_id, fact_id, action, "
         "actor, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             node_id,
             other_node_id,
             rule_id,
             decision_id,
-            memory_id,
+            fact_id,
             action,
             actor,
             None if before is None else Jsonb(before),

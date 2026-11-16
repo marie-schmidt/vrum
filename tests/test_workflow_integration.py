@@ -14,9 +14,9 @@ from mcp import Client
 
 from tests.helpers import (
     all_nodes,
+    confirm,
     day,
     embeddings_stopped,
-    make_belief,
     make_decision,
     make_fact,
     make_rule,
@@ -230,6 +230,7 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
     await make_rule(client, "A dropped rule", story_id=story["id"], status="dropped")
     await make_rule(client, "A rule of another story", story_id=other_story["id"])
     on_epic = await make_decision(client, "Decided on the epic", node_ids=[epic["id"]])
+    await confirm(client, "decision", on_epic, "Marie")
     await make_decision(client, "Decided on the second task", node_ids=[second["id"]])
     await make_decision(client, "Decided elsewhere", node_ids=[other_story["id"]])
     old = await make_decision(client, "The old way", node_ids=[story["id"]])
@@ -243,15 +244,53 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         reason="It changed",
         decided_by="Marie",
     )
-    principle = await make_decision(client, "Always be careful", kind="principle")
+    given_up = await make_decision(client, "Given up", node_ids=[first["id"]])
+    await ok(
+        client, "withdraw_decision", actor="agent-1", decision_id=given_up["id"], reason="No need"
+    )
+    free_wide = await make_decision(client, "Applies everywhere", project_wide=True)
+    linked_wide = await make_decision(
+        client, "Applies everywhere, and to this story", project_wide=True, node_ids=[story["id"]]
+    )
     fact = await make_fact(client, "Invoices are sent as PDFs", node_ids=[story["id"]])
-    belief = await make_belief(client, [fact], "PDFs are probably enough", node_ids=[story["id"]])
+    parent_fact = await make_fact(client, "Customers are in Europe", node_ids=[epic["id"]])
+    await confirm(client, "fact", parent_fact, "Ann")
+    gone = await make_fact(client, "Invoices are sent as faxes", node_ids=[story["id"]])
+    await ok(client, "withdraw_fact", actor="a", fact_ids=[gone["id"]], reason="They are not")
+    outdated = await make_fact(client, "Invoices are sent by post", node_ids=[story["id"]])
+    await ok(
+        client,
+        "supersede_fact",
+        actor="a",
+        replaces=[outdated["id"]],
+        reason="Changed",
+        text="Invoices are sent by e-mail",
+        source="The owner",
+        keep_links=False,
+    )
     await make_fact(client, "A fact about somewhere else", node_ids=[other_story["id"]])
 
     answer = await take(client, "ann", within_node_id=epic["id"], context_chars=1_000_000)
 
     assert answer["work"]["id"] == first["id"]
     context = answer["context"]
+    assert set(context) == {
+        "parents",
+        "rules",
+        "handoffs",
+        "prerequisites",
+        "active_decisions",
+        "project_wide_decisions",
+        "facts",
+        "past_decisions",
+        "unblocks",
+        "similar",
+        "similar_note",
+        "characters",
+        "max_characters",
+        "left_out",
+        "cut_note",
+    }
     assert [(p["kind"], p["id"]) for p in context["parents"]] == [
         ("epic", epic["id"]),
         ("story", story["id"]),
@@ -259,19 +298,77 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
     assert context["parents"][1]["body_preview"] == "The story in more words."
     assert ids(context["rules"]) == [kept["id"]]
     assert context["rules"][0]["body"] == "Each has its own number."
+
+    # Decisions in force that are linked to this item or its parents, with who confirmed them.
     assert set(ids(context["active_decisions"])) == {on_epic["id"], new["id"]}
-    assert all(d["status"] == "active" for d in context["active_decisions"])
-    assert ids(context["superseded_decisions"]) == [old["id"]]
-    assert context["superseded_decisions"][0]["superseded_by_id"] == new["id"]
-    # Every principle in force, wherever it is linked.
-    every_principle = await ok(
-        client, "list_decisions", kind="principle", status="active", limit=200
+    assert all(
+        d["status"] == "active" and not d["project_wide"] for d in context["active_decisions"]
     )
-    assert every_principle["next_after_id"] is None
-    assert set(ids(context["active_principles"])) == set(ids(every_principle["items"]))
-    assert principle["id"] in ids(context["active_principles"])
-    assert ids(context["facts"]) == [fact["id"]] and context["facts"][0]["suggestion"] is False
-    assert ids(context["beliefs"]) == [belief["id"]] and context["beliefs"][0]["suggestion"] is True
+    by_id = {d["id"]: d for d in context["active_decisions"]}
+    assert (by_id[on_epic["id"]]["confirmation"], by_id[on_epic["id"]]["confirmed_by"]) == (
+        "confirmed",
+        "Marie",
+    )
+    assert by_id[on_epic["id"]]["linked_to"] == [epic["id"]]
+    assert by_id[on_epic["id"]]["label"].startswith("Decision, confirmed by Marie on ")
+    assert (by_id[new["id"]]["confirmation"], by_id[new["id"]]["confirmed_by"]) == (
+        "unconfirmed",
+        None,
+    )
+    assert by_id[new["id"]]["linked_to"] == [story["id"]]
+    assert by_id[new["id"]]["label"] == "Decision, not confirmed by a person"
+    for field in ("title", "text", "reason", "decided_by", "decided_on"):
+        assert by_id[new["id"]][field] == new[field]
+
+    # What is no longer in force is shown apart, with its state, so it cannot be mistaken.
+    assert ids(context["past_decisions"]) == sorted([old["id"], given_up["id"]])
+    past = {d["id"]: d for d in context["past_decisions"]}
+    assert (past[old["id"]]["status"], past[old["id"]]["superseded_by_id"]) == (
+        "superseded",
+        new["id"],
+    )
+    assert (past[given_up["id"]]["status"], past[given_up["id"]]["superseded_by_id"]) == (
+        "withdrawn",
+        None,
+    )
+    assert past[given_up["id"]]["label"].startswith("Withdrawn decision, ")
+
+    # Every project-wide decision in force, wherever it is linked and also when it is not.
+    every_wide = await ok(client, "list_decisions", project_wide=True, status="active", limit=200)
+    assert every_wide["next_after_id"] is None
+    assert ids(context["project_wide_decisions"]) == ids(every_wide["items"])
+    wide = {d["id"]: d for d in context["project_wide_decisions"]}
+    assert {free_wide["id"], linked_wide["id"]} <= set(wide)
+    assert wide[free_wide["id"]]["linked_to"] == []
+    assert wide[linked_wide["id"]]["linked_to"] == [story["id"]]
+    assert all(d["project_wide"] and d["status"] == "active" for d in wide.values())
+    assert wide[free_wide["id"]]["label"] == "Project-wide decision, not confirmed by a person"
+    assert not set(wide) & set(by_id) and not set(wide) & set(past)
+
+    # Facts in force, from this item and its parents, each with its source and its confirmation.
+    assert ids(context["facts"]) == [fact["id"], parent_fact["id"]]
+    assert [f["text"] for f in context["facts"]] == [
+        "Invoices are sent as PDFs",
+        "Customers are in Europe",
+    ]
+    facts = {f["id"]: f for f in context["facts"]}
+    assert (facts[fact["id"]]["confirmation"], facts[fact["id"]]["confirmed_by"]) == (
+        "unconfirmed",
+        None,
+    )
+    assert facts[fact["id"]]["linked_to"] == [story["id"]]
+    assert facts[fact["id"]]["source"] == "The team call"
+    assert facts[fact["id"]]["label"] == ("Fact, not confirmed by a person. Source: The team call")
+    assert (facts[parent_fact["id"]]["confirmation"], facts[parent_fact["id"]]["confirmed_by"]) == (
+        "confirmed",
+        "Ann",
+    )
+    assert facts[parent_fact["id"]]["linked_to"] == [epic["id"]]
+    assert facts[parent_fact["id"]]["label"].startswith("Fact, confirmed by Ann on ")
+    # A withdrawn fact and a superseded one are not in the briefing at all.
+    for ended in (gone, outdated):
+        assert ended["id"] not in ids(context["facts"])
+
     assert [(d["node"]["id"], d["becomes_ready_when_done"]) for d in context["unblocks"]] == [
         (second["id"], True)
     ]
@@ -279,6 +376,69 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
     assert context["left_out"] == {} and context["cut_note"] is None
     assert context["characters"] <= context["max_characters"]
     assert other_epic["id"] not in [p["id"] for p in context["parents"]]
+
+
+async def test_a_project_wide_decision_is_in_every_briefing_until_it_ends(client: Client) -> None:
+    epic_a, story_a, _ = await project(client, 1)
+    epic_b, _, _ = await project(client, 1)
+    wide = await make_decision(client, "Applies to all the work", project_wide=True)
+
+    async def briefing(epic: dict[str, Any]) -> dict[str, Any]:
+        answer = await take(client, "ann", within_node_id=epic["id"], peek=True)
+        assert answer["found"] and answer["peeked"] and answer["claim"] is None
+        return dict(answer["context"])
+
+    for epic in (epic_a, epic_b):
+        context = await briefing(epic)
+        assert wide["id"] in ids(context["project_wide_decisions"])
+        assert wide["id"] not in ids(context["active_decisions"])
+
+    # What a person confirms is shown as confirmed in the very next briefing.
+    await confirm(client, "decision", wide, "Marie")
+    shown = {d["id"]: d for d in (await briefing(epic_b))["project_wide_decisions"]}
+    assert (shown[wide["id"]]["confirmation"], shown[wide["id"]]["confirmed_by"]) == (
+        "confirmed",
+        "Marie",
+    )
+
+    # Replaced (by the person's word), it stays project-wide: the new one is in, the old is not.
+    newer = await ok(
+        client,
+        "supersede_decision",
+        actor="agent-1",
+        decision_id=wide["id"],
+        title="Applies to all the work, differently",
+        text="t",
+        reason="r",
+        decided_by="Marie",
+        said_by="Marie",
+        quote="Changed it",
+    )
+    for epic in (epic_a, epic_b):
+        context = await briefing(epic)
+        assert newer["id"] in ids(context["project_wide_decisions"])
+        assert wide["id"] not in ids(context["project_wide_decisions"])
+        assert wide["id"] not in ids(context["past_decisions"])
+
+    # One that is linked to this very story and then withdrawn is a past decision there, and in
+    # force nowhere.
+    linked = await make_decision(
+        client, "Applies everywhere and here", project_wide=True, node_ids=[story_a["id"]]
+    )
+    await ok(
+        client,
+        "withdraw_decision",
+        actor="agent-1",
+        decision_id=linked["id"],
+        reason="Not any more",
+    )
+    for epic in (epic_a, epic_b):
+        context = await briefing(epic)
+        assert linked["id"] not in ids(context["project_wide_decisions"])
+    assert linked["id"] in ids((await briefing(epic_a))["past_decisions"])
+    assert linked["id"] not in ids((await briefing(epic_b))["past_decisions"])
+    withdrawn = await ok(client, "get_decision", decision_id=linked["id"])
+    assert (withdrawn["status"], withdrawn["project_wide"]) == ("withdrawn", True)
 
 
 async def test_the_context_keeps_to_its_size_and_says_what_it_left_out(client: Client) -> None:
@@ -877,17 +1037,53 @@ async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client)
     for filters, action in (
         ({"rule_id": rule["id"]}, "rule_created"),
         ({"decision_id": decision["id"]}, "decision_recorded"),
-        ({"memory_id": fact["id"]}, "memory_recorded"),
+        ({"fact_id": fact["id"]}, "fact_recorded"),
     ):
         page = await ok(client, "changes_since", after_event_id=start, **filters)
         actions = [e["action"] for e in page["items"]]
         assert actions[0] == action and page["items"]
         assert all(e["actor"] != "zed" for e in page["items"])
+    # One fact's feed holds everything done to that fact and nothing done to another.
+    await confirm(client, "fact", fact, "Marie", actor="yan")
+    other_fact = await make_fact(client, "Another fact", node_ids=[task["id"]])
+    await ok(
+        client,
+        "withdraw_fact",
+        actor="xi",
+        fact_ids=[fact["id"]],
+        reason="Wrong",
+        said_by="Marie",
+        quote="It is wrong",
+    )
+    await caught_up(client, (await event_ids_after(start))[-1])
+    of_fact = await ok(client, "changes_since", after_event_id=start, fact_id=fact["id"])
+    assert [(e["action"], e["actor"]) for e in of_fact["items"]] == [
+        ("fact_recorded", "agent-1"),
+        ("fact_linked", "agent-1"),
+        ("fact_confirmed", "yan"),
+        ("fact_withdrawn", "xi"),
+    ]
+    assert all(e["fact_id"] == fact["id"] for e in of_fact["items"])
+    assert other_fact["id"] not in {e["fact_id"] for e in of_fact["items"]}
+    of_decision = await ok(
+        client, "changes_since", after_event_id=start, decision_id=decision["id"]
+    )
+    assert all(e["decision_id"] == decision["id"] for e in of_decision["items"])
+    # The fact's link to the task is in the task's feed.
     on_task = await ok(client, "changes_since", after_event_id=start, node_id=task["id"])
-    assert {"create", "update"} <= {e["action"] for e in on_task["items"]}
+    assert {"create", "update", "fact_linked"} <= {e["action"] for e in on_task["items"]}
     assert all(task["id"] in (e["node_id"], e["other_node_id"]) for e in on_task["items"])
     assert "at most one of" in await refused(
         client, "changes_since", node_id=task["id"], rule_id=rule["id"]
+    )
+    assert "at most one of" in await refused(
+        client, "changes_since", decision_id=decision["id"], fact_id=fact["id"]
+    )
+    assert "There is no fact with id 987654321" in await refused(
+        client, "changes_since", fact_id=987654321
+    )
+    assert "There is no decision with id 987654321" in await refused(
+        client, "changes_since", decision_id=987654321
     )
     assert "no event with id 999999999" in await refused(
         client, "changes_since", after_event_id=999999999
@@ -1225,5 +1421,13 @@ async def test_the_server_instructions_name_only_tools_that_exist(client: Client
 
     assert named, "the instructions should name the tools of the working loop"
     assert named <= tools, f"names no tool: {sorted(named - tools)}"
-    assert {"next_work", "recall", "record_decision", "finish_work"} <= named
-    assert len(instructions.split()) < 300
+    assert {
+        "next_work",
+        "recall",
+        "record_decision",
+        "retain_fact",
+        "set_confirmation",
+        "finish_work",
+    } <= named
+    # The working loop in a few lines: it has to stay short enough that an agent reads all of it.
+    assert len(instructions.split()) < 350

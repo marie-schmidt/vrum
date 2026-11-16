@@ -20,11 +20,9 @@ export const KIND = {
   epic: { label: 'Epic', sign: '◆' },
   story: { label: 'Story', sign: '●' },
   task: { label: 'Task', sign: '▪' },
-  rule: { label: 'Rule', sign: '▤' },
+  rule: { label: 'Requirement', sign: '▤' },
   decision: { label: 'Decision', sign: '⚑' },
-  principle: { label: 'Principle', sign: '⚐' },
   fact: { label: 'Fact', sign: '◈' },
-  belief: { label: 'Belief', sign: '◇' },
 };
 
 export const PRIORITIES = ['low', 'normal', 'high', 'urgent'];

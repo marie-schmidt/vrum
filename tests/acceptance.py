@@ -1,8 +1,9 @@
 """./acceptance.sh runs this: the whole acceptance scenario, chapter by chapter, through a real MCP
-client against the real containers (see tests/acceptance_scenario.py for what it is).
+client and a real headless browser against the real containers (see tests/acceptance_scenario.py
+for what it is).
 
     uv run python -m tests.acceptance                 every chapter, in order
-    uv run python -m tests.acceptance finding model   only these (each needs a stack that has what
+    uv run python -m tests.acceptance finding board   only these (each needs a stack that has what
                                                       its chapter builds on: a fresh one is safest)
 
 The first proof that does not hold stops it with a plain message and exit code 1."""
@@ -15,14 +16,15 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 
+from playwright.async_api import expect
+
 from tests.acceptance_accounts import accounts
 from tests.acceptance_board import board
-from tests.acceptance_connect import connecting
+from tests.acceptance_context import context
 from tests.acceptance_finding import finding
-from tests.acceptance_memory import rules_and_memory
-from tests.acceptance_model import hardening, model_help
+from tests.acceptance_graph import graph
+from tests.acceptance_hardening import hardening
 from tests.acceptance_moving import moving
-from tests.acceptance_run import running
 from tests.acceptance_scenario import (
     PROOFS,
     Failed,
@@ -33,8 +35,11 @@ from tests.acceptance_scenario import (
     requirements_and_decisions,
     working_together,
 )
-from tests.acceptance_views import views
+from tests.acceptance_search import searching
+from tests.acceptance_utilities import utilities
+from tests.board_helpers import SLOW
 
+# `moving` is last: it destroys the database it started with.
 CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "arriving": arriving,
     "planning": planning,
@@ -42,13 +47,12 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "decisions": requirements_and_decisions,
     "remembering": remembering,
     "finding": finding,
-    "model": model_help,
     "hardening": hardening,
     "board": board,
-    "views": views,
-    "memory": rules_and_memory,
-    "connecting": connecting,
-    "running": running,
+    "graph": graph,
+    "context": context,
+    "searching": searching,
+    "utilities": utilities,
     "accounts": accounts,
     "moving": moving,
 }
@@ -60,6 +64,9 @@ async def main(only: list[str]) -> None:
         raise SystemExit(
             f"No chapter called {unknown[0]}. The chapters are: {', '.join(CHAPTERS)}."
         )
+    # The shared project grows through the walk: a page of it may take longer to draw than the
+    # five seconds a browser check waits by default.
+    expect.set_options(timeout=SLOW)
     started = time.monotonic()
     for name, run in CHAPTERS.items():
         if not only or name in only:

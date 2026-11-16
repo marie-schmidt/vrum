@@ -13,7 +13,7 @@ import urllib.request
 import pytest
 from playwright.async_api import expect
 
-from tests.board_helpers import SLOW, browser_page, made
+from tests.board_helpers import SLOW, browser_page, create_in_browser, made
 from tests.helpers import compose, connect, ok, unique_word
 from tests.world import api, make_project, register, server_base
 
@@ -50,18 +50,7 @@ async def register_in_the_browser(w, name: str, email: str, password: str) -> No
 
 
 async def create_in_the_browser(w, kind: str, title: str, parent: int | None = None) -> int:  # type: ignore[no-untyped-def]
-    await w.page.locator("#new-item").click()
-    dialog = w.page.locator("dialog.modal")
-    await dialog.locator("#new-kind").select_option(kind)
-    if parent is not None:
-        await dialog.locator("#new-parent").select_option(str(parent))
-    await dialog.locator("#new-title").fill(title)
-    await dialog.get_by_role("button", name="Create").click()
-    heading = w.page.locator("#card-title")
-    await expect(heading).to_contain_text(title, timeout=SLOW)
-    found = re.match(r"#(\d+) ", await heading.inner_text())
-    assert found
-    return int(found.group(1))
+    return await create_in_browser(w.page, kind, title, parent)
 
 
 async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_restart() -> None:
@@ -91,7 +80,9 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         await expect(w.page.locator("#project-switcher option:checked")).to_have_text(
             f"Compiler {word}"
         )
-        await expect(w.page.locator("h1")).to_have_text("Home", timeout=SLOW)
+        await expect(w.page.locator("h1")).to_have_text("Board", timeout=SLOW)
+        # The Board is the landing view, so a first look at a new project needs no other page.
+        assert w.page.url.endswith("#/board")
 
         # The board's own forms make an epic, a story under it and a task under that.
         await w.go("#/board")
@@ -100,8 +91,12 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         task = await create_in_the_browser(w, "task", f"Login form {word}", story)
         await expect(w.page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
 
-        # An agent key made on the project's own page reaches the same records over MCP.
-        await w.go("#/access")
+        # An agent key made on the project's own page (the Settings menu's Agent access) reaches
+        # the same records over MCP.
+        await w.page.locator("#settings-menu").click()
+        await w.page.locator("#settings-access").click()
+        await expect(w.page.locator("#key-label")).to_be_visible(timeout=SLOW)
+        assert "#/access" in w.page.url
         await w.page.locator("#key-label").fill("build agent")
         await w.page.locator("#create-key").click()
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
@@ -218,7 +213,7 @@ async def test_a_person_sees_only_their_own_projects_and_anothers_address_opens_
         await made(agent, "epic", f"Private to Ann {word}")
 
     async with browser_page(mine.address, token=mine.key, name=None) as w:
-        await w.open("#/home")
+        await w.open("#/board")
         options = await w.page.locator("#project-switcher option").all_inner_texts()
         assert options == [f"Bobs {word}", f"Bobs second {word}", "All projects…"]
         assert f"Anns {word}" not in await w.page.locator("#top").inner_text()
@@ -327,7 +322,7 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
         secret = (await w.page.locator("#key-secret").inner_text()).strip()
         await expect(w.page.locator("#keys li.key")).to_have_count(2, timeout=SLOW)
         # The key is shown once: after leaving the page it is not anywhere on it.
-        await w.go("#/home")
+        await w.go("#/board")
         await w.go("#/access")
         await expect(w.page.locator("#keys li.key")).to_have_count(2, timeout=SLOW)
         assert secret not in await w.page.locator("body").inner_text()
@@ -385,7 +380,7 @@ async def test_a_session_that_ended_sends_the_page_back_to_sign_in_and_signing_i
     owner = register(name=f"Timed {word}")
     project = make_project(owner, f"Timed {word}")
     async with browser_page(project.address, token=project.key, name=None) as w:
-        await w.open("#/home")
+        await w.open("#/board")
         await expect(w.page.locator("#account")).to_have_text(f"Timed {word}", timeout=SLOW)
         # The server ends the session (as signing out in another tab would).
         cookies = await w.page.context.cookies()
@@ -426,19 +421,31 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
         const near = (a, b) => Math.abs(a - b) < 0.5;
         const bar = document.getElementById('top').getBoundingClientRect().height;
         const said = getComputedStyle(document.documentElement).getPropertyValue('--top-now');
-        const panel = getComputedStyle(document.getElementById('panel'));
-        return near(parseFloat(said), bar) && bar > 60
-            && (panel.position !== 'sticky' || near(parseFloat(panel.top), bar));
+        const below = ['drawer', 'panel'].every((id) => {
+            const column = getComputedStyle(document.getElementById(id));
+            return column.position !== 'sticky' || near(parseFloat(column.top), bar);
+        });
+        return near(parseFloat(said), bar) && bar > 60 && below;
     }"""
-    async with browser_page(project.address, token=project.key, name=None) as w:
-        await w.open("#/board")
+    async with (
+        connect(project.mcp_url, project.key) as agent,
+        browser_page(project.address, token=project.key, name=None) as w,
+    ):
+        epic = await made(agent, "epic", f"Under the bar {word}")
+        await w.open(f"#/board?drawer=activity&sel=node:{epic}")
         await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#drawer")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#panel")).to_be_visible(timeout=SLOW)
         # With long names the bar wraps onto a second line, taller than the one line the
-        # stylesheet assumes, and more so on a narrow window: what sticks must start below it all.
+        # stylesheet assumes, and more so on a narrow window: what sticks (the drawer on the left
+        # and the detail panel on the right) must start below it all.
         await w.page.wait_for_function(agreed, timeout=SLOW)
-        assert (
-            await w.page.evaluate("getComputedStyle(document.getElementById('panel')).position")
-            == "sticky"
-        )
+        for column in ("drawer", "panel"):
+            assert (
+                await w.page.evaluate(
+                    f"getComputedStyle(document.getElementById('{column}')).position"
+                )
+                == "sticky"
+            )
         await w.page.set_viewport_size({"width": 700, "height": 1500})
         await w.page.wait_for_function(agreed, timeout=SLOW)
