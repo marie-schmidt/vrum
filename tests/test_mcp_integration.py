@@ -60,6 +60,7 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
         "search",
         "similar_items",
         "find_overlaps",
+        "find_mentions",
         "reindex",
         "export_graph",
         "import_graph",

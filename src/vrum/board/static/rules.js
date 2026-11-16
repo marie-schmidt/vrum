@@ -12,6 +12,9 @@ import { coverageWords, drawCoverage } from './coverage.js';
 import { parentChoices } from './create.js';
 import { dialogForm, field, openDialog } from './forms.js';
 import { KIND } from './labels.js';
+import { renderMarkdown } from './markdown.js';
+import { withReferences } from './reference-picker.js';
+import { mentionedInDetails, needTargets } from './references.js';
 import { ensure, epicOf, store, sync, titleOf } from './store.js';
 
 const RULE_STATUSES = [
@@ -66,7 +69,6 @@ export async function mount(element, initial) {
   root.addEventListener('dragover', dragOver);
   root.addEventListener('dragleave', dragLeave);
   root.addEventListener('drop', dropped);
-  await ensure('rules');
   await load();
 }
 
@@ -96,6 +98,7 @@ export function refresh() {
 async function load() {
   const mine = ++generation;
   await ensure('rules');
+  await needTargets(...(store.rules || []).map((rule) => rule.body));
   const counts = await drawCoverage(parts.coverageBody);
   if (mine !== generation || !root) return;
   parts.summary.replaceChildren(coverageWords(counts), ' ', h('a', { href: '#coverage-heading' }, 'See the coverage report'));
@@ -187,7 +190,8 @@ function ruleRow(rule) {
       h('span', { class: `chip rule-status status-${rule.status}`, title: WORDS[rule.status].hint }, WORDS[rule.status].label),
       h('strong', { class: 'rule-title' }, rule.title),
     ),
-    rule.body ? h('p', { class: 'entry-text' }, rule.body) : null,
+    rule.body ? renderMarkdown(rule.body, { className: 'markdown entry-text' }) : null,
+    mentionedInDetails('rule', rule.id),
     h(
       'div',
       { class: 'buttons' },
@@ -250,7 +254,7 @@ function statusSelect(value) {
 
 function ruleDialog(rule) {
   const title = h('input', { type: 'text', value: rule?.title || '', autocomplete: 'off', id: 'rule-title' });
-  const body = h('textarea', { rows: 6, value: rule?.body || '', id: 'rule-body' });
+  const body = withReferences(h('textarea', { rows: 6, value: rule?.body || '', id: 'rule-body' }));
   const status = statusSelect(rule?.status || 'held');
   status.id = 'rule-status';
   const story = h('select', { id: 'rule-story' }, h('option', { value: '' }, 'Not in a story yet (place it later)'), parentChoices('task'));

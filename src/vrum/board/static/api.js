@@ -80,6 +80,22 @@ export async function callAll(tool, args) {
   return items;
 }
 
+// Every item of a list that a tool gives with `offset` and `next_offset` (search, overlaps and
+// mentions), page after page. `first` is the first page whole, for what it says besides the items
+// (counts, the state of the index).
+export async function callPaged(tool, args) {
+  const items = [];
+  let offset = 0;
+  let first = null;
+  for (;;) {
+    const page = await call(tool, { ...args, limit: 200, offset });
+    first = first || page;
+    items.push(...page.items);
+    if (page.next_offset === null || page.next_offset === undefined) return { items, first };
+    offset = page.next_offset;
+  }
+}
+
 // Every item of one list of the export (links, rules, decisions or memories), which is the one
 // place that gives all the links at once.
 export async function exported(section) {

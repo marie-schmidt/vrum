@@ -8,6 +8,7 @@ import { call } from './api.js';
 import { actor, notify } from './ctx.js';
 import { h, plural } from './dom.js';
 import { clip, dialogForm, evidencePicker, field, openDialog, picker } from './forms.js';
+import { withReferences } from './reference-picker.js';
 import { store, sync } from './store.js';
 
 const KIND_OPTIONS = [
@@ -18,7 +19,7 @@ const KIND_OPTIONS = [
 const select = (name, options, value) =>
   h('select', { name, value }, options.map(([option, label]) => h('option', { value: option }, label)));
 const text = (name, value = '') => h('input', { type: 'text', name, value, autocomplete: 'off' });
-const area = (name, rows, value = '') => h('textarea', { name, rows, value });
+const area = (name, rows, value = '') => withReferences(h('textarea', { name, rows, value }));
 const confirmedBeliefs = (items) => items.filter((item) => item.type === 'belief' && item.confirmed_by);
 const refsOf = (value) => [
   ...(value.node_ids || []).map((id) => ({ type: 'node', id })),

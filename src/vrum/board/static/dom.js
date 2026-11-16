@@ -44,6 +44,19 @@ export function clear(el) {
   return el;
 }
 
+// Replaces what an element holds with these children, leaving out the empty ones (a bare append
+// would write "null") and opening up lists.
+export function put(el, ...children) {
+  el.replaceChildren();
+  const add = (child) => {
+    if (child === null || child === undefined || child === false) return;
+    if (Array.isArray(child)) child.forEach(add);
+    else el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  };
+  children.forEach(add);
+  return el;
+}
+
 export function announce(text) {
   const live = document.getElementById('live');
   if (live) live.textContent = text;

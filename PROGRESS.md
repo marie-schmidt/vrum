@@ -32,6 +32,11 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M12. Rules and memory on the board (attempts: 1) (2026-11-16, commit 7307fed)
 - [ ] M13. Find and connect (attempts: 0)
 - [ ] M14. Run and see it all (attempts: 0)
+- [ ] M15. Accounts and private projects (attempts: 0)
+
+## Added scope
+
+- Owner's decision, 2026-11-16: M15 follows M14 and replaces token-only human sign-in with account registration and email/password sign-in managed by Vrum, then private project creation and switching. Each account may own several projects; only their owner and project-authorised agents may access their isolated graphs and memories. Shared projects and invitations are not included. The full behaviour and proof are in `SPEC.md`; M15 has not been implemented, and M13 remains next.
 
 ## Defaults taken (for owner's veto)
 

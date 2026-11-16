@@ -8,10 +8,14 @@ import * as graph from './graph.js';
 import * as kanban from './kanban.js';
 import * as memory from './memory.js';
 import * as outline from './outline.js';
+import * as overlaps from './overlaps.js';
 import * as panel from './panel.js';
+import { refreshReferences } from './references.js';
 import * as roadmap from './roadmap.js';
 import * as rules from './rules.js';
+import * as search from './search.js';
 import { keepSynced, onChange, start, stopSyncing, store } from './store.js';
+import { keepSwitcher } from './switcher.js';
 import * as table from './table.js';
 
 const PAGES = {
@@ -22,6 +26,8 @@ const PAGES = {
   outline: { title: 'Outline', view: outline },
   rules: { title: 'Rules', view: rules },
   memory: { title: 'Memory', view: memory },
+  search: { title: 'Search', view: search },
+  overlaps: { title: 'Overlaps', view: overlaps },
 };
 const top = document.getElementById('top');
 const main = document.getElementById('page');
@@ -95,6 +101,7 @@ function drawTop() {
     h('a', { href: '#/board', class: 'brand' }, h('img', { src: '/board/brand/vrum-logo.svg', alt: 'vrum', height: 28 })),
     h('nav', { 'aria-label': 'Pages' }, links),
     h('span', { class: 'spacer' }),
+    h('button', { type: 'button', id: 'switcher-open', class: 'link', title: 'Ctrl+K, or ⌘K', onclick: () => openJump() }, 'Jump to…'),
     h('span', { id: 'connection', class: 'chip', hidden: true }, 'Cannot reach the server: trying again'),
     h('span', { id: 'index-state', class: 'chip', title: 'Items that are new or changed and not yet searchable by meaning' }, indexText()),
     h(
@@ -110,10 +117,13 @@ onChange((change) => {
   if (change.index) {
     const chip = document.getElementById('index-state');
     if (chip) chip.textContent = indexText();
+    if (mounted && mounted.index) mounted.index();
   }
   if (change.events && mounted) {
     mounted.refresh(change.events);
     panel.refresh(change.events);
+    // A title changed, or an item came or went: every reference on the page says so at once.
+    refreshReferences(document);
   }
 });
 
@@ -217,6 +227,12 @@ async function begin() {
 }
 
 addEventListener('hashchange', route);
+
+// Ctrl+K opens the quick switcher on every page.
+const openJump = keepSwitcher(
+  Object.entries(PAGES).map(([name, page]) => [name, page.title]),
+  () => running,
+);
 
 (async () => {
   readAddress();

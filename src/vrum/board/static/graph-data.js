@@ -22,6 +22,7 @@ export const EDGE = {
   concerns: { label: 'concerns', group: 'about' },
   evidence: { label: 'rests on', group: 'about' },
   overlap: { label: 'might be the same as', group: 'overlap' },
+  mention: { label: 'mentions', group: 'mention' },
   collapsed: { label: 'links between', group: 'collapsed' },
 };
 export const LINK_SWITCHES = [
@@ -49,6 +50,7 @@ export function settings(params) {
     hideLink: list(params, 'hide_link'),
     colour: pick(params.get('colour'), COLOURS, 'kind'),
     overlaps: params.get('overlaps') === '1',
+    mentions: params.get('mentions') === '1',
     card: Number(params.get('card')) || null,
     sel: params.get('sel') || null,
   };
@@ -61,6 +63,7 @@ export function needs(cfg) {
   if (cfg.show.has('decisions')) wanted.push('decisions');
   if (cfg.show.has('facts') || cfg.show.has('beliefs')) wanted.push('memories');
   if (cfg.overlaps) wanted.push('overlaps');
+  if (cfg.mentions) wanted.push('references');
   return wanted;
 }
 
@@ -122,6 +125,20 @@ export function universe(cfg) {
   if (cfg.overlaps) {
     for (const pair of store.overlaps || []) {
       edge('overlap', nodeKey(pair.first.id), nodeKey(pair.second.id), { similarity: pair.similarity });
+    }
+  }
+  if (cfg.mentions) {
+    // The line runs from the item whose text holds the reference to the item it names. Only
+    // references to things that exist, between dots that are drawn, make a line.
+    const keyOf = (type, id) => (['epic', 'story', 'task', 'node'].includes(type) ? nodeKey(id) : type === 'rule' ? `r:${id}` : ['decision', 'principle'].includes(type) ? `d:${id}` : `m:${id}`);
+    const seen = new Set();
+    for (const mention of store.references || []) {
+      if (!mention.target.exists) continue;
+      const from = keyOf(mention.source.item_type, mention.source.id);
+      const to = keyOf(mention.target.kind, mention.target.id);
+      if (seen.has(`${from}>${to}`)) continue;
+      seen.add(`${from}>${to}`);
+      edge('mention', from, to);
     }
   }
   return { dots, edges };

@@ -1,6 +1,8 @@
 """A read-only Markdown copy of the graph (M7): one file per epic, story, task, rule, decision,
 principle, fact and belief, with its fields at the top and everything it is connected to written as
-`[[file name]]` references, so a person can read it in Obsidian or keep it in git.
+`[[file name]]` references, so a person can read it in Obsidian or keep it in git. A reference a
+person wrote in a text (`[[node:12]]`, see references.py) becomes the same kind of link to that
+item's file.
 
 It is made from the export (see exchange.py) and from nothing else, so it can never say anything
 the export does not. The same graph always gives the same files, byte for byte: nothing in them
@@ -12,6 +14,10 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+from vrum.references import REFERENCE_PATTERN
+
+_REFERENCE = re.compile(REFERENCE_PATTERN)
 
 # The folders the export owns. A tool that writes it replaces these and touches nothing else.
 FOLDERS = ("epics", "stories", "tasks", "rules", "decisions", "facts", "beliefs")
@@ -135,6 +141,19 @@ def _rank(stem: str) -> tuple[str, int]:
     return kind, int(number)
 
 
+def _link_references(text: str, stems: Mapping[tuple[str, int], str]) -> str:
+    """A reference a person wrote in a text (`[[node:12]]`) becomes a link to that item's file, as
+    Obsidian reads it. One that names nothing, or the wrong kind of thing, is written as plain
+    words with no brackets, so that every link in the copy points at a file."""
+
+    def replace(found: re.Match[str]) -> str:
+        kind, number = found.group(1), int(found.group(2))
+        stem = stems.get((kind, number))
+        return f"[[{stem}]]" if stem else f"{kind}:{number} (missing)"
+
+    return _REFERENCE.sub(replace, text)
+
+
 def render(document: Mapping[str, Any]) -> dict[str, str]:
     """The files of the copy: path (such as `stories/story-12-login.md`) to what is in it. The
     reference `[[story-12-login]]` points at that file, whatever folder it is in."""
@@ -242,8 +261,14 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
             kind = "memory" if evidence["type"] == "fact" else "decision"
             connect(here, (kind, evidence["id"]), "rests on")
 
+    # How a reference to each item is written (`[[fact:5]]`): a principle is a decision, and the
+    # kind of a fact or belief is the kind its reference names.
+    stems = {
+        (str(entry.item["type"]) if kind == "memory" else kind, ident): entry.stem
+        for (kind, ident), entry in entries.items()
+    }
     files: dict[str, str] = {}
     for entry in entries.values():
         entry.links.sort(key=lambda link: (_ORDER[link[0]], *_rank(link[1])))
-        files[f"{entry.folder}/{entry.stem}.md"] = _text(entry)
+        files[f"{entry.folder}/{entry.stem}.md"] = _link_references(_text(entry), stems)
     return files

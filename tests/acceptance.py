@@ -16,6 +16,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 
 from tests.acceptance_board import board
+from tests.acceptance_connect import connecting
 from tests.acceptance_finding import finding
 from tests.acceptance_memory import rules_and_memory
 from tests.acceptance_model import hardening, model_help
@@ -44,6 +45,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "board": board,
     "views": views,
     "memory": rules_and_memory,
+    "connecting": connecting,
     "moving": moving,
 }
 

@@ -5,6 +5,8 @@ import { h, day, moment, plural } from './dom.js';
 import { itemLink } from './card.js';
 import { clip } from './forms.js';
 import { KIND } from './labels.js';
+import { renderMarkdown } from './markdown.js';
+import { mentionedInDetails } from './references.js';
 import { store } from './store.js';
 
 const ORIGIN_WORDS = {
@@ -78,12 +80,13 @@ export function decisionEntry(decision, { reason = null, actions = null, choose 
       decision.promoted_from_id ? h('span', { class: 'chip' }, 'Promoted from belief ', entryLink('belief', decision.promoted_from_id, `#${decision.promoted_from_id}`)) : null,
     ),
     h('h4', { class: 'entry-title' }, decision.title),
-    h('p', { class: 'entry-text' }, decision.text),
-    h('p', { class: 'reason' }, h('span', { class: 'quiet' }, 'Why: '), decision.reason),
+    renderMarkdown(decision.text, { className: 'markdown entry-text' }),
+    h('div', { class: 'reason' }, h('span', { class: 'quiet' }, 'Why: '), renderMarkdown(decision.reason, { className: 'markdown inline-markdown' })),
     h('p', { class: 'quiet who' }, `Decided by ${decision.decided_by} on ${day(decision.decided_on)}.`),
     concerns(decision),
     replaced,
     chainOf(decision, store.decisions, 'decision'),
+    mentionedInDetails('decision', decision.id),
     why(reason),
     choose,
     actions,
@@ -122,14 +125,14 @@ export function memoryEntry(memory, { reason = null, actions = null, choose = nu
       modelMade ? h('span', { class: 'chip model' }, memory.origin === 'derived' ? 'Drawn up by a language model' : 'Proposed by a language model') : null,
       belief && memory.confirmed_by ? h('span', { class: 'chip confirmed' }, `✓ Confirmed by ${memory.confirmed_by}`) : null,
     ),
-    h('p', { class: 'entry-text' }, memory.text),
+    renderMarkdown(memory.text, { className: 'markdown entry-text' }),
     h(
       'p',
       { class: 'quiet who' },
       `${ORIGIN_WORDS[memory.origin] || memory.origin}. Recorded by ${memory.recorded_by} on ${day(memory.recorded_at)}.`,
-      belief ? '' : ` Source: ${memory.source}.`,
       memory.happened_on ? ` It was so on ${day(memory.happened_on)}.` : '',
     ),
+    belief ? null : h('div', { class: 'quiet source' }, 'Source: ', renderMarkdown(memory.source, { className: 'markdown inline-markdown' })),
     belief
       ? h(
           'div',
@@ -145,6 +148,7 @@ export function memoryEntry(memory, { reason = null, actions = null, choose = nu
     concerns(memory),
     replaced,
     chainOf(memory, store.memories, memory.type),
+    mentionedInDetails(memory.type, memory.id),
     why(reason),
     choose,
     actions,

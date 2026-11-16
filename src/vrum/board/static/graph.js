@@ -7,6 +7,7 @@ import { announce, clear, h, plural, s } from './dom.js';
 import { EDGE, EXTRAS, LINK_SWITCHES, chosenKey, needs, neighboursOf, settings, universe, view } from './graph-data.js';
 import { KIND, STATUS, STATUSES } from './labels.js';
 import { createLayout } from './layout.js';
+import { renderMarkdown } from './markdown.js';
 import { ensure, store } from './store.js';
 
 const layout = createLayout();
@@ -104,6 +105,7 @@ function build() {
       h('legend', {}, 'Also show'),
       EXTRAS.map((name) => check(`show-${name}`, EXTRA_LABELS[name], false, (event) => toggle('show', name, event.target.checked))),
       check('overlaps', 'Suggested overlaps', false, (event) => ui.navigate({ overlaps: event.target.checked ? '1' : null })),
+      check('mentions', 'Mentions: [[references]] written in the text', false, (event) => ui.navigate({ mentions: event.target.checked ? '1' : null })),
     ),
     h(
       'details',
@@ -258,6 +260,7 @@ function syncControls() {
   root.querySelector('#depth-field').hidden = cfg.scope !== 'local';
   for (const name of EXTRAS) root.querySelector(`[name="show-${name}"]`).checked = cfg.show.has(name);
   root.querySelector('[name="overlaps"]').checked = cfg.overlaps;
+  root.querySelector('[name="mentions"]').checked = cfg.mentions;
   for (const name of ['epic', 'story', 'task']) root.querySelector(`[name="kind-${name}"]`).checked = !cfg.hideKind.has(name);
   for (const name of STATUSES) root.querySelector(`[name="status-${name}"]`).checked = !cfg.hideStatus.has(name);
   for (const [name] of LINK_SWITCHES) root.querySelector(`[name="link-${name}"]`).checked = !cfg.hideLink.has(name);
@@ -517,7 +520,9 @@ function neighbourButton(entry) {
         ? outgoing ? 'needs first' : 'is needed first by'
         : edge.type === 'supersedes'
           ? outgoing ? 'supersedes' : 'is superseded by'
-          : EDGE[edge.type].label;
+          : edge.type === 'mention'
+            ? outgoing ? 'mentions' : 'is mentioned by'
+            : EDGE[edge.type].label;
   return h(
     'li',
     {},
@@ -534,7 +539,7 @@ function drawLists() {
     parts.chosen.append(h('h3', {}, 'Chosen item'), h('p', { class: 'quiet' }, 'Choose a dot, or an item from the list, to see its neighbours here.'));
   } else {
     const details = [];
-    if (dot.text) details.push(h('p', {}, dot.text));
+    if (dot.text) details.push(renderMarkdown(dot.text));
     if (dot.origin) {
       details.push(h('p', { class: 'quiet' }, `Origin: ${dot.origin}. Recorded by ${dot.by}.${dot.type === 'belief' ? ' A suggestion, not a decision.' : ''}${dot.stale ? ' Stale: its evidence changed.' : ''}`));
     }

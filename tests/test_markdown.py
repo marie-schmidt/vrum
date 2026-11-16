@@ -149,6 +149,38 @@ def test_every_connection_is_a_reference_at_both_ends_under_its_own_name() -> No
             assert target in files
 
 
+def test_references_written_in_a_text_become_links_to_files_and_missing_ones_plain_words() -> None:
+    graph = a_file(
+        nodes=[
+            node(1, "epic", None, title="Login"),
+            node(2, "story", 1, title="Email", body="See [[node:1]], [[rule:1]] and [[node:99]]."),
+        ],
+        rules=[rule(1, 2, title="Short codes")],
+        decisions=[decision(5, kind="principle", title="Keep it simple", text="As in [[fact:7]]")],
+        memories=[
+            memory(7, "fact", text="Rule [[rule:1]] holds", source="Said in [[decision:5]]"),
+            memory(8, "belief", text="Not [[fact:8]] but [[belief:8]] and [[belief:7]]"),
+        ],
+    )
+
+    by_stem = stems(render(graph))
+
+    assert (
+        "See [[epic-1-login]], [[rule-1-short-codes]] and node:99 (missing)."
+        in by_stem["story-2-email"]
+    )
+    assert "As in [[fact-7-rule-rule-1-holds]]" in by_stem["principle-5-keep-it-simple"]
+    fact = by_stem["fact-7-rule-rule-1-holds"]
+    assert "Rule [[rule-1-short-codes]] holds" in fact
+    assert 'source: "Said in [[principle-5-keep-it-simple]]"' in fact
+    # A fact is not a belief, so naming one as the other names nothing.
+    belief = by_stem["belief-8-not-fact-8-but-belief-8-and-belief-7"]
+    assert "Not fact:8 (missing) but [[belief-8-not-fact-8-but-belief-8-and-belief-7]]" in belief
+    assert "and belief:7 (missing)" in belief
+    for text in by_stem.values():
+        assert not re.search(r"\[\[(node|rule|decision|fact|belief):", text)
+
+
 def test_the_same_graph_gives_the_same_files_every_time() -> None:
     assert render(a_graph()) == render(a_graph())
     assert all(text.endswith("\n") and "\r" not in text for text in render(a_graph()).values())

@@ -31,6 +31,7 @@ from vrum.llm import LanguageModel
 from vrum.logs import event
 from vrum.memories import Memories, Memory, MemoryChange, MemoryPage
 from vrum.recall import Recall, Recaller
+from vrum.references import MentionPage, References
 from vrum.reflection import (
     ConsolidateResult,
     ContradictionResult,
@@ -78,10 +79,11 @@ handoff note for whoever comes next. A blank note is refused.
 Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
 `changes_since` shows only what is new since an event, and `ready_work` lists what is free. \
 `list_nodes` takes a filter text as its query argument, such as \
-`kind:task status:ready -claimed OR is:overdue`. Lists \
-leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. \
-Anything holding a well-known secret format (an access token, a private key) is refused in every \
-field and never stored: leave secrets out of what you write. \
+`kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also \
+rule, decision, fact, belief); `find_mentions` lists who refers to one. Lists leave out bodies \
+unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a \
+well-known secret format is refused in every field and never stored: leave secrets out of what \
+you write. \
 If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` \
 and `reflect` use it on the memory; what they return is proposed or generated, and is not a \
 record until you record it.
@@ -214,6 +216,7 @@ def create_server(settings: Settings) -> GuardedServer:
         embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
     )
     recaller = Recaller(database, searcher)
+    references = References(database)
     workflow = Workflow(database, graph, searcher)
     reflector = Reflector(
         database,
@@ -1573,6 +1576,41 @@ def create_server(settings: Settings) -> GuardedServer:
                 epic_ids=epic_ids,
                 min_similarity=min_similarity,
                 include_dropped=include_dropped,
+                limit=limit,
+                offset=offset,
+            )
+
+    @mcp.tool()
+    async def find_mentions(
+        node_id: Annotated[
+            int | None, Field(description="An epic, story or task: who refers to it.")
+        ] = None,
+        rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
+        decision_id: Annotated[int | None, Field(description="Or a decision or principle.")] = None,
+        memory_id: Annotated[int | None, Field(description="Or a fact or belief.")] = None,
+        limit: _Limit = 50,
+        offset: Annotated[
+            int, Field(description="How many to skip. Pass next_offset for the next page.")
+        ] = 0,
+    ) -> MentionPage:
+        """List the items whose text refers to one item, or, with no item given, every reference
+        written anywhere in the graph.
+
+        A reference is [[node:12]], [[rule:3]], [[decision:7]], [[fact:5]] or [[belief:2]] in the
+        details of an epic, story, task or rule, the text or reason of a decision (or principle),
+        or the text or source of a fact or belief. Titles are not read. It is only
+        text: it creates no link, changes no readiness and no order, and nothing is stored for it.
+        This reads the text of everything when asked. Each mention says which item holds it, where
+        and a snippet around it, and, for every reference, whether the item it names exists: one
+        that does not is plainly missing. An item that refers to itself is not listed. For a
+        decision, a rule or any item, use this to see what leans on it before changing it.
+        """
+        with _database_errors():
+            return await references.find_mentions(
+                node_id=node_id,
+                rule_id=rule_id,
+                decision_id=decision_id,
+                memory_id=memory_id,
                 limit=limit,
                 offset=offset,
             )

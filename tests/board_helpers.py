@@ -14,7 +14,7 @@ from typing import Any
 from mcp import Client
 from playwright.async_api import Dialog, Locator, Page, Request, Route, async_playwright, expect
 
-from tests.helpers import ok
+from tests.helpers import ok, reindexed, unique_word
 
 # Every request of the board has to go to the server it came from.
 VIEWPORT = {"width": 1500, "height": 1500}
@@ -208,6 +208,99 @@ async def drag_bar(page: Page, node_id: int, days: float, grip: str | None = Non
     await page.mouse.move(x + days * ppd / 2, y, steps=4)
     await page.mouse.move(x + days * ppd, y, steps=4)
     await page.mouse.up()
+
+
+# -- M13: Search, Overlaps and links --------------------------------------------------------------
+
+
+async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[str, int, str]]:
+    """What `search` gives for this, every page of it: (type, id, how it matched)."""
+    found: list[tuple[str, int, str]] = []
+    offset = 0
+    while True:
+        page = await ok(client, "search", query=query, mode=mode, limit=200, offset=offset)
+        found.extend((item["item_type"], item["id"], item["matched"]) for item in page["items"])
+        if page["next_offset"] is None:
+            return found
+        offset = page["next_offset"]
+
+
+async def search_for(page: Page, query: str, mode: str = "both") -> None:
+    """Type a search into the Search page and press its button."""
+    await page.locator("#search-box").fill(query)
+    await page.locator("#search-mode").select_option(mode)
+    await page.locator("#search-go").click()
+
+
+async def listed(page: Page, count: int) -> list[tuple[str, int, str]]:
+    """The results the Search page lists, in the order shown, once it says how many there are."""
+    await expect(page.locator("#count")).to_have_text(
+        re.compile(rf"^{count} results?\b"), timeout=SLOW
+    )
+    rows: list[list[Any]] = await page.locator("li.result").evaluate_all(
+        "els => els.map(e => [e.dataset.type, Number(e.dataset.id), e.dataset.matched])"
+    )
+    return [(kind, ident, how) for kind, ident, how in rows]
+
+
+async def facet(page: Page, name: str) -> dict[str, int]:
+    """One group of filter buttons of the Search page: the label of each and its count."""
+    texts = await page.locator(f"fieldset.facet[data-facet={name}] button").all_inner_texts()
+    found: dict[str, int] = {}
+    for text in texts:
+        label, count = re.fullmatch(r"(.*) \((\d+)\)", text.strip()).groups()  # type: ignore[union-attr]
+        found[label] = int(count)
+    return found
+
+
+async def twin_epics(
+    client: Client, pairs: list[tuple[str, str]], body: str = ""
+) -> tuple[int, int, list[int], list[int]]:
+    """Two epics holding the stories of each pair, one side in each, and the index up to date."""
+    word = unique_word()
+    epic_a = await made(client, "epic", f"Overlap A {word}")
+    epic_b = await made(client, "epic", f"Overlap B {word}")
+    firsts = [await made(client, "story", one, epic_a, body=body) for one, _ in pairs]
+    seconds = [await made(client, "story", other, epic_b, body=body) for _, other in pairs]
+    await reindexed(client)
+    return epic_a, epic_b, firsts, seconds
+
+
+async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
+    """`find_overlaps`, every page of it, put together."""
+    page = await ok(client, "find_overlaps", limit=200, **arguments)
+    items = list(page["items"])
+    while page["next_offset"] is not None:
+        page = await ok(client, "find_overlaps", limit=200, offset=page["next_offset"], **arguments)
+        items.extend(page["items"])
+    return {**page, "items": items}
+
+
+async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
+    """Every pair the Overlaps page lists, in the order shown, asking for more until no more."""
+    await expect(page.locator("#count")).to_contain_text(re.compile(r"pairs?\b"), timeout=SLOW)
+    for _ in range(100):
+        more = page.locator("#show-more")
+        if await more.count() == 0:
+            break
+        count = await page.locator("li.pair").count()
+        await more.click()
+        await expect(page.locator("li.pair")).not_to_have_count(count, timeout=SLOW)
+    rows: list[list[str]] = await page.locator("li.pair").evaluate_all(
+        "els => els.map(e => [e.dataset.first, e.dataset.second, e.dataset.similarity])"
+    )
+    return [(int(first), int(second), float(score)) for first, second, score in rows]
+
+
+async def links_of(client: Client, *nodes: int) -> dict[int, list[tuple[int, int, str]]]:
+    """Every link at each node, as (source, target, type), to compare before and after."""
+    found: dict[int, list[tuple[int, int, str]]] = {}
+    for node in nodes:
+        page = await ok(client, "list_links", node_id=node, limit=200)
+        found[node] = sorted(
+            (link["source_id"], link["target_id"], link["link_type"]) for link in page["items"]
+        )
+    return found
 
 
 def http(

@@ -7,6 +7,9 @@ import { actor, notify, ui } from './ctx.js';
 import { h, clear, day, moment, plural } from './dom.js';
 import { parentChoices, openCreate } from './create.js';
 import { KIND, LINK, LINK_TYPES, PRIORITIES, PRIORITY, STATUS, SETTABLE, kindChip, priorityChip, statusChip } from './labels.js';
+import { renderMarkdown } from './markdown.js';
+import { withReferences } from './reference-picker.js';
+import { fetchMentions, mentionsList, needTargets } from './references.js';
 import { store, sync, titleOf } from './store.js';
 
 const link = (id) =>
@@ -23,7 +26,7 @@ function withCard(id) {
 
 function editForm(node, state) {
   const title = h('input', { id: 'edit-title', type: 'text', value: node.title, autocomplete: 'off' });
-  const body = h('textarea', { id: 'edit-body', rows: 6, value: node.body || '' });
+  const body = withReferences(h('textarea', { id: 'edit-body', rows: 6, value: node.body || '' }));
   const status = h(
     'select',
     { id: 'edit-status', value: node.status },
@@ -247,8 +250,8 @@ function decisionItem(entry) {
     { 'data-decision': decision.id },
     h('strong', {}, `${KIND[decision.kind].label} #${decision.id}: ${decision.title}`),
     h('div', { class: 'quiet' }, `Decided by ${decision.decided_by} on ${day(decision.decided_on)}.`),
-    h('div', {}, decision.text),
-    h('div', { class: 'quiet' }, `Why: ${decision.reason}`),
+    renderMarkdown(decision.text),
+    h('div', { class: 'quiet' }, 'Why: ', renderMarkdown(decision.reason, { className: 'markdown inline-markdown' })),
   );
 }
 
@@ -266,7 +269,7 @@ function memoryItem(entry) {
       `#${memory.id}`,
       memory.stale ? h('span', { class: 'chip stale' }, '! Stale') : null,
     ),
-    h('div', {}, memory.text),
+    h('div', {}, renderMarkdown(memory.text)),
     h(
       'div',
       { class: 'quiet' },
@@ -356,7 +359,7 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
   if (!root.querySelector('.card-detail')) clear(root).append(h('p', { class: 'quiet' }, 'Loading…'));
   const node = await call('get_node', { node_id: id });
   const wantsSimilar = node.kind !== 'task';
-  const [links, recalled, history, rules, similar] = await Promise.all([
+  const [links, recalled, history, rules, similar, mentions] = await Promise.all([
     callAll('list_links', { node_id: id }),
     call('recall', { node_id: id }),
     callAll('node_history', { node_id: id }),
@@ -367,8 +370,12 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
           return { index: { meaning: 'unavailable', note: error.message }, items: [] };
         })
       : Promise.resolve(null),
+    fetchMentions('node', id),
   ]);
+  await needTargets(node.body, JSON.stringify(recalled));
 
+  // The panel has moved on to another card while this one was being fetched.
+  if (state.dead) return state;
   // Someone started typing or choosing in the card while this was being fetched: leave it be.
   if (!force && (state.touches || 0) !== seen) {
     state.skipped = true;
@@ -411,11 +418,12 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
     claim,
     waiting,
     last ? section('Last handoff note', 'handoff', h('p', {}, `${last.actor}, ${moment(last.at)}, ${last.outcome}: ${last.note}`)) : null,
-    section('Details and changes', 'edit', h('div', { class: 'body-text' }, node.body || h('span', { class: 'quiet' }, 'No details.')), editForm(node, state), moveForm(node, state)),
+    section('Details and changes', 'edit', h('div', { class: 'body-text' }, node.body ? renderMarkdown(node.body) : h('span', { class: 'quiet' }, 'No details.')), editForm(node, state), moveForm(node, state)),
     node.kind !== 'task'
       ? h('p', {}, h('button', { type: 'button', class: 'add-child', onclick: () => openCreate({ kind: node.kind === 'epic' ? 'story' : 'task', parent: node.id }) }, node.kind === 'epic' ? 'Add a story' : 'Add a task'))
       : null,
     linksSection(node, links, state),
+    section(`Mentioned in (${mentions.length})`, 'mentions', mentionsList(mentions)),
     rules
       ? section('Rules in this story', 'rules', rules.length ? h('ul', { class: 'plain' }, rules.map((rule) => h('li', { 'data-rule': rule.id }, `Rule #${rule.id} (${rule.status}): ${rule.title}`))) : h('p', { class: 'quiet' }, 'No rules.'))
       : null,

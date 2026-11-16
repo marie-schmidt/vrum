@@ -34,13 +34,16 @@ READ_TOOLS = (
     "list_decisions",
     "list_memories",
     "recall",
+    "search",
     "similar_items",
     "find_overlaps",
+    "find_mentions",
     "export_graph",
     "changes_since",
 )
-# find_contradictions only proposes (it changes nothing in the graph), but it asks the language
-# model and writes a record that it did, as a person's change does, so it takes a name too.
+# find_contradictions and reflect only propose or answer (they change nothing in the graph), but
+# they ask the language model and write a record that they did, as a person's change does, so
+# they take a name too and sit with the writes.
 WRITE_TOOLS = (
     "create_node",
     "update_node",
@@ -65,6 +68,7 @@ WRITE_TOOLS = (
     "link_memory",
     "unlink_memory",
     "find_contradictions",
+    "reflect",
 )
 BOARD_TOOLS = frozenset(READ_TOOLS + WRITE_TOOLS)
 

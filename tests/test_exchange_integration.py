@@ -369,8 +369,15 @@ async def test_the_markdown_copy_has_one_file_per_item_and_every_connection_is_a
         assert file_of(*source) in refs(*target), (target, source)
     every_stem = set(stems)
     for path, text in files.items():
+        # A person's own text may hold other double brackets, which the copy leaves as written.
+        # Every link the copy makes (the Links section, and the references written in texts that
+        # it turns into links) is to a file, and a reference to nothing has no brackets left.
         for reference in references_in(text):
-            assert reference in every_stem, (path, reference)
+            if re.fullmatch(r"[a-z]+-\d+-.*", reference):
+                assert reference in every_stem, (path, reference)
+        assert not re.search(r"\[\[(node|rule|decision|fact|belief):[1-9][0-9]{0,17}\]\]", text), (
+            path
+        )
 
     # Fields at the top, in the form a person or Obsidian reads.
     epic = front_matter(text_of("epic", ids["epic"]))

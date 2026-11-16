@@ -543,6 +543,7 @@ PAGED = (
     "search",
     "similar_items",
     "find_overlaps",
+    "find_mentions",
     "export_graph",
 )
 # find_contradictions goes through its beliefs a batch at a time (batch, after_id).

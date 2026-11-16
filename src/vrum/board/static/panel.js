@@ -17,6 +17,7 @@ let generation = 0;
 export function hide() {
   generation += 1;
   if (!shown) return;
+  shown.state.dead = true;
   shown = null;
   aside.hidden = true;
   layout.classList.remove('with-panel');
@@ -32,6 +33,8 @@ export async function show(params) {
   if (shown && shown.key === key) return;
   if (!shown) opener = document.activeElement;
   const mine = ++generation;
+  // A card still being fetched for the one that was open must not be drawn over this one.
+  if (shown) shown.state.dead = true;
   const state = {};
   shown = { key, state };
   aside.hidden = false;
@@ -88,8 +91,12 @@ export async function refresh(events) {
     clear(aside).append(h('p', { class: 'quiet' }, `Item #${id} is no longer there.`));
     return;
   }
+  // An item that adds or drops a reference to this one in its words changes its "Mentioned in",
+  // which is a list read from the server, not from the store.
+  const mark = `[[node:${id}]]`;
+  const rewording = (event) => JSON.stringify([event.before, event.after]).includes(mark);
   const touched = events.some(
-    (event) => event.node_id === id || event.other_node_id === id || event.node_id === null,
+    (event) => event.node_id === id || event.other_node_id === id || event.node_id === null || rewording(event),
   );
   if (!touched) return;
   if (typing(state)) {

@@ -4,6 +4,7 @@ import { Refusal, call } from './api.js';
 import { actor, notify, ui } from './ctx.js';
 import { h } from './dom.js';
 import { KIND, PRIORITIES, PRIORITY } from './labels.js';
+import { withReferences } from './reference-picker.js';
 import { epics, store, sync } from './store.js';
 
 const byTitle = (a, b) => a.title.localeCompare(b.title) || a.id - b.id;
@@ -43,7 +44,7 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
   const parentField = h('select', { id: 'new-parent', name: 'parent' });
   const parentRow = h('div', { class: 'field' }, h('label', { for: 'new-parent' }, 'Belongs to'), parentField);
   const title = h('input', { id: 'new-title', name: 'title', type: 'text', autocomplete: 'off' });
-  const body = h('textarea', { id: 'new-body', name: 'body', rows: 4 });
+  const body = withReferences(h('textarea', { id: 'new-body', name: 'body', rows: 4 }));
   const priority = h(
     'select',
     { id: 'new-priority', name: 'priority', value: 'normal' },

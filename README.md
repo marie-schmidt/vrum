@@ -18,8 +18,8 @@ is built to be effective and efficient for agents and friendly to people: every 
 is wrong and what to do next, and every answer is small enough to read.
 
 It is a prototype, built one milestone at a time (see `PROGRESS.md`). You use it through an agent
-or a script, and through the board (Kanban, graph, roadmap, table, outline, rules and memory so
-far, with more pages to come).
+or a script, and through the board (Kanban, graph, roadmap, table, outline, rules, memory, search
+and overlaps so far, with more pages to come).
 
 ## Quick start
 
@@ -154,7 +154,7 @@ The working loop:
 3. Record what is decided as it happens with `record_decision` (name the person who decided in decided_by), and what you learn with `retain_fact`.
 4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a handoff note for whoever comes next. A blank note is refused.
 
-Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. `list_nodes` takes a filter text as its query argument, such as `kind:task status:ready -claimed OR is:overdue`. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format (an access token, a private key) is refused in every field and never stored: leave secrets out of what you write. If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` use it on the memory; what they return is proposed or generated, and is not a record until you record it.
+Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. `list_nodes` takes a filter text as its query argument, such as `kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also rule, decision, fact, belief); `find_mentions` lists who refers to one. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format is refused in every field and never stored: leave secrets out of what you write. If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` use it on the memory; what they return is proposed or generated, and is not a record until you record it.
 <!-- agent-guide:end -->
 
 Every tool describes itself: its description says what it does, what it needs and what it refuses,
@@ -217,8 +217,42 @@ far the check has got, then each proposal with the words that clash, with button
 belief or retract it. The **recall preview** at the top shows what an agent would be told for an
 item or a rule: the very answer of the `recall` tool, in its sections and with its reasons.
 
-**What it does not do yet.** More pages (search, overlaps and the rest) come in the next
-milestones.
+**Search.** One box over the `search` tool. Each result says how it matched (exact words, meaning
+or both), why, shows a snippet with the matched words marked, and its parent and status as the
+graph holds them now. Choose *Exact words only* or *Meaning only* to see one kind of match. The
+counts by kind (epic, story, task, rule, decision, principle, fact, belief), by status and by epic
+filter the results and keep the server's order. The page says how many items are waiting to be
+indexed: results by meaning may lag behind them, results by exact words never do. With the
+embedding service stopped, search by words still works, and searching by meaning says why it
+cannot. Under the results, **Ask** puts a question to a language model (if the server has one,
+see below): the answer is labelled *Generated, not a record*, shows the items it relied on as
+links, and is stored nowhere. You can record its conclusion as a belief under your own name,
+resting on those facts and decisions, or leave it. Without a model the box says so.
+
+**Overlaps.** Pairs of stories (or epics, or rules) in different epics that look like the same
+thing, most alike first, with their scores, side by side with their details. Change how alike
+they must be (the server's setting is the start), or name epics to look at only pairs that have
+something in them. **Mark as duplicates** and **Mark as relates to** make that link in one click,
+with your name, and nothing is ever linked unless you click. Rules are compared too, and cannot
+be linked.
+
+**Markdown and references.** Details, rules, reasons, decision texts, facts and beliefs are shown
+as Markdown by the board's own small renderer: headings, paragraphs, lists, emphasis, code, quotes
+and web addresses, which open in a new tab. Raw HTML is never rendered and nothing is loaded from
+elsewhere, so a script or image tag is shown as the text it is. Write `[[node:12]]`, `[[rule:3]]`,
+`[[decision:7]]`, `[[fact:5]]` or `[[belief:2]]` in any text to refer to an item: it is shown as a
+link with the item's current title (and follows a rename), or plainly as missing when nothing has
+that id. Typing `[[` in an editor offers a pick-list. A reference is only text: it makes no link
+and changes no readiness and no order. Every item shows **Mentioned in**, the items whose text
+refers to it (the `find_mentions` tool works this out when asked and stores nothing), and the
+graph has a **Mentions** layer that draws them. Titles are not read for references.
+
+**Jump to.** Press Ctrl+K (⌘K on a Mac), or use the button in the top bar, on any page: type a
+word of an item's title, its id (`12`, `#12`, `rule 3`, `decision 7`) or the name of a page, and
+Enter goes there.
+
+**What it does not do yet.** The home page, the activity feed, the tools list and the status
+page come in the next milestone.
 
 **Table.** One row for each epic, story or task, with its kind, title, parent, status, priority,
 who holds it, what it waits on, progress, dates and last change. Click a heading to sort (again to
@@ -285,7 +319,8 @@ can share a view by copying the link. How often the board asks for news is
   conclusion that rests on facts and decisions, and is marked stale when one of them stops being
   true. A belief is only a suggestion until a person confirms it, and never counts as a decision.
 - **Search:** by exact words, by meaning, or both, and each result says how it matched. It also
-  finds similar items and stories that overlap across epics.
+  finds similar items and stories that overlap across epics. Any text can refer to an item with
+  `[[node:12]]`, and `find_mentions` says what refers to what.
 - **History:** every change is kept, with who made it and what it was before. `changes_since`
   gives an agent only what is new.
 
@@ -361,7 +396,10 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
   roadmap (the filter language, changing several rows, dragging bars, an address that reproduces a
   view), writes rules and memory on the board (placing and dragging a rule, recording and replacing
   decisions and beliefs, stale beliefs, confirming and promoting, a check against every belief and
-  the recall preview), and finally backs up, destroys
+  the recall preview), finds and connects on the board (search by words and by meaning with the
+  embedding service stopped and back, counts, overlaps and what a click on a pair creates,
+  Markdown that is only ever text, references and their backlinks, the quick switcher, and Ask),
+  and finally backs up, destroys
   its own database, restores it, and loads an export into a fresh server. Every line it prints is
   one proof that holds. It uses a scripted stand-in for the embedding service and the language
   model, so nothing is downloaded and the answers are the same every run.

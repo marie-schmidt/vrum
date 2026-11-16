@@ -3,7 +3,7 @@
 // with the same tools an agent uses and refreshed from the same change feed. The server is the
 // only place anything is kept.
 
-import { Refusal, call, callAll, exported, get } from './api.js';
+import { Refusal, call, callAll, callPaged, exported, get } from './api.js';
 
 export const store = {
   nodes: new Map(), // id -> node
@@ -13,6 +13,7 @@ export const store = {
   memories: null,
   overlaps: null, // pairs of stories the index thinks may be the same
   overlapNote: null, // why there are none, when the index could not be used
+  references: null, // every [[reference]] written in any text, loaded when the graph asks
   info: { poll_seconds: 5, language_model: null },
   index: null, // what the index can do now, and how many items are waiting
   cursor: 0, // the newest change event seen
@@ -55,6 +56,7 @@ const LOADERS = {
   decisions: () => callAll('list_decisions', {}),
   memories: () => callAll('list_memories', {}),
   overlaps: loadOverlaps,
+  references: async () => (await callPaged('find_mentions', {})).items,
 };
 
 // Load what a page needs beyond the work itself, and keep it fresh from then on.
