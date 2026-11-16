@@ -91,7 +91,7 @@ export function createLayout() {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const d = Math.max(Math.hypot(dx, dy), 0.01);
-      const rest = edge.type === 'hierarchy' ? 55 : edge.type === 'overlap' ? 130 : 95;
+      const rest = edge.type === 'hierarchy' ? 55 : 95;
       const pull = ((d - rest) / d) * 0.08;
       force.get(edge.source).x += dx * pull;
       force.get(edge.source).y += dy * pull;

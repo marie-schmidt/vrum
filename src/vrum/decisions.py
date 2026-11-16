@@ -1,5 +1,9 @@
-"""Decisions and principles. This module owns recording them, linking them to the nodes and rules
-they affect, and superseding them."""
+"""Decisions. This module owns recording them, linking them to the nodes and rules they affect,
+superseding and withdrawing them, and confirming them.
+
+A decision is a record: it is never edited. A change of mind is a newer decision that supersedes the
+old one, or a withdrawal. One that applies throughout its project is `project_wide`: the same kind
+of record, included in every briefing and recall of that project."""
 
 from datetime import UTC, date, datetime
 from typing import Any
@@ -23,15 +27,23 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.graph import EVENT_COLUMNS, Event, EventPage
+from vrum.records import (
+    CONFIRMATIONS,
+    apply_confirmation,
+    ended_words,
+    label_of,
+    require_a_person_for_confirmed,
+    said,
+)
 
-DECISION_KINDS = ("decision", "principle")
-DECISION_STATUSES = ("active", "superseded")
+DECISION_STATUSES = ("active", "superseded", "withdrawn")
 
 _COLUMNS = (
-    "id, kind, title, text, reason, decided_by, decided_on, status, superseded_by_id, "
-    "supersedes_ids, promoted_from_id, node_ids, rule_ids, recorded_at"
+    "id, title, text, reason, decided_by, decided_on, project_wide, status, superseded_by_id, "
+    "supersedes_ids, status_reason, confirmed_by, confirmed_at, confirmation, node_ids, "
+    "rule_ids, recorded_at"
 )
-_RECORDED_FIELDS = ("kind", "title", "text", "reason", "decided_by", "decided_on")
+_RECORDED_FIELDS = ("title", "text", "reason", "decided_by", "decided_on", "project_wide")
 
 # Where a decision's links to each kind of thing are kept. Fixed here, never from a caller.
 LINK_TABLES = {"node": ("decision_nodes", "node_id"), "rule": ("decision_rules", "rule_id")}
@@ -39,28 +51,36 @@ LINK_TABLES = {"node": ("decision_nodes", "node_id"), "rule": ("decision_rules",
 
 class Decision(BaseModel):
     id: int = Field(description="The decision's id. Decisions have their own ids.")
-    kind: str = Field(
-        description="decision: something decided about this work. principle: a standing guideline "
-        "that applies everywhere, so recalling anything also returns every active principle."
+    label: str = Field(
+        description="What this is, in plain words: whether it is in force and whether a person "
+        "confirmed it."
     )
     title: str
     text: str = Field(description="What was decided.")
     reason: str = Field(description="Why.")
     decided_by: str = Field(description="The person who made the decision.")
     decided_on: date = Field(description="The day it was decided.")
+    project_wide: bool = Field(
+        description="True when it applies throughout the project, not to particular work. Every "
+        "recall and briefing of the project includes the active ones."
+    )
     status: str = Field(
-        description="active, or superseded once a newer decision has replaced it. A superseded "
-        "decision is kept as a record and is no longer in force."
+        description="active, superseded (a newer decision replaced it) or withdrawn (given up "
+        "with a reason). A decision that is not active is kept as a record and is not in force."
     )
     superseded_by_id: int | None = Field(
         description="The decision that replaced this one. Empty while it is active."
     )
     supersedes_ids: list[int] = Field(description="The decisions this one replaced, if any.")
-    promoted_from_id: int | None = Field(
-        description="The belief a person promoted to this decision, if it began as one."
+    status_reason: str | None = Field(description="Why it was withdrawn. Empty otherwise.")
+    confirmation: str = Field(
+        description="confirmed once a named person has reviewed it, otherwise unconfirmed. It "
+        "says a person looked, not that the decision is right."
     )
+    confirmed_by: str | None = Field(description="The person who confirmed it.")
+    confirmed_at: datetime | None
     node_ids: list[int] = Field(description="The epics, stories and tasks it affects.")
-    rule_ids: list[int] = Field(description="The rules it affects.")
+    rule_ids: list[int] = Field(description="The requirements it affects.")
     recorded_at: datetime
 
 
@@ -70,6 +90,10 @@ class DecisionPage(BaseModel):
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
     )
+
+
+def to_decision(row: dict[str, Any]) -> Decision:
+    return Decision.model_validate({**row, "label": label_of("decision", row)})
 
 
 def clean_fields(title: str, text: str, reason: str, decided_by: str) -> tuple[str, ...]:
@@ -91,7 +115,7 @@ async def require_decision(
     conn: AsyncConnection, decision_id: int, *, lock: bool = False
 ) -> dict[str, Any]:
     """The decision as read, or a plain refusal. `lock` holds its row until the transaction ends,
-    so that supersessions and link changes of it happen one at a time."""
+    so that changes to it happen one at a time."""
     if lock:
         await conn.execute("SELECT 1 FROM decisions WHERE id = %s FOR UPDATE", (decision_id,))
     row = await fetch_one(
@@ -133,34 +157,23 @@ async def insert_decision(
     conn: AsyncConnection,
     *,
     actor: str,
-    kind: str,
     fields: tuple[str, ...],
     decided_on: date | None,
+    project_wide: bool,
     replaces: int | None = None,
-    promoted_from: int | None = None,
 ) -> int:
     title, text, reason, decided_by = fields
     row = await fetch_one(
         conn,
-        "INSERT INTO decisions (kind, title, text, reason, decided_by, decided_on, "
-        "promoted_from_id) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-        "RETURNING id, kind, title, text, reason, decided_by, decided_on",
-        (
-            kind,
-            title,
-            text,
-            reason,
-            decided_by,
-            decided_on or datetime.now(UTC).date(),
-            promoted_from,
-        ),
+        "INSERT INTO decisions (title, text, reason, decided_by, decided_on, project_wide) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "RETURNING id, title, text, reason, decided_by, decided_on, project_wide",
+        (title, text, reason, decided_by, decided_on or datetime.now(UTC).date(), project_wide),
     )
     assert row is not None
     after = snapshot(row, _RECORDED_FIELDS)
     if replaces is not None:
         after["supersedes_id"] = replaces
-    if promoted_from is not None:
-        after["promoted_from_id"] = promoted_from
     await record_event(
         conn,
         decision_id=row["id"],
@@ -180,66 +193,72 @@ class Decisions:
         self,
         *,
         actor: str,
-        kind: str,
         title: str,
         text: str,
         reason: str,
         decided_by: str,
         decided_on: date | None,
+        project_wide: bool,
         node_ids: list[int] | None,
         rule_ids: list[int] | None,
     ) -> Decision:
         actor = clean_actor(actor)
-        check_choice("kind", kind, DECISION_KINDS)
         fields = clean_fields(title, text, reason, decided_by)
         nodes, rules = unique_ids(node_ids), unique_ids(rule_ids)
         async with self._database.transaction() as conn:
             await require_link_targets(conn, nodes, rules, "the decision")
             decision_id = await insert_decision(
-                conn, actor=actor, kind=kind, fields=fields, decided_on=decided_on
+                conn,
+                actor=actor,
+                fields=fields,
+                decided_on=decided_on,
+                project_wide=project_wide,
             )
             await add_links(conn, decision_id, actor, nodes, rules)
-            return Decision.model_validate(await require_decision(conn, decision_id))
+            return to_decision(await require_decision(conn, decision_id))
 
     async def supersede_decision(
         self,
         *,
         actor: str,
         decision_id: int,
-        kind: str | None,
         title: str,
         text: str,
         reason: str,
         decided_by: str,
         decided_on: date | None,
+        project_wide: bool | None,
         keep_links: bool,
         node_ids: list[int] | None,
         rule_ids: list[int] | None,
+        said_by: str | None,
+        quote: str | None,
     ) -> Decision:
         """Record a new decision that replaces an active one, and mark the old one superseded, in
         one step."""
         actor = clean_actor(actor)
-        if kind is not None:
-            check_choice("kind", kind, DECISION_KINDS)
         fields = clean_fields(title, text, reason, decided_by)
+        said_words = said(said_by, quote)
         extra_nodes, extra_rules = unique_ids(node_ids), unique_ids(rule_ids)
         async with self._database.transaction() as conn:
             old = await require_decision(conn, decision_id, lock=True)
-            if old["status"] == "superseded":
+            if old["status"] != "active":
                 raise Refusal(
-                    f"Decision {decision_id} was already superseded by decision "
-                    f"{old['superseded_by_id']}. If that one is changing too, supersede "
-                    f"decision {old['superseded_by_id']} instead."
+                    f"{ended_words('decision', old)}. If it was superseded and that one is "
+                    f"changing too, supersede decision {old['superseded_by_id']} instead."
+                    if old["status"] == "superseded"
+                    else f"{ended_words('decision', old)}, so it cannot be superseded."
                 )
+            require_a_person_for_confirmed("decision", [old], said_words)
             await require_link_targets(conn, extra_nodes, extra_rules, "the decision")
             nodes = unique_ids(old["node_ids"] + extra_nodes) if keep_links else extra_nodes
             rules = unique_ids(old["rule_ids"] + extra_rules) if keep_links else extra_rules
             new_id = await insert_decision(
                 conn,
                 actor=actor,
-                kind=kind or old["kind"],
                 fields=fields,
                 decided_on=decided_on,
+                project_wide=old["project_wide"] if project_wide is None else project_wide,
                 replaces=decision_id,
             )
             await add_links(conn, new_id, actor, nodes, rules)
@@ -253,28 +272,93 @@ class Decisions:
                 action="decision_superseded",
                 actor=actor,
                 before={"status": "active", "superseded_by_id": None},
-                after={"status": "superseded", "superseded_by_id": new_id},
+                after={"status": "superseded", "superseded_by_id": new_id, **said_words},
             )
-            return Decision.model_validate(await require_decision(conn, new_id))
+            return to_decision(await require_decision(conn, new_id))
+
+    async def withdraw_decision(
+        self,
+        *,
+        actor: str,
+        decision_id: int,
+        reason: str,
+        said_by: str | None,
+        quote: str | None,
+    ) -> Decision:
+        """Give a decision up, with the reason. Nothing is deleted: it stays as a record."""
+        actor = clean_actor(actor)
+        reason = required_text(
+            reason, "A withdrawal needs a reason: reason cannot be empty. Say why it is given up."
+        )
+        said_words = said(said_by, quote)
+        async with self._database.transaction() as conn:
+            old = await require_decision(conn, decision_id, lock=True)
+            if old["status"] != "active":
+                raise Refusal(f"{ended_words('decision', old)}, so it cannot be withdrawn.")
+            require_a_person_for_confirmed("decision", [old], said_words)
+            await conn.execute(
+                "UPDATE decisions SET status = 'withdrawn', status_reason = %s WHERE id = %s",
+                (reason, decision_id),
+            )
+            await record_event(
+                conn,
+                decision_id=decision_id,
+                action="decision_withdrawn",
+                actor=actor,
+                before={"status": "active"},
+                after={"status": "withdrawn", "reason": reason, **said_words},
+            )
+            return to_decision(await require_decision(conn, decision_id))
+
+    async def set_confirmation(
+        self,
+        *,
+        actor: str,
+        decision_id: int,
+        confirmation: str,
+        person: str,
+        quote: str | None,
+    ) -> Decision:
+        actor = clean_actor(actor)
+        check_choice("confirmation", confirmation, CONFIRMATIONS)
+        async with self._database.transaction() as conn:
+            row = await require_decision(conn, decision_id, lock=True)
+            await apply_confirmation(
+                conn,
+                noun="decision",
+                row=row,
+                actor=actor,
+                confirmation=confirmation,
+                person=person,
+                quote=quote,
+            )
+            return to_decision(await require_decision(conn, decision_id))
 
     async def get_decision(self, decision_id: int) -> Decision:
         async with self._database.transaction() as conn:
-            return Decision.model_validate(await require_decision(conn, decision_id))
+            return to_decision(await require_decision(conn, decision_id))
 
     async def list_decisions(
-        self, *, kind: str | None, status: str | None, limit: int, after_id: int | None
+        self,
+        *,
+        status: str | None,
+        project_wide: bool | None,
+        confirmation: str | None,
+        limit: int,
+        after_id: int | None,
     ) -> DecisionPage:
         limit = page_size(limit)
-        if kind is not None:
-            check_choice("kind", kind, DECISION_KINDS)
         if status is not None:
             check_choice("status", status, DECISION_STATUSES)
+        if confirmation is not None:
+            check_choice("confirmation", confirmation, CONFIRMATIONS)
         async with self._database.transaction() as conn:
             where = (
-                "(%(kind)s::text IS NULL OR kind = %(kind)s) "
-                "AND (%(status)s::text IS NULL OR status = %(status)s)"
+                "(%(status)s::text IS NULL OR status = %(status)s) "
+                "AND (%(project_wide)s::boolean IS NULL OR project_wide = %(project_wide)s) "
+                "AND (%(confirmation)s::text IS NULL OR confirmation = %(confirmation)s)"
             )
-            params = {"kind": kind, "status": status}
+            params = {"status": status, "project_wide": project_wide, "confirmation": confirmation}
             page, next_after_id = await page_decisions(conn, where, params, limit, after_id)
             total = await count_decisions(conn, where, params)
         return DecisionPage(items=page, total=total, next_after_id=next_after_id)
@@ -318,11 +402,15 @@ class Decisions:
             raise Refusal("Nothing to link: give at least one id in node_ids or rule_ids.")
         async with self._database.transaction() as conn:
             decision = await require_decision(conn, decision_id, lock=True)
-            if decision["status"] == "superseded":
+            if decision["status"] != "active":
+                where = (
+                    f"Change the links of decision {decision['superseded_by_id']} instead."
+                    if decision["status"] == "superseded"
+                    else "It is withdrawn, so its links stay as they were."
+                )
                 raise Refusal(
-                    f"Decision {decision_id} was superseded by decision "
-                    f"{decision['superseded_by_id']}, and a superseded decision keeps the links it "
-                    f"had. Change the links of decision {decision['superseded_by_id']} instead."
+                    f"{ended_words('decision', decision)}, and an ended decision keeps the links "
+                    f"it had. {where}"
                 )
             if add:
                 await require_link_targets(conn, nodes, rules, "the decision")
@@ -341,7 +429,7 @@ class Decisions:
                 await add_links(conn, decision_id, actor, nodes, rules)
             else:
                 await _remove_links(conn, decision_id, actor, nodes, rules)
-            return Decision.model_validate(await require_decision(conn, decision_id))
+            return to_decision(await require_decision(conn, decision_id))
 
     async def decision_history(
         self, *, decision_id: int, limit: int, after_id: int | None
@@ -392,7 +480,7 @@ async def page_decisions(
         {**params, "after": after_id or 0, "fetch": limit + 1},
     )
     page, next_after_id = split_page(rows, limit)
-    return [Decision.model_validate(row) for row in page], next_after_id
+    return [to_decision(row) for row in page], next_after_id
 
 
 async def count_decisions(conn: AsyncConnection, where: str, params: dict[str, Any]) -> int:

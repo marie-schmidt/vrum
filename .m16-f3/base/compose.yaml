@@ -1,0 +1,92 @@
+name: vrum
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vrum
+      POSTGRES_DB: vrum
+      POSTGRES_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+    volumes:
+      - vrum-data:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP on purpose: during first-time setup the database only listens on its socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U vrum -d vrum"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      VRUM_HOST: 0.0.0.0
+      VRUM_PORT: ${VRUM_PORT:-8000}
+      VRUM_DB_HOST: db
+      VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+      VRUM_MAX_REQUEST_BYTES: ${VRUM_MAX_REQUEST_BYTES:-}
+      VRUM_BOARD_POLL_SECONDS: ${VRUM_BOARD_POLL_SECONDS:-}
+      # The embedding service, if any: see .env.example. Without these, search works by exact
+      # words only.
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-}
+      EMBEDDING_MIN_SIMILARITY: ${EMBEDDING_MIN_SIMILARITY:-}
+      EMBEDDING_OVERLAP_THRESHOLD: ${EMBEDDING_OVERLAP_THRESHOLD:-}
+      EMBEDDING_REINDEX_SECONDS: ${EMBEDDING_REINDEX_SECONDS:-}
+      # The language model, if any: see .env.example. Without these, the four tools that need one
+      # (extract_facts, consolidate_memory, find_contradictions, reflect) say so.
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_KEY_FILE: ${LLM_API_KEY_FILE:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-}
+      LLM_MAX_INPUT_CHARS: ${LLM_MAX_INPUT_CHARS:-}
+    ports:
+      # The same port inside and outside, because the server only accepts requests addressed to
+      # localhost on that port. Bound to this machine only unless VRUM_BIND_ADDRESS says otherwise.
+      - "${VRUM_BIND_ADDRESS:-127.0.0.1}:${VRUM_PORT:-8000}:${VRUM_PORT:-8000}"
+    healthcheck:
+      test: ["CMD", "python", "-m", "vrum.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  # An embedding service that runs on this machine, for meaning-based search. Off unless asked for:
+  #   docker compose --profile local-embeddings up -d --build --wait
+  # with EMBEDDING_BASE_URL=http://ollama:11434/v1 and EMBEDDING_MODEL=all-minilm in .env. The
+  # first start downloads the model (about 50 MB) from the internet; after that it runs offline.
+  ollama:
+    profiles: ["local-embeddings"]
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-minilm}
+    volumes:
+      - vrum-models:/root/.ollama
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        trap 'kill $$pid' TERM INT
+        ollama serve &
+        pid=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$EMBEDDING_MODEL"
+        wait $$pid
+    healthcheck:
+      # Healthy once the model has been downloaded.
+      test: ["CMD-SHELL", "ollama list | grep -q \"$$EMBEDDING_MODEL\""]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+
+volumes:
+  vrum-data:
+  vrum-models:

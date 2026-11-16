@@ -4,8 +4,7 @@
 // reference creates no link, so choosing one changes nothing in the graph until the text is saved.
 
 import { h } from './dom.js';
-import { KIND } from './labels.js';
-import { loadTargets, refText } from './references.js';
+import { kindWords, loadTargets, refText } from './references.js';
 import { store } from './store.js';
 
 const SHOWN = 8;
@@ -20,8 +19,8 @@ function everything() {
   const found = [];
   for (const node of store.nodes.values()) found.push({ kind: 'node', id: node.id, type: node.kind, title: node.title });
   for (const rule of store.rules || []) found.push({ kind: 'rule', id: rule.id, type: 'rule', title: rule.title });
-  for (const decision of store.decisions || []) found.push({ kind: 'decision', id: decision.id, type: decision.kind, title: decision.title });
-  for (const memory of store.memories || []) found.push({ kind: memory.type, id: memory.id, type: memory.type, title: clip(memory.text) });
+  for (const decision of store.decisions || []) found.push({ kind: 'decision', id: decision.id, type: 'decision', title: decision.title });
+  for (const fact of store.facts || []) found.push({ kind: 'fact', id: fact.id, type: 'fact', title: clip(fact.text) });
   return found;
 }
 
@@ -30,7 +29,7 @@ function everything() {
 export function offers(query) {
   const typed = query.trim().toLowerCase();
   const all = everything();
-  const byKind = /^(node|rule|decision|fact|belief)\s*:?\s*(\d*)$/.exec(typed);
+  const byKind = /^(node|rule|decision|fact)\s*:?\s*(\d*)$/.exec(typed);
   let found;
   if (typed === '') found = all.filter((item) => item.kind === 'node').sort((a, b) => b.id - a.id);
   else if (byKind) found = all.filter((item) => item.kind === byKind[1] && String(item.id).startsWith(byKind[2]));
@@ -85,7 +84,7 @@ export function withReferences(control) {
     const start = before.lastIndexOf('[[');
     const typed = start < 0 ? '' : before.slice(start);
     if (start < 0 || typed.includes(']]') || typed.includes('\n')) return hide();
-    // The rules, decisions, facts and beliefs are read the first time a `[[` is typed, and the
+    // The requirements, decisions and facts are read the first time a `[[` is typed, and the
     // list is drawn again with them.
     if (!asked) {
       asked = true;
@@ -115,7 +114,7 @@ export function withReferences(control) {
               choose(at);
             },
           },
-          h('span', { 'aria-hidden': 'true' }, `${KIND[item.type]?.sign || ''} `),
+          h('span', { 'aria-hidden': 'true' }, `${kindWords(item.type).sign} `),
           h('code', {}, refText(item.kind, item.id)),
           ` ${item.title}`,
         ),

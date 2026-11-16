@@ -1,6 +1,6 @@
 """What `server_status` says: the versions, how much of each kind of thing the server holds, and
-the state of the index and of the services it uses. It only reads, and it never says a secret: the
-language model is named, its key never, and nothing about the token or the database password."""
+the state of the index and of the embedding service. It only reads, and it never says a secret:
+nothing about an embedding key, the agent keys or the database password."""
 
 from datetime import datetime
 
@@ -22,9 +22,7 @@ class ItemCounts(BaseModel):
     links: int
     rules: int
     decisions: int
-    principles: int
     facts: int
-    beliefs: int
     events: int = Field(description="How many changes the history holds.")
 
 
@@ -55,11 +53,6 @@ class ServerStatus(BaseModel):
     vrum_version: str = Field(description="The version of this server.")
     postgres_version: str = Field(description="The version of the PostgreSQL database.")
     pgvector_version: str = Field(description="The version of the pgvector extension.")
-    language_model: str | None = Field(
-        description="The language model this server is set up to use for extract_facts, "
-        "consolidate_memory, find_contradictions and reflect. Empty when there is none: those "
-        "four tools then say so, and everything else works. Its key is never shown."
-    )
     counts: ItemCounts = Field(description="How many of each kind of item the server holds.")
     index: IndexStatus
     checked_at: datetime = Field(description="When this was read.")
@@ -72,23 +65,18 @@ SELECT
   (SELECT count(*) FROM nodes WHERE kind = 'task') AS tasks,
   (SELECT count(*) FROM links) AS links,
   (SELECT count(*) FROM rules) AS rules,
-  (SELECT count(*) FROM decisions WHERE kind = 'decision') AS decisions,
-  (SELECT count(*) FROM decisions WHERE kind = 'principle') AS principles,
-  (SELECT count(*) FROM memories WHERE type = 'fact') AS facts,
-  (SELECT count(*) FROM memories WHERE type = 'belief') AS beliefs,
+  (SELECT count(*) FROM decisions) AS decisions,
+  (SELECT count(*) FROM facts) AS facts,
   (SELECT count(*) FROM events) AS events,
   now() AS checked_at
 """
 
 
 class Status:
-    def __init__(
-        self, database: Database, indexer: Indexer, searcher: Searcher, language_model: str | None
-    ) -> None:
+    def __init__(self, database: Database, indexer: Indexer, searcher: Searcher) -> None:
         self._database = database
         self._indexer = indexer
         self._searcher = searcher
-        self._language_model = language_model
 
     async def server_status(self, vrum_version: str) -> ServerStatus:
         versions = await self._database.status()
@@ -108,7 +96,6 @@ class Status:
             vrum_version=vrum_version,
             postgres_version=versions.postgres_version,
             pgvector_version=versions.pgvector_version,
-            language_model=self._language_model,
             counts=ItemCounts(**{name: int(row[name]) for name in ItemCounts.model_fields}),
             index=IndexStatus(
                 meaning=note.meaning,

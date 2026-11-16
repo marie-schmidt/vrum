@@ -430,7 +430,6 @@ def add_board(
         return _json(
             {
                 "poll_seconds": settings.board_poll_seconds,
-                "language_model": settings.llm.model if settings.llm else None,
                 "session_hours": SESSION_HOURS,
             }
         )

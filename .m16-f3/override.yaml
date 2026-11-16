@@ -1,0 +1,4 @@
+services:
+  app:
+    volumes:
+      - /Users/marieschmidt/Documents/Work/Start-Up/Projects/Vrum/.m16-f3/static:/app/.venv/lib/python3.12/site-packages/vrum/board/static:ro

@@ -18,9 +18,9 @@ from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size
 from vrum.db import Database
 from vrum.embeddings import BATCH_SIZE, EmbeddingRejected, EmbeddingUnavailable, vector_literal
 from vrum.indexing import Indexer, IndexSnapshot, snapshot
-from vrum.memories import memory_label
+from vrum.records import label_of
 
-ITEM_TYPES = ("epic", "story", "task", "rule", "decision", "principle", "fact", "belief")
+ITEM_TYPES = ("epic", "story", "task", "rule", "decision", "fact")
 # Every status any of them can have, so a filter can be checked in plain words.
 STATUSES = (
     "new",
@@ -61,21 +61,18 @@ class IndexNote(BaseModel):
 
 
 class SearchResult(BaseModel):
-    item_type: str = Field(
-        description="epic, story, task, rule, decision, principle, fact or belief."
-    )
+    item_type: str = Field(description="epic, story, task, rule, decision or fact.")
     id: int = Field(
-        description="Its id, in the id space of its type: a node, rule, decision, "
-        "or fact or belief."
+        description="Its id, in the id space of its type: a node, rule, decision or fact."
     )
     title: str
     label: str = Field(
-        description="What this is, in plain words, so a belief or an extracted fact is never "
-        "mistaken for a decision."
+        description="What this is, in plain words. For a decision or fact it says whether it is "
+        "in force and whether a person confirmed it."
     )
-    origin: str | None = Field(
-        description="For a fact or belief: stated, extracted or derived. For a decision or "
-        "principle: decided, meaning a named person made it. Empty for work and rules."
+    confirmation: str | None = Field(
+        description="For a decision or fact: confirmed or unconfirmed. Empty for work and "
+        "requirements."
     )
     status: str = Field(description="Its status now, read from the graph.")
     parent_id: int | None = Field(
@@ -92,8 +89,8 @@ class SearchResult(BaseModel):
         description="How alike in meaning, from 0 to 1. Empty when it did not match by meaning."
     )
     suggestion: bool = Field(
-        description="True when this is a suggestion rather than a record or an exact match: it "
-        "matched by meaning only, or it is a belief, or a model wrote it."
+        description="True when this is a suggestion rather than an exact match: it matched by "
+        "meaning only."
     )
     snippet: str = Field(description="A piece of its text. Matched words are between « and ».")
 
@@ -341,7 +338,7 @@ class Searcher:
         node_id: int | None,
         rule_id: int | None,
         decision_id: int | None,
-        memory_id: int | None,
+        fact_id: int | None,
         text: str | None,
         types: list[str] | None,
         min_similarity: float | None,
@@ -357,14 +354,14 @@ class Searcher:
                 ("node_id", node_id),
                 ("rule_id", rule_id),
                 ("decision_id", decision_id),
-                ("memory_id", memory_id),
+                ("fact_id", fact_id),
                 ("text", text),
             )
             if value is not None
         ]
         if len(given) != 1:
             raise Refusal(
-                "Give exactly one of node_id, rule_id, decision_id, memory_id or text: the thing "
+                "Give exactly one of node_id, rule_id, decision_id, fact_id or text: the thing "
                 "to find similar items for."
             )
         wanted_types = _check_types(types)
@@ -373,7 +370,7 @@ class Searcher:
             node_id=node_id,
             rule_id=rule_id,
             decision_id=decision_id,
-            memory_id=memory_id,
+            fact_id=fact_id,
             text=_clean_query(text, "text") if text is not None else None,
             wanted_types=wanted_types,
             floor=floor,
@@ -411,7 +408,7 @@ class Searcher:
             node_id=node_id,
             rule_id=rule_id,
             decision_id=None,
-            memory_id=None,
+            fact_id=None,
             text=None,
             wanted_types=wanted_types,
             floor=self._min_similarity,
@@ -433,7 +430,7 @@ class Searcher:
         node_id: int | None,
         rule_id: int | None,
         decision_id: int | None,
-        memory_id: int | None,
+        fact_id: int | None,
         text: str | None,
         wanted_types: list[str] | None,
         floor: float,
@@ -451,7 +448,7 @@ class Searcher:
         model = client.model if client else None
         async with self._database.transaction() as conn:
             state = await snapshot(conn, model)
-            source = await _source(conn, node_id, rule_id, decision_id, memory_id, text)
+            source = await _source(conn, node_id, rule_id, decision_id, fact_id, text)
             stored = None
             if source.item is not None and state.usable_with(model or ""):
                 stored = await _stored_vector(conn, source.item)
@@ -729,35 +726,21 @@ async def _statuses(
 _STATUS_QUERIES = (
     (_NODE_TYPES, "SELECT kind AS item_type, id, status FROM node_state WHERE id = ANY(%s)"),
     (("rule",), "SELECT 'rule' AS item_type, id, status FROM rules WHERE id = ANY(%s)"),
-    (
-        ("decision", "principle"),
-        "SELECT kind AS item_type, id, status FROM decisions WHERE id = ANY(%s)",
-    ),
-    (("fact", "belief"), "SELECT type AS item_type, id, status FROM memories WHERE id = ANY(%s)"),
+    (("decision",), "SELECT 'decision' AS item_type, id, status FROM decisions WHERE id = ANY(%s)"),
+    (("fact",), "SELECT 'fact' AS item_type, id, status FROM facts WHERE id = ANY(%s)"),
 )
 
 
 async def _active(conn: AsyncConnection, pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
-    """Which of these are in force: an active decision, an active fact, a belief that is active
-    and not stale."""
+    """Which of these are in force: an active decision or fact, and any work or requirement."""
     keep: set[tuple[str, int]] = set()
-    decision_ids = [i for kind, i in pairs if kind in ("decision", "principle")]
-    if decision_ids:
-        for row in await fetch_all(
-            conn,
-            "SELECT kind, id FROM decisions WHERE id = ANY(%s) AND status = 'active'",
-            (decision_ids,),
-        ):
-            keep.add((row["kind"], row["id"]))
-    memory_ids = [i for kind, i in pairs if kind in ("fact", "belief")]
-    if memory_ids:
-        for row in await fetch_all(
-            conn,
-            "SELECT type, id FROM memory_state WHERE id = ANY(%s) AND status = 'active' "
-            "AND NOT stale",
-            (memory_ids,),
-        ):
-            keep.add((row["type"], row["id"]))
+    for kind, table in (("decision", "decisions"), ("fact", "facts")):
+        ids = [i for item_kind, i in pairs if item_kind == kind]
+        if ids:
+            for row in await fetch_all(
+                conn, f"SELECT id FROM {table} WHERE id = ANY(%s) AND status = 'active'", (ids,)
+            ):
+                keep.add((kind, row["id"]))
     keep.update(pair for pair in pairs if pair[0] in ("epic", "story", "task", "rule"))
     return keep
 
@@ -787,7 +770,7 @@ _DETAIL_QUERIES = (
     (
         _NODE_TYPES,
         "SELECT s.kind AS item_type, s.id, s.title, s.status, s.parent_id, p.kind AS parent_kind, "
-        "p.title AS parent_title, NULL::text AS origin, initcap(s.kind) AS label, "
+        "p.title AS parent_title, initcap(s.kind) AS label, "
         "s.title || E'\\n' || s.body AS content, "
         + _HEADLINE.format(search="n.search", content="s.title || E'\\n' || s.body")
         + " AS headline FROM node_state s JOIN nodes n ON n.id = s.id "
@@ -796,17 +779,17 @@ _DETAIL_QUERIES = (
     (
         ("rule",),
         "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.story_id AS parent_id, "
-        "'story' AS parent_kind, p.title AS parent_title, NULL::text AS origin, 'Rule' AS label, "
+        "'story' AS parent_kind, p.title AS parent_title, 'Requirement' AS label, "
         "r.title || E'\\n' || r.body AS content, "
         + _HEADLINE.format(search="r.search", content="r.title || E'\\n' || r.body")
         + " AS headline FROM rules r LEFT JOIN nodes p ON p.id = r.story_id "
         "WHERE r.id = ANY(%(ids)s)",
     ),
     (
-        ("decision", "principle"),
-        "SELECT d.kind AS item_type, d.id, d.title, d.status, NULL::bigint AS parent_id, "
-        "NULL::text AS parent_kind, NULL::text AS parent_title, 'decided' AS origin, "
-        "initcap(d.kind) || ' decided by ' || d.decided_by || ' (' || d.status || ')' AS label, "
+        ("decision",),
+        "SELECT 'decision' AS item_type, d.id, d.title, d.status, NULL::bigint AS parent_id, "
+        "NULL::text AS parent_kind, NULL::text AS parent_title, d.project_wide, "
+        "d.confirmed_by, d.confirmed_at, "
         "d.title || E'\\n' || d.text || E'\\n' || d.reason AS content, "
         + _HEADLINE.format(
             search="d.search", content="d.title || E'\\n' || d.text || E'\\n' || d.reason"
@@ -814,14 +797,26 @@ _DETAIL_QUERIES = (
         + " AS headline FROM decisions d WHERE d.id = ANY(%(ids)s)",
     ),
     (
-        ("fact", "belief"),
-        "SELECT m.type AS item_type, m.id, left(m.text, 90) AS title, m.status, "
+        ("fact",),
+        "SELECT 'fact' AS item_type, f.id, left(f.text, 90) AS title, f.status, "
         "NULL::bigint AS parent_id, NULL::text AS parent_kind, NULL::text AS parent_title, "
-        "m.origin, m.type, m.source, m.text AS content, "
-        + _HEADLINE.format(search="m.search", content="m.text")
-        + " AS headline FROM memories m WHERE m.id = ANY(%(ids)s)",
+        "f.source, f.confirmed_by, f.confirmed_at, f.text AS content, "
+        + _HEADLINE.format(search="f.search", content="f.text")
+        + " AS headline FROM facts f WHERE f.id = ANY(%(ids)s)",
     ),
 )
+
+
+def _label_and_confirmation(row: dict[str, Any]) -> tuple[str, str | None]:
+    item_type = row["item_type"]
+    if item_type == "decision":
+        return label_of("decision", row), "confirmed" if row["confirmed_by"] else "unconfirmed"
+    if item_type == "fact":
+        return (
+            f"{label_of('fact', row)}. Source: {row['source']}",
+            "confirmed" if row["confirmed_by"] else "unconfirmed",
+        )
+    return row["label"], None
 
 
 def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
@@ -841,16 +836,15 @@ def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
     if matched in ("meaning", "both") and candidate.similarity is not None:
         why_parts.append(f"similar in meaning (score {candidate.similarity:.2f})")
     item_type = row["item_type"]
-    label = row["label"] if "label" in row else memory_label(row)
-    origin = row["origin"]
+    label, confirmation = _label_and_confirmation(row)
     snippet = _squash(headline) if headline else _short(row["content"], 200)
-    title = _short(row["title"], 90) if item_type in ("fact", "belief") else row["title"]
+    title = _short(row["title"], 90) if item_type == "fact" else row["title"]
     return SearchResult(
         item_type=item_type,
         id=row["id"],
         title=title,
         label=label,
-        origin=origin,
+        confirmation=confirmation,
         status=row["status"],
         parent_id=row["parent_id"],
         parent_kind=row["parent_kind"],
@@ -859,9 +853,7 @@ def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
         why="; ".join(why_parts),
         words_matched=words_matched,
         similarity=round(candidate.similarity, 3) if candidate.similarity is not None else None,
-        suggestion=matched == "meaning"
-        or item_type == "belief"
-        or origin in ("extracted", "derived"),
+        suggestion=matched == "meaning",
         snippet=snippet,
     )
 
@@ -877,7 +869,7 @@ async def _source(
     node_id: int | None,
     rule_id: int | None,
     decision_id: int | None,
-    memory_id: int | None,
+    fact_id: int | None,
     text: str | None,
 ) -> _Source:
     """The item or text that similar items are wanted for, as one text."""
@@ -898,12 +890,14 @@ async def _source(
             "WHERE id = %s",
             (rule_id,),
         )
-        missing = f"There is no rule with id {rule_id}. Use list_rules to find the id you want."
+        missing = (
+            f"There is no requirement with id {rule_id}. Use list_rules to find the id you want."
+        )
     elif decision_id is not None:
         row = await fetch_one(
             conn,
-            "SELECT kind AS item_type, btrim(title || E'\\n' || text || E'\\n' || reason) AS "
-            "content FROM decisions WHERE id = %s",
+            "SELECT 'decision' AS item_type, btrim(title || E'\\n' || text || E'\\n' || reason) "
+            "AS content FROM decisions WHERE id = %s",
             (decision_id,),
         )
         missing = (
@@ -913,16 +907,13 @@ async def _source(
     else:
         row = await fetch_one(
             conn,
-            "SELECT type AS item_type, btrim(text) AS content FROM memories WHERE id = %s",
-            (memory_id,),
+            "SELECT 'fact' AS item_type, btrim(text) AS content FROM facts WHERE id = %s",
+            (fact_id,),
         )
-        missing = (
-            f"There is no fact or belief with id {memory_id}. Use list_memories to find the id "
-            "you want."
-        )
+        missing = f"There is no fact with id {fact_id}. Use list_facts to find the id you want."
     if row is None:
         raise Refusal(missing)
-    item_id = node_id or rule_id or decision_id or memory_id
+    item_id = node_id or rule_id or decision_id or fact_id
     assert item_id is not None
     return _Source((row["item_type"], item_id), row["content"])
 

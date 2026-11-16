@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-22 -20 140 140" width="560" height="560">
+  <title>vrum icon</title>
+  <!-- Compact icon in colour. Ink #16130F, vermilion #C8321A. -->
+  <g id="v-icon" transform="skewX(-9)">
+    <polygon id="v" points="0,0 22,0 46.5,57 71,0 96,0 53,100 43,100" fill="#16130F"/>
+    <polygon id="vector" points="71,0 96,0 53,100 43,100 35.5,82.6" fill="#C8321A"/>
+  </g>
+</svg>

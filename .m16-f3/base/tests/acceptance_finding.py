@@ -1,0 +1,406 @@
+"""Chapter 6 of the acceptance scenario: finding things by exact words and by meaning, and how each
+result says how it matched (M5), and the check for similar items when something is created (M5B)."""
+
+from typing import Any
+
+from mcp import Client
+
+from tests.acceptance_scenario import URL, chapter, clip, proof, sql_value, stories
+from tests.helpers import (
+    connect,
+    embeddings_stopped,
+    make_belief,
+    make_decision,
+    make_fact,
+    ok,
+    refused,
+    reindexed,
+    run_sql,
+    the_token,
+    unique_word,
+)
+from tests.scripted_embeddings import cosine, embed
+
+# Each story and its twin say the same thing in other words. The first four twins use exactly the
+# same ideas; the last four add a word of their own, so they are alike but not identical.
+DUPLICATES = [
+    (
+        "Customers receive an invoice by email after payment",
+        "Clients receive a bill by mail after charge",
+    ),
+    ("Export the monthly report as a CSV file", "Download the monthly summary as a CSV file"),
+    (
+        "Users sign in with a password and keep their role",
+        "Customers authenticate with credentials and keep their privilege",
+    ),
+    (
+        "Translate every image caption into the customer language",
+        "Localisation of every photo caption into the client locale",
+    ),
+    (
+        "Search results appear slow for large projects",
+        "Lookup results appear sluggish for large projects today",
+    ),
+    (
+        "Create a backup every night and restore it on demand",
+        "Make a snapshot every night and recover it on demand tonight",
+    ),
+    ("Dark theme for the mobile app", "Night theme for the smartphone app now"),
+    (
+        "Cancel a subscription and keep an audit trail",
+        "Terminate a membership and keep a log history for good",
+    ),
+]
+
+
+async def search(client: Client, query: str, **arguments: Any) -> dict[str, Any]:
+    return await ok(client, "search", query=query, **arguments)
+
+
+def by_item(page: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
+    return {(item["item_type"], item["id"]): item for item in page["items"]}
+
+
+async def listing(client: Client, tool: str, **filters: Any) -> list[dict[str, Any]]:
+    """Every item a list tool has, following the pages."""
+    found: list[dict[str, Any]] = []
+    after_id = None
+    while True:
+        page = await ok(client, tool, limit=200, after_id=after_id, **filters)
+        found.extend(page["items"])
+        after_id = page["next_after_id"]
+        if after_id is None:
+            return found
+
+
+def text_of(item: dict[str, Any]) -> str:
+    return " ".join(str(value) for value in item.values() if isinstance(value, str))
+
+
+async def story_with(client: Client, title: str, body: str = "") -> dict[str, Any]:
+    (epic,) = (await stories(client, 0))[:1]
+    return await ok(
+        client, "create_node", actor="marie", kind="story", title=title, body=body,
+        parent_id=epic["id"],
+    )  # fmt: skip
+
+
+async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
+    page = await ok(client, "find_overlaps", limit=200, **arguments)
+    items = list(page["items"])
+    while page["next_offset"] is not None:
+        page = await ok(client, "find_overlaps", limit=200, offset=page["next_offset"], **arguments)
+        items.extend(page["items"])
+    return {**page, "items": items}
+
+
+async def finding() -> None:
+    chapter("Finding things: by exact words, by meaning, and how each result says it matched")
+    async with connect(URL, the_token()) as client:
+        # -- exact words, at once, for every kind of item
+        word = unique_word()
+        epic = await ok(client, "create_node", actor="a", kind="epic", title=f"Plan {word}")
+        story = await ok(
+            client, "create_node", actor="a", kind="story", title="Checkout",
+            body=f"We must handle {word} carefully.", parent_id=epic["id"],
+        )  # fmt: skip
+        task = await ok(
+            client, "create_node", actor="a", kind="task", title=f"Do the {word} part",
+            parent_id=story["id"],
+        )  # fmt: skip
+        rule = await ok(
+            client, "create_rule", actor="a", title="A rule", body=f"Never skip {word}.",
+            story_id=story["id"],
+        )  # fmt: skip
+        decision = await make_decision(client, "A decision", text=f"We choose {word}.")
+        principle = await make_decision(
+            client, "A principle", kind="principle", text=f"Always {word}."
+        )
+        fact = await make_fact(client, f"The {word} service is slow.")
+        belief = await make_belief(client, [fact], f"Probably {word} needs a cache.")
+        expected = {
+            ("epic", epic["id"]), ("story", story["id"]), ("task", task["id"]),
+            ("rule", rule["id"]), ("decision", decision["id"]),
+            ("principle", principle["id"]), ("fact", fact["id"]), ("belief", belief["id"]),
+        }  # fmt: skip
+        page = await search(client, word, mode="words", limit=200)
+        results = by_item(page)
+        proof(
+            "M5",
+            "every kind of item is found by its exact words the moment it is saved, and each "
+            "result is labelled an exact-words match",
+            set(results) == expected
+            and all(r["matched"] == "words" and r["similarity"] is None for r in results.values())
+            and all(r["why"] == f"exact words: {word}" for r in results.values()),
+            f"{page['total']} items, no index built yet",
+        )
+        nodes = [
+            n
+            for kind in ("epic", "story", "task")
+            for n in await listing(client, "list_nodes", kind=kind)
+        ]
+        lists = {
+            **{kind: [n for n in nodes if n["kind"] == kind] for kind in ("epic", "story", "task")},
+            "rule": await listing(client, "list_rules"),
+            "decision": await listing(client, "list_decisions", kind="decision"),
+            "principle": await listing(client, "list_decisions", kind="principle"),
+            "fact": await listing(client, "list_memories", type="fact"),
+            "belief": await listing(client, "list_memories", type="belief"),
+        }
+        from_lists = {
+            kind: len([item for item in items if word in text_of(item)])
+            for kind, items in lists.items()
+        }
+        proof(
+            "M5",
+            "the counts by item type equal what the list tools return",
+            page["counts_by_type"] == from_lists == {kind: 1 for kind in sorted(lists)},
+            str(page["counts_by_type"]),
+        )
+        proof(
+            "M5",
+            "a fact and a belief are found by words, labelled with their origin",
+            results[("fact", fact["id"])]["origin"] == "stated"
+            and "Fact (stated)" in results[("fact", fact["id"])]["label"]
+            and results[("belief", belief["id"])]["suggestion"] is True
+            and "Suggestion" in results[("belief", belief["id"])]["label"]
+            and "Decision decided by Marie" in results[("decision", decision["id"])]["label"],
+            results[("belief", belief["id"])]["label"][:60],
+        )
+
+        # -- meaning
+        w = unique_word()
+        title = f"Customers receive an invoice by email {w}"
+        body = "After payment the client gets a bill by mail."
+        found_story = await story_with(client, title, body)
+        found_fact = await make_fact(client, title)
+        found_belief = await make_belief(
+            client, [found_fact], f"Clients receive a bill by mail {w}"
+        )
+        await reindexed(client)
+        paraphrase = "Send the bill to clients by mail once charged"
+        score = cosine(embed(f"{title}\n{body}"), embed(paraphrase))
+        page = await search(client, paraphrase)
+        hit = by_item(page)[("story", found_story["id"])]
+        proof(
+            "M5",
+            "a paraphrase that shares none of its words is found by meaning and labelled a "
+            "suggestion with its score",
+            hit["matched"] == "meaning"
+            and hit["suggestion"] is True
+            and hit["words_matched"] == []
+            and abs(hit["similarity"] - score) < 0.002
+            and ("story", found_story["id"])
+            not in by_item(await search(client, paraphrase, mode="words")),
+            hit["why"],
+        )
+        page = await search(client, f"{title} {body}")
+        first = page["items"][0]
+        proof(
+            "M5",
+            "a result that matches both ways is labelled both and comes first",
+            (first["item_type"], first["id"]) == ("story", found_story["id"])
+            and first["matched"] == "both"
+            and first["suggestion"] is False
+            and first["similarity"] > 0.99
+            and first["why"].startswith("exact words: ")
+            and "similar in meaning" in first["why"],
+            first["why"],
+        )
+        by_words = by_item(await search(client, w, mode="words", limit=50))
+        by_meaning = by_item(
+            await search(client, "Clients get a bill by mail", mode="meaning", limit=50)
+        )
+        keys = [("fact", found_fact["id"]), ("belief", found_belief["id"])]
+        proof(
+            "M5",
+            "a fact and a belief are found by words and by meaning, labelled with their origin",
+            all(k in by_words and by_words[k]["matched"] == "words" for k in keys)
+            and all(k in by_meaning and by_meaning[k]["matched"] == "meaning" for k in keys)
+            and all(by_meaning[k]["origin"] == "stated" for k in keys),
+        )
+
+        # -- the service goes away and comes back
+        w3 = unique_word()
+        epic3 = await ok(client, "create_node", actor="a", kind="epic", title="An epic")
+        phrase = f"Customers get an invoice by email {w3}"
+        paraphrase3 = "Clients get a bill by mail"
+        with embeddings_stopped():
+            added = await ok(
+                client, "create_node", actor="a", kind="story", title=phrase, parent_id=epic3["id"]
+            )
+            page = await search(client, w3)
+            hit = by_item(page)[("story", added["id"])]
+            gap = ("story", added["id"]) in by_item(await search(client, paraphrase3))
+            message = await refused(client, "search", query=paraphrase3, mode="meaning")
+        proof(
+            "M5",
+            "with the embedding service stopped, a phrase added to a story is found by words at "
+            "once and labelled an exact-words match; its paraphrase is not found, and asking for "
+            "meaning says plainly why not",
+            hit["matched"] == "words"
+            and page["index"]["meaning"] == "service_unreachable"
+            and not gap
+            and "Searching by meaning is not possible now" in message,
+            f'"{clip(message, 80)}"',
+        )
+        await reindexed(client)
+        back = by_item(await search(client, paraphrase3))[("story", added["id"])]
+        proof(
+            "M5",
+            "once the service returns and reindex has run, the paraphrase is found by meaning",
+            back["matched"] == "meaning",
+            back["why"],
+        )
+
+        # -- the overlap finder, on a fixture with known answers
+        epic_a = await ok(client, "create_node", actor="a", kind="epic", title="Overlap fixture A")
+        epic_b = await ok(client, "create_node", actor="a", kind="epic", title="Overlap fixture B")
+        firsts, seconds = [], []
+        for one, other in DUPLICATES:
+            firsts.append(
+                await ok(
+                    client,
+                    "create_node",
+                    actor="a",
+                    kind="story",
+                    title=one,
+                    parent_id=epic_a["id"],
+                )
+            )
+            seconds.append(
+                await ok(
+                    client,
+                    "create_node",
+                    actor="a",
+                    kind="story",
+                    title=other,
+                    parent_id=epic_b["id"],
+                )
+            )
+        await reindexed(client)
+        pairs = {
+            (a["id"], b["id"]): i == j for i, a in enumerate(firsts) for j, b in enumerate(seconds)
+        }
+        duplicates = {pair for pair, same in pairs.items() if same}
+        unrelated = {pair for pair, same in pairs.items() if not same}
+        scores = {
+            (a["id"], b["id"]): cosine(embed(a["title"]), embed(b["title"]))
+            for a in firsts
+            for b in seconds
+        }
+        overlaps = await every_overlap(client, epic_ids=[epic_a["id"], epic_b["id"]])
+        flagged = {(p["first"]["id"], p["second"]["id"]) for p in overlaps["items"]}
+        proof(
+            "M5",
+            "on a fixture of known duplicate and known unrelated pairs, the overlap finder flags "
+            "the duplicates and not the unrelated pairs",
+            duplicates <= flagged and not unrelated & flagged,
+            f"threshold {overlaps['threshold']}: flagged {len(duplicates & flagged)} of "
+            f"{len(duplicates)} duplicate pairs and {len(unrelated & flagged)} of {len(unrelated)} "
+            f"unrelated pairs; duplicates scored {min(scores[p] for p in duplicates):.2f} to "
+            f"{max(scores[p] for p in duplicates):.2f}, unrelated at most "
+            f"{max(scores[p] for p in unrelated):.2f}",
+        )
+
+        # -- the index is derived, and only reindex writes to it
+        first_story = firsts[0]
+
+        async def snapshot_results() -> dict[str, Any]:
+            meaning = await search(client, "Send the bill to a client by mail", mode="meaning")
+            similar = await ok(
+                client, "similar_items", node_id=first_story["id"], min_similarity=0.3
+            )
+            over = await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
+            return {
+                "meaning": sorted(
+                    (i["item_type"], i["id"], i["similarity"]) for i in meaning["items"]
+                ),
+                "similar": sorted(
+                    (i["item_type"], i["id"], i["similarity"]) for i in similar["items"]
+                ),
+                "overlaps": sorted(
+                    (p["first"]["id"], p["second"]["id"], p["similarity"]) for p in over["items"]
+                ),
+            }
+
+        before = await snapshot_results()
+        with embeddings_stopped():
+            dropped = run_sql("DROP TABLE semantic_index, semantic_index_info")
+            without = await search(client, word)
+        report = await reindexed(client)
+        proof(
+            "M5",
+            "dropping the index tables and running reindex gives the same results",
+            dropped.returncode == 0
+            and without["index"]["meaning"] == "index_not_ready"
+            and report["indexed_total"] > 0
+            and await snapshot_results() == before,
+            f"{report['indexed_total']} items indexed again; words worked while it was gone",
+        )
+        snapshot_sql = (
+            "SELECT md5(string_agg(item_type || ':' || item_id || ':' || content_hash || ':' || "
+            "indexed_at::text || ':' || embedding::text, ',' ORDER BY item_type, item_id)) "
+            "FROM semantic_index"
+        )
+        before_index = sql_value(snapshot_sql, as_project=True)
+        await search(client, unique_word())
+        await search(client, "invoice by email", mode="meaning")
+        await ok(client, "similar_items", node_id=first_story["id"])
+        await ok(client, "similar_items", text="anything at all")
+        await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
+        await ok(client, "recall", node_id=first_story["id"], with_similar=True)
+        await ok(client, "list_nodes", limit=5)
+        await ok(client, "get_node", node_id=first_story["id"])
+        proof(
+            "M5",
+            "no tool other than reindex writes to the index: after every reading tool it is "
+            "exactly as it was",
+            before_index and sql_value(snapshot_sql, as_project=True) == before_index,
+            f"checksum {before_index[:12]} unchanged",
+        )
+
+        # -- M5B: a repeated title is flagged, and still created
+        repeated = f"Handle {unique_word()} requests"
+        (epic5, existing) = await stories(client, 1)
+        existing = await ok(
+            client,
+            "create_node",
+            actor="marie",
+            kind="story",
+            title=repeated,
+            parent_id=epic5["id"],
+        )
+        await reindexed(client)
+        again = await ok(
+            client, "create_node", actor="ann", kind="story", title=repeated, parent_id=epic5["id"]
+        )
+        (match,) = again["similar"]
+        proof(
+            "M5B",
+            "creating a story whose title repeats an existing one returns the existing one as "
+            "similar, and still creates it",
+            again["id"] != existing["id"]
+            and again["version"] == 1
+            and (match["item_type"], match["id"]) == ("story", existing["id"])
+            and match["suggestion"] is True
+            and match["similarity"] >= 0.55,
+            f"similarity {match['similarity']:.2f}",
+        )
+        with embeddings_stopped():
+            third = await ok(
+                client,
+                "create_node",
+                actor="ann",
+                kind="story",
+                title=repeated,
+                parent_id=epic5["id"],
+            )
+        proof(
+            "M5B",
+            "with the embedding service stopped it says it did not check, and still creates",
+            third["similar"] == []
+            and third["similar_checked"] is False
+            and "cannot be reached" in third["similar_note"],
+            f'"{clip(third["similar_note"], 80)}"',
+        )

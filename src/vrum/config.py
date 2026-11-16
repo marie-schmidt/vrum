@@ -145,46 +145,6 @@ class EmbeddingSettings:
 
 
 @dataclass(frozen=True)
-class LanguageModelSettings:
-    """The language model: any OpenAI-compatible chat service, local or not. Without it, the tools
-    that need a model say so, and everything else works."""
-
-    base_url: str
-    model: str
-    api_key: str | None = field(repr=False)
-    # How long to wait for one answer.
-    timeout_seconds: float
-    # The most text sent to the model in one request. More than this is not sent.
-    max_input_chars: int
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> "LanguageModelSettings | None":
-        base_url = env.get("LLM_BASE_URL", "").strip()
-        model = env.get("LLM_MODEL", "").strip()
-        if not base_url and not model:
-            return None
-        if not base_url or not model:
-            missing = "LLM_BASE_URL" if not base_url else "LLM_MODEL"
-            raise ConfigError(
-                f"{missing} is not set. LLM_BASE_URL and LLM_MODEL go together: set both to use "
-                "a language model, or neither to go without one."
-            )
-        if not base_url.startswith(("http://", "https://")):
-            raise ConfigError(
-                f"LLM_BASE_URL must start with http:// or https://, but it is {base_url!r}."
-            )
-        return cls(
-            base_url=base_url.rstrip("/"),
-            model=model,
-            api_key=_secret(env, "LLM_API_KEY"),
-            timeout_seconds=_seconds(env, "LLM_TIMEOUT_SECONDS", 120.0),
-            # About 3,000 tokens: it fits the context Ollama gives a model by default (4,096), with
-            # room for the answer. A model with a larger context can be given a larger limit.
-            max_input_chars=_whole_number(env, "LLM_MAX_INPUT_CHARS", 12000, 1000),
-        )
-
-
-@dataclass(frozen=True)
 class Settings:
     host: str
     port: int
@@ -198,7 +158,6 @@ class Settings:
     # How often the board asks the server for what changed, in seconds.
     board_poll_seconds: float = DEFAULT_BOARD_POLL_SECONDS
     embedding: EmbeddingSettings | None = None
-    llm: LanguageModelSettings | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -221,15 +180,13 @@ class Settings:
             ),
             board_poll_seconds=_seconds(env, "VRUM_BOARD_POLL_SECONDS", DEFAULT_BOARD_POLL_SECONDS),
             embedding=EmbeddingSettings.from_env(env),
-            llm=LanguageModelSettings.from_env(env),
         )
 
     def secrets(self) -> tuple[str, ...]:
         """Every secret value this server holds, so that nothing it writes can contain one."""
         found = [self.db_password]
-        for service in (self.embedding, self.llm):
-            if service is not None and service.api_key:
-                found.append(service.api_key)
+        if self.embedding is not None and self.embedding.api_key:
+            found.append(self.embedding.api_key)
         return tuple(found)
 
     def database_conninfo(self) -> str:

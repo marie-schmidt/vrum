@@ -58,7 +58,7 @@ def list_columns(detail: bool) -> str:
 
 
 EVENT_COLUMNS = (
-    "id, node_id, other_node_id, rule_id, decision_id, memory_id, action, actor, at, before, after"
+    "id, node_id, other_node_id, rule_id, decision_id, fact_id, action, actor, at, before, after"
 )
 
 
@@ -181,18 +181,16 @@ class Event(BaseModel):
     rule_id: int | None = Field(description="The rule the event is about, if it is about a rule.")
     decision_id: int | None = Field(
         description="The decision the event is about, if it is about a decision, or the decision "
-        "a fact concerns or a belief was promoted to."
+        "a fact concerns."
     )
-    memory_id: int | None = Field(
-        description="The fact or belief the event is about, if it is about one."
-    )
+    fact_id: int | None = Field(description="The fact the event is about, if it is about one.")
     action: str = Field(
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
         "claim_released, handoff, rule_created, rule_updated, rule_placed, rule_moved, "
-        "decision_recorded, decision_superseded, decision_linked, decision_unlinked, "
-        "memory_recorded, memory_superseded, memory_retracted, memory_linked, memory_unlinked, "
-        "memory_confirmed, memory_promoted or model_call (a call to the language model: it is "
-        "about no one item, and says in after what was asked and which items were used)."
+        "decision_recorded, decision_superseded, decision_withdrawn, decision_linked, "
+        "decision_unlinked, decision_confirmed, decision_unconfirmed, fact_recorded, "
+        "fact_superseded, fact_withdrawn, fact_linked, fact_unlinked, fact_confirmed or "
+        "fact_unconfirmed."
     )
     actor: str = Field(description="The person or agent that made the change.")
     at: datetime

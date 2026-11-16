@@ -72,7 +72,6 @@ def main() -> int:
         port=settings.port,
         max_request_bytes=settings.max_request_bytes,
         embedding_model=settings.embedding.model if settings.embedding else None,
-        language_model=settings.llm.model if settings.llm else None,
     )
     # The server writes its own log lines (see logs.py), so the web server's are off.
     config = uvicorn.Config(

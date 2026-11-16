@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+
+# Secrets and local configuration: never commit these
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+
+# Backups and exports hold all the data: never commit them
+backups/
+vrum-export*.json
+
+# macOS and sync tools leave stale copies named "file 2.ext" when a file is replaced; never commit them
+* 2
+* 2.*

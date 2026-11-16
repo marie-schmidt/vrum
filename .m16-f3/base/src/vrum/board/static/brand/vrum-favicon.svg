@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 144" width="144" height="144">
+  <title>vrum</title>
+  <!-- One colour icon for favicon sizes. Paper #F3EEE3 on ink #16130F. -->
+  <rect width="144" height="144" fill="#16130F"/>
+  <g transform="translate(28,22) skewX(-9)">
+    <polygon points="0,0 22,0 46.5,57 71,0 96,0 53,100 43,100" fill="#F3EEE3"/>
+  </g>
+</svg>

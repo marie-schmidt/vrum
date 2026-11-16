@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -40 519 180" width="1038" height="360">
+  <title>vrum</title>
+  <!-- Primary logo. Ink #16130F, vermilion #C8321A. Letters are live strokes (weight 22) on a 9 degree forward slant. -->
+  <g id="vrum" transform="skewX(-9)">
+    <polygon id="v" points="0,0 22,0 46.5,57 71,0 96,0 53,100 43,100" fill="#16130F"/>
+    <polygon id="vector" points="71,0 96,0 53,100 43,100 35.5,82.6" fill="#C8321A"/>
+    <path id="rum" d="M123,100 V11 H159 M185,0 V61 A28,28 0 0 0 213,89 H247 V0 M309,100 V11 H405 A28,28 0 0 1 433,39 V100 M371,100 V11 M343,11 A28,28 0 0 1 371,39" fill="none" stroke="#16130F" stroke-width="22" stroke-linejoin="miter" stroke-linecap="butt"/>
+  </g>
+</svg>

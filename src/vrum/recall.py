@@ -1,5 +1,6 @@
 """Recall: everything known about one node or rule, by exact links only, in separate labelled
-sections, each saying why an entry is there."""
+sections, each saying why an entry is there. Every entry carries its confirmation and its lifecycle,
+so an unconfirmed record is never presented as confirmed and an ended one never as in force."""
 
 from typing import Any
 
@@ -9,21 +10,19 @@ from pydantic import BaseModel, Field
 from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size, split_page
 from vrum.db import Database
 from vrum.decisions import LINK_TABLES, Decision, count_decisions, page_decisions
-from vrum.memories import MEMORY_COLUMNS, Memory, to_memory
+from vrum.facts import FACT_COLUMNS, Fact, to_fact
 from vrum.search import IndexNote, Searcher, SearchResult
 
 RECALL_LISTS = (
     "all",
     "active_decisions",
-    "active_principles",
+    "project_wide_decisions",
     "facts",
-    "beliefs",
-    "stale_beliefs",
-    "superseded_decisions",
-    "past_memories",
+    "past_decisions",
+    "past_facts",
 )
 
-_MEMORY_LINK_TABLES = {"node": "memory_nodes", "rule": "memory_rules"}
+_FACT_LINK_TABLES = {"node": "fact_nodes", "rule": "fact_rules"}
 _LINK_COLUMNS = {"node": "node_id", "rule": "rule_id"}
 
 
@@ -32,9 +31,9 @@ class RecalledDecision(BaseModel):
     decision: Decision
 
 
-class RecalledMemory(BaseModel):
-    why: str = Field(description="Why this fact or belief is in the recall.")
-    memory: Memory
+class RecalledFact(BaseModel):
+    why: str = Field(description="Why this fact is in the recall.")
+    fact: Fact
 
 
 class DecisionSection(BaseModel):
@@ -45,8 +44,8 @@ class DecisionSection(BaseModel):
     )
 
 
-class MemorySection(BaseModel):
-    items: list[RecalledMemory]
+class FactSection(BaseModel):
+    items: list[RecalledFact]
     count: int = Field(description="How many there are in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass as after_id, with show set to this section, for the next page."
@@ -55,8 +54,8 @@ class MemorySection(BaseModel):
 
 class SimilarSection(BaseModel):
     items: list[SearchResult] = Field(
-        description="Active decisions, facts and beliefs that are alike in meaning but not linked "
-        "to this item. Suggestions only: nothing here was linked by anyone."
+        description="Active decisions and facts that are alike in meaning but not linked to this "
+        "item. Suggestions only: nothing here was linked by anyone."
     )
     count: int = Field(description="How many there are in all.")
     index: IndexNote
@@ -64,27 +63,23 @@ class SimilarSection(BaseModel):
 
 class Recall(BaseModel):
     active_decisions: DecisionSection = Field(
-        description="Active decisions linked to this item. Only what is linked, nothing inferred."
+        description="Active decisions linked to this item, other than project-wide ones. Only "
+        "what is linked, nothing inferred. Each says whether a person confirmed it."
     )
-    active_principles: DecisionSection = Field(
-        description="Every active principle, linked to this item or not."
+    project_wide_decisions: DecisionSection = Field(
+        description="Every active project-wide decision, linked to this item or not: they apply "
+        "throughout the project."
     )
-    facts: MemorySection = Field(description="Active facts linked to this item.")
-    beliefs: MemorySection = Field(
-        description="Active beliefs linked to this item, or resting on evidence linked to it. "
-        "Every belief is a suggestion, never a decision."
+    facts: FactSection = Field(
+        description="Active facts linked to this item. Each says whether a person confirmed it."
     )
-    stale_beliefs: MemorySection = Field(
-        description="Beliefs that were linked or relevant, but whose evidence has changed. They "
-        "are not in force: read what changed in each one, then revise or retract it."
+    past_decisions: DecisionSection = Field(
+        description="Decisions linked to this item that were superseded or withdrawn. Shown so "
+        "you can see what changed; they are no longer in force."
     )
-    superseded_decisions: DecisionSection = Field(
-        description="Decisions and principles linked to this item that a newer decision has "
-        "replaced. Shown so you can see what changed; they are no longer in force."
-    )
-    past_memories: MemorySection = Field(
-        description="Facts and beliefs linked to this item that were superseded or retracted, with "
-        "what replaced them or why they were wrong."
+    past_facts: FactSection = Field(
+        description="Facts linked to this item that were superseded or withdrawn, with what "
+        "replaced them or why they were wrong."
     )
     similar: SimilarSection | None = Field(
         description="Only when you ask for it with with_similar: what is alike in meaning but "
@@ -93,43 +88,42 @@ class Recall(BaseModel):
 
 
 def _decision_why(decision: Decision, what: str) -> str:
-    if decision.kind == "principle":
-        return "a principle, so it applies everywhere"
+    if decision.project_wide and decision.status == "active":
+        return "a project-wide decision, so it applies throughout the project"
     base = f"linked directly to this {what}"
     if decision.status == "superseded":
         return f"{base}; replaced by decision {decision.superseded_by_id}"
+    if decision.status == "withdrawn":
+        return f"{base}; withdrawn: {decision.status_reason}"
     return base
 
 
-def _memory_why(memory: Memory, what: str, thing: int) -> str:
-    linked = thing in (memory.node_ids if what == "node" else memory.rule_ids)
-    base = (
-        f"linked directly to this {what}" if linked else f"rests on evidence linked to this {what}"
-    )
-    if memory.status == "superseded":
-        return f"{base}; replaced by {memory.type} {memory.superseded_by_id}"
-    if memory.status == "retracted":
-        return f"{base}; retracted: {memory.status_reason}"
+def _fact_why(fact: Fact, what: str) -> str:
+    base = f"linked directly to this {what}"
+    if fact.status == "superseded":
+        return f"{base}; replaced by fact {fact.superseded_by_id}"
+    if fact.status == "withdrawn":
+        return f"{base}; withdrawn: {fact.status_reason}"
     return base
 
 
-async def _count_memories(conn: AsyncConnection, where: str, params: dict[str, Any]) -> int:
-    row = await fetch_one(conn, f"SELECT count(*) AS total FROM memory_state WHERE {where}", params)
+async def _count_facts(conn: AsyncConnection, where: str, params: dict[str, Any]) -> int:
+    row = await fetch_one(conn, f"SELECT count(*) AS total FROM fact_state WHERE {where}", params)
     assert row is not None
     return int(row["total"])
 
 
-async def _page_memories(
+async def _page_facts(
     conn: AsyncConnection, where: str, params: dict[str, Any], limit: int, after_id: int | None
-) -> tuple[list[Memory], int | None]:
+) -> tuple[list[Fact], int | None]:
     rows = await fetch_all(
         conn,
-        f"SELECT {MEMORY_COLUMNS} FROM memory_state WHERE {where} AND id > %(after)s "
+        f"SELECT {FACT_COLUMNS} FROM fact_state WHERE {where} AND id > %(after)s "
         "ORDER BY id LIMIT %(fetch)s",
         {**params, "after": after_id or 0, "fetch": limit + 1},
     )
     page, next_after_id = split_page(rows, limit)
-    return [to_memory(row) for row in page], next_after_id
+    return [to_fact(row) for row in page], next_after_id
 
 
 class Recaller:
@@ -161,31 +155,20 @@ class Recaller:
         assert thing is not None
         column = _LINK_COLUMNS[what]
         decision_table = LINK_TABLES[what][0]
-        memory_table = _MEMORY_LINK_TABLES[what]
+        fact_table = _FACT_LINK_TABLES[what]
         params = {"thing": thing}
         linked_decision = (
             f"id IN (SELECT decision_id FROM {decision_table} WHERE {column} = %(thing)s)"
         )
-        linked = f"id IN (SELECT memory_id FROM {memory_table} WHERE {column} = %(thing)s)"
-        # A belief also counts when what it rests on is linked here.
-        relevant_belief = (
-            "(type = 'belief' AND id IN (SELECT be.belief_id FROM belief_evidence be "
-            f"WHERE be.fact_id IN (SELECT memory_id FROM {memory_table} "
-            f"WHERE {column} = %(thing)s) "
-            f"OR be.decision_id IN (SELECT decision_id FROM {decision_table} "
-            f"WHERE {column} = %(thing)s)))"
-        )
-        relevant = f"({linked} OR {relevant_belief})"
+        linked_fact = f"id IN (SELECT fact_id FROM {fact_table} WHERE {column} = %(thing)s)"
         decision_lists = {
-            "active_decisions": f"{linked_decision} AND kind = 'decision' AND status = 'active'",
-            "active_principles": "kind = 'principle' AND status = 'active'",
-            "superseded_decisions": f"{linked_decision} AND status = 'superseded'",
+            "active_decisions": f"{linked_decision} AND status = 'active' AND NOT project_wide",
+            "project_wide_decisions": "project_wide AND status = 'active'",
+            "past_decisions": f"{linked_decision} AND status <> 'active'",
         }
-        memory_lists = {
-            "facts": f"type = 'fact' AND status = 'active' AND {linked}",
-            "beliefs": f"type = 'belief' AND status = 'active' AND NOT stale AND {relevant}",
-            "stale_beliefs": f"stale AND {relevant}",
-            "past_memories": f"status <> 'active' AND {relevant}",
+        fact_lists = {
+            "facts": f"status = 'active' AND {linked_fact}",
+            "past_facts": f"status <> 'active' AND {linked_fact}",
         }
         async with self._database.transaction() as conn:
             found = await fetch_one(
@@ -213,49 +196,46 @@ class Recaller:
                     count=await count_decisions(conn, where, params),
                     next_after_id=next_decision_id,
                 )
-            memories: dict[str, MemorySection] = {}
-            for name, where in memory_lists.items():
-                found_memories, next_memory_id = (
-                    await _page_memories(conn, where, params, limit, after_id)
+            facts: dict[str, FactSection] = {}
+            for name, where in fact_lists.items():
+                found_facts, next_fact_id = (
+                    await _page_facts(conn, where, params, limit, after_id)
                     if show in ("all", name)
                     else ([], None)
                 )
-                memories[name] = MemorySection(
+                facts[name] = FactSection(
                     items=[
-                        RecalledMemory(why=_memory_why(item, what, thing), memory=item)
-                        for item in found_memories
+                        RecalledFact(why=_fact_why(item, what), fact=item) for item in found_facts
                     ],
-                    count=await _count_memories(conn, where, params),
-                    next_after_id=next_memory_id,
+                    count=await _count_facts(conn, where, params),
+                    next_after_id=next_fact_id,
                 )
             exclude: set[tuple[str, int]] = set()
             if with_similar:
                 # Whatever is linked or already shown is not "similar": it is known.
                 for row in await fetch_all(
-                    conn, f"SELECT kind, id FROM decision_state WHERE {linked_decision}", params
+                    conn, f"SELECT id FROM decision_state WHERE {linked_decision}", params
                 ):
-                    exclude.add((row["kind"], row["id"]))
+                    exclude.add(("decision", row["id"]))
                 for row in await fetch_all(
-                    conn, f"SELECT type, id FROM memory_state WHERE {relevant}", params
+                    conn, f"SELECT id FROM fact_state WHERE {linked_fact}", params
                 ):
-                    exclude.add((row["type"], row["id"]))
+                    exclude.add(("fact", row["id"]))
         similar: SimilarSection | None = None
         if with_similar:
             similar_items, count, note = await self._searcher.similar(
                 node_id=node_id,
                 rule_id=rule_id,
-                wanted_types=["decision", "fact", "belief"],
+                wanted_types=["decision", "fact"],
                 exclude=exclude,
                 limit=limit,
             )
             similar = SimilarSection(items=similar_items, count=count, index=note)
         return Recall(
             active_decisions=decisions["active_decisions"],
-            active_principles=decisions["active_principles"],
-            facts=memories["facts"],
-            beliefs=memories["beliefs"],
-            stale_beliefs=memories["stale_beliefs"],
-            superseded_decisions=decisions["superseded_decisions"],
-            past_memories=memories["past_memories"],
+            project_wide_decisions=decisions["project_wide_decisions"],
+            facts=facts["facts"],
+            past_decisions=decisions["past_decisions"],
+            past_facts=facts["past_facts"],
             similar=similar,
         )

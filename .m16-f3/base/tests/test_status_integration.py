@@ -1,0 +1,158 @@
+"""What `server_status` and `who_is_working` say, through a real MCP client against the running
+containers (see ./check.sh): the sizes equal what the list tools count, the index state equals
+what search says about it, the embedding service is seen answering and then not, how the last
+reindex went is kept, and nothing secret is ever in the answer."""
+
+import os
+
+import anyio
+import pytest
+from mcp import Client
+
+from tests.helpers import (
+    embeddings_stopped,
+    make_decision,
+    make_fact,
+    make_tree,
+    ok,
+    refused,
+    reindexed,
+    the_token,
+)
+
+pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+
+async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
+    epic, story, task = await make_tree(client)
+    await ok(client, "create_rule", actor="marie", title="A rule", story_id=story["id"])
+    await make_decision(client, "A decision")
+    await make_decision(client, "A principle", kind="principle")
+    fact = await make_fact(client, "A fact")
+    await ok(client, "record_belief", actor="a", text="A belief", evidence_fact_ids=[fact["id"]])
+    await reindexed(client)
+
+    status = await ok(client, "server_status")
+
+    counts = status["counts"]
+    for name, kind in (("epics", "epic"), ("stories", "story"), ("tasks", "task")):
+        assert counts[name] == (await ok(client, "list_nodes", kind=kind, limit=1))["total"], name
+    assert counts["rules"] == (await ok(client, "list_rules", limit=1))["total"]
+    for name, kind in (("decisions", "decision"), ("principles", "principle")):
+        assert counts[name] == (await ok(client, "list_decisions", kind=kind, limit=1))["total"]
+    for name, kind in (("facts", "fact"), ("beliefs", "belief")):
+        assert counts[name] == (await ok(client, "list_memories", type=kind, limit=1))["total"]
+    exported = (await ok(client, "export_graph", limit=1))["counts"]
+    assert counts["links"] == exported["links"] and counts["events"] == exported["events"]
+    assert counts["epics"] + counts["stories"] + counts["tasks"] == exported["nodes"]
+    assert epic["id"] and task["id"]
+
+
+async def test_the_index_state_equals_what_search_says_and_is_never_a_secret(
+    client: Client,
+) -> None:
+    await reindexed(client)
+    status = await ok(client, "server_status")
+    index = status["index"]
+    said = (await ok(client, "search", query="anything", limit=1))["index"]
+
+    assert (index["meaning"], index["waiting_to_index"]) == (
+        said["meaning"],
+        said["waiting_to_index"],
+    )
+    assert index["meaning"] == "used" and index["waiting_to_index"] == 0
+    assert index["embedding_service"] == "answering"
+    assert index["embedding_model"] == "scripted-embedding"
+    assert index["vector_size"] == 1024 and index["indexed"] > 0
+    assert status["language_model"] == "scripted-model"
+    # What the last reindex did is kept, with its result.
+    last = index["last_reindex"]
+    assert last["error"] is None and last["waiting_after"] == 0 and last["failed_total"] == 0
+    # Nothing secret is in it, in any field.
+    everything = str(status)
+    for secret in (the_token(), os.environ.get("VRUM_DB_PASSWORD", "no-such-password")):
+        assert secret not in everything
+
+
+async def test_a_stopped_embedding_service_is_seen_and_the_failed_reindex_is_kept(
+    client: Client,
+) -> None:
+    await reindexed(client)
+    with embeddings_stopped():
+        status = await ok(client, "server_status")
+        assert status["index"]["embedding_service"] == "unreachable"
+        assert "Nothing was indexed" in await refused(client, "reindex")
+        after = await ok(client, "server_status")
+        last = after["index"]["last_reindex"]
+        assert last["error"] and last["embedded"] == 0
+    # Back again: it answers, and the next reindex clears the error.
+    again = await ok(client, "server_status")
+    assert again["index"]["embedding_service"] == "answering"
+    await reindexed(client)
+    assert (await ok(client, "server_status"))["index"]["last_reindex"]["error"] is None
+
+
+async def test_a_server_with_no_services_says_so_and_no_model_is_named(
+    no_model_client: Client,
+) -> None:
+    status = await ok(no_model_client, "server_status")
+    assert status["language_model"] is None
+    assert status["index"]["embedding_service"] in {"answering", "not_configured"}
+    assert status["counts"]["epics"] >= 0
+
+
+async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(
+    client: Client,
+) -> None:
+    epic = await ok(client, "create_node", actor="marie", kind="epic", title="Who")
+    story = await ok(
+        client, "create_node", actor="marie", kind="story", title="Who story", parent_id=epic["id"]
+    )
+    tasks = [
+        await ok(
+            client,
+            "create_node",
+            actor="marie",
+            kind="task",
+            title=f"Who task {number}",
+            parent_id=story["id"],
+        )
+        for number in range(3)
+    ]
+    working, lapsing, finishing = (f"{name}-{epic['id']}" for name in ("ann", "bob", "cy"))
+    await ok(client, "claim_node", actor=working, node_id=tasks[0]["id"], lease_seconds=600)
+    await ok(client, "claim_node", actor=lapsing, node_id=tasks[1]["id"], lease_seconds=1)
+    await ok(client, "claim_node", actor=finishing, node_id=tasks[2]["id"])
+    await ok(
+        client,
+        "finish_work",
+        actor=finishing,
+        node_id=tasks[2]["id"],
+        outcome="done",
+        note="All of it is done.\nSecond line.",
+    )
+    await anyio.sleep(1.6)
+
+    result = await ok(client, "who_is_working")
+
+    ours = {
+        agent["actor"]: agent
+        for agent in result["agents"]
+        if agent["actor"].endswith(f"-{epic['id']}")
+    }
+    assert set(ours) == {working, lapsing, finishing}
+    assert ours[working]["state"] == "working"
+    assert [held["node_id"] for held in ours[working]["holding"]] == [tasks[0]["id"]]
+    assert ours[working]["holding"][0]["title"] == "Who task 0"
+    assert ours[lapsing]["state"] == "lapsed" and ours[lapsing]["holding"] == []
+    assert [held["node_id"] for held in ours[lapsing]["lapsed"]] == [tasks[1]["id"]]
+    assert ours[finishing]["state"] == "finished"
+    note = ours[finishing]["last_handoff"]
+    assert note["note"] == "All of it is done.\nSecond line." and note["outcome"] == "done"
+    assert note["node_id"] == tasks[2]["id"]
+    # Working first, then lapsed, then finished.
+    order = [agent["state"] for agent in result["agents"]]
+    assert order == sorted(order, key=["working", "lapsed", "finished"].index)
+    # The server's own time, for the countdown.
+    claim_ends = ours[working]["holding"][0]["expires_at"]
+    assert claim_ends > result["as_of"]

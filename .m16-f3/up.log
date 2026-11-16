@@ -1,0 +1,91 @@
+ Image vrum-m16-f3-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 588B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 562B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/python:3.12-slim
+#3 DONE 0.0s
+
+#4 [internal] load metadata for ghcr.io/astral-sh/uv:0.11
+#4 DONE 0.2s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 144B done
+#5 DONE 0.0s
+
+#6 FROM ghcr.io/astral-sh/uv:0.11@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7
+#6 resolve ghcr.io/astral-sh/uv:0.11@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 done
+#6 DONE 0.0s
+
+#7 [build 1/7] FROM docker.io/library/python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+#7 resolve docker.io/library/python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 4.00kB done
+#8 DONE 0.0s
+
+#9 [stage-1 2/3] RUN useradd --system --no-create-home --uid 10001 vrum
+#9 CACHED
+
+#10 [build 3/7] WORKDIR /app
+#10 CACHED
+
+#11 [build 2/7] COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
+#11 CACHED
+
+#12 [build 4/7] COPY pyproject.toml uv.lock ./
+#12 CACHED
+
+#13 [build 5/7] RUN uv sync --frozen --no-dev --no-install-project
+#13 CACHED
+
+#14 [build 7/7] RUN uv sync --frozen --no-dev --no-editable
+#14 CACHED
+
+#15 [build 6/7] COPY src ./src
+#15 CACHED
+
+#16 [stage-1 3/3] COPY --from=build /app/.venv /app/.venv
+#16 CACHED
+
+#17 exporting to image
+#17 exporting layers done
+#17 exporting manifest sha256:dd00e0ce15ddbf33a1a4a6985c0a5f655f3852c8637ee3a617a47c7dda419d2d done
+#17 exporting config sha256:2592c0c5d0968c1690f488dd276df272843ecea9afbe3bd93610669249862e47 done
+#17 exporting attestation manifest sha256:1566382f99319e4691137d9e0eda5c98ecc9b27189fe98ac9da13c4803d13ad4 done
+#17 exporting manifest list sha256:9c3a71992d32c2806cbe63581d57a18e64aeac23f76e6e4aa908641a5ba425d8 done
+#17 naming to docker.io/library/vrum-m16-f3-app:latest done
+#17 unpacking to docker.io/library/vrum-m16-f3-app:latest done
+#17 DONE 0.1s
+
+#18 resolving provenance for metadata file
+#18 DONE 0.0s
+ Image vrum-m16-f3-app Built 
+ Volume vrum-m16-f3_vrum-data Creating 
+ Volume vrum-m16-f3_vrum-data Creating 
+ Network vrum-m16-f3_default Creating 
+ Network vrum-m16-f3_default Creating 
+ Volume vrum-m16-f3_vrum-data Created 
+ Volume vrum-m16-f3_vrum-data Created 
+ Network vrum-m16-f3_default Created 
+ Network vrum-m16-f3_default Created 
+ Container vrum-m16-f3-db-1 Creating 
+ Container vrum-m16-f3-db-1 Created 
+ Container vrum-m16-f3-app-1 Creating 
+ Container vrum-m16-f3-app-1 Created 
+ Container vrum-m16-f3-db-1 Starting 
+ Container vrum-m16-f3-db-1 Started 
+ Container vrum-m16-f3-db-1 Waiting 
+ Container vrum-m16-f3-db-1 Healthy 
+ Container vrum-m16-f3-app-1 Starting 
+ Container vrum-m16-f3-app-1 Started 
+ Container vrum-m16-f3-db-1 Waiting 
+ Container vrum-m16-f3-app-1 Waiting 
+ Container vrum-m16-f3-db-1 Healthy 
+ Container vrum-m16-f3-app-1 Healthy 
+done

@@ -1,26 +1,21 @@
-// The card of one epic, story or task: everything about it, and the ways to change it. Every
-// change is the same operation an agent would call, with the version the person saw, so a change
-// made meanwhile by an agent is refused in the same words and nothing typed is lost.
+// The detail of one epic, story or task: everything about it, and the ways to change it, with its
+// requirements, the facts and decisions that concern it, and its history. Every change is the same
+// operation an agent would call, with the version the person saw, so a change made meanwhile by an
+// agent is refused in the same words and nothing typed is lost.
 
 import { Refusal, call, callAll } from './api.js';
 import { actor, notify, ui } from './ctx.js';
-import { h, clear, day, moment, plural } from './dom.js';
+import { clear, day, h, moment, plural } from './dom.js';
 import { parentChoices, openCreate } from './create.js';
-import { KIND, LINK, LINK_TYPES, PRIORITIES, PRIORITY, STATUS, SETTABLE, kindChip, priorityChip, statusChip } from './labels.js';
+import { KIND, LINK, PRIORITIES, PRIORITY, STATUS, SETTABLE, kindChip, priorityChip, statusChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
+import { askRecall, recallBlock } from './recall.js';
+import { closeButton, explainStale, historySection, recordButtons, requirementDialog, requirementRow, section, watchEdits } from './records.js';
 import { withReferences } from './reference-picker.js';
-import { fetchMentions, mentionsList, needTargets } from './references.js';
-import { store, sync, titleOf } from './store.js';
+import { fetchMentions, itemLink, loadTargets, mentionsList } from './references.js';
+import { childrenOf, store, sync } from './store.js';
 
-const link = (id) =>
-  h('a', { href: `#/${ui.page}?${withCard(id)}`, class: 'item-link', 'data-id': id }, `#${id} ${titleOf(id)}`);
-
-function withCard(id) {
-  const params = new URLSearchParams(ui.params);
-  params.set('card', String(id));
-  params.delete('panel');
-  return params.toString();
-}
+export { itemLink };
 
 // -- the form -------------------------------------------------------------------------------------
 
@@ -84,29 +79,7 @@ function editForm(node, state) {
   );
 }
 
-// Say what the server said and, when the card is no longer the one the person read, offer the
-// current version. What was typed stays where it is until they choose.
-async function explain(error, place, node, state) {
-  place.replaceChildren(h('span', { class: 'refusal-text' }, error.message));
-  const now = await call('get_node', { node_id: node.id }).catch(() => null);
-  if (now && now.version !== state.version) {
-    place.append(
-      ' ',
-      h(
-        'button',
-        {
-          type: 'button',
-          class: 'link load-current',
-          onclick: () => {
-            state.dirty = false;
-            state.reload(true);
-          },
-        },
-        `Load the current version (${now.version}), and lose what I typed`,
-      ),
-    );
-  }
-}
+const explain = (error, place, node, state) => explainStale(error, place, state, async () => (await call('get_node', { node_id: node.id })).version);
 
 // -- parent -------------------------------------------------------------------------------------
 
@@ -158,7 +131,7 @@ function linksSection(node, items, state) {
             { 'data-type': item.link_type },
             h('span', { class: 'relation' }, phrase(item, node.id)),
             ' ',
-            link(other),
+            itemLink(other),
             ' ',
             h(
               'button',
@@ -236,70 +209,35 @@ function linksSection(node, items, state) {
   return section('Links', 'links', list, form);
 }
 
-// -- what is known about it ---------------------------------------------------------------------
+// -- requirements -------------------------------------------------------------------------------
 
-function origin(item) {
-  const words = { stated: 'stated by a person or agent', extracted: 'proposed by a language model from a quoted passage', derived: 'drawn up by a language model from evidence' };
-  return words[item.origin] || item.origin;
-}
-
-function decisionItem(entry) {
-  const decision = entry.decision;
-  return h(
-    'li',
-    { 'data-decision': decision.id },
-    h('strong', {}, `${KIND[decision.kind].label} #${decision.id}: ${decision.title}`),
-    h('div', { class: 'quiet' }, `Decided by ${decision.decided_by} on ${day(decision.decided_on)}.`),
-    renderMarkdown(decision.text),
-    h('div', { class: 'quiet' }, 'Why: ', renderMarkdown(decision.reason, { className: 'markdown inline-markdown' })),
+// The requirements of a story are the ones in it. An epic shows those of its stories and a task
+// those of its story, so that what has to hold for the work is read where the work is.
+function requirementsSection(node) {
+  const rules = store.rules || [];
+  const inStory = (id) => rules.filter((rule) => rule.story_id === id);
+  const list = (items) => h('ul', { class: 'plain requirements' }, items.map(requirementRow));
+  if (node.kind === 'story') {
+    const own = inStory(node.id);
+    return section(
+      'Requirements',
+      'requirements',
+      own.length ? list(own) : h('p', { class: 'quiet none' }, 'No requirements in this story.'),
+      h('p', {}, h('button', { type: 'button', class: 'add-requirement', onclick: () => requirementDialog({ story: node.id }) }, 'Add a requirement…')),
+    );
+  }
+  const stories = node.kind === 'epic' ? childrenOf(node.id) : [store.nodes.get(node.parent_id)].filter(Boolean);
+  const groups = stories.map((story) => [story, inStory(story.id)]).filter(([, own]) => own.length);
+  return section(
+    node.kind === 'epic' ? 'Requirements in its stories' : 'Requirements of its story',
+    'requirements',
+    groups.length
+      ? groups.map(([story, own]) => h('div', { class: 'requirement-group', dataset: { story: story.id } }, h('h4', {}, itemLink(story.id)), list(own)))
+      : h('p', { class: 'quiet none' }, node.kind === 'epic' ? 'None of its stories has a requirement yet.' : 'Its story has no requirements yet.'),
   );
 }
 
-function memoryItem(entry) {
-  const memory = entry.memory;
-  const belief = memory.type === 'belief';
-  return h(
-    'li',
-    { 'data-memory': memory.id, class: belief ? 'belief' : 'fact' },
-    h(
-      'strong',
-      {},
-      belief ? h('span', { class: 'chip suggestion' }, '◇ Suggestion') : h('span', { class: 'chip' }, '◈ Fact'),
-      ' ',
-      `#${memory.id}`,
-      memory.stale ? h('span', { class: 'chip stale' }, '! Stale') : null,
-    ),
-    h('div', {}, renderMarkdown(memory.text)),
-    h(
-      'div',
-      { class: 'quiet' },
-      `Origin: ${memory.origin}, ${origin(memory)}. Recorded by ${memory.recorded_by}.`,
-      belief ? ` Rests on ${plural(memory.evidence_count, 'piece')} of evidence.` : memory.source ? ` Source: ${memory.source}.` : '',
-      memory.confirmed_by ? ` Confirmed by ${memory.confirmed_by}.` : belief ? ' Nobody has confirmed it.' : '',
-    ),
-    memory.stale ? h('div', { class: 'quiet' }, `Stale: ${memory.stale_because.join(' ')}`) : null,
-  );
-}
-
-function recallSections(recalled) {
-  const parts = [];
-  const add = (title, section, render, note) => {
-    if (!section.items.length) return;
-    const more = section.count > section.items.length ? h('p', { class: 'quiet' }, `${section.count - section.items.length} more not shown.`) : null;
-    parts.push(section_(title, h('ul', { class: 'plain' }, section.items.map(render)), more, note));
-  };
-  add('Decisions in force', recalled.active_decisions, decisionItem);
-  add('Principles in force', recalled.active_principles, decisionItem, 'Principles apply to everything.');
-  add('Facts', recalled.facts, memoryItem);
-  add('Beliefs: suggestions, not decisions', recalled.beliefs, memoryItem);
-  add('Stale beliefs: their evidence changed', recalled.stale_beliefs, memoryItem);
-  return parts;
-}
-
-function section_(title, ...content) {
-  return h('section', { class: 'part' }, h('h3', {}, title), content);
-}
-const section = (title, key, ...content) => h('section', { class: 'part', 'data-part': key }, h('h3', {}, title), content);
+// -- what else looks like it -----------------------------------------------------------------------
 
 function overlapSection(node, result) {
   if (!result) return null;
@@ -314,43 +252,15 @@ function overlapSection(node, result) {
       'ul',
       { class: 'plain' },
       result.items.map((item) =>
-        h('li', { 'data-overlap': item.id }, link(item.id), ` ${KIND[item.item_type]?.label || item.item_type}, ${item.similarity === null ? 'by words' : `${item.similarity.toFixed(2)} alike`}`),
+        h('li', { 'data-overlap': item.id }, itemLink(item.id), ` ${KIND[item.item_type]?.label || item.item_type}, ${item.similarity === null ? 'by words' : `${item.similarity.toFixed(2)} alike`}`),
       ),
     ),
   );
 }
 
-function describe(event) {
-  const changed = Object.keys(event.after).filter((key) => key !== 'version');
-  const words = {
-    create: 'created it',
-    update: `changed ${changed.map((key) => `${key.replace('_', ' ')} (${event.before && key in event.before ? `${event.before[key] ?? 'empty'} → ` : ''}${event.after[key] ?? 'empty'})`).join(', ')}`,
-    move: `moved it to #${event.after.parent_id}${event.before ? ` from #${event.before.parent_id}` : ''}`,
-    link_added: 'added a link',
-    link_removed: 'removed a link',
-    claimed: 'took it',
-    claim_released: 'let go of it',
-    handoff: `finished with a handoff note (${event.after.outcome})`,
-  };
-  return words[event.action] || event.action.replace(/_/g, ' ');
-}
-
-function historySection(events) {
-  const newest = [...events].reverse();
-  const shown = newest.slice(0, 10);
-  const row = (event) =>
-    h('li', { 'data-event': event.id }, h('span', { class: 'quiet' }, `${moment(event.at)} `), h('strong', {}, event.actor), ` ${describe(event)}. `, h('span', { class: 'quiet' }, `Version ${event.after.version ?? ''}`.trim()));
-  const list = h('ul', { class: 'plain history' }, shown.map(row));
-  const more =
-    newest.length > shown.length
-      ? h('button', { type: 'button', class: 'link', onclick: (event) => { list.replaceChildren(...newest.map(row)); event.target.remove(); } }, `Show all ${newest.length}`)
-      : null;
-  return section('History', 'history', list, more);
-}
-
 // -- the whole card -----------------------------------------------------------------------------
 
-// Fills `root` with the card of node `id`. Returns what the panel needs to know about it.
+// Fills `root` with the detail of node `id`. Returns what the panel needs to know about it.
 export async function renderCard(root, id, state = { id, version: null, dirty: false }, force = true) {
   const seen = state.touches || 0;
   state.skipped = false;
@@ -359,11 +269,10 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
   if (!root.querySelector('.card-detail')) clear(root).append(h('p', { class: 'quiet' }, 'Loading…'));
   const node = await call('get_node', { node_id: id });
   const wantsSimilar = node.kind !== 'task';
-  const [links, recalled, history, rules, similar, mentions] = await Promise.all([
+  const [links, recalled, history, similar, mentions] = await Promise.all([
     callAll('list_links', { node_id: id }),
-    call('recall', { node_id: id }),
+    askRecall({ node_id: id }, state.withSimilar ? { with_similar: true } : {}),
     callAll('node_history', { node_id: id }),
-    node.kind === 'story' ? callAll('list_rules', { story_id: id }) : Promise.resolve(null),
     wantsSimilar
       ? call('similar_items', { node_id: id, types: [node.kind], limit: 5 }).catch((error) => {
           if (!(error instanceof Refusal)) throw error;
@@ -371,8 +280,8 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
         })
       : Promise.resolve(null),
     fetchMentions('node', id),
+    loadTargets(),
   ]);
-  await needTargets(node.body, JSON.stringify(recalled));
 
   // The panel has moved on to another card while this one was being fetched.
   if (state.dead) return state;
@@ -396,7 +305,7 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
       ? h('p', { class: 'quiet' }, `${node.lapsed_claim_by}’s claim ran out on ${moment(node.lapsed_claim_at)} with no handoff note.`)
       : null;
   const waiting = node.waiting_on.length
-    ? h('p', {}, 'Waiting for ', node.waiting_on.map((other, position) => [position ? ', ' : '', link(other)]))
+    ? h('p', {}, 'Waiting for ', node.waiting_on.map((other, position) => [position ? ', ' : '', itemLink(other)]))
     : null;
   const last = node.last_handoff;
 
@@ -408,9 +317,9 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
       {},
       h('div', { class: 'chips' }, kindChip(node.kind), statusChip(node.status), priorityChip(node.priority), marks),
       h('h2', { id: 'card-title', tabindex: -1 }, `#${node.id} ${node.title}`),
-      h('button', { type: 'button', class: 'close', 'aria-label': 'Close the card', onclick: () => ui.navigate({ card: null }) }, '✕'),
+      closeButton('Close the details'),
     ),
-    node.parent_id !== null ? h('p', {}, `In ${KIND[store.nodes.get(node.parent_id)?.kind || 'epic'].label.toLowerCase()} `, link(node.parent_id)) : null,
+    node.parent_id !== null ? h('p', {}, `In ${KIND[store.nodes.get(node.parent_id)?.kind || 'epic'].label.toLowerCase()} `, itemLink(node.parent_id)) : null,
     node.progress_total !== null
       ? h('p', {}, `Progress: ${node.progress_done} of ${plural(node.progress_total, 'task')} done`, h('progress', { max: Math.max(node.progress_total, 1), value: node.progress_done, 'aria-label': 'Tasks done' }))
       : null,
@@ -423,27 +332,20 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
       ? h('p', {}, h('button', { type: 'button', class: 'add-child', onclick: () => openCreate({ kind: node.kind === 'epic' ? 'story' : 'task', parent: node.id }) }, node.kind === 'epic' ? 'Add a story' : 'Add a task'))
       : null,
     linksSection(node, links, state),
+    requirementsSection(node),
+    section(
+      'Facts and decisions',
+      'context',
+      recordButtons({ node_ids: [node.id] }),
+      recallBlock({ node_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) }),
+    ),
     section(`Mentioned in (${mentions.length})`, 'mentions', mentionsList(mentions)),
-    rules
-      ? section('Rules in this story', 'rules', rules.length ? h('ul', { class: 'plain' }, rules.map((rule) => h('li', { 'data-rule': rule.id }, `Rule #${rule.id} (${rule.status}): ${rule.title}`))) : h('p', { class: 'quiet' }, 'No rules.'))
-      : null,
-    recallSections(recalled),
     overlapSection(node, similar),
     historySection(history),
   );
   clear(root).append(view);
-  // Anything typed or chosen in the card from now on is not replaced by a fresh copy of it.
-  view.addEventListener('input', () => {
-    state.dirty = true;
-    state.touches = (state.touches || 0) + 1;
-  });
-  view.addEventListener('change', () => {
-    state.dirty = true;
-    state.touches = (state.touches || 0) + 1;
-  });
+  watchEdits(view, state);
   const heading = root.querySelector('#card-title');
   state.focus = () => heading.focus();
   return state;
 }
-
-export { link as itemLink };
