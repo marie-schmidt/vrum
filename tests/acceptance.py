@@ -29,6 +29,7 @@ from tests.acceptance_scenario import (
     requirements_and_decisions,
     working_together,
 )
+from tests.acceptance_views import views
 
 CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "arriving": arriving,
@@ -40,6 +41,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "model": model_help,
     "hardening": hardening,
     "board": board,
+    "views": views,
     "moving": moving,
 }
 

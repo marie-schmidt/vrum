@@ -21,6 +21,7 @@ from vrum.common import (
     stale_version,
 )
 from vrum.db import Database
+from vrum.query import compile_query
 
 KINDS = ("epic", "story", "task")
 # What a person or agent may set. `ready` is not here on purpose: it is worked out, never set.
@@ -460,12 +461,14 @@ class Graph:
         detail: bool,
         limit: int,
         after_id: int | None,
+        query: str | None = None,
     ) -> NodePage:
         limit = page_size(limit)
         if kind is not None:
             check_choice("kind", kind, KINDS)
         if status is not None:
             check_choice("status", status, SHOWN_STATUSES)
+        asked, asked_params = compile_query(query)
         where = (
             "(%(kind)s::text IS NULL OR kind = %(kind)s) "
             "AND (%(parent_id)s::bigint IS NULL OR parent_id = %(parent_id)s) "
@@ -474,9 +477,11 @@ class Graph:
             "AND (%(start_to)s::date IS NULL OR start_on <= %(start_to)s) "
             "AND (%(target_from)s::date IS NULL OR target_on >= %(target_from)s) "
             "AND (%(target_to)s::date IS NULL OR target_on <= %(target_to)s) "
-            "AND (%(overdue)s::boolean IS NULL OR overdue = %(overdue)s)"
+            "AND (%(overdue)s::boolean IS NULL OR overdue = %(overdue)s) "
+            f"AND {asked}"
         )
         params = {
+            **asked_params,
             "kind": kind,
             "parent_id": parent_id,
             "status": status,

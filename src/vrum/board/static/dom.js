@@ -8,6 +8,8 @@ function fill(el, props, children) {
     if (value === null || value === undefined || value === false) continue;
     if (name === 'class') el.setAttribute('class', value);
     else if (name === 'dataset') Object.assign(el.dataset, value);
+    // Styles are set from script, because the page's policy does not allow a style attribute.
+    else if (name === 'css') Object.assign(el.style, value);
     else if (name.startsWith('on')) el.addEventListener(name.slice(2).toLowerCase(), value);
     else if (name === 'value' || name === 'checked' || name === 'disabled' || name === 'open') {
       // Set after the children, so that a select can find its option.
@@ -23,6 +25,7 @@ function fill(el, props, children) {
   if (props) {
     if ('value' in props && props.value !== null && props.value !== undefined) el.value = props.value;
     if (props.checked) el.checked = true;
+    if (props.open) el.open = true;
     if (props.disabled) el.disabled = true;
   }
   return el;

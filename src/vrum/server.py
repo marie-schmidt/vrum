@@ -76,7 +76,9 @@ decided_by), and what you learn with `retain_fact`.
 handoff note for whoever comes next. A blank note is refused.
 
 Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
-`changes_since` shows only what is new since an event, and `ready_work` lists what is free. Lists \
+`changes_since` shows only what is new since an event, and `ready_work` lists what is free. \
+`list_nodes` takes a filter text as its query argument, such as \
+`kind:task status:ready -claimed OR is:overdue`. Lists \
 leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. \
 Anything holding a well-known secret format (an access token, a private key) is refused in every \
 field and never stored: leave secrets out of what you write. \
@@ -338,12 +340,28 @@ def create_server(settings: Settings) -> GuardedServer:
         detail: _Detail = False,
         limit: _Limit = 50,
         after_id: _After = None,
+        query: Annotated[
+            str | None,
+            Field(
+                description="A filter in words and field:value terms, such as: kind:task "
+                "status:ready,in_progress -claimed priority:high OR kind:story. Words match "
+                "part of a title or body. field:a,b means any of these; a leading - leaves "
+                "matches out; terms side by side must all hold; OR joins alternatives. Fields: "
+                "kind, status, priority, claimed (who holds it), parent, epic, story, id, start "
+                "and target (a day, a range such as 2026-11-01..2026-12-31, or none), is "
+                "(overdue, conflict, waiting, claimed, lapsed) and no (start, target, claimed, "
+                "parent, body, waiting). claimed and waiting on their own find the items that "
+                "have one, and -claimed those that have none. Combines with the other filters."
+            ),
+        ] = None,
     ) -> NodePage:
         """List nodes, oldest first, a page at a time. Every filter is optional and they combine.
 
         status can also be ready: a node nobody has started whose prerequisites are all done. The
         date filters look at each node's own dates, so a node without a date never matches one.
-        Bodies are left out unless you ask for detail: see body_preview, or use get_node.
+        Bodies are left out unless you ask for detail: see body_preview, or use get_node. For
+        anything the other filters cannot say, use query: it is the same filter language the
+        board's Table and Roadmap use.
         """
         with _database_errors():
             return await graph.list_nodes(
@@ -358,6 +376,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 detail=detail,
                 limit=limit,
                 after_id=after_id,
+                query=query,
             )
 
     @mcp.tool()

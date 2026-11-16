@@ -1,0 +1,450 @@
+"""M11's Roadmap against the running containers, driven in a real headless browser and checked
+against a real MCP client (see ./check.sh). Bars are checked at the pixels their dates give, every
+change a person makes is read back through get_node and node_history, and refusals are compared
+word for word with what the same change gets through MCP. Every filter starts with `epic:<id>`
+so that a test sees only the items it made."""
+
+import re
+from collections import Counter
+from typing import Any
+
+import pytest
+from mcp import Client
+from playwright.async_api import expect
+
+from tests.board_helpers import (
+    SLOW,
+    apply_filter,
+    bar_of,
+    board_url,
+    browser_page,
+    hold_back_news,
+    on,
+    timeline,
+)
+from tests.board_helpers import drag_bar as drag
+from tests.board_helpers import roadmap_ids as shown
+from tests.helpers import all_nodes, day, ok, refused, the_token, unique_word
+
+pytestmark = [pytest.mark.integration, pytest.mark.anyio]
+
+ACTOR = "Ada Lovelace"
+
+
+@pytest.fixture
+def board(server_url: str) -> str:
+    return board_url(server_url)
+
+
+async def made(
+    client: Client, kind: str, title: str, parent: int | None = None, **more: Any
+) -> int:
+    fields: dict[str, Any] = {"actor": "agent-1", "kind": kind, "title": title, **more}
+    if parent:
+        fields["parent_id"] = parent
+    return int((await ok(client, "create_node", **fields))["id"])
+
+
+def plain(board_words: str, mcp_words: str) -> None:
+    assert board_words.strip() and not board_words.startswith("Error executing tool")
+    assert mcp_words.endswith(board_words.strip()), (board_words, mcp_words)
+
+
+async def updates(client: Client, node_id: int) -> list[dict[str, Any]]:
+    history = await ok(client, "node_history", node_id=node_id)
+    return [event for event in history["items"] if event["action"] == "update"]
+
+
+async def dates(client: Client, node_id: int) -> tuple[str | None, str | None]:
+    node = await ok(client, "get_node", node_id=node_id)
+    return node["start_on"], node["target_on"]
+
+
+async def window(client: Client) -> tuple[int, int, int, int]:
+    """An epic, a story and two tasks, to be given dates. The ids come back as one tuple."""
+    word = unique_word()
+    epic = await made(client, "epic", f"Plan {word}")
+    story = await made(client, "story", f"Part {word}", epic)
+    first = await made(client, "task", f"First {word}", story, start_on=day(3), target_on=day(12))
+    second = await made(client, "task", f"Second {word}", story, start_on=day(4), target_on=day(14))
+    return epic, story, first, second
+
+
+# -- 4. the bars are where the dates say -----------------------------------------------------------
+
+
+async def test_the_roadmap_draws_bars_tray_worked_out_spans_arrows_and_marks_and_filters_like_mcp(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Roadmap {word}")
+    story = await made(client, "story", f"Delivery {word}", epic)
+    dated = {
+        "a": (5, 12),  # the prerequisite of b, due after b starts
+        "b": (8, 15),  # a schedule conflict
+        "c": (-20, -10),  # overdue
+        "d": (20, 30),
+        "e": (25, 26),
+        "f": (-3, 1),
+    }
+    ids: dict[str, int] = {}
+    for name, (start, end) in dated.items():
+        ids[name] = await made(
+            client,
+            "task",
+            f"Task {name} {word}",
+            story,
+            start_on=day(start),
+            target_on=day(end),
+        )
+    ids["u1"] = await made(client, "task", f"Undated one {word}", story)
+    ids["u2"] = await made(client, "task", f"Undated two {word}", story)
+    await ok(
+        client,
+        "add_link",
+        actor="a",
+        source_id=ids["b"],
+        target_id=ids["a"],
+        link_type="needs_first",
+    )
+
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        assert await shown(page, 8, 2) == {epic, story, *ids.values()}
+        line = await timeline(page)
+        assert line["today"] == on(day(0)) and line["ppd"] == 10
+
+        # Each bar is at the pixels its dates give: where it starts and how long it is.
+        for name, (start, end) in dated.items():
+            el = bar_of(page, ids[name])
+            assert await el.get_attribute("data-start") == day(start)
+            assert await el.get_attribute("data-end") == day(end)
+            assert await el.get_attribute("data-worked-out") == "false"
+            left = await el.evaluate("e => parseFloat(e.style.left)")
+            width = await el.evaluate("e => parseFloat(e.style.width)")
+            assert abs(left - (on(day(start)) - line["origin"]).days * line["ppd"]) < 1.5, name
+            assert abs(width - (end - start + 1) * line["ppd"]) < 1.5, name
+
+        # The epic and the story have no dates of their own: their bars are worked out from the
+        # tasks under them, and are marked so in words.
+        first, last = min(s for s, _ in dated.values()), max(e for _, e in dated.values())
+        for container in (epic, story):
+            el = bar_of(page, container)
+            assert await el.get_attribute("data-worked-out") == "true"
+            assert await el.get_attribute("data-start") == day(first)
+            assert await el.get_attribute("data-end") == day(last)
+            assert "Worked out from what is under it" in (
+                await el.get_attribute("aria-label") or ""
+            )
+
+        # The tray holds the two items with no dates, and nothing else.
+        assert await page.locator(".tray-item").evaluate_all(
+            "els => els.map(e => Number(e.dataset.id))"
+        ) == [ids["u1"], ids["u2"]]
+
+        # The arrow runs from what is needed first to the item that waits, in a warning colour.
+        arrows = page.locator("path.dep")
+        assert await arrows.count() == 1
+        arrow = arrows.first
+        assert await arrow.get_attribute("data-from") == str(ids["a"])
+        assert await arrow.get_attribute("data-to") == str(ids["b"])
+        assert "conflict" in (await arrow.get_attribute("class") or "")
+
+        # The schedule conflict is on the item that starts too early, and only there; the overdue
+        # mark is on the past item, and only there. Both are in words.
+        conflict = page.locator(".rm-label .chip.conflict")
+        assert await conflict.count() == 1
+        await expect(
+            page.locator(f".rm-label[data-id='{ids['b']}'] .chip.conflict")
+        ).to_contain_text("Schedule conflict")
+        overdue = page.locator(".rm-label .chip.overdue")
+        assert await overdue.count() == 1
+        await expect(
+            page.locator(f".rm-label[data-id='{ids['c']}'] .chip.overdue")
+        ).to_contain_text("Overdue")
+        assert "Schedule conflict" in (
+            await bar_of(page, ids["b"]).get_attribute("aria-label") or ""
+        )
+        assert "Overdue" in (await bar_of(page, ids["c"]).get_attribute("aria-label") or "")
+        # What the page marks is what the graph says.
+        graph = {n["id"]: n for n in await all_nodes(client, query=f"epic:{epic}")}
+        assert graph[ids["b"]]["schedule_conflicts"] == [ids["a"]]
+        assert graph[ids["c"]]["overdue"] is True
+        assert [i for i, n in graph.items() if n["overdue"]] == [ids["c"]]
+
+        # A date filter gives the same ids as the same text through MCP.
+        for text, expected_dated in (
+            (f"epic:{epic} target:{day(-30)}..{day(16)}", 4),
+            (f"epic:{epic} is:overdue", 1),
+            (f"epic:{epic} target:none kind:task", 0),
+            (f"epic:{epic} start:{day(0)}..{day(30)} -kind:epic", 4),
+        ):
+            wanted = {n["id"] for n in await all_nodes(client, query=text)}
+            undated_count = 2 if "target:none" in text else 0
+            assert len(wanted) == expected_dated + undated_count, (text, wanted)
+            await apply_filter(page, text)
+            assert await shown(page, expected_dated, undated_count) == wanted, text
+        assert w.problems == [], w.problems
+
+
+# -- 5. changing dates by dragging -----------------------------------------------------------------
+
+
+async def test_dragging_a_bar_or_an_end_changes_the_dates_as_a_versioned_change_by_the_person(
+    client: Client, board: str
+) -> None:
+    epic, story, moved, ended = await window(client)
+    started = await made(client, "task", "Started late", story, start_on=day(6), target_on=day(20))
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        await shown(page, 5, 0)
+
+        # Both dates move together.
+        await drag(page, moved, 5)
+        await expect(bar_of(page, moved)).to_have_attribute("data-start", day(8), timeout=SLOW)
+        assert await dates(client, moved) == (day(8), day(17))
+        (change,) = await updates(client, moved)
+        assert (change["actor"], change["before"], change["after"]) == (
+            ACTOR,
+            {"start_on": day(3), "target_on": day(12), "version": 1},
+            {"start_on": day(8), "target_on": day(17), "version": 2},
+        )
+        await expect(page.locator(".notice.done").last).to_contain_text(f"Moved #{moved}")
+
+        # The right end moves the target date alone, and the left end the start date alone.
+        await drag(page, ended, -3, "end")
+        await expect(bar_of(page, ended)).to_have_attribute("data-end", day(11), timeout=SLOW)
+        assert await dates(client, ended) == (day(4), day(11))
+        (change,) = await updates(client, ended)
+        assert (change["actor"], change["before"], change["after"]) == (
+            ACTOR,
+            {"target_on": day(14), "version": 1},
+            {"target_on": day(11), "version": 2},
+        )
+        await drag(page, started, 2, "start")
+        await expect(bar_of(page, started)).to_have_attribute("data-start", day(8), timeout=SLOW)
+        assert await dates(client, started) == (day(8), day(20))
+        (change,) = await updates(client, started)
+        assert (change["after"], change["actor"]) == (
+            {"start_on": day(8), "version": 2},
+            ACTOR,
+        )
+
+        # The epic and story bars follow the new dates, and cannot be dragged (they are worked out).
+        await expect(bar_of(page, epic)).to_have_attribute("data-start", day(4))
+        await expect(bar_of(page, epic)).to_have_attribute("data-end", day(20))
+        before = await dates(client, story)
+        await drag(page, story, 4)
+        await page.wait_for_timeout(500)
+        assert await dates(client, story) == before == (None, None)
+        assert w.problems == [], w.problems
+
+
+async def test_a_bar_an_agent_changed_meanwhile_is_refused_and_a_start_after_the_target_is_refused(
+    client: Client, board: str
+) -> None:
+    epic, _, stale, plain_one = await window(client)
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        await shown(page, 4, 0)
+
+        # An agent moves a bar that the board has not heard of: dragging it is refused, with the
+        # words MCP uses, and the bar shows what the graph holds.
+        await hold_back_news(page)
+        await ok(
+            client,
+            "update_node",
+            actor="agent-1",
+            node_id=stale,
+            expected_version=1,
+            start_on=day(1),
+            target_on=day(2),
+        )
+        said = await refused(
+            client,
+            "update_node",
+            actor="x",
+            node_id=stale,
+            expected_version=1,
+            start_on=day(8),
+            target_on=day(17),
+        )
+        assert "version 2" in said and "version 1" in said
+        await drag(page, stale, 5)
+        refusal = page.locator(".notice.refusal .notice-text").first
+        await expect(refusal).to_be_visible(timeout=SLOW)
+        plain(await refusal.inner_text(), said)
+        await expect(bar_of(page, stale)).to_have_attribute("data-start", day(1), timeout=SLOW)
+        assert await dates(client, stale) == (day(1), day(2))
+        assert [e["actor"] for e in await updates(client, stale)] == ["agent-1"]
+
+        # A left end dragged past the target date: the server refuses, in its own words.
+        said = await refused(
+            client,
+            "update_node",
+            actor="x",
+            node_id=plain_one,
+            expected_version=1,
+            start_on=day(24),
+        )
+        await drag(page, plain_one, 20, "start")
+        late = page.locator(".notice.refusal .notice-text", has_text="Work cannot start after")
+        await expect(late).to_be_visible(timeout=SLOW)
+        plain(await late.inner_text(), said)
+        await expect(bar_of(page, plain_one)).to_have_attribute("data-start", day(4), timeout=SLOW)
+        assert await dates(client, plain_one) == (day(4), day(14))
+        assert await updates(client, plain_one) == []
+        assert w.problems == [], w.problems
+
+
+async def test_an_undated_item_dropped_on_the_timeline_gets_both_dates_and_the_tray_has_date_fields(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Tray {word}")
+    story = await made(client, "story", f"Part {word}", epic)
+    dropped = await made(client, "task", f"Dropped {word}", story)
+    typed = await made(client, "task", f"Typed {word}", story)
+    await made(client, "task", f"Dated {word}", story, start_on=day(1), target_on=day(9))
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        await shown(page, 3, 2)
+        line = await timeline(page)
+
+        # Dropped two days after today, it gets that day and the six after it.
+        at = ((line["today"] - line["origin"]).days + 2) * line["ppd"] + line["ppd"] / 2
+        await page.drag_and_drop(
+            f".tray-item[data-id='{dropped}'] .tray-drag",
+            ".rm-rows",
+            target_position={"x": at, "y": 60},
+        )
+        await expect(bar_of(page, dropped)).to_be_visible(timeout=SLOW)
+        assert await dates(client, dropped) == (day(2), day(8))
+        (change,) = await updates(client, dropped)
+        assert (change["actor"], change["before"], change["after"]) == (
+            ACTOR,
+            {"start_on": None, "target_on": None, "version": 1},
+            {"start_on": day(2), "target_on": day(8), "version": 2},
+        )
+        assert await shown(page, 4, 1) >= {dropped, typed}
+        assert await page.locator(f".tray-item[data-id='{dropped}']").count() == 0
+
+        # The fields in the tray do the same, for people who do not drag.
+        form = page.locator(f".tray-item[data-id='{typed}'] form")
+        await form.locator("input").first.fill(day(10))
+        await form.locator("input").last.fill(day(16))
+        await form.locator("button").click()
+        await expect(bar_of(page, typed)).to_have_attribute("data-start", day(10), timeout=SLOW)
+        assert await dates(client, typed) == (day(10), day(16))
+        assert (await updates(client, typed))[0]["actor"] == ACTOR
+        assert w.problems == [], w.problems
+
+
+# -- 5. the keyboard, several bars at once, zoom and groups -------------------------------------
+
+
+async def test_keys_shift_dates_by_a_day_or_a_week_and_chosen_bars_move_together_in_one_request(
+    client: Client, board: str
+) -> None:
+    epic, _, first, second = await window(client)
+    async with browser_page(board, token=the_token(), name=ACTOR) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        await shown(page, 4, 0)
+        keyed = bar_of(page, first)
+
+        # Three presses add up and are sent as one change.
+        await keyed.focus()
+        for _ in range(3):
+            await page.keyboard.press("ArrowRight")
+        await expect(keyed).to_have_attribute("data-start", day(6), timeout=SLOW)
+        assert await dates(client, first) == (day(6), day(15))
+        (change,) = await updates(client, first)
+        assert (change["actor"], change["after"]["version"]) == (ACTOR, 2)
+
+        # Shift is a week, Alt moves the start date only and Control the target date only.
+        await keyed.focus()
+        await page.keyboard.press("Shift+ArrowLeft")
+        await expect(keyed).to_have_attribute("data-start", day(-1), timeout=SLOW)
+        assert await dates(client, first) == (day(-1), day(8))
+        await keyed.focus()
+        await page.keyboard.press("Alt+ArrowRight")
+        await expect(keyed).to_have_attribute("data-start", day(0), timeout=SLOW)
+        assert await dates(client, first) == (day(0), day(8))
+        await keyed.focus()
+        await page.keyboard.press("Control+ArrowRight")
+        await expect(keyed).to_have_attribute("data-end", day(9), timeout=SLOW)
+        assert await dates(client, first) == (day(0), day(9))
+        history = await updates(client, first)
+        assert [e["after"]["version"] for e in history] == [2, 3, 4, 5]
+        assert {e["actor"] for e in history} == {ACTOR}
+
+        # Choose two bars (Shift-click), then move one: both move, through update_nodes.
+        await bar_of(page, first).click(modifiers=["Shift"], position={"x": 30, "y": 9})
+        await bar_of(page, second).click(modifiers=["Shift"], position={"x": 30, "y": 9})
+        await expect(page.locator("#count")).to_contain_text("2 chosen to move together")
+        await expect(bar_of(page, first)).to_have_attribute("aria-pressed", "true")
+        await drag(page, second, 4)
+        await expect(bar_of(page, second)).to_have_attribute("data-start", day(8), timeout=SLOW)
+        assert await dates(client, second) == (day(8), day(18))
+        assert await dates(client, first) == (day(4), day(13))
+        assert any(url.endswith("/board/api/tool/update_nodes") for url in w.requests)
+        for node_id, version in ((first, 6), (second, 2)):
+            last = (await updates(client, node_id))[-1]
+            assert (last["actor"], last["after"]["version"]) == (ACTOR, version)
+        assert w.problems == [], w.problems
+
+
+async def test_the_roadmap_zooms_groups_and_marks_today(client: Client, board: str) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Zoom {word}")
+    story = await made(client, "story", f"Part {word}", epic)
+    held = await made(client, "task", f"Held {word}", story, start_on=day(2), target_on=day(9))
+    await made(client, "task", f"Free {word}", story, start_on=day(3), target_on=day(8))
+    finished = await made(
+        client, "task", f"Free two {word}", story, start_on=day(4), target_on=day(7)
+    )
+    await ok(client, "claim_node", actor="ann", node_id=held)
+    await ok(
+        client, "update_node", actor="a", node_id=held, expected_version=1, status="in_progress"
+    )
+    await ok(client, "update_node", actor="a", node_id=finished, expected_version=1, status="done")
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{epic}")
+        await shown(page, 5, 0)
+        track = page.locator(".rm-track")
+
+        # The line for today is where today's date puts it, at every zoom.
+        for zoom, per_day in (("quarter", 4.0), ("year", 1.2), ("month", 10.0)):
+            await page.locator(f"[data-zoom={zoom}]").click()
+            await expect(track).to_have_attribute("data-zoom", zoom)
+            line = await timeline(page)
+            assert line["ppd"] == per_day and line["today"] == on(day(0))
+            left = await page.locator(".rm-today").evaluate("e => parseFloat(e.style.left)")
+            assert abs(left - (line["today"] - line["origin"]).days * per_day) < 1.5
+            el = bar_of(page, held)
+            start_left = await el.evaluate("e => parseFloat(e.style.left)")
+            assert abs(start_left - (on(day(2)) - line["origin"]).days * per_day) < 1.5
+        assert "zoom=" not in page.url
+
+        # Grouped by who holds them: one group for ann, one for nobody.
+        await page.locator("#group").select_option("claimed")
+        headings = await page.locator(".rm-group").all_inner_texts()
+        assert sorted(headings) == ["Held by ann (1)", "Held by nobody (4)"]
+        await page.locator("#group").select_option("status")
+        counts = [
+            int(m)
+            for text in await page.locator(".rm-group").all_inner_texts()
+            for m in re.findall(r"\((\d+)\)$", text)
+        ]
+        by_status = Counter(n["status"] for n in await all_nodes(client, query=f"epic:{epic}"))
+        assert sorted(counts) == sorted(by_status.values()) and len(counts) >= 3
+        assert "group=status" in page.url
+        await page.locator("#group").select_option("epic")
+        assert "group=" not in page.url
+        assert w.problems == [], w.problems

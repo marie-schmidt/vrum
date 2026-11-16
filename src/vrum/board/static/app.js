@@ -6,10 +6,19 @@ import { actor, notify, setActor, ui } from './ctx.js';
 import { clear, h } from './dom.js';
 import * as graph from './graph.js';
 import * as kanban from './kanban.js';
+import * as outline from './outline.js';
 import * as panel from './panel.js';
+import * as roadmap from './roadmap.js';
 import { keepSynced, onChange, start, stopSyncing, store } from './store.js';
+import * as table from './table.js';
 
-const PAGES = { board: { title: 'Board', view: kanban }, graph: { title: 'Graph', view: graph } };
+const PAGES = {
+  board: { title: 'Board', view: kanban },
+  graph: { title: 'Graph', view: graph },
+  roadmap: { title: 'Roadmap', view: roadmap },
+  table: { title: 'Table', view: table },
+  outline: { title: 'Outline', view: outline },
+};
 const top = document.getElementById('top');
 const main = document.getElementById('page');
 const dialogs = document.getElementById('dialogs');
@@ -29,7 +38,7 @@ ui.navigate = (changes, { replace = false, page = ui.page } = {}) => {
     if (value === null || value === undefined || value === '') params.delete(key);
     else params.set(key, String(value));
   }
-  const query = params.toString();
+  const query = params.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',');
   const hash = `#/${page}${query ? `?${query}` : ''}`;
   if (hash === location.hash) return;
   if (replace) location.replace(hash);

@@ -66,6 +66,15 @@ def test_nothing_is_put_on_a_page_as_html() -> None:
         assert [word for word in banned if word in text] == [], path.name
 
 
+def test_nothing_is_styled_with_a_style_attribute() -> None:
+    # The security policy turns style attributes away without a word, so a bar or a column
+    # that needs a size sets it on the element (the `css` property of `h`) and nothing else.
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        found = re.findall(r"\bstyle\s*:|setAttribute\(\s*['\"]style|cssText", text)
+        assert found == [], f"{path.name} uses a style attribute: {found}"
+
+
 def test_the_security_policy_allows_only_the_servers_own_files_and_calls() -> None:
     policy = SECURITY_HEADERS["Content-Security-Policy"]
     assert "default-src 'none'" in policy and "script-src 'self'" in policy

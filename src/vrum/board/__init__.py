@@ -39,7 +39,7 @@ READ_TOOLS = (
     "export_graph",
     "changes_since",
 )
-WRITE_TOOLS = ("create_node", "update_node", "move_node", "add_link", "remove_link")
+WRITE_TOOLS = ("create_node", "update_node", "update_nodes", "move_node", "add_link", "remove_link")
 BOARD_TOOLS = frozenset(READ_TOOLS + WRITE_TOOLS)
 
 # Where each kind of file is served from. Nothing else is, so a file dropped into the static

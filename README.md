@@ -153,7 +153,7 @@ The working loop:
 3. Record what is decided as it happens with `record_decision` (name the person who decided in decided_by), and what you learn with `retain_fact`.
 4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a handoff note for whoever comes next. A blank note is refused.
 
-Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format (an access token, a private key) is refused in every field and never stored: leave secrets out of what you write. If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` use it on the memory; what they return is proposed or generated, and is not a record until you record it.
+Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, `changes_since` shows only what is new since an event, and `ready_work` lists what is free. `list_nodes` takes a filter text as its query argument, such as `kind:task status:ready -claimed OR is:overdue`. Lists leave out bodies unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a well-known secret format (an access token, a private key) is refused in every field and never stored: leave secrets out of what you write. If the server has a language model, `extract_facts`, `consolidate_memory`, `find_contradictions` and `reflect` use it on the memory; what they return is proposed or generated, and is not a record until you record it.
 <!-- agent-guide:end -->
 
 Every tool describes itself: its description says what it does, what it needs and what it refuses,
@@ -191,8 +191,52 @@ line. Beside the drawing, a list of the chosen item's neighbours and a list of e
 do everything a click on the drawing does, from the keyboard.
 
 **What it does not do yet.** Rules, decisions, facts and beliefs are shown but not edited on the
-board: an agent still does that. More pages (a table, an outline, a roadmap, memory, search, and
-the rest) come in the next milestones.
+board: an agent still does that. More pages (memory, search and the rest) come in the next
+milestones.
+
+**Table.** One row for each epic, story or task, with its kind, title, parent, status, priority,
+who holds it, what it waits on, progress, dates and last change. Click a heading to sort (again to
+reverse, a third time to clear), group by epic, story, status, priority or who holds it, and
+filter with the filter language below. Change a title, status, priority or date in the row itself.
+To change several rows at once, tick them, choose a priority and a status, and apply: each row is
+its own change at the version you saw it, and the result says which rows changed and which were
+refused, and why (for example because an agent changed that row since).
+
+**Outline.** The work as a tree you can fold: epics, their stories, their tasks, with the rules
+under each story and how many tasks are done on every branch. Drag a story or a task onto its new
+parent, or press `m` on it to choose one from a menu. The arrow keys walk the tree, Enter opens an
+item, and a refused move says why.
+
+**Roadmap.** The work on a timeline, each item a bar from its start date to its target date, with
+a line for today and zoom by month, quarter or year. Group by epic, status, priority or who holds
+it, and filter with the filter language. Drag a bar to move both dates, or one end to move that
+date; with a bar focused, the arrow keys move it a day (Shift for a week, Alt for the start only,
+Ctrl for the target only), and Space picks several bars to move together. A pale dashed bar is an
+epic or story with no dates of its own, drawn over the span of what is under it. An arrow runs from
+what must come first to the item that waits for it; an item planned to start before something it
+needs first is due is marked "Schedule conflict" (a warning, nothing is blocked), and an overdue
+item says so in words. Items with no dates wait in a tray above: drag one onto the timeline to give
+it a week starting where you drop it, or type its dates there. The roadmap has no sprints.
+
+**The filter language.** One way to say which items you mean, for the Table's and the Roadmap's
+filter box and for the agents' `list_nodes` tool (as `query`), with the same answer for both.
+
+- Words find items whose title or details contain them, whatever the case: `login "reset password"`.
+- `field:value` narrows by a field, and commas mean "any of these": `status:ready,in_progress`.
+  The fields are `kind`, `status`, `priority`, `claimed`, `parent`, `epic`, `story`, `id`,
+  `start`, `target`, `is` and `no`.
+- A leading `-` leaves things out: `-status:done`, `-claimed` (not held by anyone).
+- `claimed` and `waiting` alone mean held by someone and waiting on something; `no:field` means
+  empty (`no:start`, `no:target`, `no:claimed`, `no:parent`, `no:body`, `no:waiting`).
+- `start:` and `target:` take a day, a range (`2026-11-01..2026-12-31`, either end may be left
+  open) or `none`; `is:` finds `overdue`, `conflict` (planned to start too early), `waiting`,
+  `claimed` and `lapsed` (a claim that ran out).
+- `OR` between groups: `kind:task status:ready -claimed priority:high OR kind:story`. Terms next
+  to each other must all hold; `OR` (in capitals) starts a new group.
+
+A query that cannot be read is refused with a plain message saying what was not understood, and
+nothing is listed. Every page has its own address, with the filter, sort, grouping and zoom after
+the `#`, so you can share a view by copying the link: the server keeps no saved views.
 
 **It is the same graph.** A change on the board is the same operation an agent calls, with the same
 checks. If you drop a card where it cannot go, or edit something an agent has changed since you
@@ -287,7 +331,9 @@ You need Docker with Compose, `uv` and `openssl`. Neither check touches your own
   and walks one scenario through a real MCP client and a headless browser: it arrives and is turned
   away without the token, plans, works with ten agents at once, decides, remembers, finds, asks a
   model for help, is careful with secrets, shows the board to a person (what agents do appears on
-  it, what a person does is in the graph, refusals read the same), and finally backs up, destroys
+  it, what a person does is in the graph, refusals read the same), shows the table, outline and
+  roadmap (the filter language, changing several rows, dragging bars, an address that reproduces a
+  view), and finally backs up, destroys
   its own database, restores it, and loads an export into a fresh server. Every line it prints is
   one proof that holds. It uses a scripted stand-in for the embedding service and the language
   model, so nothing is downloaded and the answers are the same every run.
