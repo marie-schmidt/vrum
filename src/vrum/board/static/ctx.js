@@ -2,6 +2,7 @@
 // app.js fills in `navigate` when the board starts.
 
 import { h } from './dom.js';
+import { icon } from './icons.js';
 
 export const ui = {
   page: 'board',
@@ -120,6 +121,7 @@ export function notify(message, { refusal = false, detail = null } = {}) {
   const notice = h(
     'div',
     { class: `notice ${refusal ? 'refusal' : 'done'}`, role: refusal ? 'alert' : 'status' },
+    icon(refusal ? 'alert' : 'check', { size: 16, className: 'notice-icon' }),
     h('strong', {}, refusal ? 'Not done. ' : ''),
     h('span', { class: 'notice-text' }, message),
     detail,

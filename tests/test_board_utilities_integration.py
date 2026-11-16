@@ -15,12 +15,13 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, Route, expect
 
-from tests.board_helpers import SLOW, board_call, board_url, browser_page, made
+from tests.board_helpers import SLOW, board_call, board_url, browser_page, cards_are, made
 from tests.board_m14 import events_of, feed_ids, ids_of, spoken
 from tests.board_search import (
     address,
     asked,
     drawer,
+    keyboard_to_activity,
     on_view,
     open_settings,
     result_rows,
@@ -45,16 +46,6 @@ NEWS = 15_000
 @pytest.fixture
 def board(server_url: str) -> str:
     return board_url(server_url)
-
-
-async def keyboard_to_activity(page: Page) -> None:
-    """Open the Activity drawer with the keyboard alone: Tab from the search button, then Enter."""
-    await page.locator("#global-search-go").focus()
-    await page.keyboard.press("Tab")
-    assert await page.evaluate("document.activeElement.id") == "activity-open"
-    await page.keyboard.press("Enter")
-    await expect(drawer(page, "activity")).to_be_visible(timeout=SLOW)
-    await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
 
 
 async def claims_on_page(page: Page, section: str) -> set[tuple[int, str]]:
@@ -260,6 +251,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await third.open(board_address)
         await expect(page.locator("#epic-filter")).to_have_value(str(epic), timeout=SLOW)
         await expect(page.locator("#filter")).to_have_value("kind:story")
+        await cards_are(page, set(stories))
         cards: list[int] = await page.locator(".card").evaluate_all(
             "els => els.map(e => Number(e.dataset.id))"
         )
@@ -350,7 +342,7 @@ async def test_a_draft_survives_opening_drawers_switching_presentations_and_view
             assert (await address(page))[1]["sel"] == f"node:{story}"
         # Going from view to view takes the selected record along.
         for view in ("roadmap", "board", "graph"):
-            await page.locator(f"#top nav a[data-page={view}]").click()
+            await page.locator(f"#main-nav a[data-page={view}]").click()
             await on_view(page, view)
             await expect(page.locator("#panel #card-title")).to_be_visible()
             await kept(f"the {view} view")
@@ -406,7 +398,7 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
 
             # It stays when the person goes to another view, to a drawer and to a settings page.
             for view, marker in (("graph", "#graph-page"), ("roadmap", ".rm-track")):
-                await page.locator(f"#top nav a[data-page={view}]").click()
+                await page.locator(f"#main-nav a[data-page={view}]").click()
                 await on_view(page, view)
                 await expect(page.locator(marker)).to_be_visible(timeout=SLOW)
                 await expect(note).to_be_visible()

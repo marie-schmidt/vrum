@@ -64,11 +64,11 @@ async def address(page: Page) -> tuple[str, dict[str, str]]:
 
 
 async def on_view(page: Page, view: str) -> None:
-    """The top bar says this is the view that is open (and only this one)."""
-    await expect(page.locator(f"#top nav a[data-page={view}]")).to_have_attribute(
+    """The sidebar says this is the view that is open (and only this one)."""
+    await expect(page.locator(f"#main-nav a[data-page={view}]")).to_have_attribute(
         "aria-current", "page", timeout=SLOW
     )
-    await expect(page.locator("#top nav a[aria-current=page]")).to_have_count(1)
+    await expect(page.locator("#main-nav a[aria-current=page]")).to_have_count(1)
 
 
 SETTINGS = ("access", "tools", "status")
@@ -89,7 +89,7 @@ async def open_settings(page: Page, name: str) -> None:
     await expect(page.locator("#settings-list")).to_be_hidden()
     await expect(page).to_have_url(re.compile(rf"#/{name}(\?|$)"), timeout=SLOW)
     await expect(page.locator("#settings-menu")).to_have_attribute("aria-current", "page")
-    await expect(page.locator("#top nav a[aria-current=page]")).to_have_count(0)
+    await expect(page.locator("#main-nav a[aria-current=page]")).to_have_count(0)
 
 
 # -- the search drawer ---------------------------------------------------------------------------
@@ -97,6 +97,18 @@ async def open_settings(page: Page, name: str) -> None:
 
 def drawer(page: Page, name: str) -> Locator:
     return page.locator(f"#drawer[data-drawer={name}]")
+
+
+async def keyboard_to_activity(page: Page) -> None:
+    """Open the Activity drawer with the keyboard alone: Activity is in the sidebar, which comes
+    first in the page's order, right before the Settings button, so Shift+Tab from Settings
+    reaches it and Enter opens it."""
+    await page.locator("#settings-menu").focus()
+    await page.keyboard.press("Shift+Tab")
+    assert await page.evaluate("document.activeElement.id") == "activity-open"
+    await page.keyboard.press("Enter")
+    await expect(drawer(page, "activity")).to_be_visible(timeout=SLOW)
+    await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
 
 
 async def search_in_drawer(page: Page, query: str, mode: str = "both") -> None:

@@ -2,12 +2,15 @@
 reading every page of a list tool, and reading the Activity feed. All of it goes through a real MCP
 client against the real containers; none of it reaches into the page's own code."""
 
+import contextlib
 import re
 from typing import Any
 
 from mcp import Client
 from playwright.async_api import Locator, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from tests.board_helpers import SLOW
 from tests.helpers import ok
 
 
@@ -43,6 +46,24 @@ async def feed_ids(page: Page) -> list[int]:
         "els => els.map(e => Number(e.dataset.event))"
     )
     return ids
+
+
+async def feed_becomes(page: Page, wanted: list[int]) -> list[int]:
+    """Wait until the feed lists exactly these events, newest first, and give what it lists then
+    (what it still lists when the wait runs out, if it never does). A changed filter is read again
+    while the rows it had stay on show, so a row that is in both the old and the new list is no
+    sign that the new one has arrived."""
+    with contextlib.suppress(PlaywrightTimeout):
+        await page.wait_for_function(
+            """wanted => {
+                const ids = [...document.querySelectorAll('#feed li.event')]
+                    .map(e => Number(e.dataset.event));
+                return ids.length === wanted.length && ids.every((id, at) => id === wanted[at]);
+            }""",
+            arg=wanted,
+            timeout=SLOW,
+        )
+    return await feed_ids(page)
 
 
 async def events_of(client: Client, **filters: Any) -> list[dict[str, Any]]:

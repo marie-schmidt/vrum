@@ -1,8 +1,9 @@
 // Making a new epic, story or task, and the list of parents to choose from.
 
-import { Refusal, call } from './api.js';
+import { call } from './api.js';
 import { actor, notify, ui } from './ctx.js';
 import { h } from './dom.js';
+import { dialogForm, field, fieldRow, openDialog } from './forms.js';
 import { KIND, PRIORITIES, PRIORITY } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { epics, store, sync } from './store.js';
@@ -34,15 +35,13 @@ export function parentChoices(kind, selected = null) {
 }
 
 export function openCreate({ kind = 'epic', parent = null } = {}) {
-  const dialogs = document.getElementById('dialogs');
-  const problem = h('p', { class: 'problem', role: 'alert' });
   const kindField = h(
     'select',
     { id: 'new-kind', name: 'kind', value: kind },
     ['epic', 'story', 'task'].map((name) => h('option', { value: name }, KIND[name].label)),
   );
   const parentField = h('select', { id: 'new-parent', name: 'parent' });
-  const parentRow = h('div', { class: 'field' }, h('label', { for: 'new-parent' }, 'Belongs to'), parentField);
+  const parentRow = field('Belongs to', parentField);
   const title = h('input', { id: 'new-title', name: 'title', type: 'text', autocomplete: 'off' });
   const body = withReferences(h('textarea', { id: 'new-body', name: 'body', rows: 4 }));
   const priority = h(
@@ -63,66 +62,32 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
   kindField.addEventListener('change', () => fillParents(null));
   fillParents(parent);
 
-  const box = h(
-    'dialog',
-    { class: 'modal', 'aria-labelledby': 'new-heading' },
-    h('h2', { id: 'new-heading' }, 'New item'),
-    h(
-      'form',
-      {
-        method: 'dialog',
-        onsubmit: async (event) => {
-          event.preventDefault();
-          problem.textContent = '';
-          const wanted = kindField.value;
-          const args = {
-            actor: actor(),
-            kind: wanted,
-            title: title.value,
-            body: body.value,
-            priority: priority.value,
-            start_on: start.value || null,
-            target_on: target.value || null,
-          };
-          if (wanted !== 'epic') args.parent_id = parentField.value ? Number(parentField.value) : null;
-          try {
-            const made = await call('create_node', args);
-            box.close();
-            await sync();
-            const similar = (made.similar || []).map((item) => `#${item.id} ${item.title}`);
-            notify(
-              `Created ${KIND[made.kind].label.toLowerCase()} #${made.id}, “${made.title}”.` +
-                (similar.length ? ` It looks like: ${similar.join('; ')}.` : ''),
-            );
-            ui.navigate({ sel: `node:${made.id}`, panel: null });
-          } catch (error) {
-            if (!(error instanceof Refusal)) throw error;
-            problem.textContent = error.message;
-          }
-        },
-      },
-      h('div', { class: 'field' }, h('label', { for: 'new-kind' }, 'What is it'), kindField),
-      parentRow,
-      h('div', { class: 'field' }, h('label', { for: 'new-title' }, 'Title'), title),
-      h('div', { class: 'field' }, h('label', { for: 'new-body' }, 'Details'), body),
-      h(
-        'div',
-        { class: 'row' },
-        h('div', { class: 'field' }, h('label', { for: 'new-priority' }, 'Priority'), priority),
-        h('div', { class: 'field' }, h('label', { for: 'new-start' }, 'Start'), start),
-        h('div', { class: 'field' }, h('label', { for: 'new-target' }, 'Target'), target),
-      ),
-      problem,
-      h(
-        'div',
-        { class: 'buttons' },
-        h('button', { type: 'submit', class: 'primary' }, 'Create'),
-        h('button', { type: 'button', onclick: () => box.close() }, 'Cancel'),
-      ),
-    ),
-  );
-  box.addEventListener('close', () => box.remove());
-  dialogs.append(box);
-  box.showModal();
+  const { form } = dialogForm({
+    fields: [fieldRow(field('What is it', kindField), parentRow), field('Title', title), field('Details', body), fieldRow(field('Priority', priority), field('Start', start), field('Target', target))],
+    submit: 'Create',
+    work: async () => {
+      const wanted = kindField.value;
+      const args = {
+        actor: actor(),
+        kind: wanted,
+        title: title.value,
+        body: body.value,
+        priority: priority.value,
+        start_on: start.value || null,
+        target_on: target.value || null,
+      };
+      if (wanted !== 'epic') args.parent_id = parentField.value ? Number(parentField.value) : null;
+      const made = await call('create_node', args);
+      box.close();
+      await sync();
+      const similar = (made.similar || []).map((item) => `#${item.id} ${item.title}`);
+      notify(
+        `Created ${KIND[made.kind].label.toLowerCase()} #${made.id}, “${made.title}”.` +
+          (similar.length ? ` It looks like: ${similar.join('; ')}.` : ''),
+      );
+      ui.navigate({ sel: `node:${made.id}`, panel: null });
+    },
+  });
+  const box = openDialog('New item', [form]);
   title.focus();
 }

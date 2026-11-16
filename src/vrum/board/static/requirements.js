@@ -7,14 +7,14 @@
 import { Refusal, call } from './api.js';
 import { actor, hrefTo, notify, ui } from './ctx.js';
 import { h, plural, put } from './dom.js';
+import { icon } from './icons.js';
+import { kindIcon } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { mentionedInDetails } from './references.js';
-import { requirementDialog, openRecord, placeRequirementDialog } from './records.js';
+import { requirementDialog, openRecord, placeRequirementDialog, requirementKindChip, ruleStatusChip } from './records.js';
 import { epicOf, store, sync } from './store.js';
-import { TYPES } from './graph-data.js';
 import { connectionsDetails, matchesText, sectionFrame, selectOf, textInput, walkRows } from './list-parts.js';
 
-const STATUS_WORDS = { held: ['Held', 'A requirement that stands'], settled: ['Settled', 'Agreed and done with'], dropped: ['Dropped', 'No longer a requirement'] };
 const STATUS_FILTER = [
   ['live', 'Held and settled'],
   ['held', 'Held'],
@@ -50,7 +50,7 @@ export function createRequirements() {
   const frame = sectionFrame({
     name: 'requirements',
     title: 'Requirements',
-    buttons: [h('button', { type: 'button', id: 'new-requirement', class: 'primary', onclick: () => requirementDialog({}) }, 'New requirement')],
+    buttons: [h('button', { type: 'button', id: 'new-requirement', class: 'primary small', onclick: () => requirementDialog({}) }, icon('plus', { size: 14 }), 'New requirement')],
     controls: [
       ['status', 'Status', status],
       ['placement', 'Placed', placement],
@@ -63,7 +63,7 @@ export function createRequirements() {
       if (last) draw(last);
     },
   });
-  const summary = h('p', { class: 'gv-summary', id: 'requirements-summary', role: 'status' });
+  const summary = h('p', { class: 'gv-summary ctx-summary', id: 'requirements-summary', role: 'status' });
   const unplaced = h('div', { id: 'unplaced-group' });
   const groups = h('div', { id: 'requirement-groups' });
   const without = h('details', { class: 'gv-without', id: 'stories-without-requirements' });
@@ -74,12 +74,11 @@ export function createRequirements() {
 
   function row(dot, ctx) {
     const rule = dot.record;
-    const [word, hint] = STATUS_WORDS[rule.status] || [rule.status, ''];
     const chosen = ctx.cfg.sel?.key === dot.key;
     return h(
       'li',
       {
-        class: `gv-record requirement status-${rule.status}${chosen ? ' selected' : ''}`,
+        class: `gv-record ctx-row requirement status-${rule.status}${chosen ? ' selected' : ''}`,
         draggable: 'true',
         'aria-current': chosen ? 'true' : null,
         dataset: { key: dot.key, kind: 'rule', type: 'rule', id: rule.id, status: rule.status, story: rule.story_id ?? '' },
@@ -97,19 +96,14 @@ export function createRequirements() {
           document.querySelectorAll('.over').forEach((el) => el.classList.remove('over'));
         },
       },
+      h('div', { class: 'record-chips' }, requirementKindChip(rule), ruleStatusChip(rule)),
+      h('button', { type: 'button', class: 'link gv-open', onclick: () => openRecord('rule', rule.id) }, rule.title),
+      rule.body ? renderMarkdown(rule.body, { className: 'markdown entry-text row-text' }) : null,
       h(
         'div',
-        { class: 'gv-record-head' },
-        h('span', { class: 'chip kind kind-rule' }, h('span', { 'aria-hidden': 'true' }, TYPES.rule.sign), ` Requirement #${rule.id}`),
-        h('span', { class: `chip rule-status status-${rule.status}`, title: hint }, word),
-        h('button', { type: 'button', class: 'link gv-open', onclick: () => openRecord('rule', rule.id) }, rule.title),
-      ),
-      rule.body ? renderMarkdown(rule.body, { className: 'markdown entry-text' }) : null,
-      h(
-        'div',
-        { class: 'gv-actions' },
-        h('button', { type: 'button', class: 'edit-requirement', onclick: () => requirementDialog({ rule }) }, 'Edit'),
-        h('button', { type: 'button', class: 'put-requirement', onclick: () => placeRequirementDialog(rule) }, rule.story_id === null ? 'Put in a story…' : 'Move to another story…'),
+        { class: 'row-actions' },
+        h('button', { type: 'button', class: 'edit-requirement small', onclick: () => requirementDialog({ rule }) }, 'Edit'),
+        h('button', { type: 'button', class: 'put-requirement small', onclick: () => placeRequirementDialog(rule) }, rule.story_id === null ? 'Put in a story…' : 'Move to another story…'),
       ),
       mentionedInDetails('rule', rule.id),
       connectionsDetails(dot, ctx),
@@ -134,8 +128,13 @@ export function createRequirements() {
 
     const cover = coverage();
     summary.replaceChildren(
-      `${plural(cover.unplaced, 'requirement')} ${cover.unplaced === 1 ? 'is' : 'are'} in no story. ${plural(cover.stories.length, 'story', 'stories')} ${cover.stories.length === 1 ? 'has' : 'have'} no requirement. `,
-      h('a', { class: 'gv-coverage-link', id: 'show-coverage', href: hrefTo(ui.page, { ...Object.fromEntries(ui.params), panel: 'coverage', sel: null }) }, 'See the coverage report'),
+      icon('info', { size: 16 }),
+      h(
+        'span',
+        {},
+        `${plural(cover.unplaced, 'requirement')} ${cover.unplaced === 1 ? 'is' : 'are'} in no story. ${plural(cover.stories.length, 'story', 'stories')} ${cover.stories.length === 1 ? 'has' : 'have'} no requirement. `,
+        h('a', { class: 'gv-coverage-link', id: 'show-coverage', href: hrefTo(ui.page, { ...Object.fromEntries(ui.params), panel: 'coverage', sel: null }) }, 'See the coverage report'),
+      ),
     );
     summary.dataset.unplaced = String(cover.unplaced);
     summary.dataset.storiesWithout = String(cover.stories.length);
@@ -150,12 +149,16 @@ export function createRequirements() {
     const stories = [...inStory.keys()].sort((a, b) => order(a)[0] - order(b)[0] || a - b);
 
     unplaced.replaceChildren(
-      h(
-        'section',
-        { class: 'gv-group unplaced', dataset: { group: 'unplaced' } },
-        h('h3', {}, `Not in any story (${loose.length})`),
-        loose.length ? h('ul', { class: 'plain gv-rows' }, loose.map((dot) => row(dot, ctx))) : h('p', { class: 'quiet' }, cover.unplaced ? 'None match the filters.' : 'Every requirement is in a story.'),
-      ),
+      ...(inScope.length || cover.unplaced
+        ? [
+            h(
+              'section',
+              { class: 'gv-group unplaced', dataset: { group: 'unplaced' } },
+              h('h3', {}, `Not in any story (${loose.length})`),
+              loose.length ? h('ul', { class: 'plain ctx-rows' }, loose.map((dot) => row(dot, ctx))) : h('p', { class: 'quiet' }, cover.unplaced ? 'None match the filters.' : 'Every requirement is in a story.'),
+            ),
+          ]
+        : []),
     );
     put(
       groups,
@@ -168,15 +171,15 @@ export function createRequirements() {
           h(
             'h3',
             { class: 'gv-group-head', dataset: { dropStory: id } },
-            h('span', { 'aria-hidden': 'true' }, `${TYPES.story.sign} `),
+            kindIcon('story', 16),
             h('button', { type: 'button', class: 'link', onclick: () => openRecord('node', id) }, story ? `#${id} ${story.title}` : `Story #${id}`),
-            epic && epic.id !== id ? h('span', { class: 'quiet' }, ` in epic #${epic.id} ${epic.title}`) : null,
-            h('span', { class: 'quiet' }, ` (${plural(inStory.get(id).length, 'requirement')})`),
+            epic && epic.id !== id ? h('span', { class: 'quiet' }, `in epic #${epic.id} ${epic.title}`) : null,
+            h('span', { class: 'quiet' }, `(${plural(inStory.get(id).length, 'requirement')})`),
           ),
-          h('ul', { class: 'plain gv-rows' }, inStory.get(id).map((dot) => row(dot, ctx))),
+          h('ul', { class: 'plain ctx-rows' }, inStory.get(id).map((dot) => row(dot, ctx))),
         );
       }),
-      !stories.length && !loose.length ? h('p', { class: 'quiet gv-none' }, inScope.length ? 'No requirement matches the filters.' : 'There are no requirements here yet. Write one with New requirement.') : null,
+      !stories.length && !loose.length ? h('p', { class: `${inScope.length ? 'quiet' : 'empty'} ctx-none` }, inScope.length ? 'No requirement matches the filters.' : 'There are no requirements here yet. Write one with New requirement.') : null,
     );
 
     const open = without.open;
@@ -186,14 +189,14 @@ export function createRequirements() {
       cover.stories.length
         ? h(
             'ul',
-            { class: 'plain' },
+            { class: 'plain bare-stories' },
             cover.stories.slice(0, 100).map((story) =>
               h(
                 'li',
                 { class: 'gv-bare-story', dataset: { story: story.id, dropStory: story.id } },
+                kindIcon('story', 14),
                 h('button', { type: 'button', class: 'link', onclick: () => openRecord('node', story.id) }, `#${story.id} ${story.title}`),
-                ' ',
-                h('button', { type: 'button', class: 'add-requirement', onclick: () => requirementDialog({ story: story.id }) }, 'Add a requirement'),
+                h('button', { type: 'button', class: 'add-requirement small', onclick: () => requirementDialog({ story: story.id }) }, icon('plus', { size: 14 }), 'Add a requirement'),
               ),
             ),
           )

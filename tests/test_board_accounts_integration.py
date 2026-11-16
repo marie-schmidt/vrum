@@ -73,7 +73,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
 
         await w.page.locator("#project-name").fill(f"Compiler {word}")
         await w.page.locator("#create-project").click()
-        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         match = re.search(r"/board/p/(\d+)", w.page.url)
         assert match, w.page.url
         project_number = int(match.group(1))
@@ -126,7 +126,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         await expect(w.page.locator("li.project")).to_have_count(1, timeout=SLOW)
         await expect(w.page.locator("li.project a.open-project")).to_have_text(f"Compiler {word}")
         await w.page.locator("li.project a.open-project").click()
-        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         assert f"/board/p/{project_number}" in w.page.url
         await w.go("#/board")
         for item in (story, task):
@@ -216,7 +216,7 @@ async def test_a_person_sees_only_their_own_projects_and_anothers_address_opens_
         await w.open("#/board")
         options = await w.page.locator("#project-switcher option").all_inner_texts()
         assert options == [f"Bobs {word}", f"Bobs second {word}", "All projects…"]
-        assert f"Anns {word}" not in await w.page.locator("#top").inner_text()
+        assert f"Anns {word}" not in await w.page.locator("#app").inner_text()
 
         # Ann's project address, copied to Bob's browser, opens nothing of hers.
         await w.page.goto(theirs.address)
@@ -277,7 +277,7 @@ async def test_switching_projects_with_responses_held_back_never_shows_the_first
                 await asyncio.sleep(0.1)
             assert held, "no poll of the first project was held back"
 
-            # Switch to the second project from the top bar while they are held back.
+            # Switch to the second project from the sidebar while they are held back.
             before = len(w.requests)
             await w.page.locator("#project-switcher").select_option(label=f"Second {word}")
             await expect(w.page.locator("#project-switcher option:checked")).to_have_text(
@@ -409,7 +409,7 @@ async def test_a_session_that_ended_sends_the_page_back_to_sign_in_and_signing_i
         await w.page.locator("#account-email").fill(owner.email)
         await w.page.locator("#account-password").fill(owner.password)
         await w.page.locator("#sign-in-submit").click()
-        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         assert f"/board/p/{project.id}" in w.page.url
 
 
@@ -425,7 +425,7 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
             const column = getComputedStyle(document.getElementById(id));
             return column.position !== 'sticky' || near(parseFloat(column.top), bar);
         });
-        return near(parseFloat(said), bar) && bar > 60 && below;
+        return near(parseFloat(said), bar) && below;
     }"""
     async with (
         connect(project.mcp_url, project.key) as agent,
@@ -433,12 +433,12 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
     ):
         epic = await made(agent, "epic", f"Under the bar {word}")
         await w.open(f"#/board?drawer=activity&sel=node:{epic}")
-        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         await expect(w.page.locator("#drawer")).to_be_visible(timeout=SLOW)
         await expect(w.page.locator("#panel")).to_be_visible(timeout=SLOW)
-        # With long names the bar wraps onto a second line, taller than the one line the
-        # stylesheet assumes, and more so on a narrow window: what sticks (the drawer on the left
-        # and the detail panel on the right) must start below it all.
+        # What sticks (the drawer on the left and the detail panel on the right) must start below
+        # the bar, whatever height the bar really has: it is published as --top-now, and the long
+        # names (which are in the sidebar and the breadcrumbs now) truncate instead of wrapping it.
         await w.page.wait_for_function(agreed, timeout=SLOW)
         for column in ("drawer", "panel"):
             assert (

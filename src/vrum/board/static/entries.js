@@ -5,11 +5,15 @@
 
 import { day, h, moment } from './dom.js';
 import { clip, uid } from './forms.js';
+import { icon } from './icons.js';
+import { kindIcon } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { itemLink, kindWords, openLink } from './references.js';
 import { store } from './store.js';
 
 export const LIFECYCLE = { active: 'In force', superseded: 'Replaced', withdrawn: 'Withdrawn' };
+// How each lifecycle looks: its own icon, and a tone that says "this one counts" or "it does not".
+const LIFECYCLE_LOOK = { active: ['ready', 'info'], superseded: ['arrow_right', ''], withdrawn: ['dropped', 'danger'] };
 
 // A fact or a decision, from its fields (a decision has a reason, a fact has a source).
 export const recordKind = (record) =>
@@ -24,29 +28,31 @@ const tableOf = (kind) => (kind === 'decision' ? store.decisions : store.facts) 
 
 export function kindChip(record) {
   const kind = recordKind(record);
-  const words = kindWords(kind);
-  return h('span', { class: `chip kind kind-${kind}` }, h('span', { 'aria-hidden': 'true' }, words.sign), ` ${words.label} #${record.id}`);
+  return h('span', { class: `chip kind kind-${kind}` }, kindIcon(kind, 14), `${kindWords(kind).label} #${record.id}`);
 }
 
-export const lifecycleChip = (record) =>
-  h('span', { class: `chip lifecycle lifecycle-${record.status}`, dataset: { lifecycle: record.status } }, LIFECYCLE[record.status] || record.status);
+export function lifecycleChip(record) {
+  const [mark, tone] = LIFECYCLE_LOOK[record.status] || ['info', ''];
+  return h('span', { class: `chip lifecycle lifecycle-${record.status} ${tone}`.trim(), dataset: { lifecycle: record.status } }, icon(mark, { size: 14 }), LIFECYCLE[record.status] || record.status);
+}
 
 export function confirmationChip(record) {
   const confirmed = record.confirmation === 'confirmed';
   return h(
     'span',
-    { class: `chip confirmation confirmation-${confirmed ? 'confirmed' : 'unconfirmed'}`, dataset: { confirmation: confirmed ? 'confirmed' : 'unconfirmed' } },
-    h('span', { 'aria-hidden': 'true' }, confirmed ? '✓' : '○'),
-    confirmed ? ` Confirmed by ${record.confirmed_by}, ${day(record.confirmed_at)}` : ' Unconfirmed',
+    { class: `chip confirmation confirmation-${confirmed ? 'confirmed' : 'unconfirmed'} ${confirmed ? 'confirmed' : 'unconfirmed'}`, dataset: { confirmation: confirmed ? 'confirmed' : 'unconfirmed' } },
+    icon(confirmed ? 'confirmed' : 'unconfirmed', { size: 14 }),
+    confirmed ? `Confirmed by ${record.confirmed_by}, ${day(record.confirmed_at)}` : 'Unconfirmed',
   );
 }
 
 export const projectWideChip = (record) =>
-  record.project_wide ? h('span', { class: 'chip project-wide', title: 'It applies throughout the project, not only to what it is linked to' }, '◎ Project-wide') : null;
+  record.project_wide ? h('span', { class: 'chip project-wide', title: 'It applies throughout the project, not only to what it is linked to' }, icon('graph', { size: 14 }), 'Project-wide') : null;
 
-// The chips every record carries, in one place so that none is left out.
-export const recordChips = (record) =>
-  h('div', { class: 'record-chips' }, kindChip(record), projectWideChip(record), lifecycleChip(record), confirmationChip(record));
+// The chips every record carries, in one place so that none is left out. The detail panel says what
+// kind it is in its own heading, so it asks for the others only.
+export const recordChips = (record, { kind = true } = {}) =>
+  h('div', { class: 'record-chips' }, kind ? kindChip(record) : null, projectWideChip(record), lifecycleChip(record), confirmationChip(record));
 
 export function confirmationWords(record) {
   if (record.confirmation === 'confirmed') return `Confirmed by ${record.confirmed_by} on ${moment(record.confirmed_at)}.`;
@@ -72,16 +78,28 @@ function decisionLink(id) {
 }
 
 // What it concerns, as links: the epics, stories and tasks, the requirements, and for a fact the
-// decisions.
+// decisions. Each with the icon of its kind, for the lines of the detail panel.
+const concernedItems = (record) => [
+  ...(record.node_ids || []).map((id) => [store.nodes.get(id)?.kind || 'story', itemLink(id)]),
+  ...(record.rule_ids || []).map((id) => ['rule', ruleLink(id)]),
+  ...(record.decision_ids || []).map((id) => ['decision', decisionLink(id)]),
+];
+
+// A short line: "Concerns: a, b".
 export function concerns(record) {
-  const found = [
-    ...(record.node_ids || []).map((id) => itemLink(id)),
-    ...(record.rule_ids || []).map(ruleLink),
-    ...(record.decision_ids || []).map(decisionLink),
-  ];
+  const found = concernedItems(record).map(([, link]) => link);
   return found.length
     ? h('p', { class: 'concerns' }, h('span', { class: 'quiet' }, 'Concerns: '), joined(found))
     : h('p', { class: 'quiet concerns' }, 'Concerns nothing yet.');
+}
+
+// The same as a list, one item to a line, and the words for a project-wide decision. A panel's
+// "Applies to".
+export function concernsList(record) {
+  const found = concernedItems(record);
+  const wide = record.project_wide ? h('li', { class: 'concern-wide' }, icon('graph', { size: 14 }), 'The whole project') : null;
+  if (!found.length && !wide) return h('p', { class: 'quiet concerns' }, 'Nothing yet.');
+  return h('ul', { class: 'concern-list' }, wide, found.map(([kind, link]) => h('li', {}, kindIcon(kind, 14), link)));
 }
 
 // How it ended, and what replaced what: the chain ends in what is in force now.
@@ -132,6 +150,15 @@ export function recordBody(record) {
     h('div', { class: 'quiet source' }, 'Source: ', renderMarkdown(record.source, { className: 'markdown inline-markdown record-source' })),
     h('p', { class: 'quiet who' }, `Recorded by ${record.recorded_by} on ${moment(record.recorded_at)}.`),
   ];
+}
+
+// Who put a record in, and when, one line each: the Attribution of the detail panel. A decision does
+// not say who typed it, only when. A date is kept in one piece.
+export function attribution(record) {
+  if (recordKind(record) === 'decision') {
+    return [h('span', { class: 'who' }, `Decided by ${record.decided_by} on `, h('span', { class: 'nowrap' }, day(record.decided_on)), '.'), h('span', { class: 'who' }, `Recorded ${moment(record.recorded_at)}.`)];
+  }
+  return h('span', { class: 'who' }, `Recorded by ${record.recorded_by} on ${moment(record.recorded_at)}.`);
 }
 
 // One fact or decision, whole, as a list item. `why` is the reason recall gives for it; `actions`

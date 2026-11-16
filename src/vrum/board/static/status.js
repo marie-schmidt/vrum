@@ -5,6 +5,9 @@
 
 import { Refusal, call } from './api.js';
 import { h, moment, plural, put } from './dom.js';
+import { refuse } from './forms.js';
+import { icon } from './icons.js';
+import { pageHeader } from './page.js';
 import { store } from './store.js';
 
 const SIZES = [
@@ -38,12 +41,13 @@ export function mount(element) {
   root = element;
   put(
     root,
-    h('h1', {}, 'Status and export'),
-    h('p', { class: 'help' }, 'How the server is, as the server says it. It never shows the database password.'),
-    h('p', { class: 'problem', role: 'alert', id: 'status-problem' }),
-    h('div', { id: 'status-body' }, h('p', { class: 'quiet' }, 'Asking the server…')),
-    exportSection(),
-    moveSection(),
+    h('div', { class: 'settings-page' }, [
+      pageHeader('Status and export', 'How the server is, as the server says it. It never shows the database password.'),
+      h('p', { class: 'problem', role: 'alert', id: 'status-problem' }),
+      h('div', { id: 'status-body', class: 'status-grid' }, h('p', { class: 'loading', role: 'status' }, 'Asking the server…')),
+      exportSection(),
+      moveSection(),
+    ]),
   );
   load();
   timer = setInterval(load, Math.max(10, store.info.poll_seconds * 2) * 1000);
@@ -71,17 +75,20 @@ async function load() {
   try {
     const status = await call('server_status', {});
     if (mine !== generation || !root) return;
-    root.querySelector('#status-problem').textContent = '';
+    root.querySelector('#status-problem').replaceChildren();
     draw(status);
   } catch (error) {
     if (mine !== generation || !root) return;
     if (!(error instanceof Refusal)) throw error;
-    root.querySelector('#status-problem').textContent = error.message;
+    refuse(root.querySelector('#status-problem'), error.message);
   }
 }
 
-const row = (name, label, value, extra = null) =>
-  h('tr', { dataset: { name } }, h('th', { scope: 'row' }, label), h('td', { class: 'value' }, value), extra ? h('td', { class: 'quiet' }, extra) : null);
+const row = (name, label, value, extra) =>
+  h('tr', { dataset: { name } }, h('th', { scope: 'row' }, label), h('td', { class: 'value' }, value), extra === undefined ? null : h('td', { class: 'quiet' }, extra));
+
+// A table of facts that scrolls inside its own box when it is wider than the page.
+const facts = (label, ...rows) => h('div', { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': label }, h('table', { class: 'facts' }, h('tbody', {}, rows)));
 
 function draw(status) {
   const index = status.index;
@@ -90,35 +97,25 @@ function draw(status) {
     root.querySelector('#status-body'),
     h(
       'section',
-      { id: 'versions' },
+      { id: 'versions', class: 'settings-section' },
       h('h2', {}, 'The server'),
-      h('p', { class: 'ok' }, h('strong', {}, 'The server is running and can reach its database.')),
-      h('table', { class: 'facts' }, h('tbody', {}, row('vrum_version', 'Vrum', status.vrum_version), row('postgres_version', 'PostgreSQL', status.postgres_version), row('pgvector_version', 'pgvector', status.pgvector_version), row('checked_at', 'Read', moment(status.checked_at)))),
+      h('p', { class: 'ok status-line' }, icon('check', { size: 16 }), h('strong', {}, 'The server is running and can reach its database.')),
+      facts('The server’s versions', row('vrum_version', 'Vrum', status.vrum_version), row('postgres_version', 'PostgreSQL', status.postgres_version), row('pgvector_version', 'pgvector', status.pgvector_version), row('checked_at', 'Read', moment(status.checked_at))),
     ),
+    h('section', { id: 'sizes', class: 'settings-section' }, h('h2', {}, 'How much it holds'), facts('How much the project holds', SIZES.map(([name, label]) => row(name, label, String(status.counts[name]))))),
     h(
       'section',
-      { id: 'sizes' },
-      h('h2', {}, 'How much it holds'),
-      h('table', { class: 'facts' }, h('tbody', {}, SIZES.map(([name, label]) => row(name, label, String(status.counts[name]))))),
-    ),
-    h(
-      'section',
-      { id: 'index' },
+      { id: 'index', class: 'settings-section' },
       h('h2', {}, 'Search by meaning'),
-      h(
-        'table',
-        { class: 'facts' },
-        h(
-          'tbody',
-          {},
-          row('meaning', 'The index', MEANING[index.meaning] || index.meaning, index.note),
-          row('waiting', 'Items waiting to be indexed', String(index.waiting_to_index), 'New or changed and not yet in the index: found by exact words at once, by meaning once indexed.'),
-          row('indexed', 'Items in the index', String(index.indexed)),
-          row('service', 'Embedding service', SERVICE[index.embedding_service] || index.embedding_service),
-          row('model', 'Embedding model', index.embedding_model || 'None'),
-          row('vector_size', 'Numbers in each vector', index.vector_size === null ? 'Not built yet' : String(index.vector_size)),
-          row('last_reindex', 'The last time the index was brought up to date', last ? `${moment(last.at)}: ${last.error ? `stopped early (${last.error})` : `${plural(last.embedded, 'item')} embedded${last.failed_total ? `, ${last.failed_total} refused` : ''}, ${last.waiting_after ?? 0} still waiting`}, in ${last.seconds} s` : 'Not since the server started'),
-        ),
+      facts(
+        'The state of the index',
+        row('meaning', 'The index', MEANING[index.meaning] || index.meaning, index.note || ''),
+        row('waiting', 'Items waiting to be indexed', String(index.waiting_to_index), 'New or changed and not yet in the index: found by exact words at once, by meaning once indexed.'),
+        row('indexed', 'Items in the index', String(index.indexed), ''),
+        row('service', 'Embedding service', SERVICE[index.embedding_service] || index.embedding_service, ''),
+        row('model', 'Embedding model', index.embedding_model || 'None', ''),
+        row('vector_size', 'Numbers in each vector', index.vector_size === null ? 'Not built yet' : String(index.vector_size), ''),
+        row('last_reindex', 'The last time the index was brought up to date', last ? `${moment(last.at)}: ${last.error ? `stopped early (${last.error})` : `${plural(last.embedded, 'item')} embedded${last.failed_total ? `, ${last.failed_total} refused` : ''}, ${last.waiting_after ?? 0} still waiting`}, in ${last.seconds} s` : 'Not since the server started', ''),
       ),
     ),
   );
@@ -134,9 +131,10 @@ function exportSection() {
     {
       type: 'button',
       id: 'download-export',
+      class: 'primary',
       onclick: async () => {
         button.disabled = true;
-        problem.textContent = '';
+        problem.replaceChildren();
         note.textContent = 'Reading the whole graph…';
         try {
           const document_ = await readExport((pages) => {
@@ -147,7 +145,7 @@ function exportSection() {
         } catch (error) {
           if (!(error instanceof Refusal)) throw error;
           note.textContent = '';
-          problem.textContent = error.message;
+          refuse(problem, error.message);
         } finally {
           button.disabled = false;
         }
@@ -157,10 +155,10 @@ function exportSection() {
   );
   return h(
     'section',
-    { id: 'export' },
+    { id: 'export', class: 'settings-section' },
     h('h2', {}, 'Download everything'),
     h('p', {}, 'One file with every epic, story, task, link, requirement, decision, fact and the whole history, to keep or to load into an empty project. It is the same as the export an agent reads.'),
-    button,
+    h('div', { class: 'actions' }, button),
     note,
     problem,
   );
@@ -203,8 +201,8 @@ function save(document_) {
 function moveSection() {
   return h(
     'section',
-    { id: 'moving' },
+    { id: 'moving', class: 'settings-section' },
     h('h2', {}, 'Backup, restore and import'),
-    h('p', {}, 'These are done from the command line, not from a page, because they replace or fill a whole database and a mistake in a browser tab should not be able to do that. See the README for the commands: ', h('code', {}, './scripts/backup.sh'), ', ', h('code', {}, './scripts/restore.sh'), ' and ', h('code', {}, 'scripts/import_graph.py'), '.'),
+    h('p', {}, 'These are done from the command line, not from a page, because they replace or fill a whole database and a mistake in a browser tab should not be able to do that. See docs/backup-and-export.md for the commands: ', h('code', {}, './scripts/backup.sh'), ', ', h('code', {}, './scripts/restore.sh'), ' and ', h('code', {}, 'scripts/import_graph.py'), '.'),
   );
 }

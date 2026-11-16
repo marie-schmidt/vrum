@@ -81,9 +81,11 @@ class Watched:
         return self.board.split("/board")[0]
 
     async def open(self, address: str = "") -> None:
-        """Go to a page of the board, such as '#/graph?scope=all', and wait for it to load."""
+        """Go to a page of the board, such as '#/graph?scope=all', and wait for it to load. It
+        waits for the shell, not for the sidebar's links: on a narrow screen the sidebar is
+        off-canvas and so not visible until the menu button opens it."""
         await self.page.goto(f"{self.board}{address}")
-        await self.page.wait_for_selector("#top nav, .entry", timeout=15_000)
+        await self.page.wait_for_selector("#app[data-shell=project], .entry", timeout=15_000)
 
     async def go(self, address: str) -> None:
         """Change the address after the # without loading the page again, as a link does."""
@@ -288,6 +290,9 @@ async def drag_bar(page: Page, node_id: int, days: float, grip: str | None = Non
     part = bar_of(page, node_id)
     if grip:
         part = part.locator(f".rm-handle.{grip}")
+    # The timeline pans inside its own region, and an open detail panel narrows it: a bar may be
+    # out of sight until it is scrolled to.
+    await part.scroll_into_view_if_needed()
     box = await part.bounding_box()
     assert box is not None
     x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2

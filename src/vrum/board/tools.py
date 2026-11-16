@@ -215,6 +215,6 @@ TOOL_PLACES: dict[str, ToolPlace] = {
     "import_graph": _agents(
         "Moving data",
         "It loads a whole export into an empty project, which is done once to set one up, so it "
-        "stays with the command line (scripts/import_graph.py) and the README.",
+        "stays with the command line (scripts/import_graph.py) and docs/backup-and-export.md.",
     ),
 }

@@ -7,6 +7,9 @@
 import { Refusal, get, tryTool } from './api.js';
 import { ui, viewLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
+import { refuse } from './forms.js';
+import { icon } from './icons.js';
+import { pageHeader } from './page.js';
 
 // Where on the board a tool is done is a page (Board, Graph, Roadmap, Agent access, Tools, Status),
 // or one of the two drawers that open over any page.
@@ -25,37 +28,42 @@ export async function mount(element, initial) {
   params = initial;
   listing = null;
   const mine = ++generation;
-  const search = h('input', { type: 'search', id: 'tool-search', name: 'q', value: params.get('q') || '', autocomplete: 'off', placeholder: 'a word of a name, a description or a page', 'aria-label': 'Search the tools' });
+  const search = h('input', { type: 'search', id: 'tool-search', name: 'q', value: params.get('q') || '', autocomplete: 'off', placeholder: 'Name, description or page', 'aria-label': 'Search the tools' });
   parts = {
     search,
     summary: h('p', { class: 'count', id: 'count', role: 'status' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'tools-problem' }),
-    connect: h('section', { id: 'connecting' }),
-    list: h('div', { id: 'tool-list' }),
+    connect: h('section', { id: 'connecting', class: 'settings-section' }),
+    list: h('div', { id: 'tool-list' }, h('p', { class: 'loading', role: 'status' }, 'Loading the tools…')),
   };
   put(
     root,
-    h('h1', {}, 'Tools'),
-    h('p', { class: 'help' }, 'Everything an agent can do on this server, as the server lists it now. Each tool says where on the board a person does the same thing, or why it is for agents only.'),
-    parts.problem,
-    parts.connect,
-    h(
-      'form',
-      {
-        class: 'filter',
-        role: 'search',
-        onsubmit: (event) => {
-          event.preventDefault();
-          ui.navigate({ q: search.value.trim() || null });
-        },
-      },
-      h('label', { for: 'tool-search' }, 'Search'),
-      search,
-      h('button', { type: 'submit', class: 'primary' }, 'Search'),
-      h('button', { type: 'button', id: 'clear-tool-search', onclick: () => ui.navigate({ q: null }) }, 'Clear'),
-    ),
-    parts.summary,
-    parts.list,
+    h('div', { class: 'settings-page' }, [
+      pageHeader(
+        'Tools',
+        'Everything an agent can do on this server, as the server lists it now. Each tool says where on the board a person does the same thing, or why it is for agents only.',
+        h(
+          'form',
+          {
+            class: 'filter tools-search',
+            role: 'search',
+            onsubmit: (event) => {
+              event.preventDefault();
+              ui.navigate({ q: search.value.trim() || null });
+            },
+          },
+          h('label', { for: 'tool-search', class: 'sr-only' }, 'Search'),
+          icon('search', { size: 16, className: 'tools-search-icon' }),
+          search,
+          h('button', { type: 'submit', class: 'primary' }, 'Search'),
+          h('button', { type: 'button', id: 'clear-tool-search', onclick: () => ui.navigate({ q: null }) }, 'Clear'),
+        ),
+      ),
+      parts.problem,
+      parts.connect,
+      parts.summary,
+      parts.list,
+    ]),
   );
   try {
     const found = await get('/board/api/tools');
@@ -64,7 +72,8 @@ export async function mount(element, initial) {
   } catch (error) {
     if (mine !== generation || !root) return;
     if (!(error instanceof Refusal)) throw error;
-    parts.problem.textContent = error.message;
+    refuse(parts.problem, error.message);
+    parts.list.replaceChildren();
     return;
   }
   drawConnect();
@@ -160,17 +169,21 @@ function fieldsOf(tool) {
   return Object.entries(properties).map(([name, spec]) => ({ name, spec, required: required.has(name), type: typeOf(spec) }));
 }
 
-function fieldTable(fields) {
+function fieldTable(fields, toolName) {
   if (!fields.length) return h('p', { class: 'quiet' }, 'It takes no fields.');
   return h(
-    'table',
-    { class: 'fields' },
-    h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Field'), h('th', { scope: 'col' }, 'Takes'), h('th', { scope: 'col' }, 'What it is'))),
+    'div',
+    { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': `Fields of ${toolName}` },
     h(
-      'tbody',
-      {},
-      fields.map(({ name, spec, required, type }) =>
-        h('tr', { dataset: { field: name } }, h('th', { scope: 'row' }, h('code', {}, name), required ? h('span', { class: 'chip' }, 'needed') : null), h('td', {}, type), h('td', {}, `${spec.description || ''}${'default' in spec && spec.default !== null ? ` (Starts as ${JSON.stringify(spec.default)}.)` : ''}`)),
+      'table',
+      { class: 'fields' },
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Field'), h('th', { scope: 'col' }, 'Takes'), h('th', { scope: 'col' }, 'What it is'))),
+      h(
+        'tbody',
+        {},
+        fields.map(({ name, spec, required, type }) =>
+          h('tr', { dataset: { field: name } }, h('th', { scope: 'row' }, h('code', {}, name), required ? h('span', { class: 'chip' }, 'needed') : null), h('td', {}, type), h('td', {}, `${spec.description || ''}${'default' in spec && spec.default !== null ? ` (Starts as ${JSON.stringify(spec.default)}.)` : ''}`)),
+        ),
       ),
     ),
   );
@@ -181,7 +194,7 @@ function whereOnTheBoard(tool) {
   if (!tool.where) return h('p', { class: 'where problem' }, 'This tool has not been placed on the board or marked as for agents only yet.');
   // A drawer opens over the page that is open; a page is gone to.
   const link = DRAWERS.includes(tool.page) ? viewLink(ui.page, { drawer: tool.page }, {}, tool.where) : viewLink(tool.page, {}, {}, tool.where);
-  return h('p', { class: 'where' }, h('span', { class: 'chip' }, 'On the board'), ' ', link);
+  return h('p', { class: 'where' }, h('span', { class: 'chip info' }, 'On the board'), ' ', link);
 }
 
 function toolEntry(tool) {
@@ -190,11 +203,11 @@ function toolEntry(tool) {
   return h(
     'article',
     { class: 'tool', id: `tool-entry-${tool.name}`, dataset: { name: tool.name, changes: tool.changes_something ? '1' : '0', agents: tool.agents_only ? '1' : '0' } },
-    h('h3', {}, h('code', {}, tool.name), ' ', h('span', { class: `chip ${tool.changes_something ? 'changes' : 'reads'}` }, tool.changes_something ? 'Changes something' : 'Only reads')),
+    h('h3', {}, h('code', {}, tool.name), ' ', h('span', { class: `chip ${tool.changes_something ? 'warn changes' : 'ok reads'}` }, tool.changes_something ? 'Changes something' : 'Only reads')),
     h('p', { class: 'first' }, first.replace(/\s+/g, ' ')),
     rest.length ? h('details', { class: 'more' }, h('summary', {}, 'The whole description'), rest.map((paragraph) => h('p', {}, paragraph.replace(/\s+/g, ' ')))) : null,
     whereOnTheBoard(tool),
-    h('details', { class: 'fields-list' }, h('summary', {}, `Fields (${fields.length})`), fieldTable(fields)),
+    h('details', { class: 'fields-list' }, h('summary', {}, `Fields (${fields.length})`), fieldTable(fields, tool.name)),
     tool.changes_something ? null : tryIt(tool, fields),
   );
 }
@@ -241,7 +254,7 @@ function control(name, spec) {
 
 function tryIt(tool, fields) {
   const controls = fields.map((item) => ({ item, ...control(item.name, item.spec) }));
-  const result = h('pre', { class: 'result', hidden: true, 'aria-label': `What ${tool.name} returned` });
+  const result = h('pre', { class: 'result', hidden: true, tabindex: '0', 'aria-label': `What ${tool.name} returned` });
   const problem = h('p', { class: 'problem', role: 'alert' });
   const run = h('button', { type: 'submit', class: 'primary try-run' }, 'Try it');
   const form = h(
@@ -251,7 +264,7 @@ function tryIt(tool, fields) {
       novalidate: true,
       onsubmit: async (event) => {
         event.preventDefault();
-        problem.textContent = '';
+        problem.replaceChildren();
         result.hidden = true;
         run.disabled = true;
         try {
@@ -265,14 +278,14 @@ function tryIt(tool, fields) {
           result.hidden = false;
         } catch (error) {
           if (!(error instanceof Refusal)) throw error;
-          problem.textContent = error.message;
+          refuse(problem, error.message);
         } finally {
           run.disabled = false;
         }
       },
     },
     controls.map(({ item, element, id }) => h('div', { class: 'field' }, h('label', { for: id }, `${item.name}${item.required ? ' (needed)' : ''}`), element, item.spec.description ? h('p', { class: 'quiet', id: `${id}-help` }, item.spec.description) : null)),
-    h('div', { class: 'buttons' }, run),
+    h('div', { class: 'actions' }, run),
     problem,
     result,
   );

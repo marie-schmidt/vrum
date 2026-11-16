@@ -2,28 +2,29 @@
 // and filters), the way a record's connections are written out, and the text filter.
 
 import { h } from './dom.js';
-import { TYPES, neighboursOf, relationWords } from './graph-data.js';
+import { neighboursOf, relationWords } from './graph-data.js';
+import { KIND, kindIcon } from './labels.js';
 import { openRecord } from './records.js';
 
 // One part of the context list: a heading with a count and its buttons, a row of filters that act
 // in the browser over the whole list the board holds, and the place the rows go. `controls` is a
 // list of [name, label, element]; the element is built by the caller so it keeps its own value.
 export function sectionFrame({ name, title, buttons = [], controls = [], onFilter }) {
-  const count = h('span', { class: 'gv-count', id: `ctx-${name}-count`, role: 'status' });
-  const body = h('div', { class: 'gv-body', id: `ctx-${name}-body` });
+  const count = h('span', { class: 'ctx-count', id: `ctx-${name}-count`, role: 'status' });
+  const body = h('div', { class: 'ctx-body', id: `ctx-${name}-body` });
   const filters = h(
     'form',
-    { class: 'gv-filters', role: 'search', 'aria-label': `Filter the ${title.toLowerCase()}`, onsubmit: (event) => event.preventDefault() },
+    { class: 'ctx-filters', role: 'search', 'aria-label': `Filter the ${title.toLowerCase()}`, onsubmit: (event) => event.preventDefault() },
     controls.map(([field, label, control]) => {
       control.id = `ctx-${name}-${field}`;
       control.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', onFilter);
-      return h('div', { class: 'gv-field' }, h('label', { for: control.id }, label), control);
+      return h('div', { class: 'ctx-field' }, h('label', { for: control.id }, label), control);
     }),
   );
   const element = h(
     'section',
-    { class: 'gv-section', id: `ctx-${name}`, 'aria-labelledby': `ctx-${name}-heading`, dataset: { section: name } },
-    h('header', { class: 'gv-section-head' }, h('h2', { id: `ctx-${name}-heading` }, title), count, h('span', { class: 'spacer' }), ...buttons),
+    { class: 'ctx-section', id: `ctx-${name}`, 'aria-labelledby': `ctx-${name}-heading`, dataset: { section: name } },
+    h('header', { class: 'ctx-head' }, h('h2', { id: `ctx-${name}-heading` }, title), count, h('span', { class: 'spacer' }), ...buttons),
     controls.length ? filters : null,
     body,
   );
@@ -72,11 +73,11 @@ export function connectionsDetails(dot, ctx, { skip = [] } = {}) {
           'li',
           { dataset: { other: entry.dot.key, relation: entry.edge.type } },
           h('strong', {}, relationWords(entry)),
-          ' ',
           h(
             'button',
             { type: 'button', class: 'link gv-link', onclick: () => openRecord(entry.dot.kind, entry.dot.id) },
-            `${TYPES[entry.dot.type].label} #${entry.dot.id} ${entry.dot.title}`,
+            kindIcon(entry.dot.type, 14),
+            `${KIND[entry.dot.type].label} #${entry.dot.id} ${entry.dot.title}`,
           ),
         ),
       ),

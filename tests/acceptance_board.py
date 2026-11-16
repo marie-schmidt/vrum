@@ -85,7 +85,7 @@ async def destinations(page_url: str, token: str) -> None:
         await w.open("")
         await expect(heading).to_have_text("Board", timeout=SLOW)
         landed = page.url.endswith("#/board")
-        links = await page.locator("#top nav a").all_inner_texts()
+        links = await page.locator("#main-nav a .side-label").all_inner_texts()
         beside = [
             await page.locator(selector).is_visible()
             for selector in ("#project-switcher", "#global-search", "#activity-open")
@@ -101,8 +101,9 @@ async def destinations(page_url: str, token: str) -> None:
         proof(
             "M16",
             "a project opens on the Board, Board, Graph and Roadmap are the only destinations in "
-            "the top bar, with the search box, Activity and Settings beside them, and the old "
-            "addresses of Home, Table, Outline, Rules, Memory, Overlaps and Ask are not aliased",
+            "the sidebar's views list, with the search box, Activity and Settings beside them, "
+            "and the old addresses of Home, Table, Outline, Rules, Memory, Overlaps and Ask are "
+            "not aliased",
             landed and links == ["Board", "Graph", "Roadmap"] and all(beside) and all(bounced),
             f"{len(GONE)} old addresses all land on the Board",
         )
@@ -321,6 +322,8 @@ async def people_edit(client: Client, page_url: str, token: str) -> None:
         await expect(
             cell(page, epic, "in_progress").locator(f".card[data-id='{task}']")
         ).to_be_visible()
+        # With the panel open the columns are wider than the room: scroll the target into view.
+        await cell(page, epic, "done").scroll_into_view_if_needed()
         await page.drag_and_drop(
             f".card[data-id='{task}']", f".cell[data-epic='{epic}'][data-status='done']"
         )
@@ -789,7 +792,7 @@ async def days_work() -> None:
 
         # -- the Graph: the same work and context, in the same panel
         await page.locator("#drawer-close").click()
-        await page.locator("#top nav a[data-page=graph]").click()
+        await page.locator("#main-nav a[data-page=graph]").click()
         await expect(page.locator("#graph-page")).to_be_visible(timeout=SLOW)
         await expect(page.locator("#card-title")).to_contain_text(f"#{task} ")
         dot = page.locator(f".dot[data-key='node:{task}']")
@@ -857,7 +860,7 @@ async def days_work() -> None:
         )
 
         # -- the Roadmap: schedule the work
-        await page.locator("#top nav a[data-page=roadmap]").click()
+        await page.locator("#main-nav a[data-page=roadmap]").click()
         await expect(page.locator("h1")).to_have_text("Roadmap", timeout=SLOW)
         await w.go(f"#/roadmap?q=epic:{epic}&sel=node:{task}")
         await expect(page.locator(f".tray-item[data-id='{later}']")).to_be_visible(timeout=SLOW)

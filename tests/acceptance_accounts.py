@@ -60,7 +60,7 @@ async def registering(base: str) -> None:
         empty_state = "no projects yet" in await w.page.locator("#no-projects").inner_text()
         await w.page.locator("#project-name").fill(f"Compiler {word}")
         await w.page.locator("#create-project").click()
-        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         found = re.search(r"/board/p/(\d+)", w.page.url)
         assert found, w.page.url
         await w.go("#/board")

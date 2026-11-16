@@ -12,6 +12,8 @@ import { actor, notify, recordLink, ui } from './ctx.js';
 import { clear, h, moment, plural, put } from './dom.js';
 import { CHANGE_KINDS, aboutItem, eventRow, kindOfAction } from './events.js';
 import { dialogForm, field, openDialog } from './forms.js';
+import { icon } from './icons.js';
+import { kindIcon } from './labels.js';
 import { ensureContext, sync } from './store.js';
 
 const PAGE = 100;
@@ -106,10 +108,11 @@ export async function mount(element, initial) {
     side: h('section', { id: 'working', 'aria-label': 'Who is working on what' }),
   };
   const label = (name, text) => h('label', { for: `a-${name}` }, text);
+  const labelled = (name, text, control, ...more) => h('div', { class: `field act-${name}` }, label(name, text), control, ...more);
   const form = h(
     'form',
     {
-      class: 'filter activity-filter',
+      class: 'drawer-form activity-filter',
       id: 'activity-filter',
       role: 'search',
       onsubmit: (event) => {
@@ -123,23 +126,24 @@ export async function mount(element, initial) {
         });
       },
     },
-    label('actor', 'Who'),
-    parts.actor,
-    parts.who,
-    label('kind', 'Kind of change'),
-    parts.kind,
-    label('item', 'About'),
-    parts.item,
-    label('from', 'From day'),
-    parts.from,
-    label('to', 'To day'),
-    parts.to,
-    h('div', { class: 'buttons' },
+    h(
+      'div',
+      { class: 'act-fields' },
+      labelled('actor', 'Who', parts.actor, parts.who),
+      labelled('kind', 'Kind of change', parts.kind),
+      labelled('item', 'About', parts.item),
+      labelled('from', 'From day', parts.from),
+      labelled('to', 'To day', parts.to),
+    ),
+    h(
+      'div',
+      { class: 'buttons' },
       h('button', { type: 'submit', class: 'primary', id: 'apply-activity' }, 'Apply'),
       h('button', { type: 'button', id: 'clear-activity', onclick: () => ui.navigate(Object.fromEntries(FILTERS.map((name) => [name, null]))) }, 'Clear'),
+      h('span', { class: 'quiet' }, 'Days are UTC days.'),
     ),
-    h('span', { class: 'quiet' }, 'Days are UTC days.'),
   );
+  put(parts.side, h('h3', {}, 'Who is working on what'), h('p', { class: 'loading', role: 'status' }, 'Reading the claims…'));
   put(
     root,
     parts.side,
@@ -227,7 +231,10 @@ async function loadFeed(fresh) {
   const mine = ++generation;
   const f = filters();
   loadedFor = serverKey(f);
-  if (fresh) parts.summary.textContent = 'Reading the changes…';
+  if (fresh) {
+    parts.summary.textContent = 'Reading the changes…';
+    if (!events.length) put(parts.feed, h('p', { class: 'loading', role: 'status' }, 'Reading the changes…'));
+  }
   parts.problem.textContent = '';
   try {
     const page = await readBack();
@@ -280,7 +287,7 @@ function drawFeed() {
   put(
     parts.feed,
     rows.length ? h('ul', { class: 'plain feed' }, rows.map(eventRow)) : null,
-    older !== null ? h('p', {}, h('button', { type: 'button', id: 'show-older', onclick: showOlder }, 'Show older changes')) : null,
+    older !== null ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-older', onclick: showOlder }, 'Show older changes')) : null,
   );
 }
 
@@ -381,16 +388,18 @@ function claimRow(agent, work, live) {
   return h(
     'li',
     { class: `claim${live ? '' : ' lapsed'}`, dataset: { node: work.node_id, actor: agent.actor, live: live ? '1' : '0' } },
-    nodeLink(work),
-    ' ',
-    h('span', { class: 'holder' }, `held by ${agent.actor}`),
-    ' ',
-    countdown(work.expires_at, live),
+    h('div', { class: 'claim-main' }, kindIcon(work.kind, 14), nodeLink(work)),
+    h(
+      'div',
+      { class: 'claim-meta' },
+      h('span', { class: 'holder' }, icon('user', { size: 13 }), `held by ${agent.actor}`),
+      h('span', { class: 'claim-time' }, icon(live ? 'clock' : 'alert', { size: 13 }), countdown(work.expires_at, live)),
+    ),
     h(
       'span',
       { class: 'buttons' },
-      live ? h('button', { type: 'button', class: 'renew', onclick: () => attempt(() => call('renew_claim', { actor: actor(), node_id: work.node_id }), `Kept #${work.node_id} for longer.`) }, 'Renew') : null,
-      h('button', { type: 'button', class: 'release', onclick: () => releaseDialog(work, agent.actor) }, 'Release…'),
+      live ? h('button', { type: 'button', class: 'renew small', onclick: () => attempt(() => call('renew_claim', { actor: actor(), node_id: work.node_id }), `Kept #${work.node_id} for longer.`) }, 'Renew') : null,
+      h('button', { type: 'button', class: 'release small', onclick: () => releaseDialog(work, agent.actor) }, 'Release…'),
     ),
   );
 }
@@ -404,7 +413,7 @@ function drawWorking() {
   put(
     parts.side,
     h('h3', {}, 'Who is working on what'),
-    h('p', { class: 'quiet', id: 'acting-as' }, actor() ? `Buttons act as ${actor()}.` : 'Give your name first (top right): the buttons act under it.'),
+    h('p', { class: 'quiet', id: 'acting-as' }, actor() ? `Buttons act as ${actor()}.` : 'Give your name first: the buttons act under it.'),
     h('section', { id: 'claims-live' }, h('h4', {}, `Claims in force (${live.length})`), live.length ? h('ul', { class: 'plain claims' }, live.map(([agent, work]) => claimRow(agent, work, true))) : h('p', { class: 'quiet' }, 'Nobody holds anything right now.')),
     lapsed.length ? h('section', { id: 'claims-lapsed' }, h('h4', {}, `Claims that ran out (${lapsed.length})`), h('p', { class: 'quiet' }, 'These ran out with no handoff note. Anyone can take the work again; the holder can still release it with a note.'), h('ul', { class: 'plain claims' }, lapsed.map(([agent, work]) => claimRow(agent, work, false)))) : null,
     h(
@@ -419,24 +428,25 @@ function drawWorking() {
       'section',
       { id: 'free' },
       h('h4', {}, `Free to take (${free.length}${free.length === 10 ? ' or more' : ''})`),
-      h('p', { class: 'quiet', id: 'lease-help' }, 'Ready work that nobody holds, oldest first. A claim lasts this many seconds unless it is renewed:'),
-      h('label', { for: 'lease' }, 'Lease in seconds'),
-      lease,
+      h('p', { class: 'quiet', id: 'lease-help' }, 'Ready work that nobody holds, oldest first. A claim lasts this many seconds unless it is renewed.'),
       h(
-        'form',
-        {
-          id: 'claim-by-id',
-          class: 'claim-by-id',
-          onsubmit: (event) => {
-            event.preventDefault();
-            const text = claimId.value.trim().replace(/^#/, '');
-            const id = /^\d+$/.test(text) ? Number(text) : text;
-            attempt(() => call('claim_node', { actor: actor(), node_id: id, lease_seconds: Number(lease.value) }), `Took #${text}.`);
+        'div',
+        { class: 'free-controls' },
+        h('div', { class: 'field lease-field' }, h('label', { for: 'lease' }, 'Lease in seconds'), lease),
+        h(
+          'form',
+          {
+            id: 'claim-by-id',
+            class: 'claim-by-id',
+            onsubmit: (event) => {
+              event.preventDefault();
+              const text = claimId.value.trim().replace(/^#/, '');
+              const id = /^\d+$/.test(text) ? Number(text) : text;
+              attempt(() => call('claim_node', { actor: actor(), node_id: id, lease_seconds: Number(lease.value) }), `Took #${text}.`);
+            },
           },
-        },
-        h('label', { for: 'claim-id' }, 'Or take an item by its id'),
-        claimId,
-        h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'),
+          h('div', { class: 'field' }, h('label', { for: 'claim-id' }, 'Or take an item by its id'), h('div', { class: 'claim-by-id-row' }, claimId, h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'))),
+        ),
       ),
       free.length
         ? h(
@@ -446,8 +456,8 @@ function drawWorking() {
               h(
                 'li',
                 { class: 'claim', dataset: { node: node.id } },
-                itemLink(node.id, `${node.kind} #${node.id} “${node.title}”`),
-                h('button', { type: 'button', class: 'take', onclick: () => attempt(() => call('claim_node', { actor: actor(), node_id: node.id, lease_seconds: Number(lease.value) }), `Took #${node.id}.`) }, 'Claim'),
+                h('div', { class: 'claim-main' }, kindIcon(node.kind, 14), itemLink(node.id, `${node.kind} #${node.id} “${node.title}”`)),
+                h('button', { type: 'button', class: 'take small', onclick: () => attempt(() => call('claim_node', { actor: actor(), node_id: node.id, lease_seconds: Number(lease.value) }), `Took #${node.id}.`) }, 'Claim'),
               ),
             ),
           )
@@ -457,16 +467,16 @@ function drawWorking() {
   updateWho();
 }
 
+const STATE_ICONS = { working: 'in_progress', lapsed: 'alert', finished: 'done' };
+
 function agentRow(agent) {
   const note = agent.last_handoff;
   return h(
     'li',
     { class: `agent state-${agent.state}`, dataset: { actor: agent.actor, state: agent.state } },
-    h('strong', {}, agent.actor),
-    ' ',
-    h('span', { class: `chip state state-${agent.state}` }, STATE[agent.state]),
-    agent.state === 'working' ? h('span', { class: 'quiet' }, ` on ${agent.holding.map((work) => `#${work.node_id}`).join(', ')}`) : null,
-    agent.state === 'lapsed' ? h('span', { class: 'quiet' }, ` on ${agent.lapsed.map((work) => `#${work.node_id}`).join(', ')}`) : null,
+    h('div', { class: 'agent-line' }, icon('user', { size: 14 }), h('strong', {}, agent.actor), h('span', { class: `chip state state-${agent.state}` }, icon(STATE_ICONS[agent.state] || 'info', { size: 13 }), STATE[agent.state])),
+    agent.state === 'working' ? h('span', { class: 'quiet' }, `On ${agent.holding.map((work) => `#${work.node_id}`).join(', ')}`) : null,
+    agent.state === 'lapsed' ? h('span', { class: 'quiet' }, `On ${agent.lapsed.map((work) => `#${work.node_id}`).join(', ')}`) : null,
     note ? h('div', { class: 'quiet' }, `Last handoff: ${note.outcome}${note.node_id ? ` on #${note.node_id}` : ''}, ${moment(note.at)}.`) : null,
   );
 }

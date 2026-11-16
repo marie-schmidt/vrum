@@ -7,15 +7,17 @@
 
 import { Refusal, call, callAll } from './api.js';
 import { actor, notify, recordLink, ui } from './ctx.js';
-import { clear, day, h, moment } from './dom.js';
-import { concerns, confirmationWords, describedBy, isActive, lifecycleLines, recordBody, recordChips, recordKind, recordTitle } from './entries.js';
+import { clear, day, h, moment, put } from './dom.js';
+import { attribution, concernsList, confirmationWords, describedBy, isActive, lifecycleLines, recordChips, recordKind, recordTitle } from './entries.js';
 import { describe } from './events.js';
-import { clip, uid } from './forms.js';
+import { clip, refuse, uid } from './forms.js';
+import { icon } from './icons.js';
+import { KIND, kindIcon } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { recallBlock, askRecall } from './recall.js';
 import { confirmDialog, linkDialog, placeRequirementDialog, recordDecisionDialog, recordFactDialog, requirementDialog, supersedeDialog, withdrawDialog } from './record-forms.js';
 import { withReferences } from './reference-picker.js';
-import { fetchMentions, itemLink, kindWords, loadTargets, mentionsList, statusWords } from './references.js';
+import { fetchMentions, itemLink, loadTargets, mentionsList, statusWords } from './references.js';
 import { sync } from './store.js';
 
 export { linkDialog, placeRequirementDialog, recordDecisionDialog, recordFactDialog, requirementDialog, supersedeDialog, withdrawDialog };
@@ -32,15 +34,15 @@ export function openRecord(kind, id) {
 // Choosing another value asks for the person (and their words) in a dialog and calls the same
 // operation an agent does; the dropdown shows the truth again if the dialog is left. It is
 // disabled, with the reason, for a record that is no longer in force. `onDone(result)` runs after
-// the server accepted a change.
-export function confirmationControl(record, onDone = null) {
+// the server accepted a change. In the panel's grid the row's own label names it (`inGrid`).
+export function confirmationControl(record, onDone = null, { inGrid = false } = {}) {
   const kind = recordKind(record);
   const current = record.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed';
   const id = uid('confirmation-');
   const active = isActive(record);
   const select = h(
     'select',
-    { id, class: 'confirmation-select', name: 'confirmation', value: current, disabled: !active, 'aria-describedby': `${id}-note` },
+    { id, class: 'confirmation-select', name: 'confirmation', value: current, disabled: !active, 'aria-describedby': `${id}-note`, 'aria-label': inGrid ? 'Confirmation' : null },
     h('option', { value: 'unconfirmed' }, 'Unconfirmed'),
     h('option', { value: 'confirmed' }, 'Confirmed'),
   );
@@ -61,7 +63,7 @@ export function confirmationControl(record, onDone = null) {
     confirmationWords(record),
     active ? '' : ` Only a record in force can be confirmed or un-confirmed: this one was ${ended}${current === 'confirmed' ? ', so it keeps the confirmation it had' : ''}.`,
   );
-  return h('div', { class: 'confirmation-control', dataset: { record: `${kind}:${record.id}`, confirmation: current, active: String(active) } }, h('label', { for: id }, 'Confirmation'), ' ', select, note);
+  return h('div', { class: 'confirmation-control', dataset: { record: `${kind}:${record.id}`, confirmation: current, active: String(active) } }, inGrid ? null : h('label', { for: id }, 'Confirmation'), select, note);
 }
 
 // One row of a list of facts and decisions: what it is, its title or text, whether a person
@@ -93,11 +95,55 @@ export function recordRow(record, { actions = null, choose = null } = {}) {
 
 // -- pieces the detail panel's pages share --------------------------------------------------------------
 
+// A section of the panel: a heading over a hairline, and what it holds.
 export const section = (title, key, ...content) => h('section', { class: 'part', dataset: { part: key } }, h('h3', {}, title), content);
 
-export const closeButton = (label) => h('button', { type: 'button', class: 'close', 'aria-label': label, onclick: () => ui.navigate({ sel: null }) }, '✕');
+// A heading with how many there are: "Mentioned in (3)".
+export const countTitle = (title, count) => [title, h('span', { class: 'heading-count' }, ` (${count})`)];
 
-const button = (label, onclick, cls = '') => h('button', { type: 'button', class: cls, onclick }, label);
+export const closeButton = (label, onclick = () => ui.navigate({ sel: null })) =>
+  h('button', { type: 'button', class: 'close ghost icon-only small', 'aria-label': label, title: label, onclick }, icon('close', { size: 16 }));
+
+// Words that belong in a heading for the sake of its name (the id, in front of the title) but that
+// the head already shows in its own place.
+const spoken = (text) => h('span', { class: 'spoken' }, text);
+
+// The head of the panel: what it is (kind and id, small and in capitals), its chips, a large title
+// and the way to close it. The close button comes last, so that the title is followed by it when
+// the Tab key is pressed; it is drawn at the top, beside the label.
+export function detailHead({ kind, id, chips = null, title, titleId, close }) {
+  return h(
+    'header',
+    { class: 'detail-head' },
+    h('p', { class: 'detail-label' }, kindIcon(kind, 14), h('span', {}, `#${id} / ${KIND[kind].label}`)),
+    chips,
+    h('h2', { id: titleId, class: 'detail-title', tabindex: -1 }, spoken(`#${id} `), ...title),
+    close,
+  );
+}
+
+// Labels and values, in two columns. A row whose value is empty is left out. A row may be given
+// properties for its value (a class, or a data-part).
+export function detailGrid(rows) {
+  const shown = rows.filter((row) => row && row[1] !== null && row[1] !== undefined && row[1] !== false);
+  if (!shown.length) return null;
+  return h('dl', { class: 'detail-grid' }, shown.flatMap(([label, value, props = {}]) => [h('dt', {}, label), h('dd', props, value)]));
+}
+
+// A panel that has only something to say: that it is loading, that the server said no, that the
+// item is gone.
+export function stateView(message, { refusal = false, close = 'Close the details', onClose = undefined } = {}) {
+  return h(
+    'div',
+    { class: 'detail detail-state' },
+    h('header', { class: 'detail-head' }, closeButton(close, onClose)),
+    refusal ? h('p', { class: 'notice refusal', role: 'alert' }, icon('alert', { size: 16 }), h('span', {}, message)) : h('p', { class: 'quiet' }, message),
+  );
+}
+
+export const loadingView = () => h('div', { class: 'detail detail-state' }, h('p', { class: 'loading', role: 'status' }, 'Loading…'));
+
+const button = (label, onclick, cls = '', mark = null) => h('button', { type: 'button', class: `small ${cls}`.trim(), onclick }, mark ? icon(mark, { size: 14 }) : null, label);
 
 // Whatever has the focus inside the panel when it is drawn again gets it back afterwards, so a
 // keyboard user is not thrown out by news from the server. Call it before the old content goes
@@ -128,11 +174,11 @@ export function watchEdits(view, state) {
 // current version. What was typed stays where it is until they choose. `currentVersion` reads the
 // version the server holds now.
 export async function explainStale(error, place, state, currentVersion) {
-  place.replaceChildren(h('span', { class: 'refusal-text' }, error.message));
+  refuse(place, error.message);
+  place.querySelector('.problem-text').classList.add('refusal-text');
   const now = await currentVersion().catch(() => null);
   if (now !== null && now !== state.version) {
     place.append(
-      ' ',
       h(
         'button',
         {
@@ -156,11 +202,8 @@ export function historySection(events) {
     h(
       'li',
       { dataset: { event: event.id, action: event.action } },
-      h('span', { class: 'quiet' }, `${moment(event.at)} `),
-      h('strong', {}, event.actor),
-      ' ',
-      h('span', { class: 'event-words' }, describe(event), '.'),
-      event.after && event.after.version !== undefined ? h('span', { class: 'quiet' }, ` Version ${event.after.version}.`) : null,
+      h('div', { class: 'history-what' }, h('strong', {}, event.actor), ' ', h('span', { class: 'event-words' }, describe(event), '.'), event.after && event.after.version !== undefined ? h('span', { class: 'quiet' }, ` Version ${event.after.version}.`) : null),
+      h('div', { class: 'history-when quiet' }, moment(event.at)),
       event.action === 'handoff' && event.after?.note ? h('div', { class: 'handoff-note' }, renderMarkdown(event.after.note)) : null,
     );
   const list = h('ul', { class: 'plain history' }, newest.slice(0, 10).map(row));
@@ -170,10 +213,10 @@ export function historySection(events) {
           'button',
           {
             type: 'button',
-            class: 'link show-all-history',
+            class: 'small show-all-history',
             onclick: (event) => {
               list.replaceChildren(...newest.map(row));
-              event.target.remove();
+              event.currentTarget.remove();
             },
           },
           `Show all ${newest.length}`,
@@ -182,25 +225,25 @@ export function historySection(events) {
   return section('History', 'history', list, more);
 }
 
+// How a requirement stands, as a chip: held, settled or dropped, each with its own sign.
+const RULE_LOOK = { held: ['lock', 'info', 'A requirement that stands'], settled: ['confirmed', 'ok', 'Agreed and done with'], dropped: ['dropped', '', 'No longer a requirement'] };
+export function ruleStatusChip(rule) {
+  const [mark, tone, hint] = RULE_LOOK[rule.status] || ['info', '', ''];
+  return h('span', { class: `chip rule-status status-${rule.status} ${tone}`.trim(), title: hint || null }, icon(mark, { size: 14 }), statusWords(rule.status));
+}
+
+export const requirementKindChip = (rule) => h('span', { class: 'chip kind kind-rule' }, kindIcon('rule', 14), `Requirement #${rule.id}`);
+
 // A requirement in a list: its status, its title (which opens it in the panel) and what can be
 // done to it. The version it is changed at is the one it was drawn with.
 export function requirementRow(rule) {
+  const unplaced = rule.story_id === null || rule.story_id === undefined;
   return h(
     'li',
     { class: `requirement status-${rule.status}`, dataset: { rule: rule.id, status: rule.status, story: rule.story_id ?? '' } },
-    h(
-      'div',
-      { class: 'record-chips' },
-      h('span', { class: 'chip kind kind-rule' }, h('span', { 'aria-hidden': 'true' }, kindWords('rule').sign), ` Requirement #${rule.id}`),
-      h('span', { class: `chip rule-status status-${rule.status}` }, statusWords(rule.status)),
-      recordLink('rule', rule.id, { class: 'record-title' }, rule.title),
-    ),
-    h(
-      'div',
-      { class: 'buttons' },
-      button('Edit…', () => requirementDialog({ rule }), 'edit-requirement'),
-      button(rule.story_id === null || rule.story_id === undefined ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement'),
-    ),
+    h('div', { class: 'record-chips' }, requirementKindChip(rule), ruleStatusChip(rule)),
+    recordLink('rule', rule.id, { class: 'record-title' }, rule.title),
+    h('div', { class: 'row-actions' }, button('Edit…', () => requirementDialog({ rule }), 'edit-requirement'), button(unplaced ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
   );
 }
 
@@ -208,9 +251,9 @@ export function requirementRow(rule) {
 export function recordButtons(concern) {
   return h(
     'div',
-    { class: 'buttons record-buttons' },
-    button('Record a fact…', () => recordFactDialog(concern), 'record-fact'),
-    button('Record a decision…', () => recordDecisionDialog(concern), 'record-decision'),
+    { class: 'panel-actions record-buttons' },
+    button('Record a fact…', () => recordFactDialog(concern), 'record-fact', 'fact'),
+    button('Record a decision…', () => recordDecisionDialog(concern), 'record-decision', 'decision'),
   );
 }
 
@@ -228,18 +271,22 @@ function recordActions(record, state) {
   const done = () => state.reload(true);
   return h(
     'div',
-    { class: 'buttons record-actions' },
+    { class: 'panel-actions record-actions' },
     button('Replace…', () => supersedeDialog(record, { onDone: done }), 'supersede'),
     button('Withdraw…', () => withdrawDialog(record, { onDone: done }), 'withdraw'),
-    button('Change what it concerns…', () => linkDialog(record), 'link'),
+    button('Change what it concerns…', () => linkDialog(record), 'change-concerns', 'link'),
   );
 }
+
+// A fact is its statement, so its statement is its title; the full text is under it only when the
+// title does not already say it all (it was cut, or it has lines, emphasis, a link or a reference).
+const sayableAsTitle = (text) => clip(text, 140) === text.trim() && !/[\n*_`[\]~<>#]|https?:\/\//.test(text);
 
 // Fills `root` with a fact or a decision, `kind` being fact or decision. `state` is the panel's.
 export async function renderRecord(root, kind, id, state = { dirty: false }) {
   state.skipped = false;
   state.reload = () => renderRecord(root, kind, id, state);
-  if (!root.querySelector('.record-detail')) clear(root).append(h('p', { class: 'quiet' }, 'Loading…'));
+  if (!root.querySelector('.record-detail')) put(root, loadingView());
   const tools = TOOLS[kind];
   const [record, history, mentions] = await Promise.all([call(tools.get, { [tools.key]: id }), callAll(tools.history, { [tools.key]: id }), fetchMentions(kind, id), loadTargets()]);
   // The panel has moved on to something else while this was being fetched.
@@ -248,23 +295,32 @@ export async function renderRecord(root, kind, id, state = { dirty: false }) {
   state.dirty = false;
   // What it concerns, so that news about one of those (a rename, say) redraws the panel.
   state.concerns = { node: record.node_ids || [], rule: record.rule_ids || [], decision: record.decision_ids || [] };
-  const words = kindWords(kind);
+  const label = KIND[kind].label;
+  const statement = kind === 'fact' && sayableAsTitle(record.text);
+  const lifecycle = lifecycleLines(record);
   const view = h(
     'article',
-    { class: 'record-detail', dataset: { record: `${kind}:${record.id}`, kind, status: record.status, confirmation: record.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed', projectWide: String(Boolean(record.project_wide)) } },
-    h(
-      'header',
-      {},
-      recordChips(record),
-      h('h2', { id: 'record-title', tabindex: -1 }, kind === 'decision' ? `${words.label} #${record.id}: ${record.title}` : `${words.label} #${record.id}`),
-      closeButton(`Close the ${words.label.toLowerCase()}`),
-    ),
-    h('div', { class: 'part', dataset: { part: 'confirmation' } }, confirmationControl(record, () => state.reload())),
-    section(kind === 'decision' ? 'The decision' : 'The fact', 'record', recordBody(record)),
-    lifecycleLines(record).length ? section('Lifecycle', 'lifecycle', lifecycleLines(record)) : null,
-    section('What it concerns', 'concerns', concerns(record)),
-    h('div', { class: 'part', dataset: { part: 'actions' } }, recordActions(record, state)),
-    section(`Mentioned in (${mentions.length})`, 'mentions', mentionsList(mentions)),
+    { class: 'record-detail detail', dataset: { record: `${kind}:${record.id}`, kind, status: record.status, confirmation: record.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed', projectWide: String(Boolean(record.project_wide)) } },
+    detailHead({
+      kind,
+      id: record.id,
+      chips: recordChips(record, { kind: false }),
+      title: [kind === 'decision' ? record.title : statement ? record.text.trim() : clip(record.text, 140)],
+      titleId: 'record-title',
+      close: closeButton(`Close the ${label.toLowerCase()}`),
+    }),
+    detailGrid([
+      ['Confirmation', confirmationControl(record, () => state.reload(), { inGrid: true }), { dataset: { part: 'confirmation' } }],
+      ['Applies to', concernsList(record), { dataset: { part: 'concerns' } }],
+      ['Attribution', attribution(record), { class: 'attribution' }],
+      kind === 'fact' ? ['Source', renderMarkdown(record.source, { className: 'markdown inline-markdown record-source' }), { class: 'source' }] : null,
+    ]),
+    h('div', { dataset: { part: 'actions' } }, recordActions(record, state)),
+    lifecycle.length ? section('Lifecycle', 'lifecycle', lifecycle) : null,
+    kind === 'decision' ? section('Decision', 'record', renderMarkdown(record.text, { className: 'markdown record-text' })) : null,
+    kind === 'decision' ? section('Reason', 'reason', h('div', { class: 'reason' }, renderMarkdown(record.reason, { className: 'markdown record-reason' }))) : null,
+    kind === 'fact' && !statement ? section('Fact', 'record', renderMarkdown(record.text, { className: 'markdown record-text' })) : null,
+    section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)),
     historySection(history),
   );
   const restoreFocus = rememberFocus(root);
@@ -287,11 +343,11 @@ function ruleForm(rule, state) {
   const body = withReferences(h('textarea', { id: 'edit-body', rows: 6, value: rule.body || '' }));
   const status = h('select', { id: 'edit-status', value: rule.status }, RULE_STATUSES.map(([value, label]) => h('option', { value }, label)));
   const problem = h('div', { class: 'problem', role: 'alert' });
-  const field = (label, input, id) => h('div', { class: 'field' }, h('label', { for: id }, label), input);
+  const field = (label, input, id, wide = true) => h('div', { class: `field${wide ? ' wide' : ''}` }, h('label', { for: id }, label), input);
   return h(
     'form',
     {
-      class: 'edit',
+      class: 'edit form-grid',
       onsubmit: async (event) => {
         event.preventDefault();
         problem.replaceChildren();
@@ -300,7 +356,7 @@ function ruleForm(rule, state) {
         if (body.value !== (rule.body || '')) args.body = body.value;
         if (status.value !== rule.status) args.status = status.value;
         if (Object.keys(args).length === 3) {
-          problem.textContent = 'Nothing has been changed yet, so there is nothing to save.';
+          refuse(problem, 'Nothing has been changed yet, so there is nothing to save.');
           return;
         }
         try {
@@ -316,9 +372,9 @@ function ruleForm(rule, state) {
     },
     field('Title', title, 'edit-title'),
     field('Details', body, 'edit-body'),
-    field('Status', status, 'edit-status'),
+    field('Status', status, 'edit-status', false),
     problem,
-    h('div', { class: 'buttons' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
+    h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
   );
 }
 
@@ -328,7 +384,7 @@ export async function renderRule(root, id, state = { dirty: false }, force = tru
   const seen = state.touches || 0;
   state.skipped = false;
   state.reload = (now = false) => renderRule(root, id, state, now);
-  if (!root.querySelector('.record-detail')) clear(root).append(h('p', { class: 'quiet' }, 'Loading…'));
+  if (!root.querySelector('.record-detail')) put(root, loadingView());
   const [rule, recalled, history, mentions] = await Promise.all([
     call('get_rule', { rule_id: id }),
     askRecall({ rule_id: id }, state.withSimilar ? { with_similar: true } : {}),
@@ -343,21 +399,16 @@ export async function renderRule(root, id, state = { dirty: false }, force = tru
   }
   state.version = rule.version;
   state.dirty = false;
+  const unplaced = rule.story_id === null || rule.story_id === undefined;
   const view = h(
     'article',
-    { class: 'record-detail rule-detail', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, story: rule.story_id ?? '' } },
-    h(
-      'header',
-      {},
-      h('div', { class: 'chips' }, h('span', { class: 'chip kind kind-rule' }, h('span', { 'aria-hidden': 'true' }, kindWords('rule').sign), ` Requirement #${rule.id}`), h('span', { class: `chip rule-status status-${rule.status}` }, statusWords(rule.status))),
-      h('h2', { id: 'record-title', tabindex: -1 }, `#${rule.id} ${rule.title}`),
-      closeButton('Close the requirement'),
-    ),
-    rule.story_id !== null && rule.story_id !== undefined ? h('p', { class: 'in-story' }, 'In story ', itemLink(rule.story_id)) : h('p', { class: 'in-story quiet' }, 'It is in no story yet.'),
-    h('p', {}, button(rule.story_id === null || rule.story_id === undefined ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
-    section('Details and changes', 'edit', h('div', { class: 'body-text' }, rule.body ? renderMarkdown(rule.body) : h('span', { class: 'quiet' }, 'No details.')), ruleForm(rule, state)),
+    { class: 'record-detail rule-detail detail', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, story: rule.story_id ?? '' } },
+    detailHead({ kind: 'rule', id: rule.id, chips: h('div', { class: 'chips' }, ruleStatusChip(rule)), title: [rule.title], titleId: 'record-title', close: closeButton('Close the requirement') }),
+    unplaced ? h('p', { class: 'in-story quiet' }, 'It is in no story yet.') : h('p', { class: 'in-story' }, 'In story ', itemLink(rule.story_id)),
+    h('div', { class: 'panel-actions' }, button(unplaced ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
+    section('Details', 'edit', h('div', { class: 'body-text' }, rule.body ? renderMarkdown(rule.body) : h('span', { class: 'quiet' }, 'No details.')), ruleForm(rule, state)),
     section('Facts and decisions', 'context', recordButtons({ rule_ids: [rule.id] }), recallBlock({ rule_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) })),
-    section(`Mentioned in (${mentions.length})`, 'mentions', mentionsList(mentions)),
+    section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)),
     historySection(history),
   );
   const restoreFocus = rememberFocus(root);

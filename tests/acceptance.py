@@ -19,12 +19,14 @@ from collections.abc import Awaitable, Callable
 from playwright.async_api import expect
 
 from tests.acceptance_accounts import accounts
+from tests.acceptance_appearance import appearance
 from tests.acceptance_board import board
 from tests.acceptance_context import context
 from tests.acceptance_finding import finding
 from tests.acceptance_graph import graph
 from tests.acceptance_hardening import hardening
 from tests.acceptance_moving import moving
+from tests.acceptance_quickstart import quickstart
 from tests.acceptance_scenario import (
     PROOFS,
     Failed,
@@ -54,6 +56,8 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "searching": searching,
     "utilities": utilities,
     "accounts": accounts,
+    "appearance": appearance,
+    "quickstart": quickstart,
     "moving": moving,
 }
 

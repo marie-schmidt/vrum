@@ -9,15 +9,14 @@ carry a unique word, so each test looks only at what it made."""
 import datetime
 from typing import Any
 
-import anyio
 import pytest
 from mcp import Client
 from playwright.async_api import expect
 
 from tests.board_helpers import SLOW, board_url, browser_page, made, plain
-from tests.board_m14 import events_of, feed_ids, spoken
+from tests.board_m14 import events_of, feed_becomes, feed_ids, spoken
 from tests.board_m14 import feed_row as row
-from tests.board_search import VIEWS, address, drawer, on_view
+from tests.board_search import VIEWS, address, drawer, keyboard_to_activity, on_view
 from tests.helpers import (
     confirm,
     day,
@@ -424,11 +423,7 @@ async def test_the_feeds_filters_in_the_address_give_what_changes_since_gives(
             """Go to an address, and wait until the feed is exactly these events, newest first."""
             wanted = [e["id"] for e in reversed(events)]
             await w.go(f"#/board?drawer=activity&{choices}")
-            for _ in range(150):
-                if await feed_ids(page) == wanted:
-                    return
-                await anyio.sleep(0.1)
-            assert await feed_ids(page) == wanted, choices
+            assert await feed_becomes(page, wanted) == wanted, choices
 
         # Who: the server's own filter.
         ann_events = await events_of(client, actor=ann)
@@ -550,12 +545,9 @@ async def test_activity_opens_by_keyboard_from_every_view_and_leaves_a_draft_in_
         for view in VIEWS:
             await w.open(f"#/{view}")
             await on_view(page, view)
-            # Tab from the search button reaches Activity, and Enter opens the drawer.
-            await page.locator("#global-search-go").focus()
-            await page.keyboard.press("Tab")
-            assert await page.evaluate("document.activeElement.id") == "activity-open"
-            await page.keyboard.press("Enter")
-            await expect(drawer(page, "activity")).to_be_visible(timeout=SLOW)
+            # Activity is in the sidebar, right before Settings: Shift+Tab from Settings reaches
+            # it, and Enter opens the drawer.
+            await keyboard_to_activity(page)
             await expect(page.locator("#activity-open")).to_have_attribute("aria-expanded", "true")
             name, choices = await address(page)
             assert (name, choices["drawer"]) == (view, "activity")

@@ -52,13 +52,14 @@ async def test_there_are_exactly_three_primary_destinations_and_the_board_is_the
         await on_page(page, "board")
         assert page.url.endswith("#/board")
 
-        links = page.locator("#top nav a")
-        assert await links.all_inner_texts() == ["Board", "Graph", "Roadmap"]
+        links = page.locator("#main-nav a")
+        assert await links.locator(".side-label").all_inner_texts() == ["Board", "Graph", "Roadmap"]
         assert await links.evaluate_all("els => els.map(e => e.dataset.page)") == VIEWS
-        assert await page.locator("#top nav").get_attribute("aria-label") == "Views"
-        # Nothing else in the top bar leads to a page of the work: the rest are the project
-        # switcher, the search box, the Activity button and the Settings menu.
-        top_links = await page.locator("#top a[href^='#/']").evaluate_all(
+        assert await page.locator("#main-nav").get_attribute("aria-label") == "Views"
+        # Nothing else in the shell leads to a page of the work: the rest are the project switcher,
+        # the epics (each a link to the Board for that epic), the search box, the Activity button
+        # and the Settings menu.
+        top_links = await page.locator("#sidebar a[href^='#/'], #top a[href^='#/']").evaluate_all(
             "els => els.map(e => e.getAttribute('href').split('?')[0].replace('#/', ''))"
         )
         assert set(top_links) <= {*VIEWS, *SETTINGS}
@@ -70,7 +71,7 @@ async def test_there_are_exactly_three_primary_destinations_and_the_board_is_the
 
         # Each destination is a click away, and the one on show is marked.
         for name in ("graph", "roadmap", "board"):
-            await page.locator(f"#top nav a[data-page={name}]").click()
+            await page.locator(f"#main-nav a[data-page={name}]").click()
             await on_page(page, name)
             current = await links.evaluate_all(
                 "els => els.filter(e => e.getAttribute('aria-current') === 'page')"
@@ -78,7 +79,7 @@ async def test_there_are_exactly_three_primary_destinations_and_the_board_is_the
             )
             assert current == [name]
         # The logo goes home, which is the Board.
-        await page.locator("#top a.brand").click()
+        await page.locator("#sidebar a.brand").click()
         await on_page(page, "board")
         assert w.problems == [], w.problems
 
@@ -177,7 +178,7 @@ async def test_the_settings_menu_works_from_the_keyboard_and_reaches_agent_acces
             await on_page(page, name)
             await expect(menu).to_be_hidden()
             assert await button.get_attribute("aria-current") == "page"
-            current = await page.locator("#top nav a").evaluate_all(
+            current = await page.locator("#main-nav a").evaluate_all(
                 "els => els.filter(e => e.getAttribute('aria-current') === 'page').length"
             )
             assert current == 0
@@ -201,7 +202,7 @@ async def test_a_drawer_stays_open_on_a_settings_page_and_the_views_are_a_click_
         await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible()
         assert "drawer=activity" in page.url
         for name in VIEWS:
-            await page.locator(f"#top nav a[data-page={name}]").click()
+            await page.locator(f"#main-nav a[data-page={name}]").click()
             await on_page(page, name)
             await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible()
         assert w.problems == [], w.problems
@@ -297,7 +298,7 @@ async def test_what_is_typed_in_the_search_box_stays_while_the_view_changes(boar
         await on_page(page, "board")
         await page.locator("#global-search").fill(f"not yet asked {word}")
         for name in ("graph", "roadmap", "board"):
-            await page.locator(f"#top nav a[data-page={name}]").click()
+            await page.locator(f"#main-nav a[data-page={name}]").click()
             await on_page(page, name)
             assert await page.locator("#global-search").input_value() == f"not yet asked {word}"
         # Nothing was searched for, so no drawer opened.
@@ -388,7 +389,7 @@ async def test_a_draft_in_the_panel_survives_opening_drawers_and_changing_views(
         # The views change, and Graph's presentation and preset too: the selection goes with the
         # person, and so does what was typed.
         for name in ("graph", "roadmap", "board", "graph"):
-            await page.locator(f"#top nav a[data-page={name}]").click()
+            await page.locator(f"#main-nav a[data-page={name}]").click()
             await on_page(page, name)
             assert f"sel=node:{story}" in page.url
             await draft_is_kept()
@@ -449,7 +450,7 @@ async def test_switching_project_with_late_answers_shows_nothing_of_the_first_in
                 await asyncio.sleep(0.1)
             assert held, "no poll of the first project was held back"
 
-            # Switch to the second project from the top bar while they are held back.
+            # Switch to the second project from the sidebar while they are held back.
             before = len(w.requests)
             await page.locator("#project-switcher").select_option(label=f"Second {word}")
             await expect(page.locator("#project-switcher option:checked")).to_have_text(

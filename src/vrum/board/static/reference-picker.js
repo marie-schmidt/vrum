@@ -4,7 +4,8 @@
 // reference creates no link, so choosing one changes nothing in the graph until the text is saved.
 
 import { h } from './dom.js';
-import { kindWords, loadTargets, refText } from './references.js';
+import { kindIcon } from './labels.js';
+import { loadTargets, refText } from './references.js';
 import { store } from './store.js';
 
 const SHOWN = 8;
@@ -114,9 +115,9 @@ export function withReferences(control) {
               choose(at);
             },
           },
-          h('span', { 'aria-hidden': 'true' }, `${kindWords(item.type).sign} `),
+          kindIcon(item.type, 14),
           h('code', {}, refText(item.kind, item.id)),
-          ` ${item.title}`,
+          h('span', { class: 'ref-title' }, item.title),
         ),
       ),
     );

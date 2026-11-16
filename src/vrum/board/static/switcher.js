@@ -6,7 +6,7 @@
 
 import { ui } from './ctx.js';
 import { h } from './dom.js';
-import { KIND } from './labels.js';
+import { KIND, kindIcon } from './labels.js';
 import { ensureContext, store } from './store.js';
 
 const SHOWN = 10;
@@ -97,8 +97,8 @@ export function openSwitcher(pages) {
                 },
               },
               hit.page
-                ? h('span', {}, h('span', { class: 'chip' }, 'View'), ` ${hit.title}`)
-                : h('span', {}, h('span', { 'aria-hidden': 'true' }, `${KIND[hit.type]?.sign || ''} `), h('code', {}, hit.ref === 'node' ? `#${hit.id}` : `${KIND[hit.type].label.toLowerCase()} ${hit.id}`), ` ${KIND[hit.type]?.label || hit.type}: ${hit.title}`),
+                ? h('span', { class: 'switcher-item' }, h('span', { class: 'chip' }, 'View'), ` ${hit.title}`)
+                : h('span', { class: 'switcher-item' }, kindIcon(hit.type, 14), h('code', {}, hit.ref === 'node' ? `#${hit.id}` : `${KIND[hit.type].label.toLowerCase()} ${hit.id}`), ` ${KIND[hit.type]?.label || hit.type}: ${hit.title}`),
             ),
           )
         : [h('li', { class: 'quiet', role: 'presentation' }, 'Nothing matches.')]),

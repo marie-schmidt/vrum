@@ -118,13 +118,18 @@ def test_no_page_script_keeps_a_session_or_an_agent_key_in_the_browser() -> None
         assert "VRUM_TOKEN" not in text, path.name
         if path.name != "api.js":
             assert not re.search(r"\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket", text), path.name
-        if path.name != "ctx.js":
+        if path.name not in ("ctx.js", "theme.js"):
             assert "localStorage" not in text, path.name
     api_text = (STATIC / "api.js").read_text(encoding="utf-8")
     assert "Authorization" not in api_text
     ctx_text = (STATIC / "ctx.js").read_text(encoding="utf-8")
     assert re.findall(r"localStorage\.\w+\((\w+)", ctx_text) == ["NAME_KEY"] * 2
     assert "const NAME_KEY = 'vrum.actor'" in ctx_text
+    # The other thing kept is the choice of appearance (Light, Dark or System), and nothing else.
+    theme_text = (STATIC / "theme.js").read_text(encoding="utf-8")
+    assert set(re.findall(r"localStorage\.\w+\((\w+)", theme_text)) == {"KEY"}
+    assert "var KEY = 'vrum.theme'" in theme_text
+    assert "localStorage.clear" not in "".join(path.read_text(encoding="utf-8") for path in SCRIPTS)
 
 
 def test_the_board_asks_for_news_every_five_seconds_unless_told_otherwise() -> None:

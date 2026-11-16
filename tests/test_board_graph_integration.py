@@ -85,7 +85,7 @@ async def same_as_the_boards_in(w: Watched, key: str) -> None:
         await panel(page).locator("[data-part]").evaluate_all("els => els.map(e => e.dataset.part)")
     )
     await page.goto(f"{w.board}?again={unique_word()}#/board?sel={key}")
-    await expect(page.locator("#top nav")).to_be_visible(timeout=SLOW)
+    await expect(page.locator("#main-nav")).to_be_visible(timeout=SLOW)
     await expect(panel(page).locator("[data-part]").first).to_be_visible(timeout=SLOW)
     await page.wait_for_load_state("networkidle")
     assert await panel(page).inner_text() == from_graph
@@ -438,6 +438,9 @@ async def test_the_presets_and_presentations_are_buttons_that_work_from_the_keyb
             )
             assert (await hash_params(page))["view"] == "everything"
             assert await pressed(page) == ("everything", "map")
+            # The epic choice sits between the presets and the presentations, as it reads.
+            await page.keyboard.press("Tab")
+            await expect(page.locator("#graph-epic")).to_be_focused()
             await page.keyboard.press("Tab")
             await expect(page.locator("#graph-as-map")).to_be_focused()
             await page.keyboard.press("Tab")
@@ -566,12 +569,12 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
             await draft_is_kept("activity drawer and the map")
             await page.locator("#drawer-close").click()
             # To the Board and back: the panel is the same one, with the same draft.
-            await page.locator("#top nav a[data-page=board]").click()
-            await expect(page.locator("#top nav a[data-page=board]")).to_have_attribute(
+            await page.locator("#main-nav a[data-page=board]").click()
+            await expect(page.locator("#main-nav a[data-page=board]")).to_have_attribute(
                 "aria-current", "page", timeout=SLOW
             )
             await draft_is_kept("board")
-            await page.locator("#top nav a[data-page=graph]").click()
+            await page.locator("#main-nav a[data-page=graph]").click()
             await expect(page.locator("#graph-page")).to_be_visible(timeout=SLOW)
             await draft_is_kept("graph again")
 

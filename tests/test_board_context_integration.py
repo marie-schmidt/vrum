@@ -173,7 +173,7 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
         await expect(detail).to_have_attribute("data-status", "active")
         await expect(detail).to_have_attribute("data-confirmation", "unconfirmed")
         await expect(detail).to_contain_text(f"Fact about {word}")
-        await expect(detail).to_contain_text(f"Source: The call with Marie {word}")
+        await expect(detail.locator(".source")).to_contain_text(f"The call with Marie {word}")
         await expect(detail).to_contain_text(f"Recorded by {ADA}")
         await expect(detail.locator(".confirmation-select")).to_have_value("unconfirmed")
         await expect(detail.locator(".confirmation-note")).to_contain_text("Not confirmed")
@@ -182,7 +182,7 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
         detail = panel(page).locator(f".record-detail[data-record='{decision_key}']")
         await expect(detail).to_be_visible(timeout=SLOW)
         await expect(detail).to_contain_text(f"What was decided {word}")
-        await expect(detail).to_contain_text(f"Why: Because of {word}")
+        await expect(detail.locator(".reason")).to_contain_text(f"Because of {word}")
         await expect(detail).to_contain_text(f"Decided by {MARIE}")
 
         # Exact recall, section by section, for the story and for the requirement.

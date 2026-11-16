@@ -1,7 +1,9 @@
 // Where the dots go: a small force layout of our own. Dots push each other apart, lines pull their
 // two ends to a comfortable length, and everything is drawn gently towards the middle. A pinned
 // dot stays where it was put. The positions are kept between draws so that a change on the server
-// moves things a little instead of starting again.
+// moves things a little instead of starting again. This is the layout for a graph too big to label
+// in rows; for the rows themselves (layered.js) it only keeps the positions: `fix` stops the forces
+// and `assign` sets where each unpinned dot goes.
 
 const SPACING = 70; // how far apart unrelated dots like to be
 const CELL = SPACING * 3; // dots further apart than this do not push each other
@@ -14,6 +16,7 @@ export function createLayout() {
   let dots = [];
   let edges = [];
   let alpha = 0;
+  let fixed = false; // the positions are given (assign), and no force moves them
 
   // Fixed starting places, so the same graph always starts the same way.
   const spiral = (index) => {
@@ -47,7 +50,7 @@ export function createLayout() {
   }
 
   function step() {
-    if (alpha < SETTLED) return false;
+    if (fixed || alpha < SETTLED) return false;
     const grid = new Map();
     for (const dot of dots) {
       const p = pos.get(dot.key);
@@ -119,6 +122,27 @@ export function createLayout() {
   return {
     set,
     step,
+    // Stop (or start again) the forces. Changing from one to the other starts from scratch, since
+    // the two do not share a picture: positions and pins are let go.
+    fix(on) {
+      if (fixed === on) return;
+      pos.clear();
+      pinned.clear();
+      fixed = on;
+      alpha = on ? 0 : 1;
+    },
+    // Put each dot that is not pinned at the position given for it, and let none of them drift.
+    assign(positions) {
+      for (const [key, at] of positions) {
+        const p = pos.get(key);
+        if (!p || pinned.has(key)) continue;
+        p.x = at.x;
+        p.y = at.y;
+        p.vx = 0;
+        p.vy = 0;
+      }
+      alpha = 0;
+    },
     // Run until the picture has settled, or for at most `limit` steps.
     settle(limit) {
       for (let count = 0; count < limit && step(); count += 1);
@@ -146,7 +170,7 @@ export function createLayout() {
       alpha = Math.max(alpha, 0.5);
     },
     pinnedCount: () => pinned.size,
-    active: () => alpha >= SETTLED,
+    active: () => !fixed && alpha >= SETTLED,
     bounds() {
       const all = dots.map((dot) => pos.get(dot.key));
       if (!all.length) return { x0: -100, y0: -100, x1: 100, y1: 100 };

@@ -5,17 +5,24 @@
 
 import { Refusal, call, callAll } from './api.js';
 import { actor, notify } from './ctx.js';
-import { clear, day, h, moment, plural } from './dom.js';
+import { clear, day, h, moment, plural, put } from './dom.js';
 import { parentChoices, openCreate } from './create.js';
-import { KIND, LINK, PRIORITIES, PRIORITY, STATUS, SETTABLE, kindChip, priorityChip, statusChip } from './labels.js';
+import { field, refuse } from './forms.js';
+import { icon } from './icons.js';
+import { KIND, LINK, PRIORITIES, PRIORITY, STATUS, SETTABLE, priorityChip, statusChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { askRecall, recallBlock } from './recall.js';
-import { closeButton, explainStale, historySection, recordButtons, rememberFocus, requirementDialog, requirementRow, section, watchEdits } from './records.js';
+import { closeButton, countTitle, detailGrid, detailHead, explainStale, historySection, loadingView, recordButtons, rememberFocus, requirementDialog, requirementRow, section, watchEdits } from './records.js';
 import { withReferences } from './reference-picker.js';
 import { fetchMentions, itemLink, loadTargets, mentionsList } from './references.js';
 import { childrenOf, store, sync } from './store.js';
 
 export { itemLink };
+
+const wide = (element) => {
+  element.classList.add('wide');
+  return element;
+};
 
 // -- the form -------------------------------------------------------------------------------------
 
@@ -46,13 +53,13 @@ function editForm(node, state) {
     if (body.value !== was.body) args.body = body.value;
     if (status.value !== was.status) args.status = status.value;
     if (priority.value !== was.priority) args.priority = priority.value;
-    for (const [field, input, before] of [['start_on', start, day(node.start_on)], ['target_on', target, day(node.target_on)]]) {
+    for (const [name, input, before] of [['start_on', start, day(node.start_on)], ['target_on', target, day(node.target_on)]]) {
       if (input.value === before) continue;
-      if (input.value) args[field] = input.value;
-      else args[`clear_${field}`] = true;
+      if (input.value) args[name] = input.value;
+      else args[`clear_${name}`] = true;
     }
     if (Object.keys(args).length === 3) {
-      problem.textContent = 'Nothing has been changed yet, so there is nothing to save.';
+      refuse(problem, 'Nothing has been changed yet, so there is nothing to save.');
       return;
     }
     try {
@@ -66,16 +73,17 @@ function editForm(node, state) {
     }
   };
 
-  const field = (label, input, id) => h('div', { class: 'field' }, h('label', { for: id }, label), input);
   return h(
     'form',
-    { class: 'edit', onsubmit: submit },
-    field('Title', title, 'edit-title'),
-    field('Details', body, 'edit-body'),
-    h('div', { class: 'row' }, field('Status', status, 'edit-status'), field('Priority', priority, 'edit-priority')),
-    h('div', { class: 'row' }, field('Start', start, 'edit-start'), field('Target', target, 'edit-target')),
+    { class: 'edit form-grid', onsubmit: submit },
+    wide(field('Title', title)),
+    wide(field('Details', body)),
+    field('Status', status),
+    field('Priority', priority),
+    field('Start', start),
+    field('Target', target),
     problem,
-    h('div', { class: 'buttons' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
+    h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
   );
 }
 
@@ -90,7 +98,7 @@ function moveForm(node, state) {
   return h(
     'form',
     {
-      class: 'inline-form',
+      class: 'inline-form move',
       onsubmit: async (event) => {
         event.preventDefault();
         problem.replaceChildren();
@@ -106,8 +114,7 @@ function moveForm(node, state) {
       },
     },
     h('label', { for: 'move-parent' }, node.kind === 'story' ? 'Move to epic' : 'Move to story'),
-    choice,
-    h('button', { type: 'submit' }, 'Move'),
+    h('div', { class: 'inline-row' }, choice, h('button', { type: 'submit' }, 'Move')),
     problem,
   );
 }
@@ -123,21 +130,19 @@ function linksSection(node, items, state) {
   const list = items.length
     ? h(
         'ul',
-        { class: 'links' },
+        { class: 'plain links' },
         items.map((item) => {
           const other = item.source_id === node.id ? item.target_id : item.source_id;
           return h(
             'li',
             { 'data-type': item.link_type },
             h('span', { class: 'relation' }, phrase(item, node.id)),
-            ' ',
             itemLink(other),
-            ' ',
             h(
               'button',
               {
                 type: 'button',
-                class: 'link remove-link',
+                class: 'ghost small remove-link',
                 'aria-label': `Remove the link: ${phrase(item, node.id)} #${other}`,
                 onclick: async () => {
                   try {
@@ -170,18 +175,18 @@ function linksSection(node, items, state) {
   const options = [...store.nodes.values()]
     .filter((other) => other.id !== node.id)
     .map((other) => h('option', { value: `#${other.id} ${other.title}` }));
-  const target = h('input', { id: 'link-target', type: 'text', list: 'link-options', autocomplete: 'off', placeholder: 'an id such as #12, or a title' });
+  const target = h('input', { id: 'link-target', type: 'text', list: 'link-options', autocomplete: 'off', placeholder: 'an id such as #12, or a title', 'aria-label': 'The other item: an id such as #12, or a title' });
   const problem = h('div', { class: 'problem', role: 'alert' });
   const form = h(
     'form',
     {
-      class: 'inline-form',
+      class: 'inline-form add-link',
       onsubmit: async (event) => {
         event.preventDefault();
         problem.replaceChildren();
         const found = /^#?(\d+)/.exec(target.value.trim());
         if (!found) {
-          problem.textContent = 'Choose the other item: type its id (such as #12) or pick it from the list.';
+          refuse(problem, 'Choose the other item: type its id (such as #12) or pick it from the list.');
           return;
         }
         const other = Number(found[1]);
@@ -195,15 +200,14 @@ function linksSection(node, items, state) {
           await sync();
         } catch (error) {
           if (!(error instanceof Refusal)) throw error;
-          problem.textContent = error.message;
+          refuse(problem, error.message);
         }
       },
     },
     h('label', { for: 'link-relation' }, 'Add a link: this item'),
-    relation,
-    target,
+    h('div', { class: 'inline-row' }, relation),
+    h('div', { class: 'inline-row' }, target, h('button', { type: 'submit' }, 'Add')),
     h('datalist', { id: 'link-options' }, options),
-    h('button', { type: 'submit' }, 'Add'),
     problem,
   );
   return section('Links', 'links', list, form);
@@ -223,7 +227,7 @@ function requirementsSection(node) {
       'Requirements',
       'requirements',
       own.length ? list(own) : h('p', { class: 'quiet none' }, 'No requirements in this story.'),
-      h('p', {}, h('button', { type: 'button', class: 'add-requirement', onclick: () => requirementDialog({ story: node.id }) }, 'Add a requirement…')),
+      h('div', { class: 'panel-actions' }, h('button', { type: 'button', class: 'small add-requirement', onclick: () => requirementDialog({ story: node.id }) }, icon('plus', { size: 14 }), 'Add a requirement…')),
     );
   }
   const stories = node.kind === 'epic' ? childrenOf(node.id) : [store.nodes.get(node.parent_id)].filter(Boolean);
@@ -250,9 +254,9 @@ function overlapSection(node, result) {
     'overlaps',
     h(
       'ul',
-      { class: 'plain' },
+      { class: 'plain overlaps' },
       result.items.map((item) =>
-        h('li', { 'data-overlap': item.id }, itemLink(item.id), ` ${KIND[item.item_type]?.label || item.item_type}, ${item.similarity === null ? 'by words' : `${item.similarity.toFixed(2)} alike`}`),
+        h('li', { 'data-overlap': item.id }, itemLink(item.id), h('span', { class: 'quiet' }, `${KIND[item.item_type]?.label || item.item_type}, ${item.similarity === null ? 'by words' : `${item.similarity.toFixed(2)} alike`}`)),
       ),
     ),
   );
@@ -260,13 +264,24 @@ function overlapSection(node, result) {
 
 // -- the whole card -----------------------------------------------------------------------------
 
+const progressRow = (node) => {
+  const done = node.progress_done;
+  const total = node.progress_total;
+  return h(
+    'span',
+    { class: 'progress' },
+    `${done} of ${plural(total, 'task')} done`,
+    h('span', { class: 'meter', role: 'progressbar', 'aria-label': 'Tasks done', 'aria-valuemin': 0, 'aria-valuemax': total, 'aria-valuenow': done }, h('span', { css: { width: `${total ? Math.round((done / total) * 100) : 0}%` } })),
+  );
+};
+
 // Fills `root` with the detail of node `id`. Returns what the panel needs to know about it.
 export async function renderCard(root, id, state = { id, version: null, dirty: false }, force = true) {
   const seen = state.touches || 0;
   state.skipped = false;
   state.reload = (now = false) => renderCard(root, id, state, now);
   // The card stays as it is while the new one is fetched, so nothing flickers.
-  if (!root.querySelector('.card-detail')) clear(root).append(h('p', { class: 'quiet' }, 'Loading…'));
+  if (!root.querySelector('.card-detail')) put(root, loadingView());
   const node = await call('get_node', { node_id: id });
   const wantsSimilar = node.kind !== 'task';
   const [links, recalled, history, similar, mentions] = await Promise.all([
@@ -292,45 +307,44 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
   }
   state.version = node.version;
   state.dirty = false;
-  const dates = [];
-  if (node.span_worked_out) dates.push(`Worked out from what is under it: ${day(node.span_start)} to ${day(node.span_end)}.`);
+  const worked = node.span_worked_out ? `Worked out from what is under it: ${day(node.span_start)} to ${day(node.span_end)}.` : null;
   const marks = [];
-  if (node.overdue) marks.push(h('span', { class: 'chip overdue' }, '! Overdue'));
+  if (node.overdue) marks.push(h('span', { class: 'chip overdue danger' }, icon('alert', { size: 14 }), 'Overdue'));
   if (node.schedule_conflicts.length) {
-    marks.push(h('span', { class: 'chip conflict' }, `! Schedule conflict with ${node.schedule_conflicts.map((other) => `#${other}`).join(', ')}`));
+    marks.push(h('span', { class: 'chip conflict warn' }, icon('alert', { size: 14 }), `Schedule conflict with ${node.schedule_conflicts.map((other) => `#${other}`).join(', ')}`));
   }
   const claim = node.claimed_by
-    ? h('p', {}, `Held by ${node.claimed_by} until ${moment(node.claim_expires_at)}.`)
+    ? `Held by ${node.claimed_by} until ${moment(node.claim_expires_at)}.`
     : node.lapsed_claim_by
-      ? h('p', { class: 'quiet' }, `${node.lapsed_claim_by}’s claim ran out on ${moment(node.lapsed_claim_at)} with no handoff note.`)
+      ? `${node.lapsed_claim_by}’s claim ran out on ${moment(node.lapsed_claim_at)} with no handoff note.`
       : null;
-  const waiting = node.waiting_on.length
-    ? h('p', {}, 'Waiting for ', node.waiting_on.map((other, position) => [position ? ', ' : '', itemLink(other)]))
-    : null;
+  const waiting = node.waiting_on.length ? node.waiting_on.map((other, position) => [position ? ', ' : '', itemLink(other)]) : null;
   const last = node.last_handoff;
+  const parentKind = KIND[store.nodes.get(node.parent_id)?.kind || 'epic'].label.toLowerCase();
 
   const view = h(
     'article',
-    { class: 'card-detail', 'data-id': node.id, 'data-kind': node.kind },
-    h(
-      'header',
-      {},
-      h('div', { class: 'chips' }, kindChip(node.kind), statusChip(node.status), priorityChip(node.priority), marks),
-      h('h2', { id: 'card-title', tabindex: -1 }, `#${node.id} ${node.title}`),
-      closeButton('Close the details'),
-    ),
-    node.parent_id !== null ? h('p', {}, `In ${KIND[store.nodes.get(node.parent_id)?.kind || 'epic'].label.toLowerCase()} `, itemLink(node.parent_id)) : null,
-    node.progress_total !== null
-      ? h('p', {}, `Progress: ${node.progress_done} of ${plural(node.progress_total, 'task')} done`, h('progress', { max: Math.max(node.progress_total, 1), value: node.progress_done, 'aria-label': 'Tasks done' }))
-      : null,
-    h('p', { class: 'dates' }, `Start ${day(node.start_on) || 'not set'}. Target ${day(node.target_on) || 'not set'}. `, dates),
-    claim,
-    waiting,
-    last ? section('Last handoff note', 'handoff', h('p', {}, `${last.actor}, ${moment(last.at)}, ${last.outcome}: ${last.note}`)) : null,
-    section('Details and changes', 'edit', h('div', { class: 'body-text' }, node.body ? renderMarkdown(node.body) : h('span', { class: 'quiet' }, 'No details.')), editForm(node, state), moveForm(node, state)),
+    { class: 'card-detail detail', 'data-id': node.id, 'data-kind': node.kind },
+    detailHead({
+      kind: node.kind,
+      id: node.id,
+      chips: h('div', { class: 'chips' }, statusChip(node.status), priorityChip(node.priority), marks),
+      title: [node.title],
+      titleId: 'card-title',
+      close: closeButton('Close the details'),
+    }),
+    node.parent_id !== null ? h('p', { class: 'card-parent' }, `In ${parentKind} `, itemLink(node.parent_id)) : null,
+    detailGrid([
+      ['Progress', node.progress_total !== null ? progressRow(node) : null],
+      ['Dates', [`Start ${day(node.start_on) || 'not set'}. Target ${day(node.target_on) || 'not set'}. `, worked], { class: 'dates' }],
+      ['Claim', claim, { class: node.claimed_by ? 'claim' : 'claim quiet' }],
+      ['Waiting for', waiting],
+    ]),
     node.kind !== 'task'
-      ? h('p', {}, h('button', { type: 'button', class: 'add-child', onclick: () => openCreate({ kind: node.kind === 'epic' ? 'story' : 'task', parent: node.id }) }, node.kind === 'epic' ? 'Add a story' : 'Add a task'))
+      ? h('div', { class: 'panel-actions' }, h('button', { type: 'button', class: 'small add-child', onclick: () => openCreate({ kind: node.kind === 'epic' ? 'story' : 'task', parent: node.id }) }, icon('plus', { size: 14 }), node.kind === 'epic' ? 'Add a story' : 'Add a task'))
       : null,
+    last ? section('Last handoff note', 'handoff', h('p', {}, `${last.actor}, ${moment(last.at)}, ${last.outcome}: ${last.note}`)) : null,
+    section('Details', 'edit', h('div', { class: 'body-text' }, node.body ? renderMarkdown(node.body) : h('span', { class: 'quiet' }, 'No details.')), editForm(node, state), moveForm(node, state)),
     linksSection(node, links, state),
     requirementsSection(node),
     section(
@@ -339,7 +353,7 @@ export async function renderCard(root, id, state = { id, version: null, dirty: f
       recordButtons({ node_ids: [node.id] }),
       recallBlock({ node_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) }),
     ),
-    section(`Mentioned in (${mentions.length})`, 'mentions', mentionsList(mentions)),
+    section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)),
     overlapSection(node, similar),
     historySection(history),
   );

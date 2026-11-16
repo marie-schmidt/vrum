@@ -6,6 +6,7 @@
 // lists keep no data of their own: they draw the same dots and lines the map draws.
 
 import { h } from './dom.js';
+import { icon } from './icons.js';
 import { mentionedInDetails } from './references.js';
 import { confirmationControl, linkDialog, recordDecisionDialog, recordFactDialog, recordRow, supersedeDialog, withdrawDialog } from './records.js';
 import { createRequirements } from './requirements.js';
@@ -58,7 +59,7 @@ function recordSection(kind) {
   const frame = sectionFrame({
     name: spec.name,
     title: spec.title,
-    buttons: [h('button', { type: 'button', id: `record-${kind}`, class: kind === 'decision' ? 'primary' : '', onclick: spec.open }, spec.record)],
+    buttons: [h('button', { type: 'button', id: `record-${kind}`, class: `small${kind === 'decision' ? ' primary' : ''}`, onclick: spec.open }, icon('plus', { size: 14 }), spec.record)],
     controls: [
       ['status', 'Status', status],
       ['confirmation', 'Confirmation', confirmation],
@@ -72,7 +73,7 @@ function recordSection(kind) {
       if (last) draw(last);
     },
   });
-  const list = h('ul', { class: 'plain gv-rows', id: `ctx-${spec.name}-list` });
+  const list = h('ul', { class: 'plain ctx-rows', id: `ctx-${spec.name}-list` });
   frame.body.append(list);
   walkRows(frame.element);
 
@@ -84,16 +85,16 @@ function recordSection(kind) {
       record.status === 'active'
         ? h(
             'div',
-            { class: 'gv-actions' },
+            { class: 'row-actions' },
             confirmationControl(record, done),
-            h('button', { type: 'button', class: 'link-record', onclick: () => linkDialog(record) }, 'Link…'),
-            h('button', { type: 'button', class: 'supersede-record', onclick: () => supersedeDialog(record, { onDone: done }) }, 'Replace…'),
-            h('button', { type: 'button', class: 'withdraw-record', onclick: () => withdrawDialog(record, { onDone: done }) }, 'Withdraw…'),
+            h('button', { type: 'button', class: 'link-record small', onclick: () => linkDialog(record) }, icon('link', { size: 14 }), 'Link…'),
+            h('button', { type: 'button', class: 'supersede-record small', onclick: () => supersedeDialog(record, { onDone: done }) }, 'Replace…'),
+            h('button', { type: 'button', class: 'withdraw-record small', onclick: () => withdrawDialog(record, { onDone: done }) }, 'Withdraw…'),
           )
         : null;
     const item = recordRow(record, { actions });
     Object.assign(item.dataset, { key: dot.key, id: String(record.id) });
-    item.classList.add('gv-record');
+    item.classList.add('gv-record', 'ctx-row');
     item.classList.toggle('selected', chosen);
     if (chosen) item.setAttribute('aria-current', 'true');
     for (const extra of [mentionedInDetails(kind, record.id), connectionsDetails(dot, ctx)]) if (extra) item.append(extra);
@@ -116,8 +117,8 @@ function recordSection(kind) {
     const at = kept.findIndex((dot) => dot.key === ctx.cfg.sel?.key);
     if (at >= state.limit) state.limit = at + 1;
     const rows = kept.slice(0, state.limit).map((dot) => row(dot, ctx));
-    const more = kept.length > state.limit ? [h('li', { class: 'gv-more' }, h('button', { type: 'button', class: 'show-more', onclick: () => { state.limit += FIRST; draw(last); } }, `Show ${Math.min(FIRST, kept.length - state.limit)} more of ${kept.length - state.limit} left`))] : [];
-    list.replaceChildren(...(kept.length ? [...rows, ...more] : [h('li', { class: 'quiet gv-none' }, inScope.length ? 'None match the filters.' : spec.none)]));
+    const more = kept.length > state.limit ? [h('li', { class: 'ctx-more' }, h('button', { type: 'button', class: 'show-more small', onclick: () => { state.limit += FIRST; draw(last); } }, `Show ${Math.min(FIRST, kept.length - state.limit)} more of ${kept.length - state.limit} left`))] : [];
+    list.replaceChildren(...(kept.length ? [...rows, ...more] : [h('li', { class: 'empty ctx-none' }, inScope.length ? 'None match the filters.' : spec.none)]));
     if (focused) list.querySelector(`[data-key="${focused}"] .record-title`)?.focus();
   }
 

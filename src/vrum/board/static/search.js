@@ -13,7 +13,8 @@ import { Refusal, callPaged } from './api.js';
 import { recordLink, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import * as duplicates from './duplicates.js';
-import { KIND, STATUS } from './labels.js';
+import { icon } from './icons.js';
+import { KIND, STATUS, kindIcon, statusChip, statusIcon } from './labels.js';
 import { epicOf, store } from './store.js';
 
 const FIRST = 50;
@@ -47,9 +48,9 @@ export function mount(element, initial) {
   parts = {
     tabs: h(
       'div',
-      { class: 'drawer-tabs', role: 'group', 'aria-label': 'What to do' },
-      h('button', { type: 'button', id: 'search-tab-results', onclick: () => ui.navigate({ dups: null }) }, 'Search'),
-      h('button', { type: 'button', id: 'search-tab-dups', onclick: () => ui.navigate({ dups: '1' }) }, 'Possible duplicates'),
+      { class: 'drawer-tabs segmented', role: 'group', 'aria-label': 'What to do' },
+      h('button', { type: 'button', id: 'search-tab-results', onclick: () => ui.navigate({ dups: null }) }, icon('search', { size: 16 }), 'Search'),
+      h('button', { type: 'button', id: 'search-tab-dups', onclick: () => ui.navigate({ dups: '1' }) }, icon('link', { size: 16 }), 'Possible duplicates'),
     ),
     view: h('div', { id: 'search-view' }),
   };
@@ -139,8 +140,8 @@ function buildResults() {
   Object.assign(parts, {
     box,
     mode,
-    waiting: h('p', { class: 'waiting', id: 'search-waiting', role: 'status' }),
-    note: h('p', { class: 'quiet', id: 'search-note' }),
+    waiting: h('p', { class: 'index-line', id: 'search-waiting', role: 'status' }),
+    note: h('p', { class: 'index-note', id: 'search-note' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'search-problem' }),
     summary: h('p', { class: 'count', id: 'search-count', role: 'status' }),
     facets: h('div', { class: 'facets', id: 'search-facets' }),
@@ -161,9 +162,8 @@ function buildResults() {
           if (asked === `${(params.get('search') || '').trim()}|${modeOf(params)}`) load();
         },
       },
-      box,
-      mode,
-      h('button', { type: 'submit', class: 'primary', id: 'search-go' }, 'Search'),
+      h('div', { class: 'search-field' }, icon('search', { size: 16 }), box),
+      h('div', { class: 'search-row' }, mode, h('button', { type: 'submit', class: 'primary', id: 'search-go' }, 'Search')),
     ),
     parts.waiting,
     parts.note,
@@ -176,12 +176,30 @@ function buildResults() {
 
 function drawWaiting() {
   const waiting = store.index ? store.index.waiting_to_index : null;
-  parts.waiting.textContent =
-    waiting === null
-      ? 'Checking the index…'
-      : `${plural(waiting, 'item')} waiting to be indexed. ${waiting ? 'Matches by meaning may lag behind them; matches by exact words never do.' : 'Matches by meaning are up to date.'}`;
+  put(
+    parts.waiting,
+    icon(waiting ? 'clock' : 'info', { size: 14 }),
+    h(
+      'span',
+      {},
+      waiting === null
+        ? 'Checking the index…'
+        : `${plural(waiting, 'item')} waiting to be indexed. ${waiting ? 'Matches by meaning may lag behind them; matches by exact words never do.' : 'Matches by meaning are up to date.'}`,
+    ),
+  );
   parts.waiting.dataset.waiting = String(waiting ?? '');
 }
+
+// Said under the box when the index has something to say: the server's own words. It is a warning
+// when meaning could not be used, and only information when it was used or not asked for.
+function drawNote(text, meaning = 'used') {
+  const fine = meaning === 'used' || meaning === 'not_requested';
+  parts.note.className = `index-note ${fine ? 'info' : 'warn'}`;
+  put(parts.note, text ? [icon(fine ? 'info' : 'alert', { size: 14 }), h('span', {}, text)] : null);
+}
+
+// A quiet block in place of results: nothing asked yet, nothing found, or reading.
+const hush = (glyph, ...words) => h('div', { class: 'empty drawer-empty' }, icon(glyph, { size: 20 }), h('p', {}, ...words));
 
 // -- asking the server ----------------------------------------------------------------------------
 
@@ -195,13 +213,16 @@ async function load(quiet = false) {
   if (!query) {
     results = null;
     parts.problem.textContent = '';
-    parts.note.textContent = '';
-    parts.summary.textContent = 'Type something to look for. Exact words are found the moment something is saved.';
+    drawNote('');
+    parts.summary.textContent = '';
     clear(parts.facets);
-    clear(parts.list);
+    put(parts.list, hush('search', 'Type something to look for. Exact words are found the moment something is saved.'));
     return;
   }
-  if (!quiet) parts.summary.textContent = 'Searching…';
+  if (!quiet) {
+    parts.summary.textContent = 'Searching…';
+    if (!results) put(parts.list, h('p', { class: 'loading', role: 'status' }, 'Searching…'));
+  }
   let found;
   try {
     found = await callPaged('search', { query, mode });
@@ -218,7 +239,7 @@ async function load(quiet = false) {
   if (mine !== generation || !root) return;
   results = found;
   parts.problem.textContent = '';
-  parts.note.textContent = found.first.index.note;
+  drawNote(found.first.index.note, found.first.index.meaning);
   draw();
 }
 
@@ -267,8 +288,10 @@ function draw() {
     parts.list,
     kept.length
       ? h('ul', { class: 'plain results' }, visible.map(resultRow))
-      : h('p', { class: 'quiet none' }, 'Nothing matches.'),
-    kept.length > shown ? h('p', {}, h('button', { type: 'button', id: 'show-more', onclick: () => { shown += FIRST; draw(); } }, `Show ${Math.min(FIRST, kept.length - shown)} more`)) : null,
+      : all.length
+        ? h('div', { class: 'empty drawer-empty' }, icon('filter', { size: 20 }), h('p', {}, 'Nothing matches these filters.'), h('button', { type: 'button', class: 'small', onclick: () => ui.navigate({ search_type: null, search_status: null, search_epic: null }) }, `Show all ${plural(all.length, 'result')}`))
+        : hush('search', 'Nothing matches. Try other words, or another way to search.'),
+    kept.length > shown ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-more', onclick: () => { shown += FIRST; draw(); } }, `Show ${Math.min(FIRST, kept.length - shown)} more`)) : null,
   );
 }
 
@@ -277,6 +300,7 @@ function draw() {
 function facet(name, label, counts, words, order, current, note = null) {
   const key = `search_${name}`;
   const keys = order ? order.filter((one) => counts.has(one)) : [...counts.keys()].sort((a, b) => (typeof a === 'number' ? a - b : String(a).localeCompare(String(b))));
+  const glyph = (one) => (name === 'type' ? kindIcon(one, 14) : name === 'status' && STATUS[one] ? statusIcon(one, 14) : name === 'epic' ? icon('epic', { size: 14 }) : null);
   return h(
     'fieldset',
     { class: 'facet', dataset: { facet: name } },
@@ -292,10 +316,11 @@ function facet(name, label, counts, words, order, current, note = null) {
           dataset: { value: String(one), count: counts.get(one) },
           onclick: () => ui.navigate({ [key]: String(one) === String(current) ? null : one }),
         },
+        glyph(one),
         `${words(one)} (${counts.get(one)})`,
       ),
     ),
-    current && !keys.map(String).includes(String(current)) ? h('button', { type: 'button', class: 'facet-button on', onclick: () => ui.navigate({ [key]: null }) }, `${words(name === 'epic' ? Number(current) : current)} (0)`) : null,
+    current && !keys.map(String).includes(String(current)) ? h('button', { type: 'button', class: 'facet-button on', 'aria-pressed': 'true', onclick: () => ui.navigate({ [key]: null }) }, `${words(name === 'epic' ? Number(current) : current)} (0)`) : null,
     note ? h('p', { class: 'quiet' }, note) : null,
   );
 }
@@ -322,19 +347,22 @@ const recordKind = (type) => (['epic', 'story', 'task'].includes(type) ? 'node' 
 function resultRow(item) {
   const parent = item.parent_id !== null ? `${KIND[item.parent_kind]?.label || item.parent_kind} #${item.parent_id} ${item.parent_title || ''}`.trim() : null;
   const record = item.item_type === 'decision' || item.item_type === 'fact';
+  const work = ['epic', 'story', 'task'].includes(item.item_type);
   return h(
     'li',
     { class: `result matched-${item.matched}`, dataset: { type: item.item_type, id: item.id, matched: item.matched } },
     h(
       'div',
       { class: 'entry-head' },
-      h('span', { class: `chip kind kind-${item.item_type}` }, h('span', { 'aria-hidden': 'true' }, KIND[item.item_type]?.sign || ''), ` ${KIND[item.item_type]?.label || item.item_type}`),
-      h('span', { class: `chip status status-${item.status}` }, STATUS[item.status]?.label || capital(item.status)),
+      h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), KIND[item.item_type]?.label || item.item_type),
+      work ? statusChip(item.status) : h('span', { class: `chip status status-${item.status}` }, STATUS[item.status]?.label || capital(item.status)),
+      item.confirmation === 'confirmed' ? h('span', { class: 'chip confirmed' }, icon('confirmed', { size: 14 }), 'Confirmed') : null,
+      item.confirmation === 'unconfirmed' ? h('span', { class: 'chip unconfirmed' }, icon('unconfirmed', { size: 14 }), 'Unconfirmed') : null,
       h('span', { class: `chip matched matched-${item.matched}` }, MATCHED[item.matched] || item.matched),
       item.suggestion ? h('span', { class: 'chip suggestion' }, 'a suggestion') : null,
     ),
     recordLink(recordKind(item.item_type), item.id, { class: 'result-title' }, `#${item.id} ${item.title}`),
-    parent ? h('span', { class: 'quiet' }, ` in ${parent}`) : null,
+    parent ? h('span', { class: 'result-parent' }, ` in ${parent}`) : null,
     record && item.label ? h('p', { class: 'quiet record-label' }, item.label) : null,
     h('p', { class: 'snippet' }, ...snippet(item.snippet)),
     h('p', { class: 'quiet why' }, item.why),

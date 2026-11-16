@@ -127,11 +127,13 @@ async def recording() -> None:
             await dot(page, fact_key).click()
             detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
             await expect(detail).to_be_visible(timeout=SLOW)
-            await expect(detail).to_contain_text(f"Source: The call with Marie {word}")
+            await expect(detail.locator(".source")).to_contain_text(f"The call with Marie {word}")
             await expect(detail.locator(".confirmation-select")).to_have_value("unconfirmed")
             await dot(page, decision_key).click()
             detail = panel(page).locator(f".record-detail[data-record='{decision_key}']")
-            await expect(detail).to_contain_text(f"Why: Because of {word}", timeout=SLOW)
+            await expect(detail.locator(".reason")).to_contain_text(
+                f"Because of {word}", timeout=SLOW
+            )
             # Exact recall, section by section, for the story and for the requirement.
             for target in (f"node:{story}", f"rule:{rule}"):
                 await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={target}")

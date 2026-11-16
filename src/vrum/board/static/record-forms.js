@@ -9,7 +9,8 @@ import { actor, notify } from './ctx.js';
 import { h, plural } from './dom.js';
 import { parentChoices } from './create.js';
 import { recordKind } from './entries.js';
-import { clip, dialogForm, field, openDialog, picker } from './forms.js';
+import { clip, dialogForm, field, fieldRow, openDialog, picker, refuse } from './forms.js';
+import { kindIcon } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { kindWords, loadTargets } from './references.js';
 import { store, sync, titleOf } from './store.js';
@@ -110,7 +111,7 @@ export async function recordDecisionDialog(prefill = {}) {
       field('Title', title),
       field('What is decided', body),
       field('Why', reason),
-      h('div', { class: 'row' }, field('Decided by (the person)', by, 'Your own name is recorded separately, as the one who typed it.'), field('Decided on', on, 'Leave empty for today.')),
+      fieldRow(field('Decided by (the person)', by, 'Your own name is recorded separately, as the one who typed it.'), field('Decided on', on, 'Leave empty for today.')),
       wide.element,
       links.element,
     ],
@@ -162,7 +163,7 @@ export async function supersedeDialog(record, { onDone = null } = {}) {
       field('Title', title),
       field('What is decided now', body),
       field('Why it changed', reason),
-      h('div', { class: 'row' }, field('Decided by (the person)', by), field('Decided on', on, 'Leave empty for today.')),
+      fieldRow(field('Decided by (the person)', by), field('Decided on', on, 'Leave empty for today.')),
       wide.element,
     ];
     send = () =>
@@ -269,6 +270,7 @@ export async function linkDialog(record) {
     const item = list.find((entry) => entry.id === ref.id);
     return `${ref.type === 'rule' ? 'requirement' : 'decision'} #${ref.id}${item ? ` ${clip(item.title, 60)}` : ''}`;
   };
+  const kindOf = (ref) => (ref.type === 'node' ? store.nodes.get(ref.id)?.kind || 'story' : ref.type);
   const draw = () => {
     const refs = refsOf(current);
     shown.replaceChildren(
@@ -277,17 +279,18 @@ export async function linkDialog(record) {
             h(
               'li',
               { dataset: { ref: `${ref.type}:${ref.id}` } },
-              `${name(ref)} `,
-              h('button', { type: 'button', class: 'unlink', 'aria-label': `Take out ${name(ref)}`, onclick: () => change(tools.remove, { [`${ref.type}_ids`]: [ref.id] }) }, 'Take out'),
+              kindIcon(kindOf(ref), 16),
+              h('span', { class: 'concern-name' }, name(ref)),
+              h('button', { type: 'button', class: 'unlink small', 'aria-label': `Take out ${name(ref)}`, onclick: () => change(tools.remove, { [`${ref.type}_ids`]: [ref.id] }) }, 'Take out'),
             ),
           )
         : [h('li', { class: 'quiet' }, 'It concerns nothing yet.')]),
     );
   };
   const change = async (tool, ids) => {
-    problem.textContent = '';
+    problem.replaceChildren();
     if (!Object.keys(ids).length) {
-      problem.textContent = 'Choose what to add first: type an id such as #12, or pick from the list.';
+      refuse(problem, 'Choose what to add first: type an id such as #12, or pick from the list.');
       return;
     }
     try {
@@ -299,7 +302,7 @@ export async function linkDialog(record) {
       draw();
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      problem.textContent = error.message;
+      refuse(problem, error.message);
     }
   };
   draw();
@@ -308,7 +311,7 @@ export async function linkDialog(record) {
     shown,
     links.element,
     problem,
-    h('div', { class: 'buttons' }, h('button', { type: 'button', class: 'primary', id: 'concerns-add', onclick: () => change(tools.add, links.value()) }, 'Add'), h('button', { type: 'button', id: 'concerns-done', onclick: () => box.close() }, 'Done')),
+    h('div', { class: 'actions' }, h('button', { type: 'button', id: 'concerns-done', onclick: () => box.close() }, 'Done'), h('button', { type: 'button', class: 'primary', id: 'concerns-add', onclick: () => change(tools.add, links.value()) }, 'Add')),
   ]);
   box.querySelector('input[type=text]')?.focus();
   return box;
@@ -377,7 +380,7 @@ export function requirementDialog({ rule = null, story = null, onDone = null } =
     fields: [
       field('The requirement, stated briefly', title),
       field('Details, or where it came from', body),
-      h('div', { class: 'row' }, field('Status', status), rule ? null : field('Story', where)),
+      fieldRow(field('Status', status), rule ? null : field('Story', where)),
     ],
     submit: rule ? 'Save changes' : 'Create the requirement',
     work: async () => {

@@ -159,7 +159,7 @@ async def test_a_person_signs_in_with_email_and_password_and_the_session_stays_o
         await expect(w.page.locator("h1")).to_have_text("Sign in to Vrum")
         await expect(w.page.locator("#sign-in-form")).to_be_visible()
         assert (
-            await w.page.locator("#top nav").count() == 0
+            await w.page.locator("#main-nav").count() == 0
             and not await w.page.locator(".board").count()
         )
         problem = w.page.locator("#entry-problem")
@@ -173,7 +173,7 @@ async def test_a_person_signs_in_with_email_and_password_and_the_session_stays_o
         assert await submit(w, "#sign-in-submit") == 401
         await expect(problem).to_contain_text("email address or the password is not right")
         assert wrong not in await w.page.locator("body").inner_text()
-        assert await w.page.locator("#top nav").count() == 0
+        assert await w.page.locator("#main-nav").count() == 0
 
         # The right password opens the project in the address, on the Board, as the account's name.
         await w.page.locator("#account-password").fill(owner.password)
@@ -309,7 +309,7 @@ async def test_a_person_registers_makes_a_project_switches_signs_out_and_back_in
         elsewhere = project_at(board)
         await w.page.goto(f"{origin}/board/p/{elsewhere.id}")
         await expect(w.page.locator("#no-such-project")).to_contain_text("no project with that")
-        assert await w.page.locator("#top nav").count() == 0
+        assert await w.page.locator("#main-nav").count() == 0
         assert elsewhere.name not in await w.page.locator("body").inner_text()
         # The browser logs a refusal it was sent (a 409, a 404) as a failed load; nothing else
         # went wrong.
@@ -432,13 +432,15 @@ async def test_what_a_person_does_on_the_board_is_in_the_graph_with_their_name_a
         await w.page.get_by_role("button", name="Save changes").click()
         await expect(w.page.locator("#panel .card-detail")).to_contain_text("Email and password")
 
-        # Drag it to in progress, then to done: the same two changes an agent would make.
+        # Drag it to in progress, then to done: the same two changes an agent would make. With the
+        # panel open the columns are wider than the room, so the target is scrolled into view first.
         await w.page.drag_and_drop(
             f".card[data-id='{task}']", f".cell[data-epic='{epic}'][data-status='in_progress']"
         )
         await expect(
             cell(w.page, epic, "in_progress").locator(f".card[data-id='{task}']")
         ).to_be_visible()
+        await cell(w.page, epic, "done").scroll_into_view_if_needed()
         await w.page.drag_and_drop(
             f".card[data-id='{task}']", f".cell[data-epic='{epic}'][data-status='done']"
         )
@@ -825,10 +827,10 @@ async def test_a_card_can_be_opened_closed_and_moved_from_the_keyboard_alone(
 
         await target.locator(".move").focus()
         await w.page.keyboard.press("Enter")
-        menu = w.page.locator(".menu[role=menu]")
+        menu = w.page.locator(".menu.move-menu[role=menu]")
         await expect(menu).to_be_visible()
         assert await menu.get_by_role("menuitem").all_inner_texts() == [
-            "▶ In progress", "■ Blocked", "✓ Done", "✕ Dropped"
+            "In progress", "Blocked", "Done", "Dropped"
         ]  # fmt: skip
         assert "Ready is worked out" in await menu.inner_text()
         await w.page.keyboard.press("Enter")  # the first choice has the focus: in progress

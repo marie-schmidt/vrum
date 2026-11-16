@@ -1,125 +1,238 @@
-/* The Graph: presets and presentations, the map, the work list, the context list and requirements.
-   Owned by the graph work. Nothing is told by colour alone: kinds are shapes, confirmation is a tick
-   and a dashed outline, and an ended record is crossed out. */
+/* The Graph: the page header and toolbar, the map (nodes in rows with their words inside, curved
+   lines, legend and zoom under it), and the list (the work tree, with the context list below it).
+   Every colour, size and space is a token (tokens.css); light and dark follow from them. Nothing
+   here is told by colour alone: the kind is an icon and a word, the state is an icon and a word, an
+   unconfirmed record has a dashed outline and an ended one is struck through. The rows of the
+   context list (.gv-record and the like) are drawn by records.css; what is here for them is only a
+   baseline, kept at no specificity so that records.css wins. */
 
-.graph-page { display: grid; gap: 0.8rem; }
-.graph-page .toolbar { margin-bottom: 0; }
-.graph-controls { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: end; }
-.graph-controls fieldset { border: 2px solid var(--ink); padding: 0.2rem 0.6rem 0.4rem; margin: 0; }
-.graph-controls legend { font-weight: 700; font-size: 0.82rem; padding: 0 0.3rem; }
-.graph-controls label.check { display: inline-flex; gap: 0.25rem; align-items: center; margin-right: 0.6rem; font-weight: 500; }
-.filters > summary { cursor: pointer; font-weight: 700; padding: 0.2rem 0; }
-.filters .graph-controls { margin-top: 0.4rem; }
-.gv-work-filter { display: grid; gap: 0.3rem; }
-.gv-work-filter .filter { flex: 1 1 auto; }
+.graph-page { display: grid; gap: var(--space-4); min-width: 0; max-width: 100%; }
+.graph-page > * { min-width: 0; }
+.graph-page select { min-width: 0; max-width: 100%; }
 
-/* Work / Context / Everything, and Map / List: one button of each group is pressed */
-.gv-seg { display: inline-flex; border: 2px solid var(--ink); background: var(--white); }
-.gv-seg button { border: none; border-radius: 0; background: transparent; padding: 0.25rem 0.8rem; font-weight: 600; }
-.gv-seg button + button { border-left: 2px solid var(--ink); }
-.gv-seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
-.gv-seg button[aria-pressed="true"]::before { content: "✓ "; }
-.gv-seg button:focus-visible { outline-offset: -4px; }
+/* The header: the page's name, one line on what it is for, and its one main action */
+.gm-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); }
+.gm-heading { min-width: 0; }
+.gm-subtitle { margin: var(--space-1) 0 0; color: var(--text-2); }
+.gm-head .primary { flex: none; }
+
+/* The toolbar: what to show, in which epic, how much there is, and how to show it */
+.gm-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding-bottom: var(--space-3); border-bottom: var(--border-w) solid var(--border); }
+.gm-view-end { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2) var(--space-3); margin-left: auto; }
+.gm-scope { color: var(--text-2); font-size: var(--text-sm); }
+.gm-field { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.gm-field label { margin: 0; white-space: nowrap; font-size: var(--text-sm); }
+.gm-epic label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.gm-epic { min-width: 0; max-width: 100%; }
+.gm-epic select { width: 100%; max-width: min(18rem, 100%); text-overflow: ellipsis; }
+
+/* Under it: the work filter, the reach, the colours, and the switches that are not about kinds */
+.gm-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+.gm-filter { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); flex: 1 1 26rem; min-width: 0; }
+.gm-filter .filter { display: flex; flex: 1 1 20rem; flex-wrap: nowrap; align-items: center; gap: var(--space-2); margin: 0; }
+.gm-filter .filter > label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.gm-filter .filter input[type="search"] { flex: 1 1 14rem; min-width: 0; font-family: var(--font-mono); font-size: var(--text-sm); }
+.gm-filter .filter-help { margin: 0; font-size: var(--text-sm); }
+.gm-filter .filter-help[open] { flex-basis: 100%; }
+.gm-filter .filter-help > summary { cursor: pointer; color: var(--text-2); white-space: nowrap; }
+.gm-filter .problem { flex-basis: 100%; margin: 0; }
+.gm-filter .problem:empty { display: none; }
+.gm-options { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin: 0; }
+.gm-options select { min-height: var(--control-h-sm); font-size: var(--text-sm); }
+.gm-checks { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+.gm-checks label { font-size: var(--text-sm); }
+.gm-filters > summary { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; font-size: var(--text-sm); color: var(--text-2); white-space: nowrap; }
+.gm-filters[open] { flex-basis: 100%; }
+.gm-filters[open] > summary { color: var(--text); }
+.gm-filter-sets { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-3); margin-top: var(--space-2); }
+.gm-filter-sets fieldset { margin: 0; }
+.gm-filter-sets label { margin: 2px 0; font-size: var(--text-sm); }
+
+.gm-notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); margin: 0; padding: var(--space-2) var(--space-3); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface); color: var(--text-2); font-size: var(--text-sm); }
+.gm-notice.refusal { border-color: var(--danger); background: var(--danger-soft); color: var(--text); }
 
 /* The map */
-.graph-body { display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: 0.8rem; }
-.graph-stage { position: relative; border: 2px solid var(--ink); background: var(--white); }
-.graph-stage svg { display: block; width: 100%; height: 68vh; min-height: 24rem; cursor: grab; touch-action: none; }
-.graph-stage .zoom { position: absolute; right: 0.5rem; top: 0.5rem; display: grid; gap: 0.25rem; }
-.graph-notice { margin: 0; padding: 0.4rem 0.6rem; background: var(--paper-2); border: 2px solid var(--ink); }
-.graph-notice:empty { display: none; }
-.graph-side { display: grid; gap: 0.8rem; align-content: start; max-height: 74vh; overflow: auto; }
-.graph-side ul { list-style: none; margin: 0.3rem 0; padding: 0; display: grid; gap: 0.2rem; }
-.graph-side button { width: 100%; text-align: left; }
-.legend { font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; }
-.legend svg { vertical-align: middle; }
+.gm-map { display: grid; gap: var(--space-3); min-width: 0; }
+.gm-stage { min-width: 0; border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); background: var(--bg); overflow: hidden; }
+.gm-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-4); margin: 0; padding: var(--space-3) var(--space-4); border-bottom: var(--border-w) solid var(--border); background: var(--surface); color: var(--text-2); font: var(--text-xs) / var(--leading-tight) var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; overflow-wrap: anywhere; }
+.gm-canvas { position: relative; height: clamp(22rem, 64vh, 46rem); overflow: hidden; }
+.gm-canvas:focus-visible { outline-offset: -3px; }
+.gm-canvas svg#graph-svg { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; user-select: none; font-family: var(--font-sans); font-size: var(--text-sm); }
+.gm-canvas svg#graph-svg:active { cursor: grabbing; }
+
+/* Nothing to draw, still loading: said in the middle of the map, with the next step */
+.gm-state { position: absolute; left: 50%; top: 50%; width: min(26rem, calc(100% - var(--space-5))); transform: translate(-50%, -50%); text-align: center; }
+.gm-empty { padding: var(--space-5); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
+.gm-empty h2 { font-size: var(--text-lg); }
+.gm-empty p { color: var(--text-2); overflow-wrap: anywhere; }
+.gm-empty button { margin-top: var(--space-2); }
+.gm-canvas .loading { border: 0; background: none; }
+
+.gm-counts { white-space: nowrap; }
+
+/* The words of a small tile, when it is pointed at */
+.gm-tip { position: absolute; z-index: 3; max-width: min(22rem, calc(100% - var(--space-4))); transform: translate(-50%, calc(-100% - var(--space-2))); padding: var(--space-1) var(--space-3); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); font-size: var(--text-sm); pointer-events: none; overflow-wrap: anywhere; }
+
+/* Under the map, outside it: the legend and the zoom, so that neither sits on a node or a line */
+.gm-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-4); border-top: var(--border-w) solid var(--border); background: var(--surface); }
+.gm-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); margin: 0; padding: 0; list-style: none; color: var(--text-2); font-size: var(--text-xs); }
+.gm-legend li { display: inline-flex; align-items: center; gap: var(--space-2); }
+.gm-sample { flex: none; overflow: visible; }
+.gm-sample .sample-shape { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.25; }
+.gm-sample .sample-shape.dashed { stroke-dasharray: 4 3; }
+.gm-sample .sample-shape.faded { fill: var(--surface-2); stroke-dasharray: 1 3; }
+.gm-sample .sample-strike { stroke: var(--text-2); stroke-width: 1.5; }
+.gm-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.gm-zoom { display: inline-flex; align-items: center; border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); }
+.gm-zoom button { border: 0; }
+.gm-zoom-level { min-width: 3.25rem; text-align: center; font-size: var(--text-sm); font-variant-numeric: tabular-nums; color: var(--text); }
+.gm-hint { margin: 0; padding: 0 var(--space-4) var(--space-2); background: var(--surface); font-size: var(--text-xs); }
+
+/* Nodes. Each is a box with its words inside; the colour classes only tint it. */
 .dot { cursor: pointer; }
-.dot .shape { stroke: var(--ink); stroke-width: 2; }
-.dot.pinned .shape { stroke-width: 4; }
-.dot.chosen .shape { stroke: var(--vermilion); stroke-width: 4; }
-.dot.outside { opacity: 0.55; }
-.dot.unconfirmed .shape { stroke-dasharray: 3 2; }
-.dot.ended { opacity: 0.6; }
-.dot.ended .shape { stroke-dasharray: 1 3; stroke-linecap: round; }
-.dot .mark { pointer-events: none; }
-.dot .confirmed-mark { font: 700 12px var(--sans); fill: var(--green); stroke: var(--white); stroke-width: 3px; paint-order: stroke; }
-.dot .ended-mark { fill: none; stroke: var(--ink); stroke-width: 2; }
-.dot text { font: 11px var(--sans); fill: var(--ink); paint-order: stroke; stroke: var(--white); stroke-width: 3px; pointer-events: none; }
-.dot:focus-visible .shape { stroke: var(--vermilion); stroke-width: 5; }
-.edge { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
-.edge[data-type="hierarchy"] { stroke: var(--line); stroke-width: 1.5; }
-.edge[data-type="needs_first"] { stroke: var(--vermilion); stroke-width: 2.5; }
-.edge[data-type="supersedes"], .edge[data-type="replaces"] { stroke-dasharray: 12 5; }
-.edge[data-type="duplicates"] { stroke-dasharray: 2 4; stroke-width: 2.5; }
-.edge[data-type="relates_to"] { stroke-dasharray: 5 4; }
-.edge[data-type="concerns"], .edge[data-type="placed"] { stroke: var(--ink-2); stroke-dasharray: 8 3 2 3; stroke-width: 1; }
-.edge[data-type="mention"] { stroke: var(--green); stroke-dasharray: 1 5; stroke-width: 2.5; stroke-linecap: round; }
-.edge[data-type="collapsed"] { stroke: var(--ink-2); }
-.edge-label { font: 10px var(--sans); fill: var(--ink-2); paint-order: stroke; stroke: var(--white); stroke-width: 3px; pointer-events: none; }
-.arrow-needs { fill: var(--vermilion); }
-.arrow-sup { fill: var(--ink-2); }
+.dot:focus { outline: none; }
+.dot .shape { fill: var(--surface); stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; transition: stroke var(--ease); }
+.dot:hover .shape { stroke: var(--border-strong); }
+.dot .kind-text { font-family: var(--font-mono); font-size: 0.85em; letter-spacing: 0.04em; fill: var(--text-2); pointer-events: none; }
+.dot .label { font-size: 1em; font-weight: 500; fill: var(--text); pointer-events: none; }
+.dot .state-text { font-size: 0.85em; font-weight: 600; pointer-events: none; }
+.dot .kind-icon, .dot .state-icon { pointer-events: none; }
+.dot.kind-neutral .kind-icon { color: var(--text-2); }
+.dot.kind-accent .kind-icon { color: var(--accent-text); }
+.dot .state-text.tone-neutral { fill: var(--text-2); }
+.dot .state-text.tone-ok { fill: var(--ok); }
+.dot .state-text.tone-warn { fill: var(--warn); }
+.dot .state-text.tone-accent { fill: var(--accent-text); }
+.dot .state-text.tone-info { fill: var(--info); }
+.dot .state-text.tone-danger { fill: var(--danger); }
+.dot .state-icon.tone-neutral { color: var(--text-2); }
+.dot .state-icon.tone-ok { color: var(--ok); }
+.dot .state-icon.tone-warn { color: var(--warn); }
+.dot .state-icon.tone-accent { color: var(--accent-text); }
+.dot .state-icon.tone-info { color: var(--info); }
+.dot .state-icon.tone-danger { color: var(--danger); }
+
+/* Colour by status or by epic tints the box; the words keep the text colour */
+.dot.fill-neutral .shape { fill: var(--neutral-soft); }
+.dot.fill-accent .shape { fill: var(--accent-soft); }
+.dot.fill-info .shape { fill: var(--info-soft); }
+.dot.fill-ok .shape { fill: var(--ok-soft); }
+.dot.fill-warn .shape { fill: var(--warn-soft); }
+.dot.fill-danger .shape { fill: var(--danger-soft); }
+
+/* States by shape as well as colour: unconfirmed is dashed; ended and dropped are dotted, struck through */
+.dot.unconfirmed .shape { stroke: var(--border-strong); stroke-dasharray: 5 4; }
+.dot.ended .shape, .dot.dropped .shape { fill: var(--surface-2); stroke: var(--border-strong); stroke-dasharray: 1 3; stroke-linecap: round; }
+.dot.ended .label, .dot.dropped .label { fill: var(--text-2); text-decoration: line-through; }
+.dot.outside .shape { fill: var(--bg); stroke: var(--border); }
+.dot.outside .label { fill: var(--text-2); }
+.dot .strike { fill: none; stroke: var(--text-2); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+.dot .pin-mark { display: none; fill: var(--accent); stroke: var(--bg); stroke-width: 1.5; pointer-events: none; }
+.dot.pinned .pin-mark { display: block; }
+.dot.chosen .shape { stroke: var(--accent); stroke-width: 2; stroke-dasharray: none; }
+.dot:focus-visible .shape { stroke: var(--focus); stroke-width: 3; stroke-dasharray: none; }
+
+/* Lines: curves; the kind of line is its pattern and its colour, and a record's own lines are thicker */
+.edge { fill: none; stroke: var(--border-strong); stroke-width: 1.25; vector-effect: non-scaling-stroke; }
+.edge.near { stroke-width: 2.25; }
+.edge[data-type="needs_first"] { stroke: var(--text); stroke-width: 1.5; }
+.edge[data-type="supersedes"], .edge[data-type="replaces"] { stroke: var(--warn); stroke-dasharray: 8 4; }
+.edge[data-type="duplicates"] { stroke: var(--danger); stroke-dasharray: 2 4; stroke-width: 2; stroke-linecap: round; }
+.edge[data-type="relates_to"] { stroke: var(--info); stroke-dasharray: 5 4; }
+.edge[data-type="concerns"], .edge[data-type="placed"] { stroke: var(--accent-text); stroke-dasharray: 5 4; }
+.edge[data-type="mention"] { stroke: var(--ok); stroke-dasharray: 1 5; stroke-width: 2; stroke-linecap: round; }
+.edge[data-type="collapsed"] { stroke: var(--text-2); stroke-width: 1.75; }
+.edge-label { font-size: var(--text-xs); fill: var(--text-2); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.group-label { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: 0.04em; text-transform: uppercase; fill: var(--text-2); pointer-events: none; }
+.arrow-needs { fill: var(--text); }
+.arrow-sup { fill: var(--warn); }
+
+/* Under the map: the chosen record and what it is joined to, as words and buttons */
+.gm-selected { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); gap: var(--space-3) var(--space-5); padding: var(--space-3) var(--space-4); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.gm-selected h2 { margin-bottom: var(--space-2); font-size: var(--text-sm); color: var(--text-2); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 650; }
+.gm-chosen p, .gm-neighbours p { margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+.gm-chosen-title { display: flex; align-items: baseline; gap: var(--space-2); }
+.gm-chosen-title .icon { align-self: center; }
+.gm-near { display: flex; flex-wrap: wrap; gap: var(--space-2); max-height: 10rem; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.gm-near button { max-width: 100%; height: auto; min-height: var(--control-h-sm); padding-top: var(--space-1); padding-bottom: var(--space-1); text-align: left; justify-content: flex-start; font-weight: 400; }
+.gm-near .neighbour-words { overflow-wrap: anywhere; }
 
 /* The list: the work tree, then the context sections */
-.gv-list { display: grid; gap: 1.2rem; }
-.gv-section { border-top: 3px solid var(--ink); padding-top: 0.5rem; }
-.gv-section-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; margin-bottom: 0.4rem; }
-.gv-section-head .spacer { flex: 1; }
-.gv-count { color: var(--ink-2); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
-.gv-filters { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: end; margin-bottom: 0.6rem; }
-.gv-field { display: grid; }
-.gv-field input[type=search] { min-width: 14rem; }
-.gv-context { display: grid; gap: 1.2rem; }
-.gv-rows { display: grid; gap: 0.5rem; }
-.gv-none { padding: 0.8rem 0; color: var(--ink-2); list-style: none; }
-.gv-more { list-style: none; }
-.gv-summary { margin: 0.2rem 0 0.6rem; }
-.gv-record.selected { box-shadow: 0 0 0 3px var(--vermilion); }
-.gv-actions { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; margin: 0.4rem 0; }
-.gv-actions .confirmation-control { flex: 1 1 18rem; }
-.gv-connections, .mentioned-in { margin: 0.3rem 0; font-size: 0.9rem; }
-.gv-connections > summary, .mentioned-in > summary { cursor: pointer; font-weight: 600; }
-.gv-link { text-align: left; }
+.gm-list { display: grid; gap: var(--space-5); min-width: 0; padding-top: var(--space-4); border-top: var(--border-w) solid var(--border); }
+:where(.gv-section) { min-width: 0; }
+:where(.gv-section-head) { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
+:where(.gv-section-head h2) { font-size: var(--text-lg); }
+:where(.gv-section-head .spacer) { flex: 1 1 auto; }
+.gm-section-hint { flex-basis: 100%; margin: 0; }
+:where(.gv-count) { color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+:where(.gv-filters) { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
+:where(.gv-field) { display: grid; gap: var(--space-1); }
+:where(.gv-field label) { margin: 0; }
+:where(.gv-context) { display: grid; gap: var(--space-5); min-width: 0; }
+:where(.gv-rows) { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+:where(.gv-none) { padding: var(--space-4); list-style: none; color: var(--text-2); border: var(--border-w) dashed var(--border-strong); border-radius: var(--radius-md); }
+:where(.gv-more) { list-style: none; }
+:where(.gv-record) { list-style: none; padding: var(--space-3) var(--space-4); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface); overflow-wrap: anywhere; }
+:where(.gv-record.selected) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+:where(.gv-actions) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
+:where(.gv-connections, .mentioned-in) { margin: var(--space-2) 0; font-size: var(--text-sm); }
+:where(.gv-connections > summary, .mentioned-in > summary) { cursor: pointer; font-weight: 600; }
+:where(.gv-link) { text-align: left; }
 
-/* Requirements, by story */
-.gv-record.requirement { list-style: none; background: var(--white); border: 2px solid var(--ink); border-left-width: 8px; padding: 0.5rem 0.7rem; cursor: grab; overflow-wrap: anywhere; }
-.gv-record.requirement.status-dropped { border-style: dashed; border-left-style: solid; color: var(--ink-2); background: var(--paper-2); }
-.gv-record-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.3rem; }
-.gv-open { font-weight: 700; text-align: left; }
-.gv-group { border-top: 2px solid var(--line); margin-top: 0.8rem; padding-top: 0.4rem; }
-.gv-group.unplaced { border-top-color: var(--vermilion); }
-.gv-group h3 { font-size: 1rem; margin-bottom: 0.4rem; }
-.gv-group-head.over, .gv-bare-story.over { outline: 3px dashed var(--vermilion); outline-offset: 2px; background: #f0c9bb55; }
-.gv-without { margin-top: 0.8rem; }
-.gv-without > summary { cursor: pointer; font-weight: 700; }
-.gv-bare-story { padding: 0.2rem 0; list-style: none; }
-
-/* The work tree */
-.gv-tree, .gv-tree ul { list-style: none; margin: 0; padding: 0; }
-.gv-tree ul { padding-left: 1.4rem; border-left: 2px solid var(--line); margin-left: 0.7rem; }
-.gv-tree li[role=treeitem] { margin: 0.15rem 0; }
-.gv-tree li[role=treeitem]:focus { outline: none; }
-.gv-tree li[role=treeitem]:focus > .gv-row { outline: 3px solid var(--vermilion); outline-offset: 1px; }
-.gv-tree li.selected > .gv-row { box-shadow: 0 0 0 3px var(--vermilion); }
-.gv-tree li.outside > .gv-row { opacity: 0.6; }
-.gv-row { display: flex; flex-wrap: wrap; gap: 0.2rem 0.4rem; align-items: center; padding: 0.2rem 0.4rem; background: var(--white); border: 1px solid var(--line); cursor: pointer; }
-.gv-node.type-epic > .gv-row { background: var(--paper-2); border: 2px solid var(--ink); font-weight: 700; }
-.gv-twisty { width: 1.6rem; padding: 0; border: none; background: none; font-size: 1rem; text-align: center; }
+/* The work tree: one row for each epic, story and task, indented under its parent. The columns of a
+   row line up from one row to the next; in a narrow list the row folds onto two lines. */
+.gm-list { container-type: inline-size; }
+.gv-tree, .gv-tree ul { margin: 0; padding: 0; list-style: none; }
+.gv-tree ul { margin-left: var(--space-4); padding-left: var(--space-3); border-left: var(--border-w) solid var(--border); }
+.gv-tree li[role="treeitem"] { margin: 2px 0; }
+.gv-tree li[role="treeitem"]:focus { outline: none; }
+.gv-tree li[role="treeitem"]:focus-visible > .gv-row { outline: 2px solid var(--focus); outline-offset: 1px; }
+.gv-row { display: grid; grid-template-columns: var(--control-h-sm) 4.75rem minmax(0, 1fr) 7.75rem 11rem; align-items: center; column-gap: var(--space-3); padding: var(--space-1) var(--space-3); border: var(--border-w) solid transparent; border-radius: var(--radius-md); cursor: pointer; }
+.gv-row:hover { background: var(--surface-2); }
+.gv-tree li.selected > .gv-row { border-color: var(--accent); background: var(--accent-soft); }
+.gv-tree li.outside > .gv-row .gv-label { color: var(--text-2); }
+.gv-node.type-epic > .gv-row { background: var(--surface); border-color: var(--border); font-weight: 650; }
+.gv-node.type-epic > .gv-row:hover { background: var(--surface-2); }
+.gv-node.type-epic.selected > .gv-row { background: var(--accent-soft); border-color: var(--accent); }
+.gv-twisty { grid-column: 1; flex: none; width: var(--control-h-sm); min-height: var(--control-h-sm); padding: 0; border: 0; background: none; color: var(--text-2); }
 .gv-twisty.none { display: inline-block; }
-.gv-label { flex: 1 1 12rem; overflow-wrap: anywhere; }
-.gv-label .id { color: var(--ink-2); font-weight: 400; }
-.gv-progress { font-size: 0.82rem; }
-.gv-claim { font-size: 0.82rem; }
-.gv-claim.lapsed { color: var(--amber); font-weight: 600; }
-.gv-ties-line { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0.1rem 1rem; padding-left: 2rem; font-size: 0.85rem; color: var(--ink-2); }
+.gv-kind { grid-column: 2; display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-2); font: 600 var(--text-xs) / 1 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; }
+.gv-kind .icon { color: var(--text-2); }
+.gv-label { grid-column: 3; min-width: 0; padding: var(--space-1) 0; overflow-wrap: anywhere; }
+.gv-label .id { color: var(--text-2); font: 400 var(--text-xs) var(--font-mono); margin-right: var(--space-1); }
+.gv-row > .chip.status { grid-column: 4; justify-self: end; }
+.gv-progress { grid-column: 5; display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-weight: 400; white-space: nowrap; }
+.gv-progress .meter { width: 3.5rem; }
+.gv-claim { color: var(--text-2); font-size: var(--text-xs); font-weight: 400; }
+.gv-claim.lapsed { color: var(--warn); font-weight: 600; }
+.gv-ties-line { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 0 var(--space-4); padding-bottom: var(--space-1); color: var(--text-2); font-size: var(--text-sm); font-weight: 400; }
 .gv-ties-line:empty { display: none; }
-.gv-row > .gv-connections { flex-basis: 100%; padding-left: 2rem; }
-.gv-tree .gv-empty { padding: 2rem 0; color: var(--ink-2); }
+.gv-row > .gv-connections { grid-column: 3 / -1; margin: 0 0 var(--space-1); font-weight: 400; }
+.gv-tree .gv-empty { padding: var(--space-5); color: var(--text-2); text-align: center; border: var(--border-w) dashed var(--border-strong); border-radius: var(--radius-md); }
+.gv-empty strong { display: block; margin-bottom: var(--space-1); color: var(--text); font-size: var(--text-md); }
 
-@media (max-width: 60rem) {
-  .graph-body { grid-template-columns: minmax(0, 1fr); }
-  .graph-side { max-height: none; }
+@container (max-width: 44rem) {
+  .gv-row { grid-template-columns: var(--control-h-sm) minmax(0, 1fr) auto; }
+  .gv-twisty { grid-row: 1 / span 2; align-self: start; }
+  .gv-kind { grid-column: 2; grid-row: 1; padding-top: var(--space-1); }
+  .gv-label { grid-column: 2; grid-row: 2; }
+  .gv-row > .chip.status { grid-column: 3; grid-row: 1; }
+  .gv-progress { grid-column: 2 / -1; grid-row: 3; justify-content: flex-start; }
+  .gv-ties-line, .gv-row > .gv-connections { grid-column: 2 / -1; }
 }
 
-/* With the detail panel open the page is narrower: the notes go under the drawing. */
-#layout.with-panel .graph-body { grid-template-columns: minmax(0, 1fr); }
-#layout.with-panel .graph-side { max-height: none; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+@media (max-width: 60rem) {
+  .gm-selected { grid-template-columns: minmax(0, 1fr); }
+  .gm-canvas { height: clamp(20rem, 60vh, 36rem); }
+}
+
+@media (max-width: 40rem) {
+  .gm-bar { align-items: stretch; }
+  .gm-bar > .segmented { flex: 1 1 100%; }
+  .gm-bar .segmented button { flex: 1 1 0; }
+  .gm-epic { flex: 1 1 100%; }
+  .gm-epic select { max-width: 100%; }
+  .gm-view-end { flex: 1 1 100%; margin-left: 0; justify-content: space-between; }
+  .gm-view-end .segmented { flex: 0 0 auto; }
+  .gm-head .primary { width: 100%; }
+}

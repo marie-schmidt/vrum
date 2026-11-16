@@ -328,9 +328,10 @@ async def arriving() -> None:
         and http_request(f"{base}/board", method="GET", body=None)[0] == 200,
         f"{shut}",
     )
-    # The client example in the README, run as it is written, aimed at this stack.
-    found = re.search(r"```python\n(.*?)\n```", (REPO_ROOT / "README.md").read_text(), re.DOTALL)
-    assert found, "the README has no Python example"
+    # The client example in the agent guide, run as it is written, aimed at this stack.
+    guide = (REPO_ROOT / "docs" / "agents.md").read_text()
+    found = re.search(r"```python\n(.*?)\n```", guide, re.DOTALL)
+    assert found, "docs/agents.md has no Python example"
     example = found.group(1).replace("http://127.0.0.1:8000/mcp", URL)
     ran = subprocess.run(
         [sys.executable, "-c", example],
@@ -342,7 +343,7 @@ async def arriving() -> None:
     )
     proof(
         "M9",
-        "the Python example in the README connects with an agent key and gets an answer",
+        "the Python example in docs/agents.md connects with an agent key and gets an answer",
         ran.returncode == 0 and "postgres_version" in ran.stdout,
         clip(ran.stdout or ran.stderr, 70),
     )

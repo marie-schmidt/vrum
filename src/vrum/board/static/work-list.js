@@ -4,7 +4,8 @@
 // same scope the map draws) and keeps nothing of its own but which branches are closed.
 
 import { h, moment, plural } from './dom.js';
-import { kindChip, statusChip } from './labels.js';
+import { icon } from './icons.js';
+import { KIND, kindIcon, statusChip } from './labels.js';
 import { openRecord } from './records.js';
 import { store } from './store.js';
 import { keyOf } from './graph-data.js';
@@ -43,6 +44,12 @@ export function createWorkList() {
           )
         : null;
     return [part('needs', 'Needs first:', needs), part('needed-by', 'Needed first by:', needed)];
+  }
+
+  // How many of its tasks are done, in words and as a bar of exactly that share.
+  function progress(node, total) {
+    const share = total ? Math.round((node.progress_done / total) * 100) : 0;
+    return h('span', { class: 'gv-progress' }, `${node.progress_done} of ${plural(total, 'task')} done`, h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { css: { width: `${share}%` } })));
   }
 
   function claim(node) {
@@ -85,19 +92,32 @@ export function createWorkList() {
         'div',
         { class: 'gv-row', onclick: (event) => { if (!event.target.closest('button, a, summary, details')) select(node); } },
         parent
-          ? h('button', { type: 'button', class: 'gv-twisty', tabindex: -1, 'aria-label': `${open ? 'Close' : 'Open'} ${node.title}`, onclick: () => setOpen(node.id, !open) }, h('span', { 'aria-hidden': 'true' }, open ? '▾' : '▸'))
+          ? h('button', { type: 'button', class: 'gv-twisty', tabindex: -1, 'aria-label': `${open ? 'Close' : 'Open'} ${node.title}`, onclick: () => setOpen(node.id, !open) }, icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }))
           : h('span', { class: 'gv-twisty none' }),
-        kindChip(node.kind),
+        h('span', { class: 'gv-kind' }, kindIcon(node.kind, 14), KIND[node.kind].label),
         h('span', { class: 'gv-label' }, h('span', { class: 'id' }, `#${node.id} `), node.title),
         statusChip(node.status),
-        total !== null ? h('span', { class: 'gv-progress' }, `${node.progress_done} of ${plural(total, 'task')} done`, h('progress', { max: Math.max(total, 1), value: node.progress_done, 'aria-label': 'Tasks done' })) : null,
-        claim(node),
-        h('div', { class: 'gv-ties-line' }, ties(node)),
+        total !== null ? progress(node, total) : null,
+        h('div', { class: 'gv-ties-line' }, claim(node), ties(node)),
         joined(dot),
       ),
       parent ? h('ul', { role: 'group', hidden: !open }, children.map((child) => branch(child, level + 1, kids))) : null,
     );
     return item;
+  }
+
+  // Why the tree is empty, and what to do next.
+  function emptyRow(ctx, nothing) {
+    let title = 'No work in this scope yet';
+    let step = 'Choose another epic, or show the whole project.';
+    if (nothing) {
+      title = 'No work in this project yet';
+      step = 'Create an epic with New item at the top of the page, or ask an agent to make a plan.';
+    } else if (ctx.shown.notice) {
+      title = ctx.shown.notice;
+      step = 'Change the filter or the scope above.';
+    }
+    return h('li', { role: 'none', class: 'gv-empty' }, h('strong', {}, title), step);
   }
 
   function draw(ctx) {
@@ -116,7 +136,7 @@ export function createWorkList() {
     const kids = (parent) => (kidsOf.get(parent) || []).sort((a, b) => byId(a, b));
     const rows = kids(null).map((dot) => branch(dot, 1, kids));
     const nothing = ![...ctx.all.dots.values()].some((dot) => dot.isNode);
-    tree.replaceChildren(...(rows.length ? rows : [h('li', { role: 'none', class: 'gv-empty' }, !nothing && ctx.shown.notice ? ctx.shown.notice : 'There is no work here yet. Create an epic on the Board, or ask an agent to make a plan.')]));
+    tree.replaceChildren(...(rows.length ? rows : [emptyRow(ctx, nothing)]));
     const stops = [...tree.querySelectorAll('li[role=treeitem]')];
     const wanted = (focused && tree.querySelector(`li[data-key="${focused}"]`)) || (chosen && tree.querySelector(`li[data-key="${chosen}"]`)) || stops[0];
     stops.forEach((item) => item.setAttribute('tabindex', item === wanted ? '0' : '-1'));

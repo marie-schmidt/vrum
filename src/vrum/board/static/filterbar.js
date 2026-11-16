@@ -4,6 +4,7 @@
 
 import { Refusal, callAll } from './api.js';
 import { h } from './dom.js';
+import { icon } from './icons.js';
 import { store } from './store.js';
 
 const EXAMPLES = [
@@ -24,7 +25,7 @@ export function filterBar({ value, onSubmit }) {
     value,
     autocomplete: 'off',
     spellcheck: 'false',
-    placeholder: 'kind:task status:ready -claimed OR is:overdue',
+    placeholder: 'Filter work, such as status:ready -claimed',
     'aria-describedby': 'filter-problem',
   });
   const problem = h('p', { class: 'problem', id: 'filter-problem', role: 'alert' });
@@ -38,14 +39,15 @@ export function filterBar({ value, onSubmit }) {
         onSubmit(input.value.trim());
       },
     },
-    h('label', { for: 'filter' }, 'Filter'),
-    input,
-    h('button', { type: 'submit', class: 'primary' }, 'Apply'),
+    h('label', { for: 'filter', class: 'sr-only' }, 'Filter work'),
+    h('span', { class: 'filter-field' }, icon('filter', { size: 16 }), input),
+    h('button', { type: 'submit' }, 'Apply'),
     h(
       'button',
       {
         type: 'button',
         id: 'clear-filter',
+        class: 'ghost',
         onclick: () => {
           input.value = '';
           onSubmit('');
@@ -57,7 +59,7 @@ export function filterBar({ value, onSubmit }) {
   const help = h(
     'details',
     { class: 'filter-help' },
-    h('summary', {}, 'How to filter'),
+    h('summary', {}, icon('chevron_right', { size: 14 }), 'How to filter'),
     h(
       'p',
       {},
@@ -65,7 +67,7 @@ export function filterBar({ value, onSubmit }) {
     ),
     h(
       'ul',
-      { class: 'plain' },
+      { class: 'plain filter-examples' },
       EXAMPLES.map(([text, meaning]) =>
         h(
           'li',

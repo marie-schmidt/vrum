@@ -4,6 +4,7 @@
 // covered, and one it does not know is shown by its name rather than hidden.
 
 import { h, moment } from './dom.js';
+import { icon } from './icons.js';
 import { recordLink } from './ctx.js';
 import { renderMarkdown } from './markdown.js';
 import { KIND, LINK, STATUS } from './labels.js';
@@ -29,6 +30,9 @@ export const CHANGE_KINDS = [
 ];
 
 export const kindOfAction = (action) => (CHANGE_KINDS.find(([, , actions]) => actions.includes(action)) || [])[0] || 'other';
+
+// The icon of each kind of change in the feed.
+const CHANGE_ICONS = { work: 'task', links: 'link', claims: 'lock', handoffs: 'done', requirements: 'rule', decisions: 'decision', facts: 'fact', other: 'info' };
 
 // A named item as a link: "story #12 “Log in”", "requirement 4 “Short codes”", "fact 2 “…”".
 function named(kind, id) {
@@ -170,16 +174,21 @@ export function describe(event) {
   }
 }
 
-// The row of the feed: when, who, what, and a handoff note in full.
+// The row of the feed: an icon for the kind of change, who, what, when, and a handoff note in full.
 export function eventRow(event) {
+  const kind = kindOfAction(event.action);
+  const label = (CHANGE_KINDS.find(([value]) => value === kind) || [])[1] || 'Other change';
   return h(
     'li',
-    { class: `event action-${event.action}`, dataset: { event: event.id, action: event.action, actor: event.actor, kind: kindOfAction(event.action) } },
-    h('span', { class: 'quiet event-time' }, `${moment(event.at)} `),
-    h('strong', { class: 'event-actor' }, event.actor),
-    ' ',
-    h('span', { class: 'event-words' }, ...describe(event), '.'),
-    event.action === 'handoff' ? h('div', { class: 'handoff-note' }, renderMarkdown(event.after.note || '', { className: 'markdown' })) : null,
+    { class: `event action-${event.action}`, dataset: { event: event.id, action: event.action, actor: event.actor, kind } },
+    h('span', { class: `event-icon kind-${kind}`, title: label }, icon(CHANGE_ICONS[kind] || 'info', { size: 14 })),
+    h(
+      'div',
+      { class: 'event-body' },
+      h('p', { class: 'event-line' }, h('strong', { class: 'event-actor' }, event.actor), ' ', h('span', { class: 'event-words' }, ...describe(event), '.')),
+      h('time', { class: 'quiet event-time', datetime: event.at }, moment(event.at)),
+      event.action === 'handoff' ? h('div', { class: 'handoff-note' }, renderMarkdown(event.after.note || '', { className: 'markdown' })) : null,
+    ),
   );
 }
 

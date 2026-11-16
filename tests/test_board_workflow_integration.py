@@ -188,7 +188,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
 
         # -- the Graph: the same work and context, in the same panel -------------------------------
         await page.locator("#drawer-close").click()
-        await page.locator("#top nav a[data-page=graph]").click()
+        await page.locator("#main-nav a[data-page=graph]").click()
         await expect(page.locator("#graph-page")).to_be_visible(timeout=SLOW)
         assert f"sel=node:{task}" in page.url
         await expect(page.locator("#card-title")).to_contain_text(f"#{task} ")
@@ -250,7 +250,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         await page.locator("#drawer-close").click()
 
         # -- the Roadmap: schedule the work ----------------------------------------------
-        await page.locator("#top nav a[data-page=roadmap]").click()
+        await page.locator("#main-nav a[data-page=roadmap]").click()
         await expect(page.locator("h1")).to_have_text("Roadmap", timeout=SLOW)
         await w.go(f"#/roadmap?q=epic:{epic}&sel=node:{task}")
         await expect(page.locator(f".tray-item[data-id='{later}']")).to_be_visible(timeout=SLOW)

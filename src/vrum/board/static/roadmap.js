@@ -9,13 +9,14 @@
 import { Refusal, call } from './api.js';
 import { actor, notify, ui } from './ctx.js';
 import { dayOfMonth, fromDay, monthName, monthOf, monthStart, nextMonth, toDay, todayDay, weekday, yearOf } from './dates.js';
-import { clear, h, plural, s } from './dom.js';
+import { h, plural, put, s } from './dom.js';
 import { filterBar, loadRows } from './filterbar.js';
-import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES } from './labels.js';
-import { epicOf, store, sync, titleOf } from './store.js';
+import { icon } from './icons.js';
+import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, kindIcon, statusIcon } from './labels.js';
+import { epicOf, store, sync } from './store.js';
 
 const ROW = 30;
-const LABEL = 290; // the width of the column of labels (see .rm-labels in board.css)
+const MIN_ROWS = 4; // an empty timeline keeps this many rows, so there is room to drop an item
 const SCALE = 56;
 const MIN_BAR = 8;
 const NEW_LENGTH_DAYS = 7; // an item dropped on the timeline gets a week
@@ -43,12 +44,13 @@ export function mount(element, initial) {
   params = initial;
   picked = new Set();
   rows = [];
+  trayDrafts = new Map();
   wantToday = true;
   bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
   const group = h('select', { id: 'group', onchange: () => ui.navigate({ group: group.value === 'epic' ? null : group.value }) }, GROUPS.map(([value, label]) => h('option', { value }, label)));
   const zooms = h(
     'div',
-    { class: 'zoom-choice', role: 'group', 'aria-label': 'Zoom' },
+    { class: 'zoom-choice segmented', role: 'group', 'aria-label': 'Zoom' },
     Object.entries(ZOOMS).map(([key, zoom]) => h('button', { type: 'button', dataset: { zoom: key }, onclick: () => ui.navigate({ zoom: key === 'month' ? null : key }, { replace: true }) }, zoom.label)),
   );
   parts = {
@@ -56,22 +58,63 @@ export function mount(element, initial) {
     zooms,
     summary: h('p', { class: 'count', id: 'count', role: 'status' }),
     tray: h('details', { class: 'rm-tray', id: 'tray', open: true }),
-    scroll: h('div', { class: 'rm-scroll', id: 'rm-scroll' }),
+    scroll: h('div', { class: 'rm-scroll', id: 'rm-scroll', role: 'region', tabindex: 0, 'aria-label': 'Timeline, scrolls sideways and down' }, h('p', { class: 'loading', role: 'status' }, 'Reading the timeline…')),
   };
-  clear(root).append(
-    h('div', { class: 'toolbar' }, h('h1', {}, 'Roadmap'), bar.form, h('label', { for: 'group' }, 'Group by'), group, zooms, h('button', { type: 'button', id: 'today', onclick: scrollToToday }, 'Today')),
-    bar.help,
-    bar.problem,
+  const pan = (way) => parts.scroll.scrollBy({ left: way * Math.max(parts.scroll.clientWidth * 0.6, 160), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  put(
+    root,
     h(
-      'p',
-      { class: 'help' },
-      'A bar runs from its start date to its target date. Drag a bar to move both dates, or an end to move one. With a bar focused, the left and right arrows move it a day (Shift: a week); Alt moves only its start and Ctrl only its end; Space chooses it to move together with others, and Enter opens it. A light dashed bar is worked out from what is under it. An arrow runs from what is needed first to what waits for it.',
+      'div',
+      { class: 'roadmap-page' },
+      h('header', { class: 'page-header' }, h('div', { class: 'page-title' }, h('h1', {}, 'Roadmap'), h('p', { class: 'page-sub' }, 'Work on a timeline: when it starts, when it is due, and what waits for what.'))),
+      h(
+        'div',
+        { class: 'rm-toolbar' },
+        bar.form,
+        h('div', { class: 'rm-group-choice' }, h('label', { for: 'group' }, 'Group by'), group),
+        zooms,
+        h(
+          'div',
+          { class: 'rm-pan' },
+          h('button', { type: 'button', id: 'today', onclick: scrollToToday }, icon('calendar', { size: 16 }), 'Today'),
+          h('button', { type: 'button', class: 'icon-only flip', 'aria-label': 'Scroll the timeline to earlier days', onclick: () => pan(-1) }, icon('chevron_right', { size: 16 })),
+          h('button', { type: 'button', class: 'icon-only', 'aria-label': 'Scroll the timeline to later days', onclick: () => pan(1) }, icon('chevron_right', { size: 16 })),
+        ),
+      ),
+      bar.problem,
+      h(
+        'div',
+        { class: 'rm-notes' },
+        bar.help,
+        h(
+          'details',
+          { class: 'filter-help rm-help' },
+          h('summary', {}, icon('chevron_right', { size: 14 }), 'How to read and change the timeline'),
+          h(
+            'p',
+            {},
+            'A bar runs from its start date to its target date. Drag a bar to move both dates, or an end to move one. With a bar focused, the left and right arrows move it a day (Shift: a week); Alt moves only its start and Ctrl only its end; Space chooses it to move together with others, and Enter opens it. A light dashed bar is worked out from what is under it. An arrow runs from what is needed first to what waits for it. Drag the empty timeline to move along it.',
+          ),
+        ),
+      ),
+      parts.summary,
+      legend(),
+      parts.tray,
+      parts.scroll,
     ),
-    parts.summary,
-    parts.tray,
-    parts.scroll,
   );
   load();
+}
+
+// What a bar looks like for each state: its icon and its shape, as well as its colour.
+function legend() {
+  return h(
+    'ul',
+    { class: 'rm-legend', 'aria-label': 'What the bars show' },
+    STATUSES.map((status) => h('li', {}, h('span', { class: `rm-swatch status-${status}` }, statusIcon(status, 12)), STATUS[status].label)),
+    h('li', {}, h('span', { class: 'rm-swatch worked-out' }), 'Worked out from what is under it'),
+    h('li', {}, h('span', { class: 'rm-swatch overdue' }, icon('alert', { size: 12 })), 'Overdue'),
+  );
 }
 
 export function unmount() {
@@ -198,8 +241,9 @@ function draw() {
   });
   geometry = { origin, end, ppd, items, today };
 
+  const rowsHigh = Math.max(list.length, MIN_ROWS) * ROW;
   const labels = h('div', { class: 'rm-labels' }, h('div', { class: 'rm-corner', css: { height: `${SCALE}px` } }, 'Item'));
-  const area = h('div', { class: 'rm-rows', css: { height: `${list.length * ROW}px` } });
+  const area = h('div', { class: 'rm-rows', css: { height: `${rowsHigh}px` } });
   const scale = h('div', { class: 'rm-scale', css: { height: `${SCALE}px`, width: `${width}px` } });
   const track = h('div', { class: 'rm-track', css: { width: `${width}px` }, dataset: { origin: fromDay(origin), ppd: String(ppd), today: fromDay(today), zoom } }, scale, area);
 
@@ -209,14 +253,17 @@ function draw() {
 
   list.forEach((entry, at) => {
     if (entry.type === 'group') {
-      labels.append(h('div', { class: 'rm-group', css: { height: `${ROW}px` } }, entry.label));
+      labels.append(h('div', { class: 'rm-group', title: entry.label, css: { height: `${ROW}px` } }, h('span', { class: 'rm-group-text' }, entry.label)));
       area.append(h('div', { class: 'rm-band', css: { top: `${at * ROW}px`, height: `${ROW}px` } }));
       return;
     }
     labels.append(labelFor(entry, mode));
     area.append(...barFor(entry, items.get(entry.node.id)));
   });
-  area.append(arrows(items, width, list.length * ROW));
+  // A timeline with nothing on it is still somewhere to drop an item from the tray.
+  if (list.length < MIN_ROWS) labels.append(h('div', { class: 'rm-spacer', css: { height: `${(MIN_ROWS - list.length) * ROW}px` } }));
+  if (!dated.length) area.append(h('p', { class: 'rm-drop-hint' }, rows.length ? 'Nothing here has dates yet. Drag an item from the tray onto the timeline, or give it dates in the tray.' : 'Nothing to show. Make some work on the Board, or clear the filter.'));
+  area.append(arrows(items, width, rowsHigh));
   area.addEventListener('dragover', (event) => {
     if (trayDragged) {
       event.preventDefault();
@@ -235,6 +282,7 @@ function draw() {
     changeDates(node, { start_on: fromDay(first), target_on: fromDay(first + NEW_LENGTH_DAYS - 1) }, 'Gave');
   });
   area.addEventListener('pointerdown', pointerDown);
+  scale.addEventListener('pointerdown', startPan);
 
   parts.scroll.replaceChildren(h('div', { class: 'rm-inner' }, labels, track));
   parts.scroll.scrollLeft = scrolled.left;
@@ -283,10 +331,12 @@ function labelFor(entry, mode) {
   return h(
     'div',
     { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { id: node.id, kind: node.kind } },
-    h('span', { 'aria-hidden': 'true' }, `${KIND[node.kind].sign} `),
-    h('button', { type: 'button', class: 'link', onclick: () => ui.navigate({ sel: `node:${node.id}`, panel: null }) }, `#${node.id} ${node.title}`),
-    node.overdue ? h('span', { class: 'chip overdue' }, '! Overdue') : null,
-    node.schedule_conflicts.length ? h('span', { class: 'chip conflict', title: `It starts before ${node.schedule_conflicts.map((id) => `#${id}`).join(', ')} is due` }, '! Schedule conflict') : null,
+    h('span', { class: 'rm-kind', 'aria-hidden': 'true' }, kindIcon(node.kind, 14)),
+    h('button', { type: 'button', class: 'link', title: `${KIND[node.kind].label} #${node.id} ${node.title}`, onclick: () => ui.navigate({ sel: `node:${node.id}`, panel: null }) }, h('span', { class: 'id mono' }, `#${node.id}`), ` ${node.title}`),
+    node.overdue ? h('span', { class: 'chip danger overdue', title: 'Overdue' }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Overdue')) : null,
+    node.schedule_conflicts.length
+      ? h('span', { class: 'chip warn conflict', title: `It starts before ${node.schedule_conflicts.map((id) => `#${id}`).join(', ')} is due` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
+      : null,
   );
 }
 
@@ -309,17 +359,26 @@ function barFor(entry, spot) {
       onkeydown: barKey,
     },
     editable ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
-    h('span', { class: 'rm-sign', 'aria-hidden': 'true' }, STATUS[node.status].sign),
+    h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
     h('span', { class: 'rm-text' }, node.title),
     editable ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
   );
-  const note = found.length ? [h('span', { class: 'rm-note', css: { left: `${spot.left + spot.width + 6}px`, top: `${spot.y + 6}px` } }, found.map((text) => `${text === 'Worked out from what is under it' ? 'worked out' : `! ${text}`}`).join(' · '))] : [];
+  const note = found.length
+    ? [
+        h(
+          'span',
+          { class: `rm-note${node.overdue ? ' overdue' : ''}`, css: { left: `${spot.left + spot.width + 6}px`, top: `${spot.y + 6}px` } },
+          node.overdue || node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
+          found.map((text) => (text === 'Worked out from what is under it' ? 'worked out' : text)).join(' · '),
+        ),
+      ]
+    : [];
   return [el, ...note];
 }
 
 // An arrow from what is needed first to the item that waits for it, between bars that are drawn.
 function arrows(items, width, height) {
-  const svg = s('svg', { class: 'rm-deps', width, height, 'aria-hidden': 'true' }, s('defs', {}, marker('rm-arrow', '#16130f'), marker('rm-arrow-conflict', '#8a5a00')));
+  const svg = s('svg', { class: 'rm-deps', width, height, 'aria-hidden': 'true' }, s('defs', {}, marker('rm-arrow', 'rm-arrow'), marker('rm-arrow-conflict', 'rm-arrow conflict')));
   for (const link of store.links) {
     if (link.link_type !== 'needs_first') continue;
     const waiting = items.get(link.source_id);
@@ -345,37 +404,47 @@ function arrows(items, width, height) {
   return svg;
 }
 
-function marker(id, fill) {
-  return s('marker', { id, viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L10,5 L0,10 z', fill }));
+// The arrowhead takes its colour from the style sheet (the class), so it follows the theme.
+function marker(id, className) {
+  return s('marker', { id, class: className, viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L10,5 L0,10 z' }));
 }
 
 function scrollToToday() {
   if (!geometry) return;
-  const at = LABEL + (geometry.today - geometry.origin) * geometry.ppd;
+  const labels = parts.scroll.querySelector('.rm-labels')?.offsetWidth ?? 0;
+  const at = labels + (geometry.today - geometry.origin) * geometry.ppd;
   parts.scroll.scrollLeft = Math.max(0, at - parts.scroll.clientWidth / 3);
 }
 
 // -- the tray of undated items ---------------------------------------------------------------------
 
+// What was typed in the tray's date boxes and not sent yet, kept across the redraws that news causes.
+let trayDrafts = new Map();
+
 function drawTray(undated) {
   const open = parts.tray.open;
-  clear(parts.tray).append(
-    h('summary', {}, `Undated (${undated.length}): drag one onto the timeline, or give it dates here`),
+  const here = new Set(undated.map((node) => node.id));
+  for (const id of [...trayDrafts.keys()]) if (!here.has(id)) trayDrafts.delete(id);
+  put(
+    parts.tray,
+    h('summary', {}, icon('chevron_right', { size: 14 }), h('span', { class: 'tray-title' }, 'Undated'), h('span', { class: 'chip' }, String(undated.length)), h('span', { class: 'tray-sub' }, 'Drag one onto the timeline, or give it dates here')),
     undated.length
       ? h(
           'ul',
           { class: 'plain tray-list' },
           undated.map((node) => {
-            const start = h('input', { type: 'date', 'aria-label': `Start date of #${node.id}` });
-            const target = h('input', { type: 'date', 'aria-label': `Target date of #${node.id}` });
+            const draft = trayDrafts.get(node.id) || { start: '', target: '' };
+            trayDrafts.set(node.id, draft);
+            const start = h('input', { type: 'date', value: draft.start, 'aria-label': `Start date of #${node.id}`, oninput: () => { draft.start = start.value; } });
+            const target = h('input', { type: 'date', value: draft.target, 'aria-label': `Target date of #${node.id}`, oninput: () => { draft.target = target.value; } });
             return h(
               'li',
               { class: 'tray-item', dataset: { id: node.id } },
-              h('span', { class: 'tray-drag', draggable: 'true', title: 'Drag onto the timeline', ondragstart: (event) => { trayDragged = node.id; event.dataTransfer.setData('application/x-vrum-node', String(node.id)); event.dataTransfer.setData('text/plain', `#${node.id}`); event.dataTransfer.effectAllowed = 'move'; }, ondragend: () => { trayDragged = 0; } }, `${KIND[node.kind].sign} #${node.id} ${node.title}`),
+              h('span', { class: 'tray-drag', draggable: 'true', title: 'Drag onto the timeline', ondragstart: (event) => { trayDragged = node.id; event.dataTransfer.setData('application/x-vrum-node', String(node.id)); event.dataTransfer.setData('text/plain', `#${node.id}`); event.dataTransfer.effectAllowed = 'move'; }, ondragend: () => { trayDragged = 0; } }, kindIcon(node.kind, 14), h('span', { class: 'id mono' }, `#${node.id}`), h('span', { class: 'tray-name' }, node.title)),
               h(
                 'form',
                 {
-                  class: 'inline-form',
+                  class: 'tray-form',
                   onsubmit: (event) => {
                     event.preventDefault();
                     if (!start.value && !target.value) {
@@ -385,14 +454,14 @@ function drawTray(undated) {
                     changeDates(node, { ...(start.value ? { start_on: start.value } : {}), ...(target.value ? { target_on: target.value } : {}) }, 'Gave');
                   },
                 },
-                start,
-                target,
-                h('button', { type: 'submit' }, 'Set dates'),
+                h('span', { class: 'tray-field' }, h('span', { 'aria-hidden': 'true' }, 'Start'), start),
+                h('span', { class: 'tray-field' }, h('span', { 'aria-hidden': 'true' }, 'Due'), target),
+                h('button', { type: 'submit', class: 'small' }, 'Set dates'),
               ),
             );
           }),
         )
-      : h('p', { class: 'quiet' }, 'Everything here has dates, or has children that do.'),
+      : h('p', { class: 'quiet tray-none' }, rows.length ? 'Everything here has dates, or has children that do.' : 'There is no work to show yet.'),
   );
   parts.tray.open = open;
 }
@@ -505,9 +574,36 @@ async function changeDates(node, change, verb) {
   await load();
 }
 
+// Dragging the empty timeline moves along it, as the scroll bars would (a mouse only: a finger
+// already pans it).
+function startPan(event) {
+  if (event.button !== 0 || event.pointerType !== 'mouse') return;
+  const view = parts.scroll;
+  const from = { x: event.clientX, y: event.clientY, left: view.scrollLeft, top: view.scrollTop };
+  view.classList.add('panning');
+  view.setPointerCapture(event.pointerId);
+  const move = (next) => {
+    view.scrollLeft = from.left - (next.clientX - from.x);
+    view.scrollTop = from.top - (next.clientY - from.y);
+  };
+  const up = () => {
+    view.classList.remove('panning');
+    view.removeEventListener('pointermove', move);
+    view.removeEventListener('pointerup', up);
+    view.removeEventListener('pointercancel', up);
+  };
+  view.addEventListener('pointermove', move);
+  view.addEventListener('pointerup', up);
+  view.addEventListener('pointercancel', up);
+}
+
 function pointerDown(event) {
   const el = event.target.closest('.rm-bar');
-  if (!el || event.button !== 0 || !geometry) return;
+  if (!el) {
+    startPan(event);
+    return;
+  }
+  if (event.button !== 0 || !geometry) return;
   const id = Number(el.dataset.id);
   const item = geometry.items.get(id);
   if (!item) return;

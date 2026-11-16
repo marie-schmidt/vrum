@@ -9,7 +9,8 @@
 import { Refusal, call, callAll } from './api.js';
 import { actor, notify, recordLink, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
-import { KIND, STATUS } from './labels.js';
+import { icon } from './icons.js';
+import { KIND, STATUS, kindIcon, statusChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { ensure, ensureContext, store, sync } from './store.js';
 
@@ -58,7 +59,7 @@ export function mount(element, initial) {
     epics,
     unlinked,
     summary: h('p', { class: 'count', id: 'dup-count', role: 'status' }),
-    note: h('p', { class: 'quiet', id: 'dup-note' }),
+    note: h('p', { class: 'index-note', id: 'dup-note' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'dup-problem' }),
     list: h('div', { id: 'dup-pairs' }),
   };
@@ -73,9 +74,11 @@ export function mount(element, initial) {
           ui.navigate({ dup_min: min.value === '' ? null : min.value, dup_epics: epics.value.trim() || null });
         },
       },
-      h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
-      h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike they must be (0 to 1)'), min),
-      h('div', { class: 'field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (ids)'), epics),
+      h('div', { class: 'dup-fields' },
+        h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
+        h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike (0 to 1)'), min),
+        h('div', { class: 'field dup-epics-field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (ids)'), epics),
+      ),
       h('label', { class: 'check', for: 'dup-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
       h(
         'div',
@@ -83,11 +86,16 @@ export function mount(element, initial) {
         h('button', { type: 'submit', class: 'primary', id: 'dup-apply' }, 'Apply'),
         h('button', { type: 'button', id: 'dup-reset', onclick: () => ui.navigate({ dup_min: null, dup_epics: null, dup_unlinked: null }) }, 'Start again'),
       ),
-      h('p', { class: 'help', id: 'dup-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
+      h(
+        'details',
+        { class: 'drawer-help' },
+        h('summary', {}, icon('chevron_right', { size: 14 }), 'What this shows'),
+        h('p', { class: 'help', id: 'dup-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
+      ),
     ),
     parts.problem,
-    parts.summary,
     parts.note,
+    parts.summary,
     parts.list,
   );
   load(true);
@@ -166,6 +174,7 @@ async function load(fresh) {
   if (fresh) parts.epics.value = params.get('dup_epics') || '';
   if (fresh) {
     parts.summary.textContent = 'Looking…';
+    if (!pairs.length) put(parts.list, h('p', { class: 'loading', role: 'status' }, 'Looking for pairs…'));
     bodies = new Map();
   }
   try {
@@ -202,7 +211,9 @@ async function load(fresh) {
     pairs = all;
     threshold = first.threshold;
     parts.problem.textContent = '';
-    parts.note.textContent = first.index.note;
+    const fine = first.index.meaning === 'used' || first.index.meaning === 'not_requested';
+    parts.note.className = `index-note ${fine ? 'info' : 'warn'}`;
+    put(parts.note, first.index.note ? [icon(fine ? 'info' : 'alert', { size: 14 }), h('span', {}, first.index.note)] : null);
     if (fresh) parts.min.value = params.get('dup_min') ?? String(threshold);
     await describe(all.flatMap((pair) => [pair.first, pair.second]));
   } catch (error) {
@@ -244,8 +255,10 @@ function draw() {
     : `No pairs are ${threshold} or more alike${only ? ' that nobody has marked yet' : ''}.`;
   put(
     parts.list,
-    total ? h('ul', { class: 'plain pairs' }, pairs.map(pairRow)) : null,
-    nextOffset !== null ? h('p', {}, h('button', { type: 'button', id: 'dup-more', onclick: more }, 'Show more pairs')) : null,
+    total
+      ? h('ul', { class: 'plain pairs' }, pairs.map(pairRow))
+      : h('div', { class: 'empty drawer-empty' }, icon('link', { size: 20 }), h('p', {}, 'Nothing to compare at this level. Lower the number for “how alike” to see weaker pairs.')),
+    nextOffset !== null ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'dup-more', onclick: more }, 'Show more pairs')) : null,
   );
 }
 
@@ -255,10 +268,15 @@ function side(item) {
   return h(
     'div',
     { class: 'side', dataset: { type: item.item_type, id: item.id } },
-    h('div', { class: 'entry-head' }, h('span', { class: `chip kind kind-${item.item_type}` }, h('span', { 'aria-hidden': 'true' }, KIND[item.item_type].sign), ` ${KIND[item.item_type].label} #${item.id}`), h('span', { class: 'chip' }, STATUS[item.status]?.label || item.status)),
+    h(
+      'div',
+      { class: 'entry-head' },
+      h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), `${KIND[item.item_type].label} #${item.id}`),
+      STATUS[item.status] ? statusChip(item.status) : h('span', { class: 'chip' }, item.status),
+    ),
     h('h4', {}, recordLink(kind, item.id, {}, item.title)),
-    item.epic_id !== null ? h('p', { class: 'quiet' }, `In epic #${item.epic_id} ${item.epic_title || ''}`.trim()) : null,
-    text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.'),
+    item.epic_id !== null ? h('p', { class: 'quiet side-epic' }, `In epic #${item.epic_id} ${item.epic_title || ''}`.trim()) : null,
+    h('div', { class: 'side-body' }, text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.')),
   );
 }
 
@@ -283,10 +301,11 @@ function pairRow(pair) {
           'button',
           {
             type: 'button',
-            class: `mark mark-${type}`,
+            class: `mark mark-${type}${type === 'duplicates' ? '' : ' secondary'}`,
             disabled: pair.already_linked.includes(type),
             onclick: () => link(pair, type),
           },
+          icon(pair.already_linked.includes(type) ? 'check' : 'link', { size: 14 }),
           pair.already_linked.includes(type) ? MARKS[type].done : MARKS[type].button,
         ),
       )
@@ -294,7 +313,14 @@ function pairRow(pair) {
   return h(
     'li',
     { class: 'pair', dataset: { first: pair.first.id, second: pair.second.id, similarity: pair.similarity } },
-    h('p', { class: 'score' }, h('strong', {}, pair.similarity.toFixed(3)), ' alike', pair.already_linked.length ? h('span', { class: 'chip' }, `already linked: ${pair.already_linked.map((type) => MARKS[type]?.told || type).join(', ')}`) : null),
+    h(
+      'p',
+      { class: 'score' },
+      h('span', { class: 'meter', role: 'meter', 'aria-label': 'How alike', 'aria-valuemin': 0, 'aria-valuemax': 1, 'aria-valuenow': pair.similarity }, h('span', { css: { width: `${Math.round(pair.similarity * 100)}%` } })),
+      h('strong', {}, pair.similarity.toFixed(3)),
+      ' alike',
+      pair.already_linked.length ? h('span', { class: 'chip' }, `already linked: ${pair.already_linked.map((type) => MARKS[type]?.told || type).join(', ')}`) : null,
+    ),
     h('div', { class: 'sides' }, side(pair.first), side(pair.second)),
     h('div', { class: 'buttons' }, ...buttons),
   );

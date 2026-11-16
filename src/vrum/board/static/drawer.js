@@ -6,12 +6,13 @@
 
 import { ui } from './ctx.js';
 import { clear, h, put } from './dom.js';
+import { icon } from './icons.js';
 import * as activity from './activity.js';
 import * as search from './search.js';
 
 const DRAWERS = {
-  search: { title: 'Search', view: search },
-  activity: { title: 'Activity', view: activity },
+  search: { title: 'Search', icon: 'search', view: search },
+  activity: { title: 'Activity', icon: 'activity', view: activity },
 };
 
 const aside = document.getElementById('drawer');
@@ -68,8 +69,9 @@ export function showDrawer(params) {
     h(
       'header',
       { class: 'drawer-head' },
+      h('span', { class: 'drawer-icon' }, icon(DRAWERS[name].icon, { size: 18 })),
       h('h2', { id: 'drawer-title', tabindex: '-1' }, title),
-      h('button', { type: 'button', id: 'drawer-close', 'aria-label': `Close ${title.toLowerCase()}`, onclick: () => ui.navigate({ drawer: null }) }, 'Close'),
+      h('button', { type: 'button', id: 'drawer-close', class: 'ghost icon-only', 'aria-label': `Close ${title.toLowerCase()}`, title: `Close ${title.toLowerCase()}`, onclick: () => ui.navigate({ drawer: null }) }, icon('close', { size: 18 })),
     ),
     body,
   );

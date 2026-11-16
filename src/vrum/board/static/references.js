@@ -7,7 +7,8 @@
 import { callPaged } from './api.js';
 import { recordLink, ui } from './ctx.js';
 import { h } from './dom.js';
-import { KIND, STATUS } from './labels.js';
+import { icon } from './icons.js';
+import { KIND, STATUS, kindIcon } from './labels.js';
 import { ensure, store, titleOf } from './store.js';
 
 // The same pattern as the server's (src/vrum/references.py); a test keeps the two equal.
@@ -15,13 +16,8 @@ export const REFERENCE_PATTERN = String.raw`\[\[(node|rule|decision|fact):([1-9]
 
 export const refText = (kind, id) => `[[${kind}:${id}]]`;
 
-// What each kind of record is called and signed on the board. A rule is a "Requirement" to a person.
-const RECORD_WORDS = {
-  rule: { label: 'Requirement', sign: '▤' },
-  decision: { label: 'Decision', sign: '⚑' },
-  fact: { label: 'Fact', sign: '◈' },
-};
-export const kindWords = (type) => RECORD_WORDS[type] || KIND[type] || { label: type, sign: '?' };
+// What each kind of item is called on the board. A rule is a "Requirement" to a person.
+export const kindWords = (type) => KIND[type] || { label: type };
 
 // How an item's status reads: a work item's, a requirement's, or a record's.
 const OTHER_STATUS = {
@@ -92,14 +88,14 @@ export const referenceKindOf = (type) => (['epic', 'story', 'task'].includes(typ
 // the detail panel with the rest of the address as it is at that moment.
 export const itemLink = (id) => recordLink('node', id, { class: 'item-link', dataset: { id } }, `#${id} ${titleOf(id)}`);
 
-// A link to any record, with words of the caller's choosing.
-export const openLink = (kind, id, words) => recordLink(kind, id, { class: 'record-link', dataset: { record: `${kind}:${id}` } }, words);
+// A link to any record, with words of the caller's choosing and, if wished, the icon of its kind.
+export const openLink = (kind, id, words, mark = null) => recordLink(kind, id, { class: 'record-link', dataset: { record: `${kind}:${id}` } }, mark, words);
 
 function labelOf(kind, id, found) {
-  const sign = kindWords(found.type).sign;
-  if (found.title === null) return `${sign} ${kind} ${id}`.trim();
-  if (kind === 'node') return `${sign} #${id} ${found.title}`.trim();
-  return `${sign} ${kindWords(found.type).label} #${id}: ${found.title}`.trim();
+  const mark = kindIcon(found.type, 14);
+  if (found.title === null) return [mark, `${kind} ${id}`];
+  if (kind === 'node') return [mark, `#${id} ${found.title}`];
+  return [mark, `${kindWords(found.type).label} #${id}: ${found.title}`];
 }
 
 // One reference as it is shown: a link with the current title, or plainly missing.
@@ -107,7 +103,7 @@ export function renderReference(kind, id) {
   const found = resolve(kind, id);
   const data = { kind, id: String(id) };
   if (!found.exists) {
-    return h('span', { class: 'reference missing', dataset: data, title: `Nothing of that kind has the id ${id}` }, `${refText(kind, id)} (missing)`);
+    return h('span', { class: 'reference missing', dataset: data, title: `Nothing of that kind has the id ${id}` }, icon('alert', { size: 14 }), `${refText(kind, id)} (missing)`);
   }
   return recordLink(kind, id, { class: 'reference', dataset: data }, labelOf(kind, id, found));
 }
@@ -138,7 +134,7 @@ const WHERE = { details: 'its details', text: 'its text', reason: 'its reason', 
 function sourceLink(source) {
   const kind = referenceKindOf(source.item_type);
   const label = `${kindWords(source.item_type).label} #${source.id}: ${clip(source.title, 70)}`;
-  return recordLink(kind, source.id, { class: 'mention-link', dataset: { kind, id: String(source.id) } }, label);
+  return recordLink(kind, source.id, { class: 'mention-link', dataset: { kind, id: String(source.id) } }, kindIcon(source.item_type, 14), label);
 }
 
 export function mentionsList(items) {

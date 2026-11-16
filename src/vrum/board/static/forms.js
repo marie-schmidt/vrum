@@ -5,6 +5,7 @@
 
 import { Refusal } from './api.js';
 import { h } from './dom.js';
+import { icon } from './icons.js';
 import { store, titleOf } from './store.js';
 
 let counter = 0;
@@ -13,9 +14,17 @@ export const uid = (prefix = 'f') => `${prefix}${(counter += 1)}`;
 // A label, its control and a help line, joined so that a screen reader reads them together.
 export function field(label, control, help = null) {
   if (!control.id) control.id = uid();
-  const note = help ? h('p', { class: 'quiet', id: `${control.id}-help` }, help) : null;
+  const note = help ? h('p', { class: 'hint', id: `${control.id}-help` }, help) : null;
   if (note) control.setAttribute('aria-describedby', note.id);
   return h('div', { class: 'field' }, h('label', { for: control.id }, label), control, note);
+}
+
+// Two or more fields side by side, which fall into one column when there is not room.
+export const fieldRow = (...fields) => h('div', { class: 'form-row' }, ...fields);
+
+// What a server said no with, in the place made for it, with a sign so that it is not only a colour.
+export function refuse(place, message) {
+  place.replaceChildren(icon('alert', { size: 16 }), h('span', { class: 'problem-text' }, message));
 }
 
 export const clip = (text, size = 90) => {
@@ -35,18 +44,19 @@ export function openDialog(title, content, { wide = false } = {}) {
 
 // A form that does `work` when it is sent (and `also` for any further buttons, each with its own
 // work). A refusal is shown under the fields, in the server's words, and the dialog stays open
-// with everything typed; anything else goes on to the console.
+// with everything typed; anything else goes on to the console. The buttons are on the right, the
+// one that does the work last.
 export function dialogForm({ fields, submit, cancel = null, work, also = [] }) {
   const problem = h('p', { class: 'problem', role: 'alert' });
   const buttons = [];
   const guarded = async (job) => {
-    problem.textContent = '';
+    problem.replaceChildren();
     buttons.forEach((button) => { button.disabled = true; });
     try {
       await job();
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      problem.textContent = error.message;
+      refuse(problem, error.message);
     } finally {
       buttons.forEach((button) => { button.disabled = false; });
     }
@@ -70,7 +80,7 @@ export function dialogForm({ fields, submit, cancel = null, work, also = [] }) {
     },
     ...fields,
     problem,
-    h('div', { class: 'buttons' }, send, ...more, h('button', { type: 'button', onclick: () => form.closest('dialog')?.close() }, cancel || 'Cancel')),
+    h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => form.closest('dialog')?.close() }, cancel || 'Cancel'), ...more, send),
   );
   return { form, problem };
 }
@@ -114,7 +124,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
   if (kinds.includes('decision')) for (const decision of store.decisions || []) options.push(`decision ${decision.id} ${decision.title}`);
   const input = h('input', { type: 'text', list: listId, autocomplete: 'off', 'aria-label': `${label}: type an id or pick from the list`, placeholder: 'an id such as #12, or a title' });
   const problem = h('p', { class: 'problem', role: 'alert' });
-  const shown = h('ul', { class: 'chips plain' });
+  const shown = h('ul', { class: 'chips plain picker-chosen', 'aria-label': `${label}: chosen` });
 
   const draw = () =>
     shown.replaceChildren(
@@ -122,17 +132,17 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
         h(
           'li',
           { class: 'chip', dataset: { ref: `${ref.type}:${ref.id}` } },
-          `${refText[ref.type](ref.id)} ${clip(titleOfRef(ref.type, ref.id), 40)} `,
-          h('button', { type: 'button', class: 'link', 'aria-label': `Take out ${refText[ref.type](ref.id)}`, onclick: () => { refs.delete(`${ref.type}:${ref.id}`); draw(); } }, '✕'),
+          h('span', { class: 'chip-text' }, `${refText[ref.type](ref.id)} ${clip(titleOfRef(ref.type, ref.id), 40)}`),
+          h('button', { type: 'button', class: 'chip-remove ghost icon-only small', 'aria-label': `Take out ${refText[ref.type](ref.id)}`, onclick: () => { refs.delete(`${ref.type}:${ref.id}`); draw(); } }, icon('close', { size: 12 })),
         ),
       ),
     );
   const add = () => {
-    problem.textContent = '';
+    problem.replaceChildren();
     if (!input.value.trim()) return;
     const ref = parseRef(input.value, kinds);
     if (!ref) {
-      problem.textContent = 'Type an id such as #12 (requirement 3 for a requirement, decision 5 for a decision), or pick from the list.';
+      refuse(problem, 'Type an id such as #12 (requirement 3 for a requirement, decision 5 for a decision), or pick from the list.');
       return;
     }
     refs.set(`${ref.type}:${ref.id}`, ref);
@@ -152,10 +162,10 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
     'div',
     { class: 'field picker' },
     h('label', { for: (input.id = uid()) }, label),
-    h('div', { class: 'inline-form' }, input, h('button', { type: 'button', onclick: add }, 'Add')),
+    h('div', { class: 'picker-row' }, input, h('button', { type: 'button', onclick: add }, 'Add')),
     h('datalist', { id: listId }, options.map((value) => h('option', { value }))),
     shown,
-    help ? h('p', { class: 'quiet' }, help) : null,
+    help ? h('p', { class: 'hint' }, help) : null,
     problem,
   );
   return {
@@ -164,7 +174,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
     reset() {
       refs.clear();
       input.value = '';
-      problem.textContent = '';
+      problem.replaceChildren();
       draw();
     },
     // What to send: a list for each kind, and only when something was chosen.

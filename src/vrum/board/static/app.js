@@ -1,5 +1,5 @@
-// The board's shell: signing in, the person's projects, the top bar, the address, the drawer and
-// the clock that asks the server what changed.
+// The board's shell: signing in, the person's projects, the sidebar and top bar, the address, the
+// drawer and the clock that asks the server what changed.
 //
 // A project's board lives at /board/p/<number>, with the page and its choices after the #. The
 // server decides whether the person owns the project, on every request. Moving to another project
@@ -20,19 +20,23 @@ import {
   setProject,
   signOut,
 } from './api.js';
-import { SETTINGS, VIEWS, actor, addressOf, notify, setActor, ui, viewLink } from './ctx.js';
+import { SETTINGS, VIEWS, actor, addressOf, setActor, ui } from './ctx.js';
 import { drawerIndex, drawerName, hideDrawer, refreshDrawer, searchAgain, showDrawer } from './drawer.js';
 import { clear, h } from './dom.js';
 import { showNoProject, showProjects, showSignIn } from './entry.js';
+import { icon } from './icons.js';
 import * as access from './access.js';
 import * as graph from './graph.js';
 import * as kanban from './kanban.js';
 import * as panel from './panel.js';
 import { refreshReferences } from './references.js';
 import * as roadmap from './roadmap.js';
+import { keepLayout } from './shell.js';
+import { hideSidebar, showSidebar, updateSidebar, updateWho } from './sidebar.js';
 import * as status from './status.js';
-import { keepSynced, onChange, start, stopSyncing, store } from './store.js';
+import { ensureContext, keepSynced, onChange, start, stopSyncing, store } from './store.js';
 import { keepSwitcher } from './switcher.js';
+import { setConnection, setIndexText, showEntryTop, showTop, updateTop } from './topbar.js';
 import * as tools from './tools.js';
 
 // Every page there is. Anything else in the address is the Board.
@@ -44,20 +48,22 @@ const PAGES = {
   tools: { title: 'Tools', view: tools },
   status: { title: 'Status and export', view: status },
 };
-const top = document.getElementById('top');
-// The bar wraps onto more lines on a narrow window or with long names, and what sticks under it
-// has to start below where it really ends, not below where it would end on one line.
-new ResizeObserver(() => {
-  document.documentElement.style.setProperty('--top-now', `${top.getBoundingClientRect().height}px`);
-}).observe(top);
+const TITLES = Object.fromEntries(Object.entries(PAGES).map(([name, page]) => [name, page.title]));
+const app = document.getElementById('app');
 const main = document.getElementById('page');
 const dialogs = document.getElementById('dialogs');
+// The skip link goes to the page without changing the address (which would make the Board of it).
+document.querySelector('.skip').addEventListener('click', (event) => {
+  event.preventDefault();
+  main.focus();
+});
 let mounted = null; // the page on screen
 let running = false; // a project is open and loaded
 let session = null; // who is signed in
 let project = null; // the project that is open
 let projectList = []; // the person's projects, for the switcher
-let bar = null; // the parts of the top bar of an open project
+
+keepLayout();
 
 // The project in the address, if any: /board/p/12.
 const inAddress = (() => {
@@ -91,7 +97,9 @@ function route() {
   ui.page = page;
   ui.params = params;
   if (!running) return;
-  updateTop();
+  updateTop(PAGES[page].title);
+  updateSidebar();
+  document.title = `${PAGES[page].title} · ${project.name} · Vrum`;
   if (changedPage) {
     if (mounted) mounted.unmount();
     clear(main);
@@ -106,7 +114,7 @@ function route() {
   panel.show(params);
 }
 
-// -- the top bar ----------------------------------------------------------------------------------
+// -- the shell --------------------------------------------------------------------------------------
 
 function indexText() {
   const index = store.index;
@@ -118,35 +126,12 @@ function indexText() {
   return `Index: ${index.waiting_to_index} waiting`;
 }
 
-const brand = (href) => h('a', { href, class: 'brand' }, h('img', { src: '/board/brand/vrum-logo.svg', alt: 'vrum', height: 28 }));
-
 async function leaveBoard() {
   try {
     await signOut();
   } finally {
     location.assign('/board');
   }
-}
-
-const accountBar = () => [
-  h('span', { id: 'account', class: 'chip', title: session.account.email }, session.account.name),
-  h('button', { type: 'button', id: 'sign-out', class: 'link', onclick: leaveBoard }, 'Sign out'),
-];
-
-// The project switcher is a real select: choosing another project loads that project's board.
-function switcher() {
-  const choose = h(
-    'select',
-    {
-      id: 'project-switcher',
-      'aria-label': 'Project',
-      onchange: () => location.assign(choose.value ? `/board/p/${choose.value}#/board` : '/board'),
-    },
-    projectList.map((one) => h('option', { value: String(one.id) }, one.name)),
-    h('option', { value: '' }, 'All projects…'),
-  );
-  choose.value = String(project.id);
-  return choose;
 }
 
 // Enter in the box of the top bar opens the search drawer with those words.
@@ -159,145 +144,27 @@ function openSearch(text) {
 
 const toggleActivity = () => ui.navigate({ drawer: drawerName(ui.params) === 'activity' ? null : 'activity' });
 
-// The Settings menu: a button that opens a short list of links, with the keyboard behaviour of a
-// menu (Enter, Space or an arrow opens it, the arrows, Home and End move, Escape closes it).
-function settingsMenu() {
-  const button = h('button', { type: 'button', id: 'settings-menu', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'settings-list' }, 'Settings ▾');
-  const items = SETTINGS.map((name) => viewLink(name, {}, { id: `settings-${name}`, role: 'menuitem', tabindex: '-1', dataset: { page: name } }, PAGES[name].title));
-  const list = h('div', { id: 'settings-list', class: 'menu-list', role: 'menu', 'aria-label': 'Settings', hidden: true }, items);
-  const wrap = h('div', { class: 'menu-wrap' }, button, list);
-  const outside = (event) => {
-    if (!wrap.contains(event.target)) close();
-  };
-  function open(last = false) {
-    list.hidden = false;
-    button.setAttribute('aria-expanded', 'true');
-    document.addEventListener('click', outside, true);
-    (last ? items[items.length - 1] : items[0]).focus();
-  }
-  function close(restore = false) {
-    list.hidden = true;
-    button.setAttribute('aria-expanded', 'false');
-    document.removeEventListener('click', outside, true);
-    if (restore) button.focus();
-  }
-  button.addEventListener('click', () => (list.hidden ? open() : close()));
-  button.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      open(event.key === 'ArrowUp');
-    } else if (event.key === 'Escape' && !list.hidden) {
-      event.preventDefault();
-      close(true);
-    }
-  });
-  list.addEventListener('keydown', (event) => {
-    const at = items.indexOf(document.activeElement);
-    const go = (to) => {
-      event.preventDefault();
-      items[(to + items.length) % items.length].focus();
-    };
-    if (event.key === 'ArrowDown') go(at + 1);
-    else if (event.key === 'ArrowUp') go(at - 1);
-    else if (event.key === 'Home') go(0);
-    else if (event.key === 'End') go(items.length - 1);
-    else if (event.key === ' ' && at >= 0) {
-      event.preventDefault();
-      items[at].click();
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      close(true);
-    } else if (event.key === 'Tab') close();
-  });
-  list.addEventListener('click', () => close());
-  wrap.addEventListener('focusout', (event) => {
-    if (!list.hidden && !wrap.contains(event.relatedTarget)) close();
-  });
-  return { wrap, button };
+// What is at the top, and no sidebar, before a project is open.
+function entryShell() {
+  hideSidebar();
+  app.dataset.shell = 'entry';
+  showEntryTop({ session, leaveBoard });
 }
 
-// The top bar of an open project, built once: what is typed in the search box stays while the
-// address changes. updateTop sets what the address decides (the current view, the open drawer).
-function buildTop() {
-  const search = h('input', { id: 'global-search', type: 'search', name: 'search', autocomplete: 'off', 'aria-label': 'Search work, requirements, decisions and facts', placeholder: 'Search…' });
-  const menu = settingsMenu();
-  bar = {
-    nav: h('nav', { 'aria-label': 'Views' }, VIEWS.map((name) => viewLink(name, {}, { dataset: { page: name } }, PAGES[name].title))),
-    search,
-    typed: '', // the words of the address that the box was last set from
-    activity: h('button', { type: 'button', id: 'activity-open', 'aria-controls': 'drawer', 'aria-expanded': 'false', title: 'Who is working on what, and what changed', onclick: toggleActivity }, 'Activity'),
-    settings: menu.button,
-    who: h('button', { type: 'button', id: 'who', class: 'link', onclick: () => askName() }),
-  };
-  showWho();
-  clear(top).append(
-    brand('#/board'),
-    switcher(),
-    bar.nav,
-    h(
-      'form',
-      {
-        id: 'global-search-form',
-        class: 'global-search',
-        role: 'search',
-        'aria-label': 'Search the project',
-        onsubmit: (event) => {
-          event.preventDefault();
-          openSearch(search.value.trim());
-        },
-      },
-      search,
-      h('button', { type: 'submit', id: 'global-search-go' }, 'Search'),
-    ),
-    h('span', { class: 'spacer' }),
-    bar.activity,
-    menu.wrap,
-    h('button', { type: 'button', id: 'switcher-open', class: 'link', title: 'Ctrl+K, or ⌘K', onclick: () => openJump() }, 'Jump to…'),
-    h('span', { id: 'connection', class: 'chip', hidden: true }, 'Cannot reach the server: trying again'),
-    h('span', { id: 'index-state', class: 'chip', title: 'Items that are new or changed and not yet searchable by meaning' }, indexText()),
-    bar.who,
-    ...accountBar(),
-  );
-}
-
-const showWho = () => {
-  if (bar) bar.who.textContent = `You are ${actor() || '(no name)'}: change`;
-};
-
-function updateTop() {
-  if (!bar) return;
-  const mark = (element, on) => {
-    element.classList.toggle('current', on);
-    if (on) element.setAttribute('aria-current', 'page');
-    else element.removeAttribute('aria-current');
-  };
-  for (const link of bar.nav.querySelectorAll('a')) mark(link, link.dataset.page === ui.page);
-  mark(bar.settings, SETTINGS.includes(ui.page));
-  const drawer = drawerName(ui.params);
-  bar.activity.setAttribute('aria-expanded', String(drawer === 'activity'));
-  bar.activity.classList.toggle('current', drawer === 'activity');
-  // The box follows the words of the address, unless it is being typed in.
-  const words = ui.params.get('search') || '';
-  if (words !== bar.typed) {
-    bar.typed = words;
-    if (document.activeElement !== bar.search) bar.search.value = words;
-  }
-}
-
-// What is at the top before a project is open.
-function drawEntryTop() {
-  bar = null;
-  clear(top).append(brand('/board'), h('span', { class: 'spacer' }), ...(session ? accountBar() : []));
+function projectShell() {
+  app.dataset.shell = 'project';
+  showSidebar({ session, project, projectList, views: VIEWS, settings: SETTINGS, titles: TITLES, leaveBoard, askName, toggleActivity });
+  showTop({ project, indexText, openSearch, openJump });
 }
 
 onChange((change) => {
   if (change.index) {
-    const chip = document.getElementById('index-state');
-    if (chip) chip.textContent = indexText();
+    setIndexText(indexText());
     if (mounted && mounted.index) mounted.index();
     drawerIndex();
   }
   if (change.events && mounted) {
+    updateSidebar();
     mounted.refresh(change.events);
     panel.refresh(change.events);
     refreshDrawer(change.events);
@@ -309,11 +176,14 @@ onChange((change) => {
 // Not being able to reach the server is said in the top bar and above the page, whichever view
 // is open, and goes away again when the server answers.
 function showConnection(trouble) {
-  const chip = document.getElementById('connection');
-  if (chip) chip.hidden = !trouble;
+  setConnection(trouble);
   const note = document.getElementById('connection-note');
   note.hidden = !trouble;
-  note.textContent = trouble ? 'The board cannot reach the server, so what it shows may be out of date. It is trying again.' : '';
+  if (trouble) {
+    note.replaceChildren(icon('alert', { size: 16 }), h('span', {}, 'The board cannot reach the server, so what it shows may be out of date. It is trying again.'));
+  } else {
+    note.replaceChildren();
+  }
 }
 
 function connectionTrouble(error) {
@@ -347,13 +217,11 @@ function askName() {
           event.preventDefault();
           setActor(field.value);
           box.close();
-          showWho();
+          updateWho();
         },
       },
-      h('label', { for: 'name' }, 'Your name'),
-      field,
-      h('button', { type: 'submit', class: 'primary' }, 'Save'),
-      h('button', { type: 'button', onclick: () => box.close() }, 'Cancel'),
+      h('div', { class: 'field' }, h('label', { for: 'name' }, 'Your name'), field),
+      h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => box.close() }, 'Cancel'), h('button', { type: 'submit', class: 'primary' }, 'Save')),
     ),
   );
   box.showModal();
@@ -372,8 +240,9 @@ function leave(message = '') {
   clear(main);
   hideDrawer();
   panel.hide();
+  for (const open of dialogs.querySelectorAll('dialog')) open.close();
   setProject(null);
-  drawEntryTop();
+  entryShell();
   showConnection(false);
   showSignIn(main, { onSignedIn: () => location.reload(), message });
 }
@@ -382,9 +251,12 @@ function leave(message = '') {
 async function begin() {
   await start();
   running = true;
-  buildTop();
+  projectShell();
   keepSynced(connectionTrouble, () => showConnection(false));
   route();
+  // The Graph's number in the sidebar counts the requirements, decisions and facts too, so they
+  // are read now (the quick switcher and the Graph want them as well).
+  ensureContext().then(updateSidebar).catch(() => {});
 }
 
 async function openProject(number) {
@@ -395,11 +267,10 @@ async function openProject(number) {
   } catch (error) {
     setProject(null);
     if (!(error instanceof Refusal) || error instanceof NotSignedIn) throw error;
-    drawEntryTop();
+    entryShell();
     showNoProject(main, error.message);
     return;
   }
-  document.title = `${project.name} · Vrum board`;
   if (!actor()) setActor(session.account.name);
   await begin();
 }
@@ -418,9 +289,25 @@ const openJump = keepSwitcher(
   () => running,
 );
 
+// The board could not start: say so where the page goes, and offer to try again.
+function unavailable(message) {
+  stopSyncing();
+  clear(main).append(
+    h(
+      'section',
+      { id: 'board-unavailable', class: 'unavailable', role: 'alert' },
+      h('h1', {}, 'The board could not start'),
+      h('p', {}, message),
+      h('button', { type: 'button', id: 'retry', class: 'primary', onclick: () => location.reload() }, 'Try again'),
+    ),
+  );
+}
+
 (async () => {
   readAddress();
   route();
+  // While the session and the project load, the page already has its brand and the appearance control.
+  showEntryTop({ session: null, leaveBoard });
   try {
     session = await loadSession();
     if (session === null) {
@@ -428,7 +315,7 @@ const openJump = keepSwitcher(
       return;
     }
     if (inAddress === null) {
-      drawEntryTop();
+      entryShell();
       await showProjects(main, session);
       return;
     }
@@ -438,7 +325,7 @@ const openJump = keepSwitcher(
       leave('Your session has ended. Sign in again.');
       return;
     }
-    clear(main);
-    notify(error instanceof Refusal ? error.message : 'The board could not start. Reload the page to try again.', { refusal: true });
+    if (app.dataset.shell === 'loading') entryShell();
+    unavailable(error instanceof Refusal ? error.message : 'The board could not start. Reload the page to try again.');
   }
 })();

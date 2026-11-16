@@ -8,14 +8,38 @@ import { parseSel, ui } from './ctx.js';
 import { clear, h } from './dom.js';
 import { renderCard } from './card.js';
 import { renderCoverage } from './coverage.js';
-import { renderRecord, renderRule } from './records.js';
+import { icon } from './icons.js';
+import { loadingView, renderRecord, renderRule, stateView } from './records.js';
 import { store } from './store.js';
 
 const aside = document.getElementById('panel');
 const layout = document.getElementById('layout');
 let shown = null; // { key, state }
 let opener = null; // what had the focus before the panel opened, to give it back
+let openerAt = null; // where to look for it again if the page drew it anew: { region, href }
+let lastOutside = null; // the last place outside the panel that had the focus: { element, at }
 let generation = 0;
+
+// A link the page may draw again (a search result, a row of a list) is found again by where it is
+// and where it leads, so closing the panel still gives the focus back to it.
+function whereIs(element) {
+  const href = element instanceof Element ? element.getAttribute('href') : null;
+  const region = element instanceof Element ? element.closest('#drawer, #page') : null;
+  return href && region ? { region: region.id, href } : null;
+}
+
+// The drawer draws its list again before the panel opens, which takes the focus off the link that
+// was used, so the place is noted as the focus arrives, not when the panel opens.
+document.addEventListener('focusin', (event) => {
+  if (!aside.contains(event.target)) lastOutside = { element: event.target, at: whereIs(event.target) };
+});
+
+function giveBackFocus() {
+  if (opener && document.contains(opener)) opener.focus();
+  else if (openerAt) document.getElementById(openerAt.region)?.querySelector(`a[href="${CSS.escape(openerAt.href)}"]`)?.focus();
+  opener = null;
+  openerAt = null;
+}
 
 export function hide() {
   generation += 1;
@@ -25,11 +49,12 @@ export function hide() {
   aside.hidden = true;
   layout.classList.remove('with-panel');
   clear(aside);
-  if (opener && document.contains(opener)) opener.focus();
-  opener = null;
+  giveBackFocus();
 }
 
-const closeLink = () => h('button', { type: 'button', class: 'close-panel', onclick: () => ui.navigate({ sel: null, panel: null }) }, 'Close');
+// A panel with only a message in it: the server's refusal, or that the address names nothing.
+const closes = () => ui.navigate({ sel: null, panel: null });
+const say = (message, refusal = true) => clear(aside).append(stateView(message, { refusal, onClose: closes }));
 
 function draw(wanted, state) {
   if (wanted.kind === 'node') return renderCard(aside, wanted.id, state);
@@ -43,7 +68,16 @@ export async function show(params) {
   const key = wanted ? `${wanted.kind}:${wanted.id}` : typed ? `unknown:${typed}` : params.get('panel') === 'coverage' ? 'coverage' : null;
   if (key === null) return hide();
   if (shown && shown.key === key) return;
-  if (!shown) opener = document.activeElement;
+  if (!shown) {
+    const held = document.activeElement;
+    if (held && held !== document.body) {
+      opener = held;
+      openerAt = whereIs(held);
+    } else if (lastOutside) {
+      opener = lastOutside.element;
+      openerAt = lastOutside.at;
+    }
+  }
   const mine = ++generation;
   // A detail still being fetched for the one that was open must not be drawn over this one.
   if (shown) shown.state.dead = true;
@@ -51,9 +85,9 @@ export async function show(params) {
   shown = { key, state };
   aside.hidden = false;
   layout.classList.add('with-panel');
-  clear(aside);
+  clear(aside).append(loadingView());
   if (key.startsWith('unknown:')) {
-    aside.append(h('p', { class: 'problem', role: 'alert' }, 'That address does not name something the board can show. It looks like sel=node:12, sel=rule:3, sel=decision:7 or sel=fact:5.'), closeLink());
+    say('That address does not name something the board can show. It looks like sel=node:12, sel=rule:3, sel=decision:7 or sel=fact:5.');
     return;
   }
   try {
@@ -62,7 +96,7 @@ export async function show(params) {
   } catch (error) {
     if (mine !== generation) return;
     if (!(error instanceof Refusal)) throw error;
-    clear(aside).append(h('p', { class: 'problem', role: 'alert' }, error.message), closeLink());
+    say(error.message);
     return;
   }
   if (mine !== generation) return;
@@ -83,8 +117,8 @@ function banner(text, onLoad) {
     h(
       'div',
       { class: 'notice changed', role: 'status' },
-      text,
-      ' ',
+      icon('info', { size: 16 }),
+      h('span', {}, text),
       h('button', { type: 'button', class: 'link load-current', onclick: onLoad }, 'Load the current version'),
     ),
   );
@@ -129,7 +163,7 @@ export async function refresh(events) {
   const id = Number(idText);
   if (kind === 'node' && !store.nodes.has(id)) {
     aside.querySelector('.changed')?.remove();
-    clear(aside).append(h('p', { class: 'quiet' }, `Item #${id} is no longer there.`), closeLink());
+    say(`Item #${id} is no longer there.`, false);
     return;
   }
   const seen = events.map((event) => relevance(event, kind, id, state));
@@ -144,7 +178,7 @@ export async function refresh(events) {
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     aside.querySelector('.panel-problem')?.remove();
-    aside.prepend(h('p', { class: 'problem panel-problem', role: 'alert' }, error.message));
+    aside.prepend(h('p', { class: 'notice refusal panel-problem', role: 'alert' }, icon('alert', { size: 16 }), h('span', {}, error.message)));
     return;
   }
   if (state.skipped) {

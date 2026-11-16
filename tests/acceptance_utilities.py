@@ -21,7 +21,7 @@ from playwright.async_api import Page, Route, expect
 from tests.acceptance_board import same_words
 from tests.acceptance_scenario import URL, Failed, chapter, clip, proof
 from tests.board_helpers import SLOW, board_call, board_url, browser_page, made
-from tests.board_m14 import events_of, feed_ids, feed_row, ids_of, spoken
+from tests.board_m14 import events_of, feed_becomes, feed_ids, feed_row, ids_of, spoken
 from tests.board_search import (
     address,
     asked,
@@ -345,11 +345,7 @@ async def filters(client: Client, page_url: str) -> None:
         ):
             await w.go(f"#/board?drawer=activity&{choices}")
             ids = [e["id"] for e in reversed(wanted)]
-            for _ in range(150):
-                if await feed_ids(page) == ids:
-                    break
-                await page.wait_for_timeout(100)
-            held.append(await feed_ids(page) == ids)
+            held.append(await feed_becomes(page, ids) == ids)
         await w.go(f"#/board?drawer=activity&act_actor={ann}&act_kind=requirements")
         await expect(feed_row(page, f"{ann} moved requirement {rule['id']}")).to_contain_text(
             f"from story #{one['id']} “One {word}” to story #{two['id']} “Two {word}”",
@@ -360,23 +356,20 @@ async def filters(client: Client, page_url: str) -> None:
             for e in reversed(await events_of(client, actor=ann))
             if e["action"].startswith("rule_")
         ]
-        kind_holds = await feed_ids(page) == rules_only
+        kind_holds = await feed_becomes(page, rules_only) == rules_only
         await w.go(f"#/board?drawer=activity&act_actor={ann}&act_from={day(1)}")
         await expect(page.locator("#activity-count")).to_contain_text(
             "Nothing read so far matches", timeout=SLOW
         )
         today = [e["id"] for e in reversed(await events_of(client, actor=ann))]
         await w.go(f"#/board?drawer=activity&act_actor={ann}&act_from={day()}&act_to={day()}")
-        for _ in range(150):
-            if await feed_ids(page) == today:
-                break
-            await page.wait_for_timeout(100)
+        on_the_day = await feed_becomes(page, today)
         proof(
             "M14",
             "the Activity drawer is filterable by actor, kind of change, item and time, each equal "
             "to changes_since with the same filter, newest first, in plain words such as 'moved "
             "requirement N from story A to story B'",
-            all(held) and kind_holds and await feed_ids(page) == today,
+            all(held) and kind_holds and on_the_day == today,
             f"{len(rules_only)} requirement changes",
         )
         assert w.problems == []
@@ -634,9 +627,10 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
     async with browser_page(page_url, token=the_token()) as w:
         page = w.page
         await w.open("#/roadmap")
-        # Activity: Tab from the search button, then Enter, and nothing else.
-        await page.locator("#global-search-go").focus()
-        await page.keyboard.press("Tab")
+        # Activity: it is in the sidebar right before Settings, so Shift+Tab from the Settings
+        # button, then Enter, and nothing else.
+        await page.locator("#settings-menu").focus()
+        await page.keyboard.press("Shift+Tab")
         focused = await page.evaluate("document.activeElement.id")
         await page.keyboard.press("Enter")
         await expect(drawer(page, "activity")).to_be_visible(timeout=SLOW)
@@ -673,11 +667,11 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         assert w.problems == []
         proof(
             "M16",
-            "the Activity drawer opens from the keyboard alone (Tab from the search button, then "
-            "Enter) and shows the server's newest changes with a handoff note in full and who is "
-            "working on what exactly as MCP lists them; the Tools and Status pages open from the "
-            "Settings menu with the keys and show the 53 tools and the health, sizes and index "
-            "server_status gives",
+            "the Activity drawer opens from the keyboard alone (Shift+Tab from the Settings "
+            "button, then Enter) and shows the server's newest changes with a handoff note in "
+            "full and who is working on what exactly as MCP lists them; the Tools and Status "
+            "pages open from the Settings menu with the keys and show the 53 tools and the "
+            "health, sizes and index server_status gives",
             focused == "activity-open"
             and feed_equal
             and note_in_full
@@ -860,7 +854,7 @@ async def drafts(client: Client, page_url: str) -> None:
             assert await page.locator("#search-box").input_value() == unasked, button
             assert (await address(page))[1]["sel"] == f"node:{story}"
         for view in ("roadmap", "board", "graph"):
-            await page.locator(f"#top nav a[data-page={view}]").click()
+            await page.locator(f"#main-nav a[data-page={view}]").click()
             await on_view(page, view)
             await kept(f"the {view} view")
             assert (await address(page))[1]["sel"] == f"node:{story}"
@@ -908,7 +902,7 @@ async def connection_failure(client: Client, page_url: str) -> None:
         lane_kept = await page.locator(f".lane[data-epic='{epic}']").is_visible()
         stays = []
         for view, marker in (("graph", "#graph-page"), ("roadmap", ".rm-track")):
-            await page.locator(f"#top nav a[data-page={view}]").click()
+            await page.locator(f"#main-nav a[data-page={view}]").click()
             await on_view(page, view)
             await expect(page.locator(marker)).to_be_visible(timeout=SLOW)
             stays.append(await note.is_visible())

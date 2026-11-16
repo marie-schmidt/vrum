@@ -4,7 +4,9 @@
 
 import { call } from './api.js';
 import { ui } from './ctx.js';
-import { clear, h, plural } from './dom.js';
+import { clear, h, plural, put } from './dom.js';
+import { kindIcon } from './labels.js';
+import { closeButton, loadingView } from './records.js';
 import { itemLink, openLink } from './references.js';
 
 function list(title, key, items, render, total, more) {
@@ -12,7 +14,7 @@ function list(title, key, items, render, total, more) {
     'section',
     { class: 'part', dataset: { part: key } },
     h('h3', {}, `${title} (${total})`),
-    items.length ? h('ul', { class: 'plain' }, items.map(render)) : h('p', { class: 'quiet' }, 'None.'),
+    items.length ? h('ul', { class: 'plain coverage-list' }, items.map(render)) : h('p', { class: 'quiet' }, 'None.'),
     more,
   );
 }
@@ -35,13 +37,14 @@ export async function drawCoverage(into) {
         'Requirements in no story',
         'unplaced-requirements',
         unplaced,
-        (rule) => h('li', { 'data-rule': rule.id }, openLink('rule', rule.id, `Requirement #${rule.id} (${rule.status}): ${rule.title}`)),
+        (rule) => h('li', { 'data-rule': rule.id }, openLink('rule', rule.id, `Requirement #${rule.id} (${rule.status}): ${rule.title}`, kindIcon('rule', 14))),
         report.unplaced_rule_count,
         report.next_unplaced_after_id && unplaced.length < report.unplaced_rule_count
           ? h(
               'button',
               {
                 type: 'button',
+                class: 'small',
                 onclick: async () => {
                   const more = await section('unplaced_rules', { unplaced_after_id: report.next_unplaced_after_id });
                   unplaced.push(...more.unplaced_rules);
@@ -60,13 +63,14 @@ export async function drawCoverage(into) {
         'Stories with no requirement',
         'stories-without-requirements',
         stories,
-        (story) => h('li', { 'data-story': story.id, 'data-drop-story': story.id }, itemLink(story.id)),
+        (story) => h('li', { 'data-story': story.id, 'data-drop-story': story.id }, kindIcon('story', 14), itemLink(story.id)),
         report.story_without_rules_count,
         report.next_stories_after_id && stories.length < report.story_without_rules_count
           ? h(
               'button',
               {
                 type: 'button',
+                class: 'small',
                 onclick: async () => {
                   const more = await section('stories_without_rules', { stories_after_id: report.next_stories_after_id });
                   stories.push(...more.stories_without_rules);
@@ -89,15 +93,17 @@ export const coverageWords = ({ unplacedRules, storiesWithoutRules }) =>
   `${plural(unplacedRules, 'requirement')} ${unplacedRules === 1 ? 'is' : 'are'} in no story. ${plural(storiesWithoutRules, 'story', 'stories')} ${storiesWithoutRules === 1 ? 'has' : 'have'} no requirement.`;
 
 export async function renderCoverage(root) {
+  if (!root.querySelector('.coverage')) put(root, loadingView());
   const lists = h('div', { class: 'coverage-lists' });
   const view = h(
     'article',
-    { class: 'coverage' },
+    { class: 'coverage detail' },
     h(
       'header',
-      {},
-      h('h2', { id: 'coverage-title', tabindex: -1 }, 'Coverage'),
-      h('button', { type: 'button', class: 'close', 'aria-label': 'Close the coverage report', onclick: () => ui.navigate({ panel: null }) }, '✕'),
+      { class: 'detail-head' },
+      h('p', { class: 'detail-label' }, kindIcon('rule', 14), h('span', {}, 'Requirements / report')),
+      h('h2', { id: 'coverage-title', class: 'detail-title', tabindex: -1 }, 'Coverage'),
+      closeButton('Close the coverage report', () => ui.navigate({ panel: null })),
     ),
     h('p', { class: 'quiet' }, 'What is not matched up yet. Dropped requirements and dropped stories are left out.'),
     lists,

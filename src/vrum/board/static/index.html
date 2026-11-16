@@ -1,23 +1,38 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Vrum board</title>
   <link rel="icon" type="image/svg+xml" href="/board/brand/vrum-favicon.svg">
+  <!-- The theme is decided here, before the first paint, so the page never flashes the wrong one. -->
+  <script src="/board/theme.js"></script>
+  <link rel="stylesheet" href="/board/tokens.css">
+  <link rel="stylesheet" href="/board/base.css">
   <link rel="stylesheet" href="/board/board.css">
+  <link rel="stylesheet" href="/board/kanban.css">
+  <link rel="stylesheet" href="/board/roadmap.css">
+  <link rel="stylesheet" href="/board/drawers.css">
   <link rel="stylesheet" href="/board/records.css">
   <link rel="stylesheet" href="/board/graph-views.css">
 </head>
 <body>
   <a class="skip" href="#page">Skip to the page</a>
-  <header id="top"></header>
-  <p id="connection-note" class="banner" role="alert" hidden></p>
-  <div id="notices" aria-label="Messages"></div>
-  <div id="layout">
-    <aside id="drawer" aria-label="Drawer" hidden></aside>
-    <main id="page" tabindex="-1" aria-label="Page"></main>
-    <aside id="panel" aria-label="Details" hidden></aside>
+  <div id="app" data-shell="loading">
+    <aside id="sidebar" aria-label="Project" hidden></aside>
+    <div id="sidebar-scrim" hidden></div>
+    <div id="main-column">
+      <header id="top"></header>
+      <p id="connection-note" class="banner" role="alert" hidden></p>
+      <div id="notices" aria-label="Messages"></div>
+      <div id="layout">
+        <div id="sheet-scrim" aria-hidden="true"></div>
+        <aside id="drawer" aria-label="Drawer" hidden></aside>
+        <main id="page" tabindex="-1" aria-label="Page"><p class="loading" role="status">Loading…</p></main>
+        <aside id="panel" aria-label="Details" hidden></aside>
+      </div>
+    </div>
   </div>
   <div id="dialogs"></div>
   <div id="live" class="sr-only" role="status" aria-live="polite"></div>

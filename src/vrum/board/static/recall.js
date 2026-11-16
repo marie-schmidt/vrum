@@ -8,7 +8,8 @@ import { Refusal, call } from './api.js';
 import { recordLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { recordEntry } from './entries.js';
-import { uid } from './forms.js';
+import { refuse, uid } from './forms.js';
+import { kindIcon } from './labels.js';
 import { kindWords, referenceKindOf } from './references.js';
 
 const PAGE = 50;
@@ -47,7 +48,7 @@ function listSection([name, title, note], entries, ask, hideEmpty) {
             'button',
             {
               type: 'button',
-              class: 'show-more',
+              class: 'show-more small',
               onclick: async () => {
                 const next = await ask({ show: name, after_id: after });
                 draw(next[name].items);
@@ -65,8 +66,8 @@ function listSection([name, title, note], entries, ask, hideEmpty) {
   return h(
     'section',
     { class: 'recall-section', dataset: { section: name, count } },
-    h('h4', {}, `${title} (${count})`),
-    h('p', { class: 'quiet' }, note),
+    h('h4', {}, title, h('span', { class: 'heading-count' }, ` (${count})`)),
+    h('p', { class: 'quiet section-note' }, note),
     items.length ? list : h('p', { class: 'quiet none' }, 'None.'),
     more,
   );
@@ -83,8 +84,9 @@ function similarSection(similar) {
           h(
             'li',
             { class: 'similar-item', dataset: { similar: `${item.item_type}:${item.id}` } },
+            kindIcon(item.item_type, 14),
             recordLink(referenceKindOf(item.item_type), item.id, { class: 'item-link' }, `${kindWords(item.item_type).label} #${item.id}: ${item.title}`),
-            ` ${item.similarity === null || item.similarity === undefined ? 'by words' : `${item.similarity.toFixed(2)} alike`}`,
+            h('span', { class: 'quiet' }, `${item.similarity === null || item.similarity === undefined ? 'by words' : `${item.similarity.toFixed(2)} alike`}`),
           ),
         ),
       )
@@ -92,8 +94,8 @@ function similarSection(similar) {
   return h(
     'section',
     { class: 'recall-section', dataset: { section: 'similar', count: similar.count ?? similar.items.length } },
-    h('h4', {}, `Alike in meaning, not linked (${similar.count ?? similar.items.length})`),
-    h('p', { class: 'quiet' }, 'Suggestions from the index. Nobody linked these to this item.'),
+    h('h4', {}, 'Alike in meaning, not linked', h('span', { class: 'heading-count' }, ` (${similar.count ?? similar.items.length})`)),
+    h('p', { class: 'quiet section-note' }, 'Suggestions from the index. Nobody linked these to this item.'),
     body,
   );
 }
@@ -129,14 +131,14 @@ export function recallBlock(target, data, { withSimilar = false, onSimilar = () 
     onchange: async (event) => {
       // Choosing what to look at is not an unsaved edit of the item.
       event.stopPropagation();
-      problem.textContent = '';
+      problem.replaceChildren();
       similar = toggle.checked;
       onSimilar(similar);
       try {
         draw(await askRecall(target, extra()));
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
-        problem.textContent = error.message;
+        refuse(problem, error.message);
       }
     },
   });
