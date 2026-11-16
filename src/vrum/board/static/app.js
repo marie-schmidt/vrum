@@ -54,6 +54,11 @@ const PAGES = {
   status: { title: 'Status', view: status },
 };
 const top = document.getElementById('top');
+// The bar wraps onto more lines on a narrow window or with long names, and what sticks under it
+// has to start below where it really ends, not below where it would end on one line.
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--top-now', `${top.getBoundingClientRect().height}px`);
+}).observe(top);
 const main = document.getElementById('page');
 const dialogs = document.getElementById('dialogs');
 let mounted = null; // the page on screen

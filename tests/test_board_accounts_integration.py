@@ -416,3 +416,29 @@ async def test_a_session_that_ended_sends_the_page_back_to_sign_in_and_signing_i
         await w.page.locator("#sign-in-submit").click()
         await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
         assert f"/board/p/{project.id}" in w.page.url
+
+
+async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() -> None:
+    word = unique_word()
+    owner = register(name=f"A person with quite a long name {word}")
+    project = make_project(owner, f"A project with a long name too {word}")
+    agreed = """() => {
+        const near = (a, b) => Math.abs(a - b) < 0.5;
+        const bar = document.getElementById('top').getBoundingClientRect().height;
+        const said = getComputedStyle(document.documentElement).getPropertyValue('--top-now');
+        const panel = getComputedStyle(document.getElementById('panel'));
+        return near(parseFloat(said), bar) && bar > 60
+            && (panel.position !== 'sticky' || near(parseFloat(panel.top), bar));
+    }"""
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        await w.open("#/board")
+        await expect(w.page.locator("#top nav")).to_be_visible(timeout=SLOW)
+        # With long names the bar wraps onto a second line, taller than the one line the
+        # stylesheet assumes, and more so on a narrow window: what sticks must start below it all.
+        await w.page.wait_for_function(agreed, timeout=SLOW)
+        assert (
+            await w.page.evaluate("getComputedStyle(document.getElementById('panel')).position")
+            == "sticky"
+        )
+        await w.page.set_viewport_size({"width": 700, "height": 1500})
+        await w.page.wait_for_function(agreed, timeout=SLOW)

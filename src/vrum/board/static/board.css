@@ -54,7 +54,7 @@ progress { width: 6rem; height: 0.6rem; vertical-align: middle; margin-left: 0.4
 #top nav a.current { border-color: var(--ink); background: var(--ink); color: var(--paper); }
 #top .spacer { flex: 1; }
 #top .chip { font-size: 0.8rem; }
-#notices { position: fixed; top: calc(var(--top) + 0.3rem); right: 1rem; z-index: 40; display: grid; gap: 0.4rem; width: min(32rem, calc(100vw - 2rem)); pointer-events: none; }
+#notices { position: fixed; top: calc(var(--top-now, var(--top)) + 0.3rem); right: 1rem; z-index: 40; display: grid; gap: 0.4rem; width: min(32rem, calc(100vw - 2rem)); pointer-events: none; }
 #notices .notice { pointer-events: auto; box-shadow: 4px 4px 0 var(--ink); }
 .notice { background: var(--white); border: 2px solid var(--ink); padding: 0.4rem 0.7rem; display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
 .notice.refusal { border-color: var(--vermilion); border-left-width: 8px; }
@@ -67,7 +67,7 @@ progress { width: 6rem; height: 0.6rem; vertical-align: middle; margin-left: 0.4
 #layout.with-panel { grid-template-columns: minmax(0, 1fr) minmax(22rem, 30rem); }
 #page { padding: 1rem; min-width: 0; }
 #page:focus { outline: none; }
-#panel { border-left: 3px solid var(--ink); background: var(--white); padding: 1rem; position: sticky; top: var(--top); align-self: start; max-height: calc(100vh - var(--top)); overflow: auto; }
+#panel { border-left: 3px solid var(--ink); background: var(--white); padding: 1rem; position: sticky; top: var(--top-now, var(--top)); align-self: start; max-height: calc(100vh - var(--top-now, var(--top))); overflow: auto; }
 #panel[hidden] { display: none; }
 
 /* Chips */
@@ -313,7 +313,7 @@ dialog.modal.wide { width: min(46rem, 94vw); max-height: 92vh; overflow-y: auto;
 .memory-section { border-top: 3px solid var(--ink); margin-top: 1.2rem; padding-top: 0.5rem; }
 .memory-filter { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; margin: 0.8rem 0; padding: 0.5rem; border: 2px solid var(--ink); background: var(--white); }
 .memory-filter label { display: inline; margin: 0; }
-.bulk { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.4rem 0.6rem; border: 2px solid var(--ink); background: var(--white); margin: 0.5rem 0; position: sticky; top: var(--top); z-index: 5; }
+.bulk { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.4rem 0.6rem; border: 2px solid var(--ink); background: var(--white); margin: 0.5rem 0; position: sticky; top: var(--top-now, var(--top)); z-index: 5; }
 .change-result { flex-direction: column; align-items: stretch; margin: 0.6rem 0; }
 .picker .chips { margin: 0.3rem 0; }
 .evidence-pick { list-style: none; margin: 0.3rem 0; padding: 0.4rem 0.6rem; max-height: 11rem; overflow-y: auto; border: 2px solid var(--ink); background: var(--white); display: block; }
@@ -426,7 +426,7 @@ dialog.modal.wide { width: min(46rem, 94vw); max-height: 92vh; overflow-y: auto;
 .event { background: var(--white); border: 2px solid var(--ink); border-left-width: 6px; padding: 0.3rem 0.6rem; overflow-wrap: anywhere; }
 .event.action-handoff { border-left-color: var(--vermilion); }
 .event .handoff-note { border-left: 4px solid var(--line); margin: 0.3rem 0 0.1rem 0.3rem; padding-left: 0.6rem; background: var(--paper); }
-#working { border: 2px solid var(--ink); background: var(--white); padding: 0.6rem 0.8rem; position: sticky; top: calc(var(--top) + 0.5rem); max-height: calc(100vh - var(--top) - 1rem); overflow-y: auto; }
+#working { border: 2px solid var(--ink); background: var(--white); padding: 0.6rem 0.8rem; position: sticky; top: calc(var(--top-now, var(--top)) + 0.5rem); max-height: calc(100vh - var(--top-now, var(--top)) - 1rem); overflow-y: auto; }
 #working h3 { margin: 0.8rem 0 0.3rem; }
 .claims { gap: 0.4rem; }
 .claim { border-left: 4px solid var(--ink); padding-left: 0.5rem; }
