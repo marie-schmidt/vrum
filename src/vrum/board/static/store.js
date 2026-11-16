@@ -3,7 +3,7 @@
 // with the same tools an agent uses and refreshed from the same change feed. The server is the
 // only place anything is kept.
 
-import { Refusal, call, callAll, callPaged, exported, get } from './api.js';
+import { Refusal, call, callAll, callPaged, exported, get, indexState } from './api.js';
 
 export const store = {
   nodes: new Map(), // id -> node
@@ -81,7 +81,7 @@ export async function refreshWork() {
 }
 
 async function refreshIndex() {
-  const index = await get('/board/api/index');
+  const index = await indexState();
   const changed =
     !store.index ||
     store.index.waiting_to_index !== index.waiting_to_index ||

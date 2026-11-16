@@ -2,11 +2,18 @@
 beliefs. It is derived from the graph, can be dropped at any time, and never decides anything.
 
 This module is the only one that writes to the index tables (it also creates and drops them): the
-reindex job below does it, on request and in the background. Everything else only reads them."""
+reindex job below does it, on request and in the background. Everything else only reads them.
+
+One index holds every project's items, each with its project, and a project's work sees only its
+own rows of it (the database enforces that, as it does for the graph). The job that keeps it
+current works for every project, so it runs with no project named; a request to reindex is for one
+project and reports on that project."""
 
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -15,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from vrum.common import Refusal, fetch_all, fetch_one
 from vrum.config import EmbeddingSettings
-from vrum.db import Database
+from vrum.db import Database, working_for
 from vrum.embeddings import (
     BATCH_SIZE,
     EmbeddingClient,
@@ -70,7 +77,8 @@ async def snapshot(conn: AsyncConnection, model: str | None) -> IndexSnapshot:
         row = await fetch_one(
             conn,
             "SELECT count(*) AS waiting FROM index_source s WHERE NOT EXISTS ("
-            "SELECT 1 FROM semantic_index i WHERE i.item_type = s.item_type "
+            "SELECT 1 FROM semantic_index i WHERE i.project_id = s.project_id "
+            "AND i.item_type = s.item_type "
             "AND i.item_id = s.id AND i.content_hash = s.content_hash)",
         )
         built = True
@@ -177,14 +185,27 @@ class Indexer:
             )
         return self._client
 
-    async def reindex(self) -> IndexReport:
+    @asynccontextmanager
+    async def _reading(self, project_id: int | None) -> AsyncIterator[AsyncConnection]:
+        """A transaction for reading the index: one project's rows, or with no project every
+        project's (for the job that serves them all)."""
+        if project_id is None:
+            async with self._database.admin_transaction() as conn:
+                yield conn
+        else:
+            with working_for(project_id):
+                async with self._database.transaction() as conn:
+                    yield conn
+
+    async def reindex(self, project_id: int | None = None) -> IndexReport:
         """Bring the index up to date: build it if it does not exist (or was built with another
-        model), then embed every item that is new or changed. Raises EmbeddingUnavailable when
-        the service cannot be reached at the start; later trouble is reported in the result.
-        Either way, how it went is kept for the status page."""
+        model), then embed every item that is new or changed, in one project or, with none named,
+        in all of them. Raises EmbeddingUnavailable when the service cannot be reached at the
+        start; later trouble is reported in the result. Either way, how it went is kept for the
+        status page."""
         started = time.monotonic()
         try:
-            report = await self._reindex(started)
+            report = await self._reindex(started, project_id)
         except EmbeddingUnavailable as error:
             self._remember(0, 0, None, str(error), started)
             raise
@@ -205,7 +226,7 @@ class Indexer:
             seconds=round(time.monotonic() - started, 3),
         )
 
-    async def _reindex(self, started: float) -> IndexReport:
+    async def _reindex(self, started: float, project_id: int | None) -> IndexReport:
         client = self.require_client()
         assert self._settings is not None
         async with self._lock:
@@ -217,8 +238,10 @@ class Indexer:
                     f"PostgreSQL's vector type holds at most {_MOST_DIMENSIONS}."
                 )
             rebuilt_because = await self._ensure_tables(client.model, dimensions)
-            embedded, failed, error = await self._embed_waiting(client, self._settings.max_chars)
-            async with self._database.transaction() as conn:
+            embedded, failed, error = await self._embed_waiting(
+                client, self._settings.max_chars, project_id
+            )
+            async with self._reading(project_id) as conn:
                 state = await snapshot(conn, client.model)
                 total = await fetch_one(conn, "SELECT count(*) AS total FROM semantic_index")
             assert total is not None
@@ -238,7 +261,7 @@ class Indexer:
     async def _ensure_tables(self, model: str, dimensions: int) -> str | None:
         """Make sure the index tables exist for this model and vector size, dropping and
         rebuilding them if they were built for another. Says why if it built them."""
-        async with self._database.transaction() as conn:
+        async with self._database.admin_transaction() as conn:
             exists = await fetch_one(
                 conn,
                 "SELECT to_regclass('semantic_index') IS NOT NULL "
@@ -268,10 +291,11 @@ class Indexer:
             # `dimensions` is a whole number read from the service and checked above.
             await conn.execute(
                 "CREATE TABLE semantic_index ("
+                "project_id bigint NOT NULL REFERENCES projects (id), "
                 "item_type text NOT NULL, item_id bigint NOT NULL, content_hash text NOT NULL, "
                 f"embedding vector({int(dimensions)}) NOT NULL, "
                 "indexed_at timestamptz NOT NULL DEFAULT now(), "
-                "PRIMARY KEY (item_type, item_id))"
+                "PRIMARY KEY (project_id, item_type, item_id))"
             )
             await conn.execute(
                 "CREATE TABLE semantic_index_info ("
@@ -283,52 +307,72 @@ class Indexer:
                 "INSERT INTO semantic_index_info (model, dimensions) VALUES (%s, %s)",
                 (model, dimensions),
             )
+            # A project's work reads its own rows of the index and no others, and writes none.
+            await conn.execute("ALTER TABLE semantic_index ENABLE ROW LEVEL SECURITY")
+            await conn.execute(
+                "CREATE POLICY project_only ON semantic_index "
+                "USING (project_id = current_project())"
+            )
+            await conn.execute(
+                "GRANT SELECT ON semantic_index, semantic_index_info TO vrum_project"
+            )
             return reason
 
     async def _embed_waiting(
-        self, client: EmbeddingClient, max_chars: int
+        self, client: EmbeddingClient, max_chars: int, project_id: int | None
     ) -> tuple[int, list[FailedItem], str | None]:
         embedded = 0
         failed: list[FailedItem] = []
         # Items are taken in order, past the last one tried, so one that keeps failing cannot hold
         # up the rest or be tried over and over in one run.
-        after: tuple[str, int] = ("", 0)
+        after: tuple[int, str, int] = (0, "", 0)
         while True:
-            async with self._database.transaction() as conn:
+            async with self._database.admin_transaction() as conn:
                 batch = await fetch_all(
                     conn,
-                    "SELECT s.item_type, s.id, s.content, s.content_hash FROM index_source s "
-                    "LEFT JOIN semantic_index i ON i.item_type = s.item_type AND i.item_id = s.id "
+                    "SELECT s.project_id, s.item_type, s.id, s.content, s.content_hash "
+                    "FROM index_source s LEFT JOIN semantic_index i "
+                    "ON i.project_id = s.project_id AND i.item_type = s.item_type "
+                    "AND i.item_id = s.id "
                     "WHERE i.content_hash IS DISTINCT FROM s.content_hash "
-                    "AND (s.item_type, s.id) > (%s, %s) ORDER BY s.item_type, s.id LIMIT %s",
-                    (after[0], after[1], BATCH_SIZE),
+                    "AND (%s::bigint IS NULL OR s.project_id = %s) "
+                    "AND (s.project_id, s.item_type, s.id) > (%s, %s, %s) "
+                    "ORDER BY s.project_id, s.item_type, s.id LIMIT %s",
+                    (project_id, project_id, after[0], after[1], after[2], BATCH_SIZE),
                 )
             if not batch:
                 return embedded, failed, None
-            after = (batch[-1]["item_type"], batch[-1]["id"])
+            after = (batch[-1]["project_id"], batch[-1]["item_type"], batch[-1]["id"])
             try:
                 done, refused = await _embed_batch(client, batch, max_chars)
             except EmbeddingUnavailable as error:
                 return embedded, failed, str(error)
             failed.extend(refused)
             if done:
-                async with self._database.transaction() as conn, conn.cursor() as cursor:
+                async with self._database.admin_transaction() as conn, conn.cursor() as cursor:
                     await cursor.executemany(
-                        "INSERT INTO semantic_index (item_type, item_id, content_hash, "
-                        "embedding) VALUES (%s, %s, %s, %s::vector) "
-                        "ON CONFLICT (item_type, item_id) DO UPDATE SET "
+                        "INSERT INTO semantic_index (project_id, item_type, item_id, "
+                        "content_hash, embedding) VALUES (%s, %s, %s, %s, %s::vector) "
+                        "ON CONFLICT (project_id, item_type, item_id) DO UPDATE SET "
                         "content_hash = EXCLUDED.content_hash, "
                         "embedding = EXCLUDED.embedding, indexed_at = now()",
                         [
-                            (row["item_type"], row["id"], row["content_hash"], vector)
+                            (
+                                row["project_id"],
+                                row["item_type"],
+                                row["id"],
+                                row["content_hash"],
+                                vector,
+                            )
                             for row, vector in done
                         ],
                     )
                 embedded += len(done)
 
     async def run_forever(self) -> None:
-        """The background job: whenever items are waiting to be indexed, index them. It looks
-        again after a few seconds, and waits longer after trouble. It stops when cancelled."""
+        """The background job: whenever items are waiting to be indexed, in any project, index
+        them. It looks again after a few seconds, and waits longer after trouble. It stops when
+        cancelled."""
         assert self._settings is not None and self._client is not None
         interval = self._settings.reindex_seconds
         after_trouble = max(interval, min(interval * 5, 30.0))
@@ -336,7 +380,7 @@ class Indexer:
         while True:
             delay = interval
             try:
-                async with self._database.transaction() as conn:
+                async with self._reading(None) as conn:
                     waiting = (await snapshot(conn, self._client.model)).waiting
                 if waiting:
                     report = await self.reindex()

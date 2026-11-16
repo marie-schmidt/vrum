@@ -1,6 +1,6 @@
 """Try a running Vrum with a real embedding model and print what it does.
 
-    VRUM_TOKEN=<the token in .env> uv run python scripts/real_embeddings_check.py http://127.0.0.1:8000/mcp
+    VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/real_embeddings_check.py http://127.0.0.1:8000/mcp
 
 It adds a small, clearly named set of epics and stories (reworded requirements, related but
 different ones, and unrelated ones) to the graph it is pointed at, waits for the server's own job

@@ -1,5 +1,5 @@
 """The board's server side, without any containers: which tools its pages may call, what is open
-without a token, what the page files do and do not contain, and its one setting."""
+without signing in, what the page files do and do not contain, and its one setting."""
 
 import asyncio
 import os
@@ -14,7 +14,7 @@ from vrum.board.tools import AREAS, TOOL_PLACES, AgentsOnly, OnTheBoard, ToolPla
 from vrum.config import ConfigError, Settings
 from vrum.server import create_server
 
-ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "s3cret-value", "VRUM_TOKEN": "t" * 24}
+ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "s3cret-value"}
 PAGE_FILES = [path for path in STATIC.rglob("*") if path.is_file()]
 SCRIPTS = [path for path in PAGE_FILES if path.suffix == ".js"]
 
@@ -106,6 +106,25 @@ def test_the_security_policy_allows_only_the_servers_own_files_and_calls() -> No
     assert "default-src 'none'" in policy and "script-src 'self'" in policy
     assert "connect-src 'self'" in policy and "frame-ancestors 'none'" in policy
     assert "unsafe" not in policy and "http" not in policy and "*" not in policy
+
+
+def test_no_page_script_keeps_a_session_or_an_agent_key_in_the_browser() -> None:
+    # The session is a cookie the page cannot read, and its secret lives in memory only. The one
+    # thing kept in the browser is the name a person's changes are recorded with, and every call
+    # to the server goes through api.js, which puts the project in the address and sends no key.
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        assert [w for w in ("document.cookie", "sessionStorage", "indexedDB") if w in text] == []
+        assert "VRUM_TOKEN" not in text, path.name
+        if path.name != "api.js":
+            assert not re.search(r"\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket", text), path.name
+        if path.name != "ctx.js":
+            assert "localStorage" not in text, path.name
+    api_text = (STATIC / "api.js").read_text(encoding="utf-8")
+    assert "Authorization" not in api_text
+    ctx_text = (STATIC / "ctx.js").read_text(encoding="utf-8")
+    assert re.findall(r"localStorage\.\w+\((\w+)", ctx_text) == ["NAME_KEY"] * 2
+    assert "const NAME_KEY = 'vrum.actor'" in ctx_text
 
 
 def test_the_board_asks_for_news_every_five_seconds_unless_told_otherwise() -> None:

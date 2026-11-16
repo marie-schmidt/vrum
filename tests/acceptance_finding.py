@@ -343,7 +343,7 @@ async def finding() -> None:
             "indexed_at::text || ':' || embedding::text, ',' ORDER BY item_type, item_id)) "
             "FROM semantic_index"
         )
-        before_index = sql_value(snapshot_sql)
+        before_index = sql_value(snapshot_sql, as_project=True)
         await search(client, unique_word())
         await search(client, "invoice by email", mode="meaning")
         await ok(client, "similar_items", node_id=first_story["id"])
@@ -356,7 +356,7 @@ async def finding() -> None:
             "M5",
             "no tool other than reindex writes to the index: after every reading tool it is "
             "exactly as it was",
-            before_index and sql_value(snapshot_sql) == before_index,
+            before_index and sql_value(snapshot_sql, as_project=True) == before_index,
             f"checksum {before_index[:12]} unchanged",
         )
 

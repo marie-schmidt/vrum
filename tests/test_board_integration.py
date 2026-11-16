@@ -4,15 +4,17 @@ by reading the graph back through the tools; what an agent does through the tool
 looking at the board."""
 
 import asyncio
+import json
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from mcp import Client
 from playwright.async_api import Locator, expect
 
-from tests.board_helpers import Watched, board_url, browser_page, http
+from tests.board_helpers import Watched, api_path, board_call, board_url, browser_page, http
 from tests.helpers import (
     embeddings_stopped,
     make_fact,
@@ -23,6 +25,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import SESSION_COOKIE, api, project_at, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -75,57 +78,256 @@ async def history(client: Client, node_id: int) -> list[dict[str, Any]]:
 # -- 1. signing in ---------------------------------------------------------------------------------
 
 
-async def test_the_board_turns_away_a_wrong_or_empty_token_and_its_data_calls_need_the_token(
-    board: str,
+async def test_every_data_call_needs_a_signed_in_owner_and_the_pages_themselves_hold_no_data(
+    client: Client, board: str
 ) -> None:
-    token = the_token()
-    wrong = "a-wrong-token-" + unique_word()
+    project = project_at(board)
+    owner = project.owner.sign_in_again()
+    wrong = "vrs_wrong-session-" + unique_word()
+    origin = board.split("/board")[0]
+    mine = api_path(board)
+    word = unique_word()
+    epic = await made(client, "epic", f"Guarded {word}")
 
-    # The page files hold no data, so they are open.
+    # The page files hold no data, so they are open, and hold no session, secret or key.
     status, headers, text = http("GET", board)
     assert status == 200 and "Vrum board" in text
-    assert token not in text
-    # Every data call needs the token, and says so in plain words.
-    for method, path, body in (
-        ("GET", "/api/info", None),
-        ("GET", "/api/index", None),
-        ("POST", "/api/tool/list_nodes", {}),
-        ("POST", "/api/tool/update_node", {"actor": "x", "node_id": 1}),
+    for secret in (owner.cookie, owner.csrf, project.key):
+        assert secret not in text and secret not in str(headers)
+
+    # Every data call needs a session, says so in plain words, and never repeats what was sent.
+    calls: list[tuple[str, str, Any]] = [
+        ("GET", "/board/api/info", None),
+        ("GET", "/board/api/tools", None),
+        ("GET", "/board/api/projects", None),
+        ("GET", mine, None),
+        ("GET", f"{mine}/index", None),
+        ("GET", f"{mine}/keys", None),
+        ("POST", f"{mine}/tool/list_nodes", {}),
+        ("POST", f"{mine}/tool/update_node", {"actor": "x", "node_id": epic}),
+        ("POST", f"{mine}/try/list_nodes", {}),
+    ]
+    for method, path, body in calls:
+        for cookie in (None, wrong):
+            reply = api(origin, method, path, body, cookie=cookie)
+            assert reply.status == 401, (method, path, reply.body)
+            assert "not signed in" in reply.body["message"], (path, reply.body)
+            assert wrong not in json.dumps(reply.body), path
+
+    # Signed in, a read needs nothing more.
+    reply = owner.call("GET", "/board/api/info")
+    assert reply.status == 200 and "poll_seconds" in reply.body
+    # A change also needs the session's own secret and the server's own address as its origin, so
+    # that a page of another website cannot make this browser change anything.
+    change = {"actor": "x", "node_id": epic, "expected_version": 1, "title": f"Changed {word}"}
+    path = f"{mine}/tool/update_node"
+    for csrf, origin_sent, extra in (
+        (None, "same", None),
+        ("not-the-secret-" + unique_word(), "same", None),
+        (owner.csrf, "https://elsewhere.example", None),
+        (owner.csrf, "same", {"Sec-Fetch-Site": "cross-site"}),
     ):
-        status, _, text = http(method, board + path, body=body)
-        assert status == 401 and "needs a token and none was sent" in text, (path, text)
-        status, _, text = http(method, board + path, token=wrong, body=body)
-        assert status == 401 and "The token is not right" in text and wrong not in text, path
-    status, _, text = http("GET", board + "/api/info", token=token)
-    assert status == 200 and "poll_seconds" in text
+        reply = api(
+            origin, "POST", path, change, cookie=owner.cookie, csrf=csrf, origin=origin_sent,
+            extra=extra,
+        )  # fmt: skip
+        assert reply.status == 403, (csrf, origin_sent, extra, reply.body)
+        assert "nothing was done" in reply.body["message"]
+        assert (await ok(client, "get_node", node_id=epic))["version"] == 1
+    assert owner.call("POST", path, change).status == 200
+    assert (await ok(client, "get_node", node_id=epic))["version"] == 2
+
+    # Another person's project is as good as no project: the same words, so that they say nothing
+    # about which projects exist.
+    stranger = register(origin)
+    theirs = stranger.call("GET", mine)
+    nowhere = stranger.call("GET", "/board/api/projects/999999999")
+    assert theirs.status == nowhere.status == 404 and theirs.body == nowhere.body
+    for rest, body in (("/tool/list_nodes", {}), ("/index", None), ("/keys", None)):
+        refusal = stranger.call("POST" if rest.startswith("/tool") else "GET", mine + rest, body)
+        assert refusal.status == 404 and refusal.body == theirs.body, rest
+    assert project.name not in json.dumps(theirs.body)
+
+
+async def test_a_person_signs_in_with_email_and_password_and_the_session_stays_out_of_the_page(
+    board: str,
+) -> None:
+    project = project_at(board)
+    owner = project.owner
+    wrong = "not-the-password-" + unique_word()
+
+    async def submit(w: Watched, button: str) -> int:
+        """Press a button of the sign-in page and give the status the server answered with."""
+        async with w.page.expect_response(
+            lambda r: r.request.method == "POST" and "/board/api/" in r.url
+        ) as sent:
+            await w.page.locator(button).click()
+        return (await sent.value).status
 
     async with browser_page(board, token=None, name=None) as w:
         await w.open()
-        sign_in = w.page.locator("dialog.modal")
-        await expect(sign_in).to_contain_text("Sign in")
-        await sign_in.get_by_role("button", name="Sign in").click()
-        await expect(sign_in.locator(".problem")).to_contain_text("needs a token and none was sent")
-        await sign_in.locator("#token").fill(wrong)
-        await sign_in.get_by_role("button", name="Sign in").click()
-        await expect(sign_in.locator(".problem")).to_contain_text("The token is not right")
-        assert wrong not in await sign_in.locator(".problem").inner_text()
-        assert await w.page.locator(".board").count() == 0
+        await expect(w.page.locator("h1")).to_have_text("Sign in to Vrum")
+        await expect(w.page.locator("#sign-in-form")).to_be_visible()
+        assert (
+            await w.page.locator("#top nav").count() == 0
+            and not await w.page.locator(".board").count()
+        )
+        problem = w.page.locator("#entry-problem")
 
-        await sign_in.locator("#token").fill(token)
-        await sign_in.get_by_role("button", name="Sign in").click()
-        name = w.page.locator("dialog.modal #name")
-        await expect(name).to_be_visible()
-        await name.fill("Ada Lovelace")
-        await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
-        # Home is the first page after signing in.
+        # Nothing typed, then a wrong password: the same plain words, and what was typed is never
+        # shown back.
+        assert await submit(w, "#sign-in-submit") == 401
+        await expect(problem).to_contain_text("email address or the password is not right")
+        await w.page.locator("#account-email").fill(owner.email)
+        await w.page.locator("#account-password").fill(wrong)
+        assert await submit(w, "#sign-in-submit") == 401
+        await expect(problem).to_contain_text("email address or the password is not right")
+        assert wrong not in await w.page.locator("body").inner_text()
+        assert await w.page.locator("#top nav").count() == 0
+
+        # The right password opens the project in the address, on Home, as the account's name.
+        await w.page.locator("#account-password").fill(owner.password)
+        assert await submit(w, "#sign-in-submit") == 200
+        await expect(w.page.locator("h1")).to_have_text("Home", timeout=SLOW)
+        await expect(w.page.locator("#who")).to_contain_text(owner.name)
+        await expect(w.page.locator("#account")).to_have_text(owner.name)
+        await expect(w.page.locator("#project-switcher")).to_have_value(str(project.id))
+        assert await w.page.evaluate("localStorage.getItem('vrum.actor')") == owner.name
+
+        # The session is a cookie that a script on the page cannot read, that is not sent to
+        # another site, and that goes only to the board's own addresses.
+        cookies = [c for c in await w.page.context.cookies() if c["name"] == SESSION_COOKIE]
+        assert len(cookies) == 1
+        cookie = cookies[0]
+        assert cookie["httpOnly"] and cookie["sameSite"] == "Strict" and cookie["path"] == "/board"
+        assert await w.page.evaluate("document.cookie") == ""
+        # It, and the agent key, are in no address, no storage and nothing the page shows.
+        everything = " ".join(
+            [
+                w.page.url,
+                await w.page.evaluate("JSON.stringify(localStorage)"),
+                await w.page.evaluate("JSON.stringify(sessionStorage)"),
+                await w.page.evaluate("document.documentElement.outerHTML"),
+                *w.requests,
+            ]
+        )
+        for secret in (cookie["value"], project.key):
+            assert secret not in everything
+        # The two failed attempts were refused with a 401, and the browser logs each as a failed
+        # load; nothing else went wrong.
+        assert all("status of 401" in problem_ for problem_ in w.problems), w.problems
+
+
+async def test_a_person_registers_makes_a_project_switches_signs_out_and_back_in(
+    board: str,
+) -> None:
+    origin = board.split("/board")[0]
+    word = unique_word()
+    email, secret, shown = f"{word}@example.test", f"correct-horse-{word}", f"Grace {word}"
+
+    async def press(w: Watched, button: str) -> int:
+        async with w.page.expect_response(
+            lambda r: r.request.method == "POST" and "/board/api/" in r.url
+        ) as sent:
+            await w.page.locator(button).click()
+        return (await sent.value).status
+
+    async with browser_page(f"{origin}/board", token=None, name=None) as w:
+        await w.open()
+        await w.page.locator("#show-register").click()
+        await expect(w.page.locator("h1")).to_have_text("Create an account")
+        await w.page.locator("#account-email").fill(email)
+        await w.page.locator("#account-name").fill(shown)
+        problem = w.page.locator("#entry-problem")
+
+        # The server's own words for what is wrong, and nothing is made.
+        await w.page.locator("#account-password").fill("short")
+        assert await press(w, "#register-submit") == 400
+        await expect(problem).to_contain_text("The password must be 10 to 200 characters")
+        await w.page.locator("#account-email").fill("not an address")
+        await w.page.locator("#account-password").fill(secret)
+        assert await press(w, "#register-submit") == 400
+        await expect(problem).to_contain_text("does not look like an email address")
+        existing = project_at(board).owner.email
+        await w.page.locator("#account-email").fill(existing)
+        assert await press(w, "#register-submit") == 409
+        await expect(problem).to_contain_text("already exists")
+        assert secret not in await w.page.locator("body").inner_text()
+
+        # A good registration signs the person in and shows an honest empty list of projects.
+        await w.page.locator("#account-email").fill(email)
+        assert await press(w, "#register-submit") == 201
+        await expect(w.page.locator("#no-projects")).to_contain_text(shown, timeout=SLOW)
+        assert await w.page.locator("#projects").count() == 0
+        await expect(w.page.locator("#account")).to_have_text(shown)
+        await expect(w.page.locator("#sign-out")).to_be_visible()
+
+        # Making a project opens its board, on Home, with changes recorded under the person's name.
+        assert await press(w, "#create-project") == 400
+        await expect(w.page.locator("#project-problem")).to_contain_text("Give the project a name")
+        await w.page.locator("#project-name").fill(f"First {word}")
+        assert await press(w, "#create-project") == 201
+        await expect(w.page.locator("h1")).to_have_text("Home", timeout=SLOW)
+        assert re.fullmatch(r"/board/p/\d+", urlparse(w.page.url).path)
+        first = int(urlparse(w.page.url).path.rsplit("/", 1)[1])
+        await expect(w.page.locator("#who")).to_contain_text(shown)
+        await expect(w.page.locator("#project-switcher")).to_have_value(str(first))
+        assert await w.page.locator("#project-switcher option").all_inner_texts() == [
+            f"First {word}", "All projects…"
+        ]  # fmt: skip
+
+        # The project list of the same account, a second project, and the switcher's own choice.
+        await w.page.locator("#project-switcher").select_option("")
+        await expect(w.page.locator("#projects .project")).to_have_count(1, timeout=SLOW)
+        await w.page.locator("#project-name").fill(f"First {word}")
+        assert await press(w, "#create-project") == 409
+        await expect(w.page.locator("#project-problem")).to_contain_text("already have a project")
+        await w.page.locator("#project-name").fill(f"Second {word}")
+        assert await press(w, "#create-project") == 201
+        await expect(w.page.locator("h1")).to_have_text("Home", timeout=SLOW)
+        second = int(urlparse(w.page.url).path.rsplit("/", 1)[1])
+        assert second != first
+        await w.page.locator("#project-switcher").select_option(str(first))
+        await expect(w.page.locator("#project-switcher")).to_have_value(str(first), timeout=SLOW)
+        assert urlparse(w.page.url).path == f"/board/p/{first}"
         await expect(w.page.locator("h1")).to_have_text("Home")
-        await expect(w.page.locator("#who")).to_contain_text("Ada Lovelace")
 
-        # The token is kept for this tab only: not in the address, a cookie or the page's storage.
-        assert token not in w.page.url
-        assert await w.page.context.cookies() == []
-        assert token not in await w.page.evaluate("JSON.stringify(localStorage)")
-        assert all(token not in url for url in w.requests)
+        # Signing out ends the session at the server, not only in the page.
+        old = (await w.page.context.cookies())[0]["value"]
+        await w.page.locator("#sign-out").click()
+        await expect(w.page.locator("#sign-in-form")).to_be_visible(timeout=SLOW)
+        assert urlparse(w.page.url).path == "/board"
+        assert [c for c in await w.page.context.cookies() if c["value"] == old] == []
+        stale = api(origin, "GET", "/board/api/projects", cookie=old)
+        assert stale.status == 401 and "not signed in" in stale.body["message"]
+
+        # Signing in again lists both projects, and opens one.
+        await w.page.locator("#account-email").fill(email.upper())
+        await w.page.locator("#account-password").fill(secret)
+        assert await press(w, "#sign-in-submit") == 200
+        await expect(w.page.locator("#projects .project")).to_have_count(2, timeout=SLOW)
+        assert await w.page.locator("#projects .project a").all_inner_texts() == [
+            f"First {word}", f"Second {word}"
+        ]  # fmt: skip
+        await w.page.locator("#projects .project a", has_text=f"Second {word}").click()
+        await expect(w.page.locator("h1")).to_have_text("Home", timeout=SLOW)
+        assert urlparse(w.page.url).path == f"/board/p/{second}"
+
+        # Another person's project is not opened by its address: the page says so and shows
+        # nothing of it.
+        elsewhere = project_at(board)
+        await w.page.goto(f"{origin}/board/p/{elsewhere.id}")
+        await expect(w.page.locator("#no-such-project")).to_contain_text("no project with that")
+        assert await w.page.locator("#top nav").count() == 0
+        assert elsewhere.name not in await w.page.locator("body").inner_text()
+        # The browser logs a refusal it was sent (a 409, a 404) as a failed load; nothing else
+        # went wrong.
+        assert all(
+            "status of 404" in problem_
+            or "status of 409" in problem_
+            or "status of 401" in problem_
+            for problem_ in w.problems
+        ), w.problems
 
 
 # -- 2. an agent's work shows up -----------------------------------
@@ -213,10 +415,15 @@ async def test_what_a_person_does_on_the_board_is_in_the_graph_with_their_name_a
     word = unique_word()
     async with browser_page(board, token=the_token(), name=None) as w:
         await w.open("#/board")
+        # With no name chosen yet, changes are recorded under the account's own name, until the
+        # person says otherwise.
+        await expect(w.page.locator("#who")).to_contain_text(project_at(board).owner.name)
+        await w.page.locator("#who").click()
         who = w.page.locator("dialog.modal #name")
         await expect(who).to_be_visible()
         await who.fill("Ada Lovelace")
         await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
+        await expect(w.page.locator("#who")).to_contain_text("Ada Lovelace")
 
         async def create(kind: str, title: str, parent: int | None = None) -> int:
             await w.page.locator("#new-item").click()
@@ -543,8 +750,8 @@ async def test_titles_with_markup_are_shown_as_text_nothing_runs_and_nothing_lea
     policy = headers["content-security-policy"]
     assert status == 200 and "default-src 'none'" in policy and "script-src 'self'" in policy
     assert "'unsafe-inline'" not in policy and "http" not in policy
-    _, api_headers, _ = http("GET", board + "/api/info", token=the_token())
-    assert api_headers["content-security-policy"] == policy
+    answered = board_call(board, "GET", "/board/api/info")
+    assert answered.status == 200 and answered.headers["content-security-policy"] == policy
 
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={epic}")

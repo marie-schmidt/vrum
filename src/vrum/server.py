@@ -16,11 +16,12 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from vrum.accounts import Accounts
 from vrum.board import add_board
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims, WhoIsWorking
 from vrum.common import Refusal, clean_actor, parse_day
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
-from vrum.db import Database
+from vrum.db import Database, current_project
 from vrum.decisions import Decision, DecisionPage, Decisions
 from vrum.embeddings import EmbeddingUnavailable
 from vrum.exchange import Exchange, ExportPage, ImportResult
@@ -195,6 +196,7 @@ def _database_errors() -> Iterator[None]:
 
 def create_server(settings: Settings) -> GuardedServer:
     database = Database(settings.database_conninfo())
+    accounts = Accounts(database)
     graph = Graph(database)
     links = Links(database)
     claims = Claims(database)
@@ -241,6 +243,7 @@ def create_server(settings: Settings) -> GuardedServer:
     mcp = GuardedServer(
         "vrum", version=version("vrum"), lifespan=lifespan, instructions=INSTRUCTIONS
     )
+    mcp.accounts = accounts
 
     @mcp.tool(annotations=_READS)
     async def server_status() -> ServerStatus:
@@ -1647,7 +1650,7 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             try:
-                return await indexer.reindex()
+                return await indexer.reindex(current_project())
             except EmbeddingUnavailable as error:
                 raise Refusal(
                     f"{error} Nothing was indexed. Exact-words search still works; try again "
@@ -1890,5 +1893,5 @@ def create_server(settings: Settings) -> GuardedServer:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
-    add_board(mcp, settings=settings, searcher=searcher)
+    add_board(mcp, settings=settings, searcher=searcher, accounts=accounts)
     return mcp

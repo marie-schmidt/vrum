@@ -393,6 +393,23 @@ These fill gaps the spec leaves open. The owner may veto any of them.
 - **Secrets.** The token is held for the tab only, never in an address, and no response the board receives holds it or the database password (a browser test searches all of them).
 - **Found along the way.** (1) An article named `tool-<name>` collided with the page's own `#tool-search`; entries are `tool-entry-<name>`. (2) Two checks that expected the Kanban as the first page after signing in now expect Home. (3) Counting rows twice in a row can pass on the old page, so the tests wait until the ids are the expected ones.
 
+## 2026-11-16: choices made while building M15 (accounts and private projects)
+
+These fill gaps the spec leaves open. The owner may veto any of them. Email verification, account recovery and password change or deletion are not built; they wait for answers in `BLOCKED.md`.
+
+- **The wall is in the database.** Every graph table has a `project_id` and composite keys, so a link, parent, evidence or replacement in another project is refused by the database itself. Each request runs under the `vrum_project` role with row-level security on the project it was authorised for, so a forgotten filter in code shows nothing of another project. The role can read no account, session or key table.
+- **Ids are per project.** Node 12 in two projects is different data; every project counts from 1 with its own sequences. Export and import work on one project and load only into an empty one, with the same ids.
+- **Passwords.** scrypt (N 2^15, r 8, p 1), 10 to 200 characters, a name of 1 to 100 characters, a project name unique per owner ignoring case. A sign-in for an unknown address does the same work as one for a known address and says the same words.
+- **Sessions.** A random cookie (`HttpOnly`, `SameSite=Strict`, `Path=/board`, `Secure` when served over https; not marked `Secure` over plain http so that a local install works), kept as a hash on the server. 12 hours, absolute. Signing out ends it on the server. Every write also needs the session's CSRF header and a same-site origin.
+- **Rate limits (default for veto).** 5 failed sign-ins per address and 200 per client address in 10 minutes, kept in memory, forgiven by a good sign-in. The price: someone can lock an address out for 10 minutes. A locked address is refused even with the right password.
+- **Registration is open.** Anyone who can reach the server can make an account; that is the point of a self-hosted install, and the spec asks for no gate.
+- **Agent keys.** `vrk_` and 32 random bytes, shown once; only a hash and an 8 character hint are kept, with a label and when it was last used (updated at most once a minute). A key opens one project. It is checked on every call, not only when connecting, so revoking it stops a connected agent on its next request.
+- **There is no server token.** `VRUM_TOKEN` is gone: the server starts without it, and only `GET /health` and the board's page files are open. Scripts read `VRUM_AGENT_KEY`.
+- **Switching is a whole page load.** A project lives at `/board/p/<id>`; going to another one reloads, so nothing of the first can be drawn on the second. The client also drops any answer that belongs to a project that is no longer open. The board records changes under the account's name by default at sign-in, and the name can be changed.
+- **Backup and restore stay whole-install** and outside accounts: one dump holds every account and project, and `restore.sh` makes the database role first because a role belongs to the cluster, not to the database.
+- **The semantic index is install-wide** with a `project_id` and the same row-level security; the background job covers every project, and `reindex` through a tool covers the caller's project only.
+- **Known wart.** Browsers do not scope cookies by port, so two Vrum servers on one host share the session cookie name and sign each other out. Not addressed.
+
 ## 2026-11-16: accounts and private projects added (M15)
 
 - **What:** add M15 after M14: a person creates an account with email and password managed by Vrum, then creates a private project. An account can own several projects. Projects have separate graphs and memories, and only their owner and agents authorised for that project can access them. Shared projects, invitations, member roles and external identity providers are not included.

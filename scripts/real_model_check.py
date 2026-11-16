@@ -1,6 +1,6 @@
 """Try a running Vrum with a real language model and print what it does.
 
-    VRUM_TOKEN=<the token in .env> uv run python scripts/real_model_check.py http://127.0.0.1:8000/mcp
+    VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/real_model_check.py http://127.0.0.1:8000/mcp
 
 The server has to be started with LLM_BASE_URL and LLM_MODEL pointing at the model (see
 .env.example). The script adds a small, clearly named set of notes, facts, beliefs and decisions to

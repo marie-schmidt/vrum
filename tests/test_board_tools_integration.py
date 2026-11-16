@@ -11,9 +11,10 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, http, made, plain
+from tests.board_helpers import SLOW, api_path, board_url, browser_page, made, plain
 from tests.board_m14 import spoken
 from tests.helpers import ok, refused, the_token, unique_word
+from tests.world import SESSION_COOKIE, api, project_at, register
 from vrum.board.tools import TOOL_PLACES, AgentsOnly
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -90,18 +91,38 @@ async def test_the_page_lists_exactly_the_tools_the_server_lists_with_a_place_fo
         assert w.problems == []
 
 
-async def test_the_page_says_where_to_connect_and_never_shows_the_token(
+async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_session(
     client: Client, board: str, server_url: str
 ) -> None:
+    project = project_at(board)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/tools")
         await listed(page)
         assert await page.locator("#endpoint").inner_text() == server_url
+        # It describes the agent key: sent as a bearer header, read from the environment, made on
+        # the Agent access page, and never one that is shown here.
+        connecting = await page.locator("#connecting").inner_text()
+        assert "agent key" in connecting and "Authorization: Bearer" in connecting
+        assert "shown only once" in connecting
+        assert await page.locator("#connecting a[href='#/access']").count() == 1
         example = await page.locator("#example").text_content() or ""
-        assert server_url in example and "Authorization" in example and "VRUM_TOKEN" in example
-        assert the_token() not in await page.locator("body").inner_text()
-        assert the_token() not in example
+        assert server_url in example and "Authorization" in example
+        assert "VRUM_AGENT_KEY" in example and "VRUM_TOKEN" not in example
+        # Neither an agent key nor the session cookie (which a page cannot read) is in anything
+        # the page shows or asked for. (The session's other secret is checked on the Status page.)
+        cookies = [c for c in await page.context.cookies() if c["name"] == SESSION_COOKIE]
+        everything = " ".join(
+            [
+                await page.locator("body").inner_text(),
+                await page.evaluate("document.documentElement.outerHTML"),
+                example,
+                page.url,
+                *w.requests,
+            ]
+        )
+        for secret in (project.key, cookies[0]["value"]):
+            assert secret not in everything
         # The search narrows the list by what is in the names, areas, descriptions and places.
         await page.locator("#tool-search").fill("overlaps")
         await page.get_by_role("button", name="Search", exact=True).click()
@@ -179,23 +200,33 @@ async def test_no_tool_that_changes_anything_has_a_try_it_and_the_server_turns_a
     client: Client, board: str
 ) -> None:
     token = the_token()
+    owner = project_at(board).owner.sign_in_again()
+    origin = board.split("/board")[0]
     before = (await ok(client, "list_nodes", limit=1))["total"]
     made_up = {"actor": "x", "kind": "epic", "title": "Must not exist"}
-    status, _, text = http("POST", board + "/api/try/create_node", token=token, body=made_up)
-    assert status == 403 and "changes something" in text and "Must not exist" not in text
+    refusal = owner.call("POST", api_path(board, "/try/create_node"), made_up)
+    assert refusal.status == 403 and "changes something" in refusal.body["message"]
+    assert "Must not exist" not in json.dumps(refusal.body)
     assert (await ok(client, "list_nodes", limit=1))["total"] == before
     for name in ("claim_node", "reindex", "import_graph", "reflect", "next_work"):
-        status, _, text = http("POST", board + f"/api/try/{name}", token=token, body={})
-        assert status == 403, name
-    status, _, text = http("POST", board + "/api/try/no_such_tool", token=token, body={})
-    assert status == 404 and "no tool called no_such_tool" in text
-    # A try needs the token like every other call, and a read goes through the same checks.
-    status, _, text = http("POST", board + "/api/try/list_nodes", body={})
-    assert status == 401 and "needs a token" in text
-    status, _, text = http("POST", board + "/api/try/list_nodes", token=token, body={"limit": 0})
-    assert status == 400 and "limit must be a whole number from 1 to 200" in text
-    status, _, text = http("GET", board + "/api/tools")
-    assert status == 401
+        assert owner.call("POST", api_path(board, f"/try/{name}"), {}).status == 403, name
+    nothing = owner.call("POST", api_path(board, "/try/no_such_tool"), {})
+    assert nothing.status == 404 and "no tool called no_such_tool" in nothing.body["message"]
+    # A try needs a signed-in owner like every other call (an agent key is not one), and a read
+    # goes through the same checks.
+    for cookie, key in ((None, None), (None, token)):
+        unsigned = api(
+            origin, "POST", api_path(board, "/try/list_nodes"), {}, cookie=cookie,
+            extra={"Authorization": f"Bearer {key}"} if key else None,
+        )  # fmt: skip
+        assert unsigned.status == 401 and "not signed in" in unsigned.body["message"]
+    stranger = register(origin)
+    theirs = stranger.call("POST", api_path(board, "/try/list_nodes"), {})
+    assert theirs.status == 404 and "no project" in theirs.body["message"]
+    limit = owner.call("POST", api_path(board, "/try/list_nodes"), {"limit": 0})
+    assert limit.status == 400
+    assert "limit must be a whole number from 1 to 200" in limit.body["message"]
+    assert api(origin, "GET", "/board/api/tools").status == 401
     assert (await ok(client, "list_nodes", limit=1))["total"] == before
     # The page offers a try for no tool that changes something.
     async with browser_page(board, token=token) as w:

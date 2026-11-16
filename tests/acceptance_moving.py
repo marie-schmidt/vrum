@@ -10,21 +10,27 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from tests.acceptance_scenario import URL, chapter, clip, proof
 from tests.helpers import REPO_ROOT, connect, export_everything, ok, refused, rich_world, the_token
+from tests.world import make_project, register, server_base
 
 SECTIONS = ("nodes", "links", "rules", "decisions", "memories", "events")
 
 
-def run(*command: str | Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    *command: str | Path, check: bool = True, key: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """A command of this repository, with this stack's environment (the compose project, ports,
-    password and token ./acceptance.sh set)."""
+    password ./acceptance.sh set) and the agent key of the project the scripts are to work on
+    (the shared project's, unless `key` names another)."""
     result = subprocess.run(
         [str(part) for part in command],
         cwd=REPO_ROOT,
+        env={**os.environ, "VRUM_AGENT_KEY": key or the_token()},
         capture_output=True,
         text=True,
         check=False,
@@ -36,13 +42,16 @@ def run(*command: str | Path, check: bool = True) -> subprocess.CompletedProcess
 
 
 async def wait_until_up() -> None:
+    """Wait for the server to answer its health check: after a fresh start there is no account
+    and so no key to ask anything else with."""
     for _ in range(90):
         try:
-            async with connect(URL, the_token()) as client:
-                await ok(client, "server_status")
-                return
-        except BaseException:
-            time.sleep(1)
+            with urllib.request.urlopen(f"{server_base()}/health", timeout=3) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(1)
     raise AssertionError("the server did not come back")
 
 
@@ -173,7 +182,10 @@ async def moving() -> None:
     run("docker", "compose", "down", "--volumes", "--remove-orphans")
     run("docker", "compose", "up", "--detach", "--build", "--wait", "--wait-timeout", "240")
     await wait_until_up()
-    async with connect(URL, the_token()) as client:
+    # A fresh install has no account and no project: a person registers, makes one, and makes a
+    # key for it, exactly as on the board, and the file is loaded into that empty project.
+    empty_project = make_project(register(server_base(), "Second install owner"), "Fresh")
+    async with connect(URL, empty_project.key) as client:
         empty = await export_everything(client)
         bad = copy.deepcopy(original)
         gone = next(n for n in bad["nodes"] if n["kind"] == "epic")
@@ -192,15 +204,21 @@ async def moving() -> None:
         and still_empty,
         f'"{clip(message, 90)}"',
     )
-    loaded = run(sys.executable, REPO_ROOT / "scripts" / "import_graph.py", URL, exported)
-    async with connect(URL, the_token()) as client:
+    loaded = run(
+        sys.executable,
+        REPO_ROOT / "scripts" / "import_graph.py",
+        URL,
+        exported,
+        key=empty_project.key,
+    )
+    async with connect(URL, empty_project.key) as client:
         after = await export_everything(client)
         top = max(n["id"] for n in original["nodes"])
         new = await ok(client, "create_node", actor="ann", kind="epic", title="After the import")
         second = await refused(client, "import_graph", actor="ann", document=original)
     proof(
         "M7",
-        "an export loaded into an empty server comes back identical, with new ids continuing "
+        "an export loaded into an empty project comes back identical, with new ids continuing "
         "after the highest one, and a second import into it is refused",
         after == original
         and new["id"] == top + 1

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The acceptance check: starts Vrum from this folder in a throwaway stack of its own (a fresh
-# database, a random token and password; it never touches your own stack or your .env) and walks
+# database, a random password; it never touches your own stack or your .env) and walks
 # one scenario through it with a real MCP client, showing that every proof of every milestone holds.
 #
 #   ./acceptance.sh                run the whole scenario (a few minutes)
@@ -19,7 +19,7 @@ need() {
 }
 need docker "https://docs.docker.com/get-docker/"
 need uv "https://docs.astral.sh/uv/"
-need openssl "it makes the random token and password"
+need openssl "it makes the random database password"
 docker compose version > /dev/null 2>&1 || { echo "acceptance.sh needs Docker with the compose plugin." >&2; exit 1; }
 docker info > /dev/null 2>&1 || { echo "Docker is not running. Start it and try again." >&2; exit 1; }
 
@@ -27,7 +27,6 @@ port="${VRUM_ACCEPTANCE_PORT:-18400}"
 export COMPOSE_PROJECT_NAME=vrum-acceptance
 export COMPOSE_FILE=compose.yaml:compose.check.yaml
 export VRUM_DB_PASSWORD="$(openssl rand -hex 16)"
-export VRUM_TOKEN="$(openssl rand -hex 24)"
 export VRUM_PORT="$port"
 export VRUM_NO_MODEL_PORT=$((port + 1))
 export VRUM_MODEL_SCRIPT_PORT=$((port + 2))

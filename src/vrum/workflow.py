@@ -808,10 +808,9 @@ class Workflow:
                 "Give at most one of node_id, rule_id, decision_id or memory_id: the one item to "
                 "follow. Leave them all out to see every change."
             )
-        async with self._database.transaction() as conn:
+        async with self._database.transaction(snapshot=True) as conn:
             # One snapshot for the page and for latest_event_id: an event that finishes in
             # between must not be counted in the latest id without being in the page.
-            await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             if node_id is not None:
                 await require_node(conn, node_id)
             if rule_id is not None:

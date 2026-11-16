@@ -22,18 +22,21 @@ def assert_refused_with_how_to_rebuild(code: int, said: str) -> None:
 
 
 def test_a_database_built_from_a_different_schema_is_refused_with_how_to_rebuild_it() -> None:
-    original = run_sql("SELECT schema_hash FROM schema_info", plain=True).stdout.strip()
-    assert len(original) == 64
+    original = run_sql("SELECT schema_hash FROM schema_info", plain=True, project=None)
+    original_hash = original.stdout.strip()
+    assert len(original_hash) == 64
     try:
-        assert run_sql("UPDATE schema_info SET schema_hash = 'an-older-schema'").returncode == 0
+        change = run_sql("UPDATE schema_info SET schema_hash = 'an-older-schema'", project=None)
+        assert change.returncode == 0
         assert_refused_with_how_to_rebuild(*start_another_server())
     finally:
-        run_sql(f"UPDATE schema_info SET schema_hash = '{original}'")
+        run_sql(f"UPDATE schema_info SET schema_hash = '{original_hash}'", project=None)
 
 
 def test_a_database_with_tables_but_no_schema_marker_is_refused_too() -> None:
     try:
-        assert run_sql("ALTER TABLE schema_info RENAME TO schema_info_hidden").returncode == 0
+        rename = run_sql("ALTER TABLE schema_info RENAME TO schema_info_hidden", project=None)
+        assert rename.returncode == 0
         assert_refused_with_how_to_rebuild(*start_another_server())
     finally:
-        run_sql("ALTER TABLE schema_info_hidden RENAME TO schema_info")
+        run_sql("ALTER TABLE schema_info_hidden RENAME TO schema_info", project=None)

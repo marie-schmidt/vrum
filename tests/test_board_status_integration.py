@@ -1,7 +1,7 @@
 """M14's Status page against the running containers, driven in a real headless browser and checked
 against a real MCP client (see ./check.sh): what it shows equals `server_status` and the index state
 the searches report, the embedding service is seen answering and then not, the downloaded export
-is the MCP export, and the token and the database password are in no page and no response."""
+is the MCP export, and no agent key, session or database password is in any page or response."""
 
 import json
 import os
@@ -23,6 +23,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import SESSION_COOKIE, project_at
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -183,22 +184,29 @@ async def test_the_downloaded_export_is_the_mcp_export(
         assert w.problems == []
 
 
-async def test_the_token_and_the_database_password_are_in_no_page_and_no_response(
+async def test_no_agent_key_no_session_and_no_database_password_is_in_any_page_or_response(
     client: Client, board: str, tmp_path: Path
 ) -> None:
-    secrets = {
-        "the token": the_token(),
-        "the database password": os.environ.get("VRUM_DB_PASSWORD", "no-such-password-set"),
-    }
-    assert all(len(secret) >= 16 for secret in secrets.values())
+    project = project_at(board)
+    password = os.environ.get("VRUM_DB_PASSWORD", "no-such-password-set")
     async with browser_page(board, token=the_token(), keep_bodies=True) as w:
         page = w.page
+        cookie = next(c for c in await page.context.cookies() if c["name"] == SESSION_COOKIE)
+        secrets = {
+            "the agent key": project.key,
+            "the session cookie": cookie["value"],
+            "the database password": password,
+        }
+        assert all(len(secret) >= 16 for secret in secrets.values())
         await w.open("#/home")
         texts = []
-        for name in ("home", "activity", "tools", "status", "memory", "search"):
+        for name in ("home", "activity", "tools", "access", "status", "memory", "search"):
             await w.go(f"#/{name}")
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(500)
+            if name == "access":
+                # The keys are listed by their first letters and nothing more.
+                await expect(page.locator("#keys")).to_contain_text(f"{project.key[:8]}…")
             texts.append(await page.locator("body").inner_text())
         # Open every tool's try form that needs nothing and run the status one too.
         await w.go("#/tools")
@@ -223,6 +231,19 @@ async def test_the_token_and_the_database_password_are_in_no_page_and_no_respons
             assert [url for url in w.requests if secret in url] == [], label
             assert secret not in await page.evaluate("JSON.stringify(localStorage)"), label
             assert secret not in await page.content(), label
-        # The token is kept for this tab and sent only in the header, never in an address.
-        assert all(the_token() not in url for url in w.requests)
+        # The session's own secret, which the page needs to make a change, is told to the page once
+        # (by the answer that says who is signed in) and nowhere else.
+        told = [json.loads(body) for url, body in w.bodies if url.endswith("/board/api/session")]
+        assert told
+        csrf = told[0]["csrf"]
+        assert len(csrf) >= 16 and all(one["csrf"] == csrf for one in told)
+        elsewhere = [url for url, body in w.bodies if csrf in body and not url.endswith("/session")]
+        assert elsewhere == []
+        assert [text for text in texts if csrf in text] == []
+        assert csrf not in path.read_text(encoding="utf-8")
+        assert [url for url in w.requests if csrf in url] == []
+        assert csrf not in await page.evaluate("JSON.stringify(localStorage)")
+        assert csrf not in await page.content()
+        # Nothing the board asked for went anywhere but the server it came from.
+        assert all(url.startswith(w.origin) for url in w.requests)
         assert w.problems == []

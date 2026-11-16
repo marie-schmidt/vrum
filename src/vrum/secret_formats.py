@@ -23,6 +23,8 @@ _FORMATS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("a Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("an npm token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    ("a Vrum agent key", re.compile(r"\bvrk_[A-Za-z0-9_-]{30,}")),
+    ("a Vrum session", re.compile(r"\bvrs_[A-Za-z0-9_-]{30,}")),
     ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
     ("a SendGrid key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}")),
     (

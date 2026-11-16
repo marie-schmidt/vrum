@@ -1,38 +1,36 @@
-// Talking to the server. The token is typed once per browser session and kept only in that
-// session's storage. It is sent in the Authorization header and never put in an address or a
-// cookie.
-
-const KEY = 'vrum.token';
+// Talking to the server. A person is signed in by a session cookie that the page cannot read (the
+// server sets it and the browser sends it). Every change carries the session's own secret in a
+// header, which the server checks, so that another website cannot make this browser change
+// anything. A project's data is always asked for by the project's number in the address, so an
+// answer can only ever be for the project it was asked for.
 
 // A request the server turned down, with its words (they are the same as an agent is told).
 export class Refusal extends Error {}
-// The token is missing or wrong.
+// Nobody is signed in, or the session ended.
 export class NotSignedIn extends Refusal {}
+// An answer for a project the board has left. It is dropped and never drawn.
+export class Stale extends Refusal {}
 
-let token = sessionStorage.getItem(KEY) || '';
+let csrf = '';
+let project = null; // the number of the project the board is on, or null
 
-export function signedIn() {
-  return token !== '';
+export function setProject(id) {
+  project = id;
 }
 
-export function setToken(value) {
-  token = value.trim();
-  if (token) sessionStorage.setItem(KEY, token);
-  else sessionStorage.removeItem(KEY);
-}
-
-export function signOut() {
-  setToken('');
+export function projectId() {
+  return project;
 }
 
 async function send(path, options) {
+  const mine = project;
+  const changing = options && options.method && options.method !== 'GET';
   let response;
   try {
     response = await fetch(path, {
       cache: 'no-store',
       ...options,
-      // With no token there is no header at all, so the server says that none was sent.
-      headers: { ...(options && options.headers), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { ...(options && options.headers), ...(changing && csrf ? { 'X-Vrum-CSRF': csrf } : {}) },
     });
   } catch {
     throw new Refusal('The board cannot reach the server. Check that it is running, then try again.');
@@ -43,9 +41,10 @@ async function send(path, options) {
   } catch {
     // Not JSON: say what happened below.
   }
+  // The person may have moved to another project while this was on its way.
+  if (mine !== project) throw new Stale('That answer was for a project the board has left.');
   if (response.status === 401) {
-    const words = body && body.error && body.error.message;
-    throw new NotSignedIn(words || 'The token is not right, so nothing was done.');
+    throw new NotSignedIn((body && body.message) || 'You are not signed in, or your session has ended.');
   }
   if (!response.ok) {
     throw new Refusal(
@@ -55,25 +54,65 @@ async function send(path, options) {
   return body;
 }
 
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+const post = (path, body) => send(path, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body || {}) });
+const scoped = (path) => `/board/api/projects/${project}${path}`;
+
+// -- who is signed in -----------------------------------------------------------------------------
+
+// Who this browser is signed in as, or null when nobody is.
+export async function loadSession() {
+  const found = await send('/board/api/session', { method: 'GET' });
+  if (!found.account) return null;
+  csrf = found.csrf;
+  return found;
+}
+
+async function started(path, body) {
+  const found = await post(path, body);
+  csrf = found.csrf;
+  return found;
+}
+
+export const signIn = (email, password) => started('/board/api/session', { email, password });
+export const register = (email, name, password) => started('/board/api/accounts', { email, name, password });
+
+export async function signOut() {
+  try {
+    await send('/board/api/session', { method: 'DELETE' });
+  } finally {
+    csrf = '';
+  }
+}
+
+// -- projects and keys ------------------------------------------------------------------------------
+
+export const projects = async () => (await send('/board/api/projects', { method: 'GET' })).projects;
+export const createProject = (name) => post('/board/api/projects', { name });
+export const projectInfo = (id) => send(`/board/api/projects/${id}`, { method: 'GET' });
+export const keys = async () => (await send(scoped('/keys'), { method: 'GET' })).keys;
+export const createKey = (label) => post(scoped('/keys'), { label });
+export const revokeKey = async (id) => (await send(scoped(`/keys/${id}`), { method: 'DELETE' })).key;
+
+// -- a project's graph ---------------------------------------------------------------------------
+
 // Call a tool, as an agent would, and return what it returned.
 export function call(tool, args) {
-  return send(`/board/api/tool/${tool}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(args || {}),
-  });
+  return post(scoped(`/tool/${tool}`), args);
 }
 
 // Try a tool that only reads, as the Tools page does. The server decides from its own tool list
 // which tools those are, and turns any other away.
 export function tryTool(tool, args) {
-  return send(`/board/api/try/${tool}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(args || {}),
-  });
+  return post(scoped(`/try/${tool}`), args);
 }
 
+// The state of the project's search index.
+export function indexState() {
+  return send(scoped('/index'), { method: 'GET' });
+}
+
+// What does not belong to a project: how often to ask for news, which language model there is.
 export function get(path) {
   return send(path, { method: 'GET' });
 }

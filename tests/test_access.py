@@ -13,8 +13,20 @@ from vrum.logs import Scrubber, configure_logging, event
 
 pytestmark = pytest.mark.anyio
 
-TOKEN = "0123456789abcdef0123456789abcdef"
+KEY = "vrk_0123456789abcdef0123456789abcdef0123456789"
 LIMIT = 1000
+
+
+class Keys:
+    """Which keys reach which project. A key that is not here (a revoked one) reaches none."""
+
+    def __init__(self) -> None:
+        self.held = {KEY: 7}
+        self.asked: list[str] = []
+
+    async def project_for_key(self, key: str) -> int | None:
+        self.asked.append(key)
+        return self.held.get(key)
 
 
 class Recorder:
@@ -55,6 +67,7 @@ async def ask(
     *,
     method: str = "POST",
     path: str = "/mcp",
+    query: str = "",
     authorization: str | None = None,
     chunks: list[bytes] | None = None,
     content_length: int | None | str = "auto",
@@ -71,6 +84,7 @@ async def ask(
         "type": "http",
         "method": method,
         "path": path,
+        "query_string": query.encode(),
         "headers": headers,
         "client": ("10.1.2.3", 5000),
     }
@@ -103,14 +117,19 @@ def inner() -> Recorder:
 
 
 @pytest.fixture
-def guard(inner: Recorder) -> AccessGuard:
-    return AccessGuard(inner, token=TOKEN, max_request_bytes=LIMIT)
+def keys() -> Keys:
+    return Keys()
 
 
-async def test_the_right_token_lets_a_request_through_with_its_body_intact(
+@pytest.fixture
+def guard(inner: Recorder, keys: Keys) -> AccessGuard:
+    return AccessGuard(inner, keys=keys, max_request_bytes=LIMIT)
+
+
+async def test_a_key_that_reaches_a_project_lets_a_request_through_with_its_body_intact(
     guard: AccessGuard, inner: Recorder
 ) -> None:
-    answer = await ask(guard, authorization=f"Bearer {TOKEN}")
+    answer = await ask(guard, authorization=f"Bearer {KEY}")
 
     assert (answer.status, answer.body) == (200, b"fine")
     assert inner.reached == 1 and inner.body == b'{"hello": 1}'
@@ -118,25 +137,25 @@ async def test_the_right_token_lets_a_request_through_with_its_body_intact(
 
 @pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
 async def test_the_word_bearer_may_be_written_in_any_case(guard: AccessGuard, scheme: str) -> None:
-    assert (await ask(guard, authorization=f"{scheme} {TOKEN}")).status == 200
+    assert (await ask(guard, authorization=f"{scheme} {KEY}")).status == 200
 
 
 @pytest.mark.parametrize(
-    ("authorization", "expected"),
+    ("authorization", "expected", "reason"),
     [
-        (None, "needs a token and none was sent"),
-        ("", "needs a token and none was sent"),
-        ("   ", "needs a token and none was sent"),
-        ("Bearer wrong-token-value-1234567890", "token is not right"),
-        (f"Bearer {TOKEN[:-1]}", "token is not right"),
-        (f"Bearer {TOKEN}x", "token is not right"),
-        ("Bearer ", "token is not right"),
-        (f"Basic {TOKEN}", "not a bearer token"),
-        (TOKEN, "not a bearer token"),
+        (None, "needs an agent key for a project, and none was sent", "no_key"),
+        ("", "needs an agent key for a project, and none was sent", "no_key"),
+        ("   ", "needs an agent key for a project, and none was sent", "no_key"),
+        ("Bearer vrk_wrong-key-value-1234567890abcdef", "agent key is not valid", "wrong_key"),
+        (f"Bearer {KEY[:-1]}", "agent key is not valid", "wrong_key"),
+        (f"Bearer {KEY}x", "agent key is not valid", "wrong_key"),
+        ("Bearer ", "not a bearer token", "not_bearer"),
+        (f"Basic {KEY}", "not a bearer token", "not_bearer"),
+        (KEY, "not a bearer token", "not_bearer"),
     ],
 )
-async def test_a_request_with_no_token_a_wrong_one_or_another_header_is_refused_in_plain_words(
-    guard: AccessGuard, inner: Recorder, authorization: str | None, expected: str
+async def test_a_request_with_no_key_a_wrong_one_or_another_header_is_refused_in_plain_words(
+    guard: AccessGuard, inner: Recorder, authorization: str | None, expected: str, reason: str
 ) -> None:
     answer = await ask(guard, authorization=authorization)
 
@@ -147,49 +166,65 @@ async def test_a_request_with_no_token_a_wrong_one_or_another_header_is_refused_
     envelope = json.loads(answer.body)
     assert (envelope["jsonrpc"], envelope["id"], envelope["error"]["code"]) == ("2.0", None, -32001)
     assert inner.reached == 0
-    # What was sent is not repeated back, and the real token is not given away.
-    assert TOKEN not in answer.body.decode()
+    # What was sent is not repeated back, and a real key is not given away.
+    assert KEY not in answer.body.decode()
     if authorization and "wrong" in authorization:
         assert authorization.split()[1] not in answer.body.decode()
 
 
-async def test_a_token_in_the_address_is_not_a_token(guard: AccessGuard, inner: Recorder) -> None:
-    answer = await ask(guard, path=f"/mcp?token={TOKEN}", authorization=None)
-    assert answer.status == 401 and inner.reached == 0
+async def test_a_key_that_has_been_revoked_is_refused_on_the_very_next_request(
+    guard: AccessGuard, inner: Recorder, keys: Keys
+) -> None:
+    assert (await ask(guard, authorization=f"Bearer {KEY}")).status == 200
+
+    del keys.held[KEY]
+
+    answer = await ask(guard, authorization=f"Bearer {KEY}")
+    assert answer.status == 401 and "agent key is not valid" in answer.error
+    assert inner.reached == 1 and keys.asked == [KEY, KEY]
 
 
-async def test_the_health_check_needs_no_token_and_nothing_else_is_open(
+async def test_a_key_in_the_address_is_not_a_key(
+    guard: AccessGuard, inner: Recorder, keys: Keys
+) -> None:
+    answer = await ask(guard, query=f"key={KEY}", authorization=None)
+    assert answer.status == 401 and inner.reached == 0 and keys.asked == []
+
+
+async def test_only_the_mcp_endpoint_needs_a_key_and_the_health_check_is_open(
     guard: AccessGuard, inner: Recorder
 ) -> None:
     assert OPEN_PATHS == {"/health": "GET"}
 
     assert (await ask(guard, method="GET", path="/health", chunks=[])).status == 200
     assert inner.reached == 1
-    for method, path in (("POST", "/health"), ("GET", "/mcp"), ("GET", "/"), ("GET", "/health/x")):
+    # Both the endpoint and anything under it need a key, for every method.
+    for method, path in (("POST", "/mcp"), ("GET", "/mcp"), ("DELETE", "/mcp"), ("GET", "/mcp/x")):
         assert (await ask(guard, method=method, path=path, chunks=[])).status == 401
     assert inner.reached == 1
 
 
-async def test_paths_given_to_the_guard_as_open_are_open_for_their_method_only(
-    inner: Recorder,
+async def test_the_boards_own_calls_are_for_the_board_to_check_against_a_session(
+    inner: Recorder, keys: Keys
 ) -> None:
     guard = AccessGuard(
         inner,
-        token=TOKEN,
+        keys=keys,
         max_request_bytes=LIMIT,
         open_paths={**OPEN_PATHS, "/board": "GET", "/board/app.js": "GET"},
     )
-    for path in ("/health", "/board", "/board/app.js"):
-        assert (await ask(guard, method="GET", path=path, chunks=[])).status == 200
-    assert inner.reached == 3
+    # They carry a cookie and no key, so the guard hands them on: the board refuses what has no
+    # session, and says so. The guard still limits how much they may send.
     for method, path in (
-        ("POST", "/board"),
-        ("GET", "/board/api/info"),
-        ("GET", "/board/other.js"),
-        ("POST", "/board/api/tool/list_nodes"),
+        ("GET", "/board"),
+        ("GET", "/board/app.js"),
+        ("GET", "/board/api/projects"),
+        ("POST", "/board/api/projects/3/tool/list_nodes"),
     ):
-        assert (await ask(guard, method=method, path=path, chunks=[])).status == 401
-    assert inner.reached == 3
+        assert (await ask(guard, method=method, path=path, chunks=[])).status == 200
+    assert inner.reached == 4 and keys.asked == []
+    too_big = await ask(guard, path="/board/api/projects/3/tool/create_node", chunks=[b"x" * 2000])
+    assert too_big.status == 413 and inner.reached == 4
 
 
 async def test_a_request_that_says_it_is_too_big_is_refused_before_its_body_is_read(
@@ -197,7 +232,7 @@ async def test_a_request_that_says_it_is_too_big_is_refused_before_its_body_is_r
 ) -> None:
     answer = await ask(
         guard,
-        authorization=f"Bearer {TOKEN}",
+        authorization=f"Bearer {KEY}",
         chunks=[b"x" * (LIMIT + 1)],
     )
 
@@ -210,7 +245,7 @@ async def test_a_request_that_says_it_is_too_big_is_refused_before_its_body_is_r
 async def test_a_request_that_does_not_say_how_long_it_is_is_counted_as_it_arrives(
     guard: AccessGuard, inner: Recorder
 ) -> None:
-    unannounced: dict[str, Any] = {"content_length": None, "authorization": f"Bearer {TOKEN}"}
+    unannounced: dict[str, Any] = {"content_length": None, "authorization": f"Bearer {KEY}"}
 
     under = await ask(guard, chunks=[b"a" * 400, b"b" * 400, b"c" * 200], **unannounced)
     assert under.status == 200 and len(inner.body) == LIMIT
@@ -222,7 +257,7 @@ async def test_a_request_that_does_not_say_how_long_it_is_is_counted_as_it_arriv
 async def test_a_request_of_exactly_the_limit_is_accepted(
     guard: AccessGuard, inner: Recorder
 ) -> None:
-    answer = await ask(guard, authorization=f"Bearer {TOKEN}", chunks=[b"x" * LIMIT])
+    answer = await ask(guard, authorization=f"Bearer {KEY}", chunks=[b"x" * LIMIT])
     assert answer.status == 200 and len(inner.body) == LIMIT
 
 
@@ -233,7 +268,7 @@ async def test_a_request_with_no_body_at_all_passes_whether_or_not_it_says_so(
         answer = await ask(
             guard,
             method="GET",
-            authorization=f"Bearer {TOKEN}",
+            authorization=f"Bearer {KEY}",
             chunks=[],
             content_length=content_length,
         )
@@ -241,8 +276,10 @@ async def test_a_request_with_no_body_at_all_passes_whether_or_not_it_says_so(
     assert inner.reached == 2
 
 
-async def test_it_leaves_everything_that_is_not_a_web_request_alone(inner: Recorder) -> None:
-    guard = AccessGuard(inner, token=TOKEN, max_request_bytes=LIMIT)
+async def test_it_leaves_everything_that_is_not_a_web_request_alone(
+    inner: Recorder, keys: Keys
+) -> None:
+    guard = AccessGuard(inner, keys=keys, max_request_bytes=LIMIT)
 
     async def receive() -> Message:
         return {"type": "lifespan.startup"}
@@ -256,34 +293,50 @@ async def test_it_leaves_everything_that_is_not_a_web_request_alone(inner: Recor
 async def test_a_refusal_is_one_log_line_with_the_reason_and_never_what_was_sent(
     guard: AccessGuard, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    configure_logging([TOKEN])
-    sent_token = "the-wrong-token-that-someone-tried-1234"
+    configure_logging([])
+    sent_key = "vrk_the-wrong-key-that-someone-tried-1234567890"
 
-    await ask(guard, authorization=f"Bearer {sent_token}")
+    await ask(guard, authorization=f"Bearer {sent_key}")
     await ask(guard, authorization=None)
-    await ask(guard, authorization=f"Bearer {TOKEN}", chunks=[b"x" * (LIMIT + 5)])
+    await ask(guard, authorization=f"Bearer {KEY}", chunks=[b"x" * (LIMIT + 5)])
 
     lines = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     refused = [line for line in lines if line["event"] == "request_refused"]
     assert [(line["reason"], line["status"]) for line in refused] == [
-        ("wrong_token", 401),
-        ("no_token", 401),
+        ("wrong_key", 401),
+        ("no_key", 401),
         ("too_large", 413),
     ]
     assert refused[0]["method"] == "POST" and refused[0]["path"] == "/mcp"
     assert refused[0]["client"] == "10.1.2.3" and refused[2]["declared_bytes"] == LIMIT + 5
     everything = capsys.readouterr().err + json.dumps(lines)
-    assert sent_token not in everything and TOKEN not in everything
+    assert sent_key not in everything and KEY not in everything
 
 
 def test_the_scrubber_removes_held_secrets_and_known_formats_but_leaves_short_ones() -> None:
-    scrub = Scrubber([TOKEN, "pw"])
+    scrub = Scrubber(["a-database-password-0123456789", "pw"])
     github = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5"
 
-    scrubbed = scrub(f"token {TOKEN} and {github} and pw stays")
+    scrubbed = scrub(f"password a-database-password-0123456789 and {github} and pw stays")
 
-    assert scrubbed == "token [secret removed] and [a GitHub token removed] and pw stays"
-    assert scrub.deep({"a": [f"x{TOKEN}"], "b": 3}) == {"a": ["x[secret removed]"], "b": 3}
+    assert scrubbed == "password [secret removed] and [a GitHub token removed] and pw stays"
+    assert scrub.deep({"a": ["xa-database-password-0123456789"], "b": 3}) == {
+        "a": ["x[secret removed]"],
+        "b": 3,
+    }
+
+
+def test_the_scrubber_removes_agent_keys_and_session_values_wherever_they_appear() -> None:
+    scrub = Scrubber([])
+    session = "vrs_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5vW7"
+
+    scrubbed = scrub(f"key {KEY} cookie vrum_session={session} end")
+
+    assert KEY not in scrubbed and session not in scrubbed
+    assert (
+        scrubbed
+        == "key [a Vrum agent key removed] cookie vrum_session=[a Vrum session removed] end"
+    )
 
 
 def test_a_log_line_is_json_with_the_event_the_facts_and_the_scrub_applied(

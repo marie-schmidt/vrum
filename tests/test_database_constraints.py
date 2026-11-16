@@ -20,12 +20,20 @@ from tests.helpers import (
     ok,
     run_sql,
 )
+from tests.world import the_project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
+def mine() -> str:
+    """What keeps a statement to the shared test project's rows. These statements run as the
+    database's owner, who is not held back by the walls between projects, and every project
+    numbers its rows from 1, so a bare `WHERE id = 5` would reach every project's row 5."""
+    return f"project_id = {the_project().id}"
+
+
 def test_the_database_can_be_reached_directly() -> None:
-    result = run_sql("SELECT count(*) FROM nodes")
+    result = run_sql("SELECT count(*) FROM nodes", as_project=True)
     assert result.returncode == 0, result.stderr
 
 
@@ -65,12 +73,13 @@ async def test_the_database_refuses_a_hierarchy_that_is_not_epic_story_task(clie
             "node_title_is_not_blank",
         ),
         "the stored status ready": (
-            f"UPDATE nodes SET status = 'ready', version = version + 1 WHERE id = {story['id']}",
+            f"UPDATE nodes SET status = 'ready', version = version + 1 "
+            f"WHERE {mine()} AND id = {story['id']}",
             "node_status_is_known",
         ),
         "a story made its own parent": (
             f"UPDATE nodes SET parent_id = {story['id']}, version = version + 1 "
-            f"WHERE id = {story['id']}",
+            f"WHERE {mine()} AND id = {story['id']}",
             "node_parent_has_the_right_kind",
         ),
     }
@@ -87,11 +96,12 @@ async def test_the_database_refuses_a_kind_change_and_a_change_without_a_new_ver
     client: Client,
 ) -> None:
     _, story, _ = await make_tree(client)
-    result = run_sql(f"UPDATE nodes SET kind = 'epic', parent_id = NULL WHERE id = {story['id']}")
+    where = f"WHERE {mine()} AND id = {story['id']}"
+    result = run_sql(f"UPDATE nodes SET kind = 'epic', parent_id = NULL {where}")
     assert "cannot change its kind" in result.stderr
-    result = run_sql(f"UPDATE nodes SET title = 'quiet edit' WHERE id = {story['id']}")
+    result = run_sql(f"UPDATE nodes SET title = 'quiet edit' {where}")
     assert "raise its version by exactly one" in result.stderr
-    result = run_sql(f"UPDATE nodes SET title = 'x', version = 5 WHERE id = {story['id']}")
+    result = run_sql(f"UPDATE nodes SET title = 'x', version = 5 {where}")
     assert "raise its version by exactly one" in result.stderr
     assert (await ok(client, "get_node", node_id=story["id"]))["title"] == "A story"
 
@@ -102,12 +112,17 @@ async def test_the_event_log_cannot_be_rewritten_and_nodes_with_history_cannot_b
     epic, story, _ = await make_tree(client)
     assert (
         "append-only"
-        in run_sql(f"UPDATE events SET actor = 'someone' WHERE node_id = {epic['id']}").stderr
+        in run_sql(
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND node_id = {epic['id']}"
+        ).stderr
     )
-    assert "append-only" in run_sql(f"DELETE FROM events WHERE node_id = {epic['id']}").stderr
+    assert (
+        "append-only"
+        in run_sql(f"DELETE FROM events WHERE {mine()} AND node_id = {epic['id']}").stderr
+    )
     assert (
         "violates foreign key constraint"
-        in run_sql(f"DELETE FROM nodes WHERE id = {story['id']}").stderr
+        in run_sql(f"DELETE FROM nodes WHERE {mine()} AND id = {story['id']}").stderr
     )
     assert (
         "violates check constraint"
@@ -142,11 +157,11 @@ async def test_the_database_refuses_a_start_date_after_the_target_date_on_its_ow
         ),
         "a start moved past the target": (
             f"UPDATE nodes SET start_on = '{day(30)}', version = version + 1 "
-            f"WHERE id = {task['id']}"
+            f"WHERE {mine()} AND id = {task['id']}"
         ),
         "a target moved before the start": (
             f"UPDATE nodes SET target_on = '{day(1)}', version = version + 1 "
-            f"WHERE id = {task['id']}"
+            f"WHERE {mine()} AND id = {task['id']}"
         ),
     }
     for what, sql in attempts.items():
@@ -156,7 +171,8 @@ async def test_the_database_refuses_a_start_date_after_the_target_date_on_its_ow
 
     # Either date alone, or none, is fine, and the same day for both.
     fine = run_sql(
-        f"UPDATE nodes SET start_on = NULL, version = version + 1 WHERE id = {task['id']}"
+        f"UPDATE nodes SET start_on = NULL, version = version + 1 "
+        f"WHERE {mine()} AND id = {task['id']}"
     )
     assert fine.returncode == 0, fine.stderr
     unchanged = await ok(client, "get_node", node_id=task["id"])
@@ -268,11 +284,11 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
         ),
         "moving a rule into a task": (
             f"UPDATE rules SET story_id = {task['id']}, version = version + 1 "
-            f"WHERE id = {rule['id']}",
+            f"WHERE {mine()} AND id = {rule['id']}",
             "rule_belongs_to_a_story",
         ),
         "a change to a rule without a new version": (
-            f"UPDATE rules SET title = 'quiet edit' WHERE id = {rule['id']}",
+            f"UPDATE rules SET title = 'quiet edit' WHERE {mine()} AND id = {rule['id']}",
             "raise its version by exactly one",
         ),
         "a rule event that names no rule": (
@@ -317,11 +333,13 @@ async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
     rule = await make_rule(client, story_id=story["id"])
     assert (
         "append-only"
-        in run_sql(f"UPDATE events SET actor = 'someone' WHERE rule_id = {rule['id']}").stderr
+        in run_sql(
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND rule_id = {rule['id']}"
+        ).stderr
     )
     assert (
         "violates foreign key constraint"
-        in run_sql(f"DELETE FROM rules WHERE id = {rule['id']}").stderr
+        in run_sql(f"DELETE FROM rules WHERE {mine()} AND id = {rule['id']}").stderr
     )
 
 
@@ -366,53 +384,58 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
             "decision_is_superseded_exactly_when_replaced",
         ),
         "replaced while still marked active": (
-            f"UPDATE decisions SET superseded_by_id = {other['id']} WHERE id = {new['id']}",
+            f"UPDATE decisions SET superseded_by_id = {other['id']} "
+            f"WHERE {mine()} AND id = {new['id']}",
             "decision_is_superseded_exactly_when_replaced",
         ),
         "replaced by an earlier decision": (
             f"UPDATE decisions SET status = 'superseded', superseded_by_id = {old['id']} "
-            f"WHERE id = {new['id']}",
+            f"WHERE {mine()} AND id = {new['id']}",
             "decision_is_replaced_by_a_later_one",
         ),
         "an edit to what was decided": (
-            f"UPDATE decisions SET text = 'something else' WHERE id = {other['id']}",
+            f"UPDATE decisions SET text = 'something else' WHERE {mine()} AND id = {other['id']}",
             "A decision cannot be edited",
         ),
         "an edit to who decided it": (
-            f"UPDATE decisions SET decided_by = 'someone else' WHERE id = {other['id']}",
+            f"UPDATE decisions SET decided_by = 'someone else' "
+            f"WHERE {mine()} AND id = {other['id']}",
             "A decision cannot be edited",
         ),
         "bringing a superseded decision back": (
             f"UPDATE decisions SET status = 'active', superseded_by_id = NULL "
-            f"WHERE id = {old['id']}",
+            f"WHERE {mine()} AND id = {old['id']}",
             "A superseded decision cannot change again",
         ),
         "pointing a superseded decision at another replacement": (
-            f"UPDATE decisions SET superseded_by_id = {other['id']} WHERE id = {old['id']}",
+            f"UPDATE decisions SET superseded_by_id = {other['id']} "
+            f"WHERE {mine()} AND id = {old['id']}",
             "A superseded decision cannot change again",
         ),
         "deleting a decision": (
-            f"DELETE FROM decisions WHERE id = {other['id']}",
+            f"DELETE FROM decisions WHERE {mine()} AND id = {other['id']}",
             "cannot be deleted",
         ),
         "a link to a node that does not exist": (
-            f"INSERT INTO decision_nodes VALUES ({other['id']}, 987654321)",
+            f"INSERT INTO decision_nodes (decision_id, node_id) VALUES ({other['id']}, 987654321)",
             "violates foreign key constraint",
         ),
         "a link to a rule that does not exist": (
-            f"INSERT INTO decision_rules VALUES ({other['id']}, 987654321)",
+            f"INSERT INTO decision_rules (decision_id, rule_id) VALUES ({other['id']}, 987654321)",
             "violates foreign key constraint",
         ),
         "the same link twice": (
-            f"INSERT INTO decision_nodes VALUES ({new['id']}, {story['id']})",
+            f"INSERT INTO decision_nodes (decision_id, node_id) "
+            f"VALUES ({new['id']}, {story['id']})",
             "decision_nodes_pkey",
         ),
         "a new link on a superseded decision": (
-            f"INSERT INTO decision_nodes VALUES ({old['id']}, {story['parent_id']})",
+            f"INSERT INTO decision_nodes (decision_id, node_id) "
+            f"VALUES ({old['id']}, {story['parent_id']})",
             "keeps the links it had",
         ),
         "removing a link from a superseded decision": (
-            f"DELETE FROM decision_nodes WHERE decision_id = {old['id']}",
+            f"DELETE FROM decision_nodes WHERE {mine()} AND decision_id = {old['id']}",
             "keeps the links it had",
         ),
         "a decision event that names no decision": (
@@ -439,11 +462,12 @@ async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> No
     assert (
         "append-only"
         in run_sql(
-            f"UPDATE events SET actor = 'someone' WHERE decision_id = {decision['id']}"
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND decision_id = {decision['id']}"
         ).stderr
     )
     assert (
-        "append-only" in run_sql(f"DELETE FROM events WHERE decision_id = {decision['id']}").stderr
+        "append-only"
+        in run_sql(f"DELETE FROM events WHERE {mine()} AND decision_id = {decision['id']}").stderr
     )
 
 
@@ -512,51 +536,54 @@ async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) 
         ),
         "a fact confirmed by someone": (
             f"UPDATE memories SET confirmed_by = 'Ann', confirmed_at = now() "
-            f"WHERE id = {fact['id']}",
+            f"WHERE {mine()} AND id = {fact['id']}",
             "only_a_belief_is_confirmed",
         ),
         "replaced by an earlier item": (
             f"UPDATE memories SET status = 'superseded', superseded_by_id = {early['id']}, "
-            f"status_reason = 'r' WHERE id = {fact['id']}",
+            f"status_reason = 'r' WHERE {mine()} AND id = {fact['id']}",
             "memory_is_replaced_by_a_later_one",
         ),
         "a fact replaced by a belief": (
             f"UPDATE memories SET status = 'superseded', superseded_by_id = {belief['id']}, "
-            f"status_reason = 'r' WHERE id = {fact['id']}",
+            f"status_reason = 'r' WHERE {mine()} AND id = {fact['id']}",
             "memory_is_replaced_by_its_own_type",
         ),
         "editing the text": (
-            f"UPDATE memories SET text = 'something else' WHERE id = {fact['id']}",
+            f"UPDATE memories SET text = 'something else' WHERE {mine()} AND id = {fact['id']}",
             "A fact or belief cannot be edited",
         ),
         "editing the source": (
-            f"UPDATE memories SET source = 'someone else' WHERE id = {fact['id']}",
+            f"UPDATE memories SET source = 'someone else' WHERE {mine()} AND id = {fact['id']}",
             "A fact or belief cannot be edited",
         ),
         "editing who recorded it": (
-            f"UPDATE memories SET recorded_by = 'someone else' WHERE id = {fact['id']}",
+            f"UPDATE memories SET recorded_by = 'someone else' "
+            f"WHERE {mine()} AND id = {fact['id']}",
             "A fact or belief cannot be edited",
         ),
         "deleting it": (
-            f"DELETE FROM memories WHERE id = {fact['id']}",
+            f"DELETE FROM memories WHERE {mine()} AND id = {fact['id']}",
             "cannot be deleted",
         ),
         "bringing a retracted fact back": (
             f"UPDATE memories SET status = 'active', status_reason = NULL "
-            f"WHERE id = {retracted['id']}",
+            f"WHERE {mine()} AND id = {retracted['id']}",
             "cannot change again",
         ),
         "pointing a superseded fact at another replacement": (
-            f"UPDATE memories SET superseded_by_id = {new['id']} WHERE id = {old['id']}",
+            f"UPDATE memories SET superseded_by_id = {new['id']} "
+            f"WHERE {mine()} AND id = {old['id']}",
             "cannot change again",
         ),
         "changing who confirmed a belief": (
-            f"UPDATE memories SET confirmed_by = 'Bob' WHERE id = {confirmed['id']}",
+            f"UPDATE memories SET confirmed_by = 'Bob' WHERE {mine()} AND id = {confirmed['id']}",
             "A confirmation cannot be changed",
         ),
         "confirming a belief in the step that retracts it": (
             f"UPDATE memories SET status = 'retracted', status_reason = 'r', "
-            f"confirmed_by = 'Ann', confirmed_at = now() WHERE id = {belief['id']}",
+            f"confirmed_by = 'Ann', confirmed_at = now() "
+            f"WHERE {mine()} AND id = {belief['id']}",
             "cannot be confirmed in the same step",
         ),
         "a belief with no evidence": (
@@ -581,11 +608,12 @@ async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) 
             "must be an active fact or decision",
         ),
         "changing the evidence of a belief": (
-            f"UPDATE belief_evidence SET fact_id = {early['id']} WHERE belief_id = {belief['id']}",
+            f"UPDATE belief_evidence SET fact_id = {early['id']} "
+            f"WHERE {mine()} AND belief_id = {belief['id']}",
             "cannot be changed or removed",
         ),
         "removing the evidence of a belief": (
-            f"DELETE FROM belief_evidence WHERE belief_id = {belief['id']}",
+            f"DELETE FROM belief_evidence WHERE {mine()} AND belief_id = {belief['id']}",
             "cannot be changed or removed",
         ),
         "a belief that concerns a decision": (
@@ -594,23 +622,24 @@ async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) 
             "only_a_fact_concerns_a_decision",
         ),
         "a link to a node that does not exist": (
-            f"INSERT INTO memory_nodes VALUES ({fact['id']}, 987654321)",
+            f"INSERT INTO memory_nodes (memory_id, node_id) VALUES ({fact['id']}, 987654321)",
             "violates foreign key constraint",
         ),
         "a link to a rule that does not exist": (
-            f"INSERT INTO memory_rules VALUES ({fact['id']}, 987654321)",
+            f"INSERT INTO memory_rules (memory_id, rule_id) VALUES ({fact['id']}, 987654321)",
             "violates foreign key constraint",
         ),
         "the same link twice": (
-            f"INSERT INTO memory_nodes VALUES ({fact['id']}, {story['id']})",
+            f"INSERT INTO memory_nodes (memory_id, node_id) VALUES ({fact['id']}, {story['id']})",
             "memory_nodes_pkey",
         ),
         "a new link on a superseded fact": (
-            f"INSERT INTO memory_nodes VALUES ({old['id']}, {story['parent_id']})",
+            f"INSERT INTO memory_nodes (memory_id, node_id) "
+            f"VALUES ({old['id']}, {story['parent_id']})",
             "keeps the links it had",
         ),
         "removing a link from a superseded fact": (
-            f"DELETE FROM memory_nodes WHERE memory_id = {old['id']}",
+            f"DELETE FROM memory_nodes WHERE {mine()} AND memory_id = {old['id']}",
             "keeps the links it had",
         ),
         "a decision promoted from a fact": (
@@ -620,7 +649,8 @@ async def test_the_database_keeps_facts_and_beliefs_as_a_record(client: Client) 
             "decision_is_promoted_from_a_belief",
         ),
         "changing where a decision came from": (
-            f"UPDATE decisions SET promoted_from_id = {belief['id']} WHERE id = {decision['id']}",
+            f"UPDATE decisions SET promoted_from_id = {belief['id']} "
+            f"WHERE {mine()} AND id = {decision['id']}",
             "A decision cannot be edited",
         ),
         "a fact event that names no fact": (
@@ -656,6 +686,11 @@ async def test_a_fact_or_belief_event_cannot_be_rewritten_either(client: Client)
     fact = await make_fact(client, "Logged")
     assert (
         "append-only"
-        in run_sql(f"UPDATE events SET actor = 'someone' WHERE memory_id = {fact['id']}").stderr
+        in run_sql(
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND memory_id = {fact['id']}"
+        ).stderr
     )
-    assert "append-only" in run_sql(f"DELETE FROM events WHERE memory_id = {fact['id']}").stderr
+    assert (
+        "append-only"
+        in run_sql(f"DELETE FROM events WHERE {mine()} AND memory_id = {fact['id']}").stderr
+    )

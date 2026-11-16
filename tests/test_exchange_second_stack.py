@@ -1,6 +1,7 @@
 """M7 against the running containers, part two: loading a file into an empty server, and backing up
 and restoring a database. Both destroy a database, so they run on a second, separate copy of Vrum
-(tests/second_stack.py: its own compose project, database volume, port and token) that each test
+(tests/second_stack.py: its own compose project, database volume, port, account, project and agent
+key) that each test
 starts empty and removes afterwards (see ./check.sh).
 
 The graph they move is built through the tools (tests.helpers.rich_world), so it is the kind of
@@ -60,6 +61,10 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
     result = stack.python("export_graph.py", stack.url, exported)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(exported.read_text(encoding="utf-8")) == original
+    # Nothing about accounts or access is part of a project's export.
+    assert stack.project is not None
+    for secret in (stack.project.owner.email, stack.project.owner.password, stack.key):
+        assert secret not in exported.read_text(encoding="utf-8")
     # What a model made is marked as such. The tools cannot make these here (no model is set up on
     # this copy), so two items are marked in the file, to see that the marks come through.
     marked = copy.deepcopy(original)
@@ -217,6 +222,13 @@ async def test_a_backup_restores_into_a_fresh_container_and_the_export_is_identi
 
     assert restored.returncode == 0, restored.stdout + restored.stderr
     assert "Restored from" in restored.stdout
+    # The backup holds the whole install: the same person signs in again with the same password
+    # and finds the project, and the project's agent key still works.
+    assert stack.project is not None
+    again = stack.project.owner.sign_in_again()
+    listed = again.call("GET", "/board/api/projects")
+    assert listed.status == 200
+    assert [one["id"] for one in listed.body["projects"]] == [stack.project.id]
     async with stack.client() as client:
         assert await export_everything(client) == original
         # The event log reads in order, and what is written after the restore comes after it.

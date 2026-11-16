@@ -59,7 +59,6 @@ services:
       VRUM_PORT: ${VRUM_NO_MODEL_PORT:-18001}
       VRUM_DB_HOST: db
       VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set.}
-      VRUM_TOKEN: ${VRUM_TOKEN:?VRUM_TOKEN is not set.}
     ports:
       - "127.0.0.1:${VRUM_NO_MODEL_PORT:-18001}:${VRUM_NO_MODEL_PORT:-18001}"
     healthcheck:

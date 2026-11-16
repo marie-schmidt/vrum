@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 
+from tests.acceptance_accounts import accounts
 from tests.acceptance_board import board
 from tests.acceptance_connect import connecting
 from tests.acceptance_finding import finding
@@ -48,6 +49,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "memory": rules_and_memory,
     "connecting": connecting,
     "running": running,
+    "accounts": accounts,
     "moving": moving,
 }
 
@@ -81,7 +83,7 @@ async def main(only: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    for needed in ("VRUM_TEST_URL", "VRUM_TOKEN", "COMPOSE_PROJECT_NAME"):
+    for needed in ("VRUM_TEST_URL", "COMPOSE_PROJECT_NAME"):
         if not os.environ.get(needed):
             raise SystemExit(f"{needed} is not set. Run this through ./acceptance.sh.")
     try:

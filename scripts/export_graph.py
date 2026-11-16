@@ -1,10 +1,10 @@
 """Write the whole graph of a running Vrum to one JSON file (every item, with its ids, dates,
-origins and history), to keep or to load into an empty server with import_graph.py.
+origins and history), to keep or to load into an empty project with import_graph.py.
 
-    VRUM_TOKEN=<the token in .env> uv run python scripts/export_graph.py \\
+    VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/export_graph.py \\
         http://127.0.0.1:8000/mcp vrum-export.json
 
-The file holds everything in the graph, so it is written readable only by you."""
+The file holds everything in the project's graph, so it is written readable only by you."""
 
 import asyncio
 import json

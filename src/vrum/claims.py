@@ -102,7 +102,7 @@ async def take_claim(
         "SELECT id, kind, %(actor)s, clock_timestamp(), "
         "clock_timestamp() + make_interval(secs => %(lease)s) FROM nodes "
         "WHERE id = %(node)s "
-        "ON CONFLICT (node_id) DO UPDATE SET actor = EXCLUDED.actor, "
+        "ON CONFLICT (project_id, node_id) DO UPDATE SET actor = EXCLUDED.actor, "
         "claimed_at = EXCLUDED.claimed_at, expires_at = EXCLUDED.expires_at "
         "WHERE claims.expires_at <= clock_timestamp() "
         f"RETURNING {_CLAIM_COLUMNS}",

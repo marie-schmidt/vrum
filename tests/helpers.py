@@ -22,7 +22,7 @@ from mcp.types import CallToolResult, TextContent
 
 @asynccontextmanager
 async def connect(url: str, token: str | None) -> AsyncIterator[Client]:
-    """A client of the server at `url` that sends this token (or none)."""
+    """A client of the server at `url` that sends this agent key (or none)."""
     headers = None if token is None else {"Authorization": f"Bearer {token}"}
     async with (
         create_mcp_http_client(headers=headers) as http,
@@ -32,11 +32,11 @@ async def connect(url: str, token: str | None) -> AsyncIterator[Client]:
 
 
 def the_token() -> str:
-    """The token of the stack ./check.sh started."""
-    token = os.environ.get("VRUM_TOKEN")
-    if not token:
-        pytest.fail("VRUM_TOKEN is not set. Run the integration tests through ./check.sh.")
-    return token
+    """The agent key of the project almost every test works in (see tests/world.py): it reaches
+    that project on the check stack and nothing else."""
+    from tests.world import the_project
+
+    return the_project().key
 
 
 def _text(result: CallToolResult) -> str:
@@ -206,9 +206,29 @@ def compose(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_sql(sql: str, *, plain: bool = False) -> subprocess.CompletedProcess[str]:
-    """Run SQL directly inside the real database. `plain` prints bare values, nothing else."""
-    flags = ["-tA"] if plain else []
+def run_sql(
+    sql: str,
+    *,
+    plain: bool = False,
+    project: int | None | bool = True,
+    as_project: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run SQL directly inside the real database, as its owner, who is not held back by the walls
+    between projects. `plain` prints bare values, nothing else. `project` names the project that
+    new rows go to when the SQL does not say (by default the shared test project, made if need be;
+    a number for another; None or False for none, so that nothing is defaulted). With
+    `as_project` the SQL runs as the database role a project's work runs as: it sees that
+    project's rows only, as the server's own queries do."""
+    flags = ["-tAq"] if plain else []
+    if project is True:
+        from tests.world import the_project
+
+        project = the_project().id
+    prefix = (
+        [] if project is None or project is False else ["-c", f"SET vrum.project_id = {project}"]
+    )
+    if as_project:
+        prefix += ["-c", "SET ROLE vrum_project"]
     return compose(
         "exec",
         "-T",
@@ -221,6 +241,7 @@ def run_sql(sql: str, *, plain: bool = False) -> subprocess.CompletedProcess[str
         "-v",
         "ON_ERROR_STOP=1",
         *flags,
+        *prefix,
         "-c",
         sql,
     )

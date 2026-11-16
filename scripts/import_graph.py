@@ -1,7 +1,7 @@
 """Load a file written by export_graph.py into a running Vrum that is empty, keeping every id, date,
-origin and event. All of it is loaded or none of it. A server that already holds anything refuses.
+origin and event. All of it is loaded or none of it. A project that already holds anything refuses.
 
-    VRUM_TOKEN=<the token in .env> uv run python scripts/import_graph.py \\
+    VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/import_graph.py \\
         http://127.0.0.1:8000/mcp vrum-export.json
 
 A file can be as big as one request may be: 4 MiB unless the server's VRUM_MAX_REQUEST_BYTES is

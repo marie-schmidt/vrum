@@ -13,8 +13,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import ValidationError
 
+from vrum.access import NOT_A_BEARER, bearer_key
+from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY, Accounts
 from vrum.common import Refusal, refuse_secrets
-from vrum.db import Database
+from vrum.db import Database, NoProject, current_project, working_for
 from vrum.logs import event
 
 log = logging.getLogger("vrum.tools")
@@ -40,10 +42,37 @@ def plain_validation_message(tool: str, error: ValidationError) -> str:
 
 
 class GuardedServer(MCPServer[Database]):
+    # Who may use which project. Set when the server is built (see create_server).
+    accounts: Accounts
+
+    async def _project_for(self, context: Any) -> int:
+        """The project this call is for, decided by the call itself and never by an argument. A
+        call that came over the network is for the project its agent key belongs to, found again
+        on every call, so a key that has just been revoked stops working on a connection that is
+        already open. A call the board makes in this process is for the project the board has
+        already checked that the signed-in person owns."""
+        if context is None:
+            project = current_project()
+            if project is None:
+                raise NoProject("The board made a call with no project named.")
+            return project
+        try:
+            header = (context.headers or {}).get("authorization")
+        except RuntimeError:
+            header = None
+        key, reason = bearer_key(header)
+        if key is None:
+            raise Refusal(NO_AGENT_KEY if reason == "no_key" else NOT_A_BEARER)
+        project = await self.accounts.project_for_key(key)
+        if project is None:
+            raise Refusal(BAD_AGENT_KEY)
+        return project
+
     async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
         started = time.monotonic()
         outcome = "ok"
         actor: str | None = None
+        project: int | None = None
         try:
             try:
                 refuse_secrets(arguments)
@@ -51,7 +80,12 @@ class GuardedServer(MCPServer[Database]):
                 raise Refusal(f"Error executing tool {name}: {refusal}") from None
             raw_actor = arguments.get("actor")
             actor = raw_actor[:100] if isinstance(raw_actor, str) else None
-            return await super().call_tool(name, arguments, context)
+            try:
+                project = await self._project_for(context)
+            except Refusal as refusal:
+                raise Refusal(f"Error executing tool {name}: {refusal}") from None
+            with working_for(project):
+                return await super().call_tool(name, arguments, context)
         except ToolError as error:
             if isinstance(error.__cause__, ValidationError):
                 outcome = "invalid"
@@ -68,6 +102,7 @@ class GuardedServer(MCPServer[Database]):
                 "tool_call",
                 tool=name[:_LONGEST_FIELD],
                 actor=actor,
+                project=project,
                 outcome=outcome,
                 ms=round((time.monotonic() - started) * 1000),
             )

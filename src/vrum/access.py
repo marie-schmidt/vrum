@@ -1,21 +1,23 @@
 """Who may talk to the server, and how much they may send.
 
-Every request has to carry the token, as `Authorization: Bearer <token>`, except the health check,
-which says only ok or unavailable. A request with no token, a wrong one or the wrong sort of
-header is refused before its body is read, and a request with more bytes than the limit is refused
-before it is handled. Each refusal says in plain words what to do. Nothing a caller sent in a
-header is ever repeated back or written to a log."""
+The MCP endpoint needs an agent key for a project, as `Authorization: Bearer <key>`. A request with
+no key, a key that is wrong or revoked, or the wrong sort of header is refused before its body is
+read. The health check and the board's page files hold no data and are open. The board's own calls
+(under /board/api) are checked by the board against the person's session, because they carry a
+cookie and not a key. Every request with more bytes than the limit is refused before it is
+handled. Each refusal says in plain words what to do. Nothing a caller sent in a header is ever
+repeated back or written to a log."""
 
-import hmac
 import json
 import logging
 from collections import deque
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY
 from vrum.logs import event
 
 log = logging.getLogger("vrum.access")
@@ -23,22 +25,31 @@ log = logging.getLogger("vrum.access")
 # The JSON-RPC error code that goes with each refusal (the range -32000 to -32099 is for servers).
 _CODES = {401: -32001, 413: -32002}
 
-# Paths that need no token, with the one method each answers. They say nothing about the data. The
+# Paths that need no key, with the one method each answers. They say nothing about the data. The
 # board's page files are added to these when the application is built (see vrum.board).
 OPEN_PATHS = {"/health": "GET"}
 
-NO_TOKEN = (
-    "This server needs a token and none was sent. Send it in the Authorization header as "
-    "'Bearer <token>'. The token is VRUM_TOKEN in the server's .env file."
-)
-WRONG_TOKEN = (
-    "The token is not right, so nothing was done. Check it against VRUM_TOKEN in the server's "
-    ".env file, and send it in the Authorization header as 'Bearer <token>'."
-)
+# Where the MCP endpoint is, which is the SDK's own default.
+MCP_PATH = "/mcp"
+
 NOT_A_BEARER = (
     "The Authorization header is not a bearer token, so nothing was done. Send it as "
-    "'Authorization: Bearer <token>'."
+    "'Authorization: Bearer <key>', with the agent key of the project."
 )
+
+
+class AgentKeys(Protocol):
+    async def project_for_key(self, key: str) -> int | None: ...
+
+
+def bearer_key(header: str | None) -> tuple[str | None, str | None]:
+    """The key in an Authorization header, or why there is none: (key, reason)."""
+    if header is None or not header.strip():
+        return None, "no_key"
+    scheme, _, presented = header.partition(" ")
+    if scheme.lower() != "bearer" or not presented.strip():
+        return None, "not_bearer"
+    return presented.strip(), None
 
 
 def too_large(size: int | None, limit: int) -> str:
@@ -54,12 +65,12 @@ class AccessGuard:
         self,
         app: ASGIApp,
         *,
-        token: str,
+        keys: AgentKeys,
         max_request_bytes: int,
         open_paths: Mapping[str, str] = OPEN_PATHS,
     ) -> None:
         self.app = app
-        self._token = token.encode()
+        self._keys = keys
         self._limit = max_request_bytes
         self._open_paths = open_paths
 
@@ -72,11 +83,12 @@ class AccessGuard:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
-        problem = self._token_problem(headers.get("authorization"))
-        if problem is not None:
-            reason, message = problem
-            await self._refuse(scope, send, 401, reason, message)
-            return
+        if path == MCP_PATH or path.startswith(MCP_PATH + "/"):
+            problem = await self._key_problem(headers.get("authorization"))
+            if problem is not None:
+                reason, message = problem
+                await self._refuse(scope, send, 401, reason, message)
+                return
         declared = _declared_size(headers)
         if declared is not None and declared > self._limit:
             await self._refuse(
@@ -91,15 +103,13 @@ class AccessGuard:
             receive = body
         await self.app(scope, receive, send)
 
-    def _token_problem(self, header: str | None) -> tuple[str, str] | None:
+    async def _key_problem(self, header: str | None) -> tuple[str, str] | None:
         """Why this Authorization header does not let a request in, or None when it does."""
-        if header is None or not header.strip():
-            return "no_token", NO_TOKEN
-        scheme, _, presented = header.partition(" ")
-        if scheme.lower() != "bearer":
-            return "not_bearer", NOT_A_BEARER
-        if not hmac.compare_digest(presented.strip().encode(), self._token):
-            return "wrong_token", WRONG_TOKEN
+        key, reason = bearer_key(header)
+        if key is None:
+            return (reason or "no_key"), NO_AGENT_KEY if reason == "no_key" else NOT_A_BEARER
+        if await self._keys.project_for_key(key) is None:
+            return "wrong_key", BAD_AGENT_KEY
         return None
 
     async def _read_unannounced_body(self, receive: Receive) -> Receive | None:

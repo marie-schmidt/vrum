@@ -373,7 +373,7 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
         {"source": "s21", "target": "s11", "link_type": "supersedes"},
         {"source": "e1", "target": "e2", "link_type": "duplicates"},
     ]
-    board = board_url(stack.url)
+    board = board_url(stack.url, stack.project)
     async with stack.client() as client:
         await ok(client, "create_plan", actor="agent-1", items=forty, links=links)
         nodes = await all_nodes(client)
@@ -383,7 +383,7 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
                 known[link["id"]] = link
         assert len(nodes) == 40 and len(known) == len(links)
 
-        async with browser_page(board, token=stack.token) as w:
+        async with browser_page(board, token=stack.key) as w:
             page = w.page
             await drawn(w, "#/graph?scope=all")
             await expect(svg(page)).to_have_attribute("data-dots", "40")

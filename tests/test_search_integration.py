@@ -1019,7 +1019,9 @@ async def test_reading_tools_leave_the_index_exactly_as_it_was(client: Client) -
     )
 
     def snapshot() -> str:
-        result = run_sql(snapshot_sql, plain=True)
+        # As the shared project's own work sees it: the background indexer keeps indexing other
+        # projects' items, which is not what this test is about.
+        result = run_sql(snapshot_sql, plain=True, as_project=True)
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
 

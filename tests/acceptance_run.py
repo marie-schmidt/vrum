@@ -23,7 +23,6 @@ from tests.board_helpers import (
     board_url,
     browser_page,
     every_overlap,
-    http,
     made,
 )
 from tests.board_m14 import (
@@ -50,6 +49,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import project_at
 
 ADA = "Ada Lovelace"
 NEWS = 15_000
@@ -467,12 +467,13 @@ async def tools(client: Client, page_url: str) -> None:
         shown = json.loads(await entry.locator("pre.result").inner_text())
         mcp = await ok(client, "list_nodes", kind="epic", limit=3, query=f"epic:{epic}")
         changing = page.locator("article.tool[data-changes='1']")
-        status, _, text = http(
+        owner = project_at(page_url).owner.sign_in_again()
+        tried = owner.call(
             "POST",
-            page_url + "/api/try/create_node",
-            token=the_token(),
-            body={"actor": "x", "kind": "epic", "title": "Must not exist"},
+            f"/board/api/projects/{project_at(page_url).id}/try/create_node",
+            {"actor": "x", "kind": "epic", "title": "Must not exist"},
         )
+        status, text = tried.status, json.dumps(tried.body)
         proof(
             "M14",
             "Try it on list_nodes returns what MCP returns, no tool that changes anything has a "
@@ -516,7 +517,8 @@ async def status(client: Client, page_url: str) -> None:
         ).strip()
 
     secrets = {
-        "the token": the_token(),
+        "the agent key": the_token(),
+        "the owner's password": project_at(page_url).owner.password,
         "the database password": os.environ["VRUM_DB_PASSWORD"],
     }
     async with browser_page(page_url, token=the_token(), name=ADA, keep_bodies=True) as w:
@@ -581,8 +583,8 @@ async def status(client: Client, page_url: str) -> None:
         texts = await page.locator("body").inner_text()
         proof(
             "M14",
-            "the token and the database password are in no response the board's pages received "
-            "(searched for in every one), no page, no address and no downloaded file",
+            "no session, agent key or database password is in any response the board's pages "
+            "received (searched for in every one), no page, no address and no downloaded file",
             len(w.bodies) > 20
             and all(
                 not [u for u, body in w.bodies if secret in body]

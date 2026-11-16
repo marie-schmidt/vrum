@@ -477,6 +477,26 @@ dialog.switcher { width: min(36rem, 94vw); }
 .switcher-option[aria-selected="true"] { background: var(--ink); color: var(--paper); }
 .switcher-option[aria-selected="true"] .chip { color: var(--ink); }
 
+/* Signing in, projects and agent access (M15) */
+.entry { max-width: 30rem; margin: 2rem auto; }
+.entry .help { color: var(--ink-2); }
+.entry form { margin: 1rem 0; }
+.entry .field input { padding: 0.35rem 0.5rem; border: 2px solid var(--ink); background: var(--white); }
+.entry .primary { margin-top: 0.4rem; }
+.projects { gap: 0.4rem; }
+.project { border-left: 4px solid var(--ink); padding: 0.2rem 0 0.2rem 0.6rem; }
+.project .open-project { font-weight: 700; }
+#project-switcher { max-width: 12rem; border: 2px solid var(--ink); background: var(--white); padding: 0.15rem 0.3rem; }
+.keys { gap: 0.4rem; }
+.key { border-left: 4px solid var(--green); padding: 0.2rem 0 0.2rem 0.6rem; }
+.key.revoked { border-left-color: var(--amber); color: var(--ink-2); }
+.key .status-revoked { font-weight: 700; color: var(--amber); }
+.key .status-active { font-weight: 700; color: var(--green); }
+.key .revoke { margin-left: 0.5rem; }
+#new-key { border: 3px solid var(--ink); background: var(--white); padding: 0.8rem 1rem; margin: 1rem 0; }
+#key-secret { overflow-wrap: anywhere; font-size: 1rem; font-weight: 700; }
+#key-form { max-width: 30rem; }
+
 @media (max-width: 60rem) {
   .activity-layout { grid-template-columns: minmax(0, 1fr); }
   #working { position: static; max-height: none; }

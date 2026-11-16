@@ -78,7 +78,7 @@ def ids(items: list[dict[str, Any]]) -> list[int]:
 
 
 def count_rows(table: str) -> int:
-    result = run_sql(f"SELECT count(*) FROM {table}", plain=True)
+    result = run_sql(f"SELECT count(*) FROM {table}", plain=True, as_project=True)
     assert result.returncode == 0, result.stderr
     return int(result.stdout.strip())
 
@@ -804,7 +804,9 @@ async def test_a_hundred_and_twenty_changes_report_each_one(client: Client) -> N
 
 
 async def event_ids_after(first: int) -> list[int]:
-    result = run_sql(f"SELECT id FROM events WHERE id > {first} ORDER BY id", plain=True)
+    result = run_sql(
+        f"SELECT id FROM events WHERE id > {first} ORDER BY id", plain=True, as_project=True
+    )
     assert result.returncode == 0, result.stderr
     return [int(line) for line in result.stdout.split()]
 
@@ -1004,12 +1006,15 @@ async def test_an_event_that_finishes_late_is_never_skipped_by_someone_following
     slow_thread.join(timeout=60)
     assert not slow_thread.is_alive()
     slow_id = int(
-        run_sql(f"SELECT id FROM events WHERE actor = '{slow}'", plain=True).stdout.strip()
+        run_sql(
+            f"SELECT id FROM events WHERE actor = '{slow}'", plain=True, as_project=True
+        ).stdout.strip()
     )
     began_later = run_sql(
         f"SELECT (SELECT xid FROM events WHERE id = {slow_id}) "
         f"> (SELECT xid FROM events WHERE id = {fast_id})",
         plain=True,
+        as_project=True,
     )
     assert slow_id < fast_id and began_later.stdout.strip() == "t", (
         "the changes did not happen in the order this test needs"

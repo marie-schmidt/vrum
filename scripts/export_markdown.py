@@ -2,7 +2,7 @@
 task, rule, decision, principle, fact and belief, with its fields at the top and its links written
 as [[references]], to read in Obsidian or keep in git.
 
-    VRUM_TOKEN=<the token in .env> uv run python scripts/export_markdown.py \\
+    VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/export_markdown.py \\
         http://127.0.0.1:8000/mcp vrum-notes
 
 The copy is read-only: it is made again from the graph each time. This replaces the folders epics,

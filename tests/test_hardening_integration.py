@@ -1,8 +1,8 @@
-"""M6 against the running containers: the token, the size limit, secrets in what is written, plain
-refusals, paging everywhere, and the logs (see ./check.sh).
+"""M6 against the running containers: the agent key, the size limit, secrets in what is written,
+plain refusals, paging everywhere, and the logs (see ./check.sh).
 
 Raw HTTP is used where what matters is what the server answers a caller that is not an MCP client
-(no token, a wrong one, a body that is too big), and a real MCP client where what matters is what a
+(no key, a wrong one, a body that is too big), and a real MCP client where what matters is what a
 client shows its user."""
 
 import http.client
@@ -33,6 +33,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import api, make_project, register, the_project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -61,14 +62,14 @@ def request(
     url: str,
     *,
     method: str = "POST",
-    token: str | None = None,
+    key: str | None = None,
     authorization: str | None = None,
     body: bytes | None = b"{}",
 ) -> tuple[int, dict[str, str], bytes]:
     """One HTTP request, answered whatever the status."""
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
+    if key is not None:
+        headers["Authorization"] = f"Bearer {key}"
     if authorization is not None:
         headers["Authorization"] = authorization
     call = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -90,12 +91,12 @@ def message_of(body: bytes) -> str:
     return str(json.loads(body)["error"]["message"])
 
 
-def declaring(url: str, length: int, token: str | None) -> tuple[int, bytes]:
+def declaring(url: str, length: int, key: str | None) -> tuple[int, bytes]:
     """What the server answers a request that says its body is this long, and sends none of it."""
     connection = open_connection(url)
     connection.putrequest("POST", urlsplit(url).path)
-    if token is not None:
-        connection.putheader("Authorization", f"Bearer {token}")
+    if key is not None:
+        connection.putheader("Authorization", f"Bearer {key}")
     connection.putheader("Content-Type", "application/json")
     connection.putheader("Content-Length", str(length))
     connection.endheaders()
@@ -111,11 +112,11 @@ def leaves(error: BaseException) -> list[BaseException]:
     return [error]
 
 
-async def told_when_connecting(url: str, token: str | None) -> MCPError:
+async def told_when_connecting(url: str, key: str | None) -> MCPError:
     """What an MCP client is told when it cannot get in."""
     try:
-        async with connect(url, token):
-            pytest.fail("the client got in without a valid token")
+        async with connect(url, key):
+            pytest.fail("the client got in without a valid agent key")
     except BaseException as error:
         found = [leaf for leaf in leaves(error) if isinstance(leaf, MCPError)]
         if not found:
@@ -125,20 +126,22 @@ async def told_when_connecting(url: str, token: str | None) -> MCPError:
 
 
 def count_everything() -> str:
-    """How much of everything there is, to see that a refused write changed nothing."""
+    """How much of everything the shared project holds, to see that a refused write changed
+    nothing."""
     result = run_sql(
         "SELECT (SELECT count(*) FROM nodes) || '/' || (SELECT count(*) FROM links) || '/' || "
         "(SELECT count(*) FROM rules) || '/' || (SELECT count(*) FROM decisions) || '/' || "
         "(SELECT count(*) FROM memories) || '/' || (SELECT count(*) FROM claims) || '/' || "
         "(SELECT count(*) FROM events)",
         plain=True,
+        as_project=True,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 
 
 def stored_anywhere(text: str) -> int:
-    """How many places in the database hold this text."""
+    """How many places in the whole database, in every project, hold this text."""
     like = f"'%{text}%'"
     result = run_sql(
         f"SELECT (SELECT count(*) FROM events WHERE after::text LIKE {like} "
@@ -151,6 +154,7 @@ def stored_anywhere(text: str) -> int:
         f"OR status_reason LIKE {like} OR confirmed_by LIKE {like}) "
         f"+ (SELECT count(*) FROM claims WHERE actor LIKE {like})",
         plain=True,
+        project=None,
     )
     assert result.returncode == 0, result.stderr
     return int(result.stdout.strip())
@@ -161,66 +165,125 @@ def no_model_url() -> str:
     return os.environ["VRUM_NO_MODEL_TEST_URL"]
 
 
-# -- the token -----------------------------------------------------------------------------------
+# -- the agent key -------------------------------------------------------------------------------
+
+
+def a_revoked_key() -> str:
+    """An agent key that was good for the shared project and has been revoked."""
+    project = the_project()
+    made = project.owner.call(
+        "POST", f"/board/api/projects/{project.id}/keys", {"label": "revoked soon"}
+    )
+    assert made.status == 201, made.body
+    revoked = project.owner.call(
+        "DELETE", f"/board/api/projects/{project.id}/keys/{made.body['key']['id']}"
+    )
+    assert revoked.status == 200, revoked.body
+    return str(made.body["secret"])
 
 
 @pytest.mark.parametrize("which", ["with_model", "without_model"])
-async def test_a_request_with_no_token_or_a_wrong_one_is_refused_in_plain_words(
+async def test_a_request_with_no_key_or_a_wrong_one_is_refused_in_plain_words(
     which: str, server_url: str, no_model_url: str
 ) -> None:
     url = server_url if which == "with_model" else no_model_url
-    wrong = "a-wrong-token-" + unique_word()
+    wrong = "vrk_wrong-" + unique_word()
+    revoked = a_revoked_key()
+    none = "needs an agent key for a project, and none was sent"
+    invalid = "The agent key is not valid"
 
     cases: list[tuple[dict[str, Any], str]] = [
-        ({}, "needs a token and none was sent"),
-        ({"token": wrong}, "token is not right"),
-        ({"token": the_token() + "x"}, "token is not right"),
-        ({"token": the_token()[:-1]}, "token is not right"),
+        ({}, none),
+        ({"key": wrong}, invalid),
+        ({"key": the_token() + "x"}, invalid),
+        ({"key": the_token()[:-1]}, invalid),
+        ({"key": revoked}, invalid),
         ({"authorization": f"Basic {the_token()}"}, "not a bearer token"),
         ({"authorization": the_token()}, "not a bearer token"),
-        ({"authorization": ""}, "needs a token and none was sent"),
+        ({"authorization": ""}, none),
     ]
     for arguments, expected in cases:
         status, headers, body = request(url, **arguments)
         text = message_of(body)
         assert status == 401 and expected in text, (arguments, status, text)
-        assert "Bearer <token>" in text
+        assert "Bearer <key>" in text
         assert headers["www-authenticate"] == 'Bearer realm="vrum"'
-        assert the_token() not in body.decode() and wrong not in body.decode()
-    # Any other way of asking gets the same: nothing but the health check is open.
-    root = url.removesuffix("/mcp")
-    for method, path in (("GET", "/mcp"), ("DELETE", "/mcp"), ("POST", "/"), ("GET", "/health/x")):
-        status, _, _ = request(root + path, method=method, body=b"{}" if method == "POST" else None)
-        assert status == 401, (method, path)
-    # A token in the address is not a token.
-    status, _, body = request(f"{url}?token={the_token()}&access_token={the_token()}")
+        shown = body.decode()
+        assert the_token() not in shown and wrong not in shown and revoked not in shown
+    # Every way of asking the MCP endpoint is the same.
+    for method in ("GET", "DELETE", "POST"):
+        status, _, _ = request(url, method=method, body=b"{}" if method == "POST" else None)
+        assert status == 401, method
+    assert request(url + "/anything", method="GET", body=None)[0] == 401
+    # A key in the address is not a key.
+    status, _, body = request(
+        f"{url}?key={the_token()}&token={the_token()}&access_token={the_token()}"
+    )
     assert status == 401 and the_token() not in body.decode()
-    # With the right token the request is let in (this one is not a real request, and says so).
-    status, _, _ = request(url, token=the_token())
+    # The rest of the server holds nothing for a caller with no key to ask for.
+    root = url.removesuffix("/mcp")
+    for method, path in (("POST", "/"), ("GET", "/health/x"), ("GET", "/no/such/path")):
+        status, _, body = request(
+            root + path, method=method, body=b"{}" if method == "POST" else None
+        )
+        assert status == 404 and the_token() not in body.decode(), (method, path, status)
+    # With a right key the request is let in (this one is not a real request, and says so).
+    status, _, _ = request(url, key=the_token())
     assert status not in (401, 413)
 
 
-async def test_an_mcp_client_without_the_token_or_with_a_wrong_one_is_told_why(
+async def test_an_mcp_client_without_a_key_or_with_a_wrong_one_is_told_why(
     server_url: str,
 ) -> None:
     none = await told_when_connecting(server_url, None)
-    wrong = await told_when_connecting(server_url, "wrong-token-" + unique_word())
+    wrong = await told_when_connecting(server_url, "vrk_wrong-" + unique_word())
+    revoked = await told_when_connecting(server_url, a_revoked_key())
 
-    assert "needs a token and none was sent" in none.message and none.code == -32001
-    assert "token is not right" in wrong.message and "Bearer <token>" in wrong.message
+    assert "needs an agent key for a project, and none was sent" in none.message
+    assert none.code == -32001
+    for told in (wrong, revoked):
+        assert "The agent key is not valid" in told.message and "Bearer <key>" in told.message
 
 
-async def test_the_health_check_needs_no_token_says_only_ok_and_is_the_only_open_door(
+async def test_the_health_check_and_the_page_files_are_the_only_open_doors_and_hold_no_data(
     server_url: str,
 ) -> None:
-    health = server_url.removesuffix("/mcp") + "/health"
+    root = server_url.removesuffix("/mcp")
+    health = root + "/health"
 
     status, headers, body = request(health, method="GET", body=None)
 
     assert (status, body) == (200, b'{"status":"ok"}')
     assert headers["content-type"].startswith("application/json")
-    assert request(health, method="POST", body=b"{}")[0] == 401
-    assert request(health, method="DELETE", body=None)[0] == 401
+    assert request(health, method="POST", body=b"{}")[0] == 405
+    assert request(health, method="DELETE", body=None)[0] == 405
+    # The board's page files are open and hold no data. The sign-in page says no one is signed in.
+    for path in ("/board", "/board/p/1", "/board/app.js"):
+        status, _, body = request(root + path, method="GET", body=None)
+        assert status == 200, path
+        assert the_project().name.encode() not in body and the_token().encode() not in body
+    status, _, body = request(root + "/board/api/session", method="GET", body=None)
+    assert status == 200 and json.loads(body) == {"account": None, "csrf": None}
+    # Everything else the board answers needs a person who is signed in and owns the project, and
+    # there is no way in with an agent key: it is for agents, not for people.
+    project = the_project().id
+    for method, path in (
+        ("GET", "/board/api/projects"),
+        ("GET", f"/board/api/projects/{project}"),
+        ("GET", f"/board/api/projects/{project}/keys"),
+        ("GET", f"/board/api/projects/{project}/index"),
+        ("POST", f"/board/api/projects/{project}/tool/list_nodes"),
+        ("POST", f"/board/api/projects/{project}/try/list_nodes"),
+        ("GET", "/board/api/tools"),
+        ("GET", "/board/api/info"),
+    ):
+        status, _, body = request(
+            root + path, method=method, key=the_token(), body=b"{}" if method == "POST" else None
+        )
+        assert status == 401, (method, path, status)
+        assert "not signed in" in body.decode() and the_token() not in body.decode()
+    # The tool route of the old, install-wide board is gone.
+    assert request(root + "/board/api/tool/list_nodes", key=the_token())[0] in (404, 405)
 
 
 # -- the size of a request -------------------------------------------------------------------------
@@ -254,9 +317,9 @@ async def test_a_request_is_refused_by_what_it_says_it_holds_before_its_body_is_
 
     assert status == 413
     assert f"{50 * 1024 * 1024:,} bytes" in message_of(answer)
-    # Without a valid token it is not even looked at: the answer is the one about the token.
-    status, answer = declaring(server_url, 50 * 1024 * 1024, "wrong-" + unique_word())
-    assert status == 401 and "token is not right" in message_of(answer)
+    # Without a valid key it is not even looked at: the answer is the one about the key.
+    status, answer = declaring(server_url, 50 * 1024 * 1024, "vrk_wrong-" + unique_word())
+    assert status == 401 and "The agent key is not valid" in message_of(answer)
 
 
 async def test_a_request_that_does_not_say_how_long_it_is_is_counted_as_it_arrives(
@@ -640,14 +703,16 @@ def log_of(service: str) -> str:
     return result.stdout + result.stderr
 
 
-async def test_the_logs_say_what_happened_and_hold_no_token_no_password_and_no_text(
+async def test_the_logs_say_what_happened_and_hold_no_key_no_password_no_session_and_no_text(
     client: Client, server_url: str
 ) -> None:
     content = unique_word()
     actor = f"logger-{unique_word()}"
     secret = a_secret()
-    wrong = "a-wrong-token-" + unique_word()
+    wrong = "vrk_wrong-" + unique_word()
+    wrong_password = "wrong-password-" + unique_word()
     body = f"a body that only this test writes {content}"
+    shared = the_project()
 
     await ok(client, "create_node", actor=actor, kind="epic", title=f"Title {content}", body=body)
     await refused(client, "claim_node", actor=actor, node_id=999999999)
@@ -655,9 +720,26 @@ async def test_the_logs_say_what_happened_and_hold_no_token_no_password_and_no_t
     await refused(client, "create_node", actor=secret, kind="epic", title="t")
     await refused(client, "get_node", node_id=999999999)
     await refused(client, "list_nodes", limit="x")
-    request(server_url, token=wrong)
+    revoked = a_revoked_key()
+    request(server_url, key=wrong)
+    request(server_url, key=revoked)
     request(server_url)
     declaring(server_url, MAX_REQUEST_BYTES + 100, the_token())
+    # A person registers, signs in twice (once with a wrong password), makes a project and a key,
+    # uses the key, and signs out.
+    person = register()
+    signed_in = person.sign_in_again()
+    failed = api(
+        person.base,
+        "POST",
+        "/board/api/session",
+        {"email": person.email, "password": wrong_password},
+    )
+    assert failed.status == 401
+    own = make_project(person, f"Own {content}")
+    async with connect(own.mcp_url, own.key) as own_client:
+        await ok(own_client, "server_status")
+    assert signed_in.call("DELETE", "/board/api/session").status == 200
     await anyio.sleep(0.5)
 
     log = log_of("app")
@@ -669,6 +751,8 @@ async def test_the_logs_say_what_happened_and_hold_no_token_no_password_and_no_t
         ("create_node", "ok"),
         ("claim_node", "refused"),
     ]
+    # A call says which project it was for, by number.
+    assert all(line["project"] == shared.id for line in mine)
     # A call refused for holding a secret is logged with no actor, as the secret may be the actor.
     assert any(
         line["event"] == "tool_call" and line["outcome"] == "refused" and line["actor"] is None
@@ -678,7 +762,7 @@ async def test_the_logs_say_what_happened_and_hold_no_token_no_password_and_no_t
     outcomes = {line["outcome"] for line in lines if line["event"] == "tool_call"}
     assert {"ok", "refused", "invalid"} <= outcomes
     refusals = [line for line in lines if line["event"] == "request_refused"]
-    assert {"no_token", "wrong_token", "too_large"} <= {line["reason"] for line in refusals}
+    assert {"no_key", "wrong_key", "too_large"} <= {line["reason"] for line in refusals}
     assert all({"status", "method", "path", "client"} <= line.keys() for line in refusals)
     assert any(line["event"] == "server_started" for line in lines)
     # What must never be in them is in none of them, on either server.
@@ -686,6 +770,17 @@ async def test_the_logs_say_what_happened_and_hold_no_token_no_password_and_no_t
         text = log if service == "app" else log_of(service)
         for forbidden in (
             the_token(),
+            revoked,
+            own.key,
+            shared.owner.password,
+            shared.owner.cookie,
+            shared.owner.csrf,
+            person.password,
+            wrong_password,
+            person.cookie,
+            person.csrf,
+            signed_in.cookie,
+            signed_in.csrf,
             os.environ["VRUM_DB_PASSWORD"],
             wrong,
             secret,

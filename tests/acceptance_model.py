@@ -269,7 +269,8 @@ async def model_help() -> None:
         statement = f"{marker} {unique_word()}"
         active = int(
             sql_value(
-                "SELECT count(*) FROM memory_state WHERE type = 'belief' AND status = 'active'"
+                "SELECT count(*) FROM memory_state WHERE type = 'belief' AND status = 'active'",
+                as_project=True,
             )
         )
         model.script(
@@ -336,11 +337,12 @@ async def model_help() -> None:
 
         # -- 6. every belief, in batches
         marker = mark()
-        base = int(sql_value("SELECT coalesce(max(id), 0) FROM memories"))
+        base = int(sql_value("SELECT coalesce(max(id), 0) FROM memories", as_project=True))
         passed = int(
             sql_value(
                 "SELECT count(*) FROM memory_state WHERE type = 'belief' AND status = 'active' "
-                f"AND id <= {base}"
+                f"AND id <= {base}",
+                as_project=True,
             )
         )
         mine = await beliefs_about(client, marker, 45)
@@ -468,7 +470,7 @@ async def hardening() -> None:
     chapter("Being careful: the size of a request, secrets in what is written, and the logs")
     model = ScriptedModel()
     secret = "ghp_" + "".join(random.choices(string.ascii_letters + string.digits, k=36))
-    wrong = "a-wrong-token-" + unique_word()
+    wrong = "vrk_a-wrong-key-" + unique_word() + "-0123456789"
     async with connect(URL, the_token()) as client:
         before = rows("nodes", "events")
         body = "word " * (MAX_REQUEST_BYTES // 5 + 200)
@@ -560,8 +562,8 @@ async def hardening() -> None:
         lines = [json.loads(line) for line in logs["app"].splitlines() if line.strip()]
         events = {line["event"] for line in lines}
         forbidden = {
-            "the token": the_token(),
-            "the wrong token": wrong,
+            "the agent key": the_token(),
+            "the wrong key": wrong,
             "the database password": os.environ["VRUM_DB_PASSWORD"],
             "the secret that was pasted": secret,
             "the word Authorization": "Authorization",
@@ -575,7 +577,7 @@ async def hardening() -> None:
         ]
         proof(
             "M6",
-            "the logs say what happened, as JSON, and contain no token, no password and no secret",
+            "the logs say what happened, as JSON, and contain no key, no password and no secret",
             not leaks
             and {"server_started", "tool_call", "request_refused"} <= events
             and any(

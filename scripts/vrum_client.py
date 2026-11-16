@@ -1,5 +1,6 @@
-"""How the scripts in this folder connect to a running Vrum: with the token, read from the
-VRUM_TOKEN environment variable (the same one the server's .env holds)."""
+"""How the scripts in this folder connect to a running Vrum: with the agent key of one project, read
+from the VRUM_AGENT_KEY environment variable. The project's owner makes the key on the board
+(Agent access on the project's page). A key reaches that project and no other."""
 
 import os
 import sys
@@ -22,14 +23,15 @@ from vrum.exchange import FORMAT, FORMAT_VERSION, SECTIONS  # noqa: E402
 
 @asynccontextmanager
 async def connect(url: str) -> AsyncIterator[Client]:
-    token = os.environ.get("VRUM_TOKEN", "").strip()
-    if not token:
+    key = os.environ.get("VRUM_AGENT_KEY", "").strip()
+    if not key:
         raise SystemExit(
-            "VRUM_TOKEN is not set. Every request to the server needs the token from its .env "
-            "file: run `export VRUM_TOKEN=<the token>` first."
+            "VRUM_AGENT_KEY is not set. Every request to the server needs the agent key of a "
+            "project: make one on the project's board (Agent access), then run "
+            "`export VRUM_AGENT_KEY=<the key>` first."
         )
     async with (
-        create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}) as http,
+        create_mcp_http_client(headers={"Authorization": f"Bearer {key}"}) as http,
         Client(streamable_http_client(url, http_client=http)) as client,
     ):
         yield client

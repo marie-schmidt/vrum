@@ -31,14 +31,15 @@ def build_app(settings: Settings) -> Starlette:
         allowed_hosts=local_hosts,
         allowed_origins=[f"http://{host}" for host in local_hosts],
     )
-    app = create_server(settings).streamable_http_app(
+    server = create_server(settings)
+    app = server.streamable_http_app(
         transport_security=security,
         host=settings.host,
         max_request_body_size=settings.max_request_bytes,
     )
     app.add_middleware(
         AccessGuard,
-        token=settings.token,
+        keys=server.accounts,
         max_request_bytes=settings.max_request_bytes,
         open_paths={**OPEN_PATHS, **board_open_paths()},
     )

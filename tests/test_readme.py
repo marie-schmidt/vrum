@@ -12,7 +12,7 @@ from vrum.server import INSTRUCTIONS, create_server
 
 ROOT = Path(__file__).resolve().parent.parent
 README = (ROOT / "README.md").read_text(encoding="utf-8")
-ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "a-password", "VRUM_TOKEN": "t" * 24}
+ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "a-password"}
 
 # Names in backticks that are not tools: the kinds of link.
 NOT_TOOLS = {"needs_first", "relates_to"}
@@ -74,4 +74,4 @@ def test_the_example_configurations_are_valid_json_and_point_at_the_mcp_endpoint
     for block in blocks:
         entry = json.loads(block)["mcpServers"]["vrum"]
         assert entry["type"] == "http" and entry["url"] == "http://127.0.0.1:8000/mcp"
-        assert entry["headers"] == {"Authorization": "Bearer ${VRUM_TOKEN}"}
+        assert entry["headers"] == {"Authorization": "Bearer ${VRUM_AGENT_KEY}"}

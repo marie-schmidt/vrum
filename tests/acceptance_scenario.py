@@ -92,8 +92,10 @@ def rows(*tables: str) -> tuple[int, ...]:
     return tuple(counts)
 
 
-def sql_value(sql: str) -> str:
-    result = run_sql(sql, plain=True)
+def sql_value(sql: str, *, as_project: bool = False) -> str:
+    """One value from the database. With `as_project`, only what the shared test project holds
+    (what its agents see); otherwise everything, as the database's owner."""
+    result = run_sql(sql, plain=True, as_project=as_project)
     if result.returncode != 0:
         raise Failed(f"the database said: {result.stderr}")
     return result.stdout.strip()
@@ -174,12 +176,12 @@ async def set_status(client: Client, node: dict[str, Any], status: str) -> dict[
 
 
 # ---------------------------------------------------------------------------------------------
-# 1. Arriving: the server is up, and only someone with the token gets in (M0, M6)
+# 1. Arriving: the server is up, and only an agent key for a project gets in (M0, M6, M15)
 # ---------------------------------------------------------------------------------------------
 
 
 async def arriving() -> None:
-    chapter("Arriving: the server is up, and only someone with the token gets in")
+    chapter("Arriving: the server is up, and only an agent key for a project gets in")
     base = URL.removesuffix("/mcp")
     listing = compose("ps", "--format", "json")
     states = [json.loads(line) for line in listing.stdout.splitlines() if line.strip()]
@@ -190,7 +192,7 @@ async def arriving() -> None:
         ", ".join(sorted(state["Service"] for state in states)),
     )
     status, body = http_request(f"{base}/health", method="GET", body=None)
-    proof("M0", "GET /health answers ok with no token", (status, body) == (200, b'{"status":"ok"}'))
+    proof("M0", "GET /health answers ok with no key", (status, body) == (200, b'{"status":"ok"}'))
     async with connect(URL, the_token()) as client:
         tools = [tool.name for tool in (await client.list_tools()).tools]
         proof("M0", "a real MCP client lists the tools", len(tools) >= 55, f"{len(tools)} tools")
@@ -208,9 +210,9 @@ async def arriving() -> None:
             named and named <= set(tools),
             f"{len(named)} tools named",
         )
-    wrong = "a-wrong-token-" + unique_word()
-    for label, token in (("no token", None), ("a wrong token", wrong)):
-        status, body = http_request(URL, token=token)
+    wrong = "vrk_a-wrong-key-" + unique_word() + "-0123456789"
+    for label, key in (("no key", None), ("a wrong key", wrong)):
+        status, body = http_request(URL, token=key)
         message = str(json.loads(body)["error"]["message"])
         proof(
             "M6",
@@ -218,17 +220,29 @@ async def arriving() -> None:
             status == 401 and wrong not in message and the_token() not in message,
             f'{status} "{clip(message, 70)}"',
         )
-        told = await turned_away(URL, token)
+        told = await turned_away(URL, key)
         proof("M6", f"an MCP client with {label} is told why in plain words", told.code == -32001)
-    status, _ = http_request(f"{base}/health", method="POST", body=b"{}")
-    proof("M6", "only GET /health is open: anything else needs the token", status == 401)
+    shut = [
+        http_request(URL, method="GET", body=None)[0],
+        http_request(f"{base}/board/api/projects", method="GET", body=None)[0],
+        http_request(f"{base}/board/api/tools", method="GET", body=None)[0],
+        http_request(f"{base}/board/api/projects/1/tool/list_nodes", body=b"{}")[0],
+    ]
+    proof(
+        "M15",
+        "the endpoint needs an agent key, and the board's data calls need a signed-in person: "
+        "only GET /health and the board's page files are open",
+        shut == [401, 401, 401, 401]
+        and http_request(f"{base}/board", method="GET", body=None)[0] == 200,
+        f"{shut}",
+    )
     # The client example in the README, run as it is written, aimed at this stack.
     found = re.search(r"```python\n(.*?)\n```", (REPO_ROOT / "README.md").read_text(), re.DOTALL)
     assert found, "the README has no Python example"
     example = found.group(1).replace("http://127.0.0.1:8000/mcp", URL)
     ran = subprocess.run(
         [sys.executable, "-c", example],
-        env={**os.environ, "VRUM_TOKEN": the_token()},
+        env={**os.environ, "VRUM_AGENT_KEY": the_token()},
         capture_output=True,
         text=True,
         check=False,
@@ -236,7 +250,7 @@ async def arriving() -> None:
     )
     proof(
         "M9",
-        "the Python example in the README connects with the token and gets an answer",
+        "the Python example in the README connects with an agent key and gets an answer",
         ran.returncode == 0 and "postgres_version" in ran.stdout,
         clip(ran.stdout or ran.stderr, 70),
     )
@@ -748,7 +762,8 @@ async def working_together() -> None:
         expected = [
             int(x)
             for x in sql_value(
-                f"SELECT string_agg(id::text, ' ' ORDER BY id) FROM events WHERE id > {start}"
+                f"SELECT string_agg(id::text, ' ' ORDER BY id) FROM events WHERE id > {start}",
+                as_project=True,
             ).split()
         ]
         for _ in range(100):

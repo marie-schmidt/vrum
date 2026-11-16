@@ -53,7 +53,10 @@ docker compose stop app > /dev/null
 
 echo "Restoring into a new database..."
 psql_db -d postgres -c "DROP DATABASE IF EXISTS vrum_restoring WITH (FORCE)" -c "CREATE DATABASE vrum_restoring" > /dev/null
-if ! docker compose exec -T db pg_restore -U vrum -d vrum_restoring --single-transaction --exit-on-error --no-owner --no-acl < "$file"; then
+# The role that a project's work runs as belongs to the database server and not to one database, so
+# a backup does not carry it, but it does carry what the role may do. Make sure the role is there.
+psql_db -d postgres -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vrum_project') THEN CREATE ROLE vrum_project NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF; END \$\$" > /dev/null
+if ! docker compose exec -T db pg_restore -U vrum -d vrum_restoring --single-transaction --exit-on-error --no-owner < "$file"; then
   echo "The backup could not be restored. The data that was there has not been touched." >&2
   psql_db -d postgres -c "DROP DATABASE IF EXISTS vrum_restoring WITH (FORCE)" > /dev/null || true
   exit 1

@@ -24,6 +24,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.world import make_project, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -33,7 +34,7 @@ SECTIONS = ("nodes", "links", "rules", "decisions", "memories", "events")
 def counts_in_the_database() -> dict[str, int]:
     found: dict[str, int] = {}
     for section in SECTIONS:
-        result = run_sql(f"SELECT count(*) FROM {section}", plain=True)
+        result = run_sql(f"SELECT count(*) FROM {section}", plain=True, as_project=True)
         assert result.returncode == 0, result.stderr
         found[section] = int(result.stdout.strip())
     return found
@@ -245,15 +246,21 @@ async def test_each_page_is_one_list_and_the_cursor_says_where_to_go_on(client: 
 # -- the Markdown copy ---------------------------------------------------------------------------
 
 
-def run_script(name: str, *arguments: str | Path) -> Any:
+def run_script(name: str, *arguments: str | Path, key: str | None = None) -> Any:
+    """A script of this repository, run as a person would, with the shared project's agent key (or
+    another, or none at all with an empty one)."""
     import os
     import subprocess
 
     url = os.environ["VRUM_TEST_URL"]
+    environment = {k: v for k, v in os.environ.items() if k != "VRUM_AGENT_KEY"}
+    wanted = the_token() if key is None else key
+    if wanted:
+        environment["VRUM_AGENT_KEY"] = wanted
     return subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / name), url, *map(str, arguments)],
         cwd=REPO_ROOT,
-        env={**os.environ, "VRUM_TOKEN": the_token()},
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -453,7 +460,7 @@ async def test_the_markdown_copy_will_not_write_into_a_folder_that_holds_other_f
     assert [path.name for path in target.rglob("*") if path.is_file()] == ["precious.md"]
 
 
-async def test_the_export_script_writes_the_same_file_as_the_pages_and_only_for_its_owner(
+async def test_the_export_script_writes_the_same_file_as_the_pages_and_for_its_own_project_only(
     client: Client, tmp_path: Path
 ) -> None:
     await rich_world(client)
@@ -465,3 +472,13 @@ async def test_the_export_script_writes_the_same_file_as_the_pages_and_only_for_
     assert json.loads(target.read_text(encoding="utf-8")) == await export_everything(client)
     assert target.stat().st_mode & 0o077 == 0
     assert "nodes" in result.stdout
+    # With no agent key it says what to do and writes nothing; with the key of another project it
+    # writes that project's graph, which holds none of this one's.
+    nothing = run_script("export_graph.py", tmp_path / "none.json", key="")
+    assert nothing.returncode != 0 and "VRUM_AGENT_KEY is not set" in nothing.stderr
+    assert not (tmp_path / "none.json").exists()
+    elsewhere = make_project(register(), "Somewhere else")
+    other = run_script("export_graph.py", tmp_path / "other.json", key=elsewhere.key)
+    assert other.returncode == 0, other.stdout + other.stderr
+    other_file = json.loads((tmp_path / "other.json").read_text(encoding="utf-8"))
+    assert all(not other_file[name] for name in SECTIONS)

@@ -656,7 +656,8 @@ async def _neighbours(
     rows = await fetch_all(
         conn,
         "SELECT i.item_type, i.item_id, 1 - (i.embedding <=> %(v)s::vector) AS similarity "
-        "FROM semantic_index i JOIN index_source s ON s.item_type = i.item_type "
+        "FROM semantic_index i JOIN index_source s ON s.project_id = i.project_id "
+        "AND s.item_type = i.item_type "
         "AND s.id = i.item_id AND s.content_hash = i.content_hash "
         "WHERE (i.embedding <=> %(v)s::vector) <= %(max_distance)s "
         "AND (%(types)s::text[] IS NULL OR i.item_type = ANY(%(types)s)) "
@@ -675,7 +676,8 @@ async def _neighbours_many(
     rows = await fetch_all(
         conn,
         "WITH current AS MATERIALIZED (SELECT i.item_type, i.item_id, i.embedding "
-        "FROM semantic_index i JOIN index_source s ON s.item_type = i.item_type "
+        "FROM semantic_index i JOIN index_source s ON s.project_id = i.project_id "
+        "AND s.item_type = i.item_type "
         "AND s.id = i.item_id AND s.content_hash = i.content_hash "
         "WHERE i.item_type = ANY(%(types)s)) "
         "SELECT q.n, c.item_type, c.item_id, 1 - (c.embedding <=> q.v::vector) AS similarity "
@@ -930,7 +932,8 @@ async def _stored_vector(conn: AsyncConnection, item: tuple[str, int]) -> str | 
     row = await fetch_one(
         conn,
         "SELECT i.embedding::text AS vector FROM semantic_index i JOIN index_source s "
-        "ON s.item_type = i.item_type AND s.id = i.item_id AND s.content_hash = i.content_hash "
+        "ON s.project_id = i.project_id AND s.item_type = i.item_type AND s.id = i.item_id "
+        "AND s.content_hash = i.content_hash "
         "WHERE i.item_type = %s AND i.item_id = %s",
         item,
     )
@@ -942,21 +945,27 @@ async def _stored_vector(conn: AsyncConnection, item: tuple[str, int]) -> str | 
 _OVERLAP_ITEMS = {
     "epic": (
         "SELECT i.item_id AS id, i.embedding, n.id AS epic_id FROM semantic_index i "
-        "JOIN index_source s ON s.item_type = i.item_type AND s.id = i.item_id "
-        "AND s.content_hash = i.content_hash JOIN nodes n ON n.id = i.item_id "
+        "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
+        "AND s.id = i.item_id "
+        "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
+        "AND n.id = i.item_id "
         "WHERE i.item_type = 'epic' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "story": (
         "SELECT i.item_id AS id, i.embedding, n.parent_id AS epic_id FROM semantic_index i "
-        "JOIN index_source s ON s.item_type = i.item_type AND s.id = i.item_id "
-        "AND s.content_hash = i.content_hash JOIN nodes n ON n.id = i.item_id "
+        "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
+        "AND s.id = i.item_id "
+        "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
+        "AND n.id = i.item_id "
         "WHERE i.item_type = 'story' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "rule": (
         "SELECT i.item_id AS id, i.embedding, p.parent_id AS epic_id FROM semantic_index i "
-        "JOIN index_source s ON s.item_type = i.item_type AND s.id = i.item_id "
-        "AND s.content_hash = i.content_hash JOIN rules r ON r.id = i.item_id "
-        "LEFT JOIN nodes p ON p.id = r.story_id "
+        "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
+        "AND s.id = i.item_id "
+        "AND s.content_hash = i.content_hash JOIN rules r ON r.project_id = i.project_id "
+        "AND r.id = i.item_id "
+        "LEFT JOIN nodes p ON p.project_id = r.project_id AND p.id = r.story_id "
         "WHERE i.item_type = 'rule' AND (%(dropped)s OR r.status <> 'dropped')"
     ),
 }

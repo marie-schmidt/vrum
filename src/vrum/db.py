@@ -1,9 +1,16 @@
 """The PostgreSQL connection pool, building the database from its schema, and the questions the
-server asks about the database."""
+server asks about the database.
+
+Work on a project's graph runs in `transaction()`, which is for the project the current work was
+started for (see `working_for`): the transaction switches to a database role that cannot reach
+accounts, sessions or keys, and the database shows it the rows of that project and no others. With
+no project named it shows none. Everything that is not a project's own work (accounts, projects,
+keys, the index job, building the schema) runs in `admin_transaction()`."""
 
 import hashlib
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from importlib.resources import files
 
@@ -14,6 +21,29 @@ from psycopg_pool import AsyncConnectionPool
 _QUICK_TIMEOUT_SECONDS = 3.0
 _STARTUP_TIMEOUT_SECONDS = 30.0
 _SCHEMA_LOCK_ID = 7_431_900_001
+
+# The project the work in progress belongs to. It is set by the code that has already decided who
+# may use the project (see GuardedServer and the board), never by an argument a caller sent.
+_project: ContextVar[int | None] = ContextVar("vrum_project", default=None)
+
+
+class NoProject(RuntimeError):
+    """Work on a project's graph was started with no project named. This is a fault in the server,
+    never something a caller did: the work is refused rather than run for no project."""
+
+
+@contextmanager
+def working_for(project_id: int) -> Iterator[None]:
+    """Everything done inside this block, in tools and in what they call, is for this project."""
+    token = _project.set(project_id)
+    try:
+        yield
+    finally:
+        _project.reset(token)
+
+
+def current_project() -> int | None:
+    return _project.get()
 
 
 @dataclass(frozen=True)
@@ -82,8 +112,28 @@ class Database:
         await self._pool.close()
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[AsyncConnection]:
-        """A connection in one transaction: what is done on it is saved together or not at all."""
+    async def transaction(self, *, snapshot: bool = False) -> AsyncIterator[AsyncConnection]:
+        """A connection in one transaction for the current project: what is done on it is saved
+        together or not at all, and it can reach that project's rows and nothing else. With
+        `snapshot` it reads one consistent view of the data, as it was when it began."""
+        project = _project.get()
+        if project is None:
+            raise NoProject("Work on a project's graph was started with no project named.")
+        async with self._pool.connection() as conn, conn.transaction():
+            if snapshot:
+                # The isolation level has to be chosen before the first query of the transaction.
+                await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            await conn.execute(
+                "SELECT set_config('vrum.project_id', %s, true), "
+                "set_config('role', 'vrum_project', true)",
+                (str(project),),
+            )
+            yield conn
+
+    @asynccontextmanager
+    async def admin_transaction(self) -> AsyncIterator[AsyncConnection]:
+        """A connection in one transaction with no project: for accounts, projects and keys, the
+        index job and building the database. Never used for a project's own work."""
         async with self._pool.connection() as conn, conn.transaction():
             yield conn
 

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp import Client
 from playwright.async_api import (
@@ -25,6 +26,7 @@ from playwright.async_api import (
 )
 
 from tests.helpers import ok, reindexed, unique_word
+from tests.world import SESSION_COOKIE, Person, Project, Reply, project_at, the_project
 
 # Every request of the board has to go to the server it came from.
 VIEWPORT = {"width": 1500, "height": 1500}
@@ -43,13 +45,16 @@ PAGES = [
     "overlaps",
     "activity",
     "tools",
+    "access",
     "status",
 ]
 
 
-def board_url(mcp_url: str) -> str:
-    """The address of the board of the server whose MCP endpoint is `mcp_url`."""
-    return mcp_url.removesuffix("/mcp") + "/board"
+def board_url(mcp_url: str, project: Project | None = None) -> str:
+    """The address of a project's board (by default the shared test project's) on the server whose
+    MCP endpoint is `mcp_url`."""
+    one = project or the_project()
+    return f"{mcp_url.removesuffix('/mcp')}/board/p/{one.id}"
 
 
 async def made(
@@ -82,12 +87,13 @@ class Watched:
 
     @property
     def origin(self) -> str:
-        return self.board.removesuffix("/board")
+        """The server's own address, such as http://127.0.0.1:18000."""
+        return self.board.split("/board")[0]
 
     async def open(self, address: str = "") -> None:
         """Go to a page of the board, such as '#/graph?scope=all', and wait for it to load."""
         await self.page.goto(f"{self.board}{address}")
-        await self.page.wait_for_selector("#top nav, dialog.modal", timeout=15_000)
+        await self.page.wait_for_selector("#top nav, .entry", timeout=15_000)
 
     async def go(self, address: str) -> None:
         """Change the address after the # without loading the page again, as a link does."""
@@ -98,16 +104,28 @@ class Watched:
 async def browser_page(
     board: str, *, token: str | None, name: str | None = "Tester", keep_bodies: bool = False
 ) -> AsyncIterator[Watched]:
-    """A headless browser on the board. With a token and a name it starts signed in, as a person
-    who has used the board before would be; with none it shows the sign-in. `keep_bodies` keeps
-    the text of every response, for a test that searches them all."""
+    """A headless browser on a project's board (`board`, from board_url). With a `token`, which is
+    the shared test project's agent key from the_token(), it starts signed in as that project's
+    owner, with a session of its own, as a person who has used the board before would be; with
+    none it is signed out and shows the sign-in. `name` is what the board records changes with.
+    `keep_bodies` keeps the text of every response, for a test that searches them all."""
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         try:
             context = await browser.new_context(viewport=VIEWPORT)  # type: ignore[arg-type]
             if token is not None:
-                await context.add_init_script(
-                    f"sessionStorage.setItem('vrum.token', {json.dumps(token)});"
+                person = project_at(board).owner.sign_in_again()
+                await context.add_cookies(
+                    [
+                        {
+                            "name": SESSION_COOKIE,
+                            "value": person.cookie,
+                            "domain": urlparse(board).hostname or "127.0.0.1",
+                            "path": "/board",
+                            "httpOnly": True,
+                            "sameSite": "Strict",
+                        }
+                    ]
                 )
             if name is not None:
                 await context.add_init_script(
@@ -158,7 +176,7 @@ async def hold_back_news(page: Page) -> None:
     async def nothing_new(route: Route) -> None:
         await route.fulfill(json={"items": [], "next_after_id": None, "latest_event_id": 0})
 
-    await page.route("**/board/api/tool/changes_since", nothing_new)
+    await page.route("**/board/api/projects/*/tool/changes_since", nothing_new)
     await page.wait_for_load_state("networkidle")
 
 
@@ -363,3 +381,25 @@ def http(
             {key.lower(): value for key, value in error.headers.items()},
             error.read().decode(),
         )
+
+
+def api_path(board: str, rest: str = "") -> str:
+    """The board's API address for the project whose board is `board`: for '/tool/list_nodes' it
+    is /board/api/projects/<id>/tool/list_nodes."""
+    return f"/board/api/projects/{project_at(board).id}{rest}"
+
+
+def board_call(
+    board: str,
+    method: str,
+    path: str,
+    body: Any = None,
+    *,
+    person: Person | None = None,
+    **more: Any,
+) -> Reply:
+    """A request to the board's API (a whole path, see api_path) as a person who is signed in: by
+    default the owner of the project whose board is `board`, with a session of its own, carrying
+    the session's secret and the server's own address as the origin, as the board's page does."""
+    who = person or project_at(board).owner.sign_in_again()
+    return who.call(method, path, body, **more)

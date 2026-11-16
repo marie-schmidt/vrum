@@ -19,8 +19,6 @@ DEFAULT_OVERLAP_THRESHOLD = 0.55
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # How often the board asks for what changed. An agent's work shows on the board within this long.
 DEFAULT_BOARD_POLL_SECONDS = 5.0
-# The shortest token accepted: ./scripts/init-env.sh makes one of 48 characters.
-MIN_TOKEN_CHARS = 16
 
 
 class ConfigError(Exception):
@@ -98,29 +96,6 @@ def _secret(env: Mapping[str, str], name: str) -> str | None:
             raise ConfigError(f"{name}_FILE is {path!r}, which is empty.")
         return value
     return direct or None
-
-
-def _token(env: Mapping[str, str]) -> str:
-    """The token every request has to carry: in VRUM_TOKEN, or in the file VRUM_TOKEN_FILE names.
-    There is no default, and nothing weak or awkward is accepted."""
-    token = _secret(env, "VRUM_TOKEN")
-    if token is None:
-        raise ConfigError(
-            "VRUM_TOKEN is not set. Every request to the server has to carry a token, and there "
-            "is no default one: run ./scripts/init-env.sh to create one in .env, or put one in "
-            "VRUM_TOKEN (or in the file that VRUM_TOKEN_FILE names)."
-        )
-    if len(token) < MIN_TOKEN_CHARS:
-        raise ConfigError(
-            f"VRUM_TOKEN is only {len(token)} characters, and a token needs at least "
-            f"{MIN_TOKEN_CHARS}. Run ./scripts/init-env.sh to create a random one."
-        )
-    if not token.isascii() or not token.isprintable() or any(ch.isspace() for ch in token):
-        raise ConfigError(
-            "VRUM_TOKEN may only hold visible characters with no spaces, because it travels in an "
-            "HTTP header. Run ./scripts/init-env.sh to create one."
-        )
-    return token
 
 
 @dataclass(frozen=True)
@@ -218,8 +193,6 @@ class Settings:
     db_name: str
     db_user: str
     db_password: str = field(repr=False)
-    # Every request to the server has to carry this, as a bearer token. There is no default.
-    token: str = field(repr=False)
     # The most bytes one request may hold. A bigger one is refused with a plain message.
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
     # How often the board asks the server for what changed, in seconds.
@@ -243,7 +216,6 @@ class Settings:
                 "VRUM_DB_PASSWORD",
                 "There is no default password; run ./scripts/init-env.sh to create one in .env.",
             ),
-            token=_token(env),
             max_request_bytes=_whole_number(
                 env, "VRUM_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES, 1000
             ),
@@ -254,7 +226,7 @@ class Settings:
 
     def secrets(self) -> tuple[str, ...]:
         """Every secret value this server holds, so that nothing it writes can contain one."""
-        found = [self.token, self.db_password]
+        found = [self.db_password]
         for service in (self.embedding, self.llm):
             if service is not None and service.api_key:
                 found.append(service.api_key)

@@ -29,7 +29,6 @@ FORMAT_VERSION = 1
 SECTIONS = ("nodes", "links", "rules", "decisions", "memories", "events")
 # How many problems in a file are listed before "and N more".
 _MOST_PROBLEMS = 20
-_IMPORT_LOCK_ID = 7_431_900_003
 _A = {"epic": "an epic", "story": "a story", "belief": "a belief", "fact": "a fact"}
 
 _QUERIES = {
@@ -55,11 +54,6 @@ _QUERIES = {
         "before, after FROM events"
     ),
 }
-# Everything an import writes, in the order writers take their locks.
-_LOCKED_TABLES = (
-    "nodes, links, claims, rules, decisions, decision_nodes, decision_rules, memories, "
-    "memory_nodes, memory_rules, memory_decisions, belief_evidence, events"
-)
 
 
 class ExportPage(BaseModel):
@@ -428,8 +422,7 @@ class Exchange:
     async def export_page(self, *, after: str | None, limit: int) -> ExportPage:
         limit = page_size(limit)
         section, last = _cursor(after)
-        async with self._database.transaction() as conn:
-            await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        async with self._database.transaction(snapshot=True) as conn:
             counts = await _counts(conn) if after is None else None
             start = SECTIONS.index(section)
             for position in range(start, len(SECTIONS)):
@@ -469,9 +462,9 @@ class Exchange:
         parsed = check_document(document)
         try:
             async with self._database.transaction() as conn:
-                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_IMPORT_LOCK_ID,))
-                # No one writes while this goes on, and what is found empty stays empty.
-                await conn.execute(f"LOCK TABLE {_LOCKED_TABLES} IN EXCLUSIVE MODE")
+                # One import at a time into a project. Nothing is locked beyond that: another
+                # project's work goes on, and what is found empty here is loaded in this one step.
+                await conn.execute("SELECT pg_advisory_xact_lock(2, current_project()::integer)")
                 await _require_empty(conn)
                 await _load(conn, parsed)
         except (
@@ -502,10 +495,10 @@ async def _require_empty(conn: AsyncConnection) -> None:
     if held:
         what = ", ".join(f"{count} {name}" for name, count in held.items())
         raise Refusal(
-            f"This server already holds data ({what}), and an import only goes into an empty "
+            f"This project already holds data ({what}), and an import only goes into an empty "
             "one, because it keeps the ids in the file and they would clash. Nothing was "
-            "imported. Load it into a fresh server (docker compose down --volumes, then docker "
-            "compose up -d --build --wait), or restore a backup instead."
+            "imported. Create a new project and import into that, or use a backup to restore "
+            "the whole server."
         )
 
 
@@ -528,7 +521,7 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     await _insert(
         conn,
         "INSERT INTO nodes (id, kind, parent_id, title, body, status, priority, start_on, "
-        "target_on, version, created_at, updated_at) OVERRIDING SYSTEM VALUE "
+        "target_on, version, created_at, updated_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
@@ -551,13 +544,13 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     await _insert(
         conn,
         "INSERT INTO links (id, source_id, target_id, link_type, created_at) "
-        "OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s)",
+        "VALUES (%s, %s, %s, %s, %s)",
         ((x.id, x.source_id, x.target_id, x.link_type, x.created_at) for x in doc.links),
     )
     await _insert(
         conn,
         "INSERT INTO rules (id, story_id, title, body, status, version, created_at, updated_at) "
-        "OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (r.id, r.story_id, r.title, r.body, r.status, r.version, r.created_at, r.updated_at)
             for r in doc.rules
@@ -566,7 +559,7 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     await _insert(
         conn,
         "INSERT INTO memories (id, type, kind, text, source, happened_on, origin, recorded_by, "
-        "recorded_at) OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
                 m.id,
@@ -585,7 +578,7 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     await _insert(
         conn,
         "INSERT INTO decisions (id, kind, title, text, reason, decided_by, decided_on, "
-        "promoted_from_id, recorded_at) OVERRIDING SYSTEM VALUE "
+        "promoted_from_id, recorded_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
@@ -660,7 +653,7 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     await _insert(
         conn,
         "INSERT INTO events (id, node_id, other_node_id, rule_id, decision_id, memory_id, "
-        "action, actor, at, before, after) OVERRIDING SYSTEM VALUE "
+        "action, actor, at, before, after) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
@@ -681,8 +674,4 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     )
     # New items continue after the highest id in the file.
     for table in SECTIONS:
-        await conn.execute(
-            f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-            f"coalesce((SELECT max(id) FROM {table}), 1), "
-            f"EXISTS (SELECT 1 FROM {table}))"
-        )
+        await conn.execute(f"SELECT continue_ids_after('{table}', (SELECT max(id) FROM {table}))")

@@ -34,7 +34,8 @@ SECRET = "ghp_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5"
 
 
 def count(sql: str) -> int:
-    result = run_sql(sql, plain=True)
+    """A number from the shared test project's own rows (the SQL runs as that project does)."""
+    result = run_sql(sql, plain=True, as_project=True)
     assert result.returncode == 0, result.stderr
     return int(result.stdout.strip().splitlines()[0])
 

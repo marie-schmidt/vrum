@@ -85,13 +85,28 @@ export function refresh() {}
 
 function drawConnect() {
   const address = `${location.origin}${listing.mcp_path}`;
-  const command = `claude mcp add --transport http vrum ${address} --header "Authorization: Bearer $VRUM_TOKEN"`;
-  const file = JSON.stringify({ mcpServers: { vrum: { type: 'http', url: address, headers: { Authorization: 'Bearer ${VRUM_TOKEN}' } } } }, null, 2);
+  const command = `claude mcp add --transport http vrum ${address} --header "Authorization: Bearer $VRUM_AGENT_KEY"`;
+  const file = JSON.stringify({ mcpServers: { vrum: { type: 'http', url: address, headers: { Authorization: 'Bearer ${VRUM_AGENT_KEY}' } } } }, null, 2);
   put(
     parts.connect,
     h('h2', {}, 'Connecting an agent'),
-    h('dl', { class: 'connect' }, h('dt', {}, 'The endpoint'), h('dd', {}, h('code', { id: 'endpoint' }, address)), h('dt', {}, 'The token'), h('dd', {}, 'Send it with every request, in a header: ', h('code', {}, 'Authorization: Bearer <the token>'), '. The token is VRUM_TOKEN in the .env file of this server. It is never shown here, and never put in a file you commit: let the client read it from the environment.')),
-    h('details', { id: 'example' }, h('summary', {}, 'An example client configuration'), h('p', {}, 'For Claude Code:'), h('pre', {}, h('code', {}, command)), h('p', {}, 'Or a project file (.mcp.json), which holds no token because each client reads VRUM_TOKEN from the environment:'), h('pre', {}, h('code', {}, file))),
+    h(
+      'dl',
+      { class: 'connect' },
+      h('dt', {}, 'The endpoint'),
+      h('dd', {}, h('code', { id: 'endpoint' }, address)),
+      h('dt', {}, 'The agent key'),
+      h(
+        'dd',
+        {},
+        'Send it with every request, in a header: ',
+        h('code', {}, 'Authorization: Bearer <the agent key>'),
+        '. A key belongs to this one project and reaches nothing else. You make and revoke keys on the ',
+        h('a', { href: hrefTo('access') }, 'Agent access'),
+        ' page, and a key is shown only once, when it is made. Never put it in a file you commit: let the client read it from the environment.',
+      ),
+    ),
+    h('details', { id: 'example' }, h('summary', {}, 'An example client configuration'), h('p', {}, 'For Claude Code:'), h('pre', {}, h('code', {}, command)), h('p', {}, 'Or a project file (.mcp.json), which holds no key because each client reads VRUM_AGENT_KEY from the environment:'), h('pre', {}, h('code', {}, file))),
   );
 }
 

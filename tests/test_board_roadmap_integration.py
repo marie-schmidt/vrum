@@ -14,6 +14,7 @@ from playwright.async_api import expect
 
 from tests.board_helpers import (
     SLOW,
+    api_path,
     apply_filter,
     bar_of,
     board_url,
@@ -380,7 +381,7 @@ async def test_keys_shift_dates_by_a_day_or_a_week_and_chosen_bars_move_together
         await expect(bar_of(page, second)).to_have_attribute("data-start", day(8), timeout=SLOW)
         assert await dates(client, second) == (day(8), day(18))
         assert await dates(client, first) == (day(4), day(13))
-        assert any(url.endswith("/board/api/tool/update_nodes") for url in w.requests)
+        assert any(url.endswith(f"{api_path(board)}/tool/update_nodes") for url in w.requests)
         for node_id, version in ((first, 6), (second, 2)):
             last = (await updates(client, node_id))[-1]
             assert (last["actor"], last["after"]["version"]) == (ACTOR, version)

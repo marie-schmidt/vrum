@@ -16,7 +16,7 @@ mkdir -p "$(dirname "$file")"
 partial="$file.partial"
 trap 'rm -f "$partial"' EXIT
 
-if ! docker compose exec -T db pg_dump -U vrum -d vrum --format=custom --no-owner --no-acl > "$partial"; then
+if ! docker compose exec -T db pg_dump -U vrum -d vrum --format=custom --no-owner > "$partial"; then
   echo "The backup failed and nothing was written. Is the database running? Start it with:" >&2
   echo "  docker compose up -d --wait" >&2
   exit 1

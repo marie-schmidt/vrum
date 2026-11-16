@@ -31,6 +31,7 @@ from tests.helpers import (
     unique_word,
 )
 from tests.second_stack import SecondStack
+from tests.world import api, project_at
 
 SLOW = 15_000
 
@@ -102,39 +103,52 @@ async def board() -> None:
 
 
 async def signing_in(page_url: str, token: str) -> None:
-    status, _, text = http("GET", page_url + "/api/info")
-    wrong_status, _, wrong_text = http(
-        "POST", page_url + "/api/tool/list_nodes", token="not-the-token-at-all", body={}
+    base = page_url.split("/board")[0]
+    project = project_at(page_url)
+    owner = project.owner
+    nobody = api(base, "GET", "/board/api/info")
+    wrong = api(
+        base,
+        "POST",
+        f"/board/api/projects/{project.id}/tool/list_nodes",
+        {},
+        cookie="vrs_not-a-session-at-all",
+        csrf="not-the-secret",
     )
     proof(
         "M10",
-        "the board's data calls refuse a request with no token or a wrong one, in plain words",
-        status == 401
-        and "needs a token" in text
-        and wrong_status == 401
-        and "not right" in wrong_text,
-        f"{status} and {wrong_status}",
+        "the board's data calls refuse a request with no session or a wrong one, in plain words",
+        nobody.status == 401
+        and "not signed in" in str(nobody.body["message"])
+        and wrong.status == 401
+        and "not signed in" in str(wrong.body["message"]),
+        f"{nobody.status} and {wrong.status}",
     )
-    async with browser_page(page_url, token=None, name=None) as w:
+    async with browser_page(f"{base}/board", token=None, name=None) as w:
         await w.open()
-        sign_in = w.page.locator("dialog.modal")
-        await sign_in.get_by_role("button", name="Sign in").click()
-        await expect(sign_in.locator(".problem")).to_contain_text("needs a token and none was sent")
-        await sign_in.locator("#token").fill("not-the-token-at-all")
-        await sign_in.get_by_role("button", name="Sign in").click()
-        await expect(sign_in.locator(".problem")).to_contain_text("The token is not right")
-        shown = await sign_in.locator(".problem").inner_text()
-        await sign_in.locator("#token").fill(token)
-        await sign_in.get_by_role("button", name="Sign in").click()
-        await w.page.locator("dialog.modal #name").fill("Ada Lovelace")
-        await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
+        await w.page.locator("#sign-in-submit").click()
+        await expect(w.page.locator("#entry-problem")).to_contain_text("not right")
+        await w.page.locator("#account-email").fill(owner.email)
+        await w.page.locator("#account-password").fill("not-the-password-at-all")
+        await w.page.locator("#sign-in-submit").click()
+        await expect(w.page.locator("#entry-problem")).to_contain_text("not right")
+        shown = await w.page.locator("#entry-problem").inner_text()
+        await w.page.locator("#account-password").fill(owner.password)
+        await w.page.locator("#sign-in-submit").click()
+        await w.page.locator("li.project a.open-project", has_text=project.name).click()
         await expect(w.page.locator("h1")).to_have_text("Home")
         cookies = await w.page.context.cookies()
+        session = [one for one in cookies if one["name"] == "vrum_session"]
         proof(
             "M10",
-            "the sign-in turns away an empty and a wrong token with a plain message, and with the "
-            "right one the board loads; the token is not in the address or a cookie",
-            token not in w.page.url and cookies == [] and "not-the-token" not in shown,
+            "the sign-in turns away an empty and a wrong password with a plain message, and with "
+            "the right one the board loads; the password is not in the address or on the page, "
+            "and the session cookie is one the page's scripts cannot read",
+            owner.password not in w.page.url
+            and "not-the-password" not in shown
+            and len(session) == 1
+            and session[0]["httpOnly"]
+            and await w.page.evaluate("document.cookie") == "",
             f'"{clip(shown, 60)}"',
         )
 
@@ -197,6 +211,7 @@ async def people_edit(client: Client, page_url: str, token: str) -> None:
     async with browser_page(page_url, token=token, name=None) as w:
         page = w.page
         await w.open("#/board")
+        await page.locator("#who").click()
         await page.locator("dialog.modal #name").fill("Ada Lovelace")
         await page.locator("dialog.modal").get_by_role("button", name="Save").click()
 
@@ -710,7 +725,7 @@ async def everything(page_url: str) -> None:
             for node in nodes:
                 for link in (await ok(client, "list_links", node_id=node["id"]))["items"]:
                     known[link["id"]] = link
-            async with browser_page(board_url(stack.url), token=stack.token) as w:
+            async with browser_page(board_url(stack.url, stack.project), token=stack.key) as w:
                 page = w.page
                 await graph(w, "#/graph?scope=all")
                 await expect(page.locator("svg#graph-svg")).to_have_attribute("data-dots", "40")

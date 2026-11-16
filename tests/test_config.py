@@ -4,8 +4,7 @@ import pytest
 
 from vrum.config import ConfigError, Settings
 
-TOKEN = "a-token-of-more-than-sixteen-characters"
-FULL_ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "s3cret-value", "VRUM_TOKEN": TOKEN}
+FULL_ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "s3cret-value"}
 
 
 def test_defaults_apply_when_only_the_required_values_are_set() -> None:
@@ -155,43 +154,14 @@ def test_language_model_settings_have_defaults_and_the_key_stays_out_of_sight(
         Settings.from_env({**base, "LLM_TIMEOUT_SECONDS": "soon"})
 
 
-def test_there_is_no_default_token_and_the_server_will_not_start_without_one() -> None:
-    env = {key: value for key, value in FULL_ENV.items() if key != "VRUM_TOKEN"}
-    with pytest.raises(ConfigError, match="VRUM_TOKEN is not set.*no default one"):
-        Settings.from_env(env)
-    with pytest.raises(ConfigError, match="VRUM_TOKEN is not set"):
-        Settings.from_env({**env, "VRUM_TOKEN": "   "})
-
-
-@pytest.mark.parametrize(
-    ("token", "message"),
-    [
-        ("short", "only 5 characters, and a token needs at least 16"),
-        ("a token with spaces inside it", "visible characters with no spaces"),
-        ("a-token-with-a-new\nline-in-it", "visible characters with no spaces"),
-        ("a-token-with-a-café-letter-in", "visible characters with no spaces"),
-    ],
-)
-def test_a_token_that_is_short_or_awkward_in_a_header_is_refused_in_plain_words(
-    token: str, message: str
-) -> None:
-    with pytest.raises(ConfigError, match=message):
-        Settings.from_env({**FULL_ENV, "VRUM_TOKEN": token})
-
-
-def test_the_token_can_come_from_a_file_and_never_appears_when_settings_are_printed(
-    tmp_path: Path,
-) -> None:
-    key_file = tmp_path / "token"
-    key_file.write_text(f"  {TOKEN}-from-a-file\n")
-    env = {key: value for key, value in FULL_ENV.items() if key != "VRUM_TOKEN"}
-
-    settings = Settings.from_env({**env, "VRUM_TOKEN_FILE": str(key_file)})
-
-    assert settings.token == f"{TOKEN}-from-a-file"
-    assert TOKEN not in repr(settings) and TOKEN not in repr(Settings.from_env(FULL_ENV))
-    with pytest.raises(ConfigError, match="Set only one of VRUM_TOKEN and VRUM_TOKEN_FILE"):
-        Settings.from_env({**FULL_ENV, "VRUM_TOKEN_FILE": str(key_file)})
+def test_the_server_needs_no_token_to_start_and_a_leftover_one_changes_nothing() -> None:
+    # People sign in with accounts and agents use project keys: there is nothing install-wide to
+    # configure, and an old VRUM_TOKEN in the environment is simply not read.
+    assert Settings.from_env({"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "s3cret-value"})
+    with_leftover = Settings.from_env({**FULL_ENV, "VRUM_TOKEN": "left-over-from-before-m15"})
+    assert not hasattr(with_leftover, "token")
+    assert "left-over-from-before-m15" not in repr(with_leftover)
+    assert "left-over-from-before-m15" not in with_leftover.secrets()
 
 
 def test_the_secrets_a_server_holds_are_listed_so_that_logs_can_be_scrubbed() -> None:
@@ -205,7 +175,6 @@ def test_the_secrets_a_server_holds_are_listed_so_that_logs_can_be_scrubbed() ->
         "LLM_API_KEY": "model-key-value",
     }
     assert set(Settings.from_env(env).secrets()) == {
-        TOKEN,
         "s3cret-value",
         "embedding-key-value",
         "model-key-value",
