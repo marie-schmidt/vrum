@@ -5,7 +5,7 @@
 // the shared detail panel, on whatever page the person is on (`sel=kind:id`).
 
 import { callPaged } from './api.js';
-import { ui } from './ctx.js';
+import { recordLink, ui } from './ctx.js';
 import { h } from './dom.js';
 import { KIND, STATUS } from './labels.js';
 import { ensure, store, titleOf } from './store.js';
@@ -88,12 +88,12 @@ export function hrefFor(kind, id) {
 // says; this gives the kind a reference to it is written with.
 export const referenceKindOf = (type) => (['epic', 'story', 'task'].includes(type) ? 'node' : type);
 
-// A link to an epic, story or task, written as its id and its title now.
-export const itemLink = (id) => h('a', { href: hrefFor('node', id), class: 'item-link', dataset: { id } }, `#${id} ${titleOf(id)}`);
+// A link to an epic, story or task, written as its id and its title now. A plain click shows it in
+// the detail panel with the rest of the address as it is at that moment.
+export const itemLink = (id) => recordLink('node', id, { class: 'item-link', dataset: { id } }, `#${id} ${titleOf(id)}`);
 
 // A link to any record, with words of the caller's choosing.
-export const recordLink = (kind, id, words) =>
-  h('a', { href: hrefFor(kind, id), class: 'record-link', dataset: { record: `${kind}:${id}` } }, words);
+export const openLink = (kind, id, words) => recordLink(kind, id, { class: 'record-link', dataset: { record: `${kind}:${id}` } }, words);
 
 function labelOf(kind, id, found) {
   const sign = kindWords(found.type).sign;
@@ -109,7 +109,7 @@ export function renderReference(kind, id) {
   if (!found.exists) {
     return h('span', { class: 'reference missing', dataset: data, title: `Nothing of that kind has the id ${id}` }, `${refText(kind, id)} (missing)`);
   }
-  return h('a', { class: 'reference', href: hrefFor(kind, id), dataset: data }, labelOf(kind, id, found));
+  return recordLink(kind, id, { class: 'reference', dataset: data }, labelOf(kind, id, found));
 }
 
 // A title changed, or an item came or went: show every reference on the page as it is now.
@@ -138,7 +138,7 @@ const WHERE = { details: 'its details', text: 'its text', reason: 'its reason', 
 function sourceLink(source) {
   const kind = referenceKindOf(source.item_type);
   const label = `${kindWords(source.item_type).label} #${source.id}: ${clip(source.title, 70)}`;
-  return h('a', { class: 'mention-link', href: hrefFor(kind, source.id), dataset: { kind, id: String(source.id) } }, label);
+  return recordLink(kind, source.id, { class: 'mention-link', dataset: { kind, id: String(source.id) } }, label);
 }
 
 export function mentionsList(items) {

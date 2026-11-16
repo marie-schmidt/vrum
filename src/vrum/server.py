@@ -12,7 +12,7 @@ import psycopg
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -195,7 +195,7 @@ def create_server(settings: Settings) -> GuardedServer:
     claims = Claims(database)
     rules = Rules(database)
     decisions = Decisions(database)
-    memories = Memories(database)
+    facts = Facts(database)
     exchange = Exchange(database)
     indexer = Indexer(database, settings.embedding)
     embedding = settings.embedding
@@ -206,17 +206,9 @@ def create_server(settings: Settings) -> GuardedServer:
         embedding.overlap_threshold if embedding else DEFAULT_OVERLAP_THRESHOLD,
     )
     recaller = Recaller(database, searcher)
-    status = Status(database, indexer, searcher, settings.llm.model if settings.llm else None)
+    status = Status(database, indexer, searcher)
     references = References(database)
     workflow = Workflow(database, graph, searcher)
-    reflector = Reflector(
-        database,
-        LanguageModel(settings.llm) if settings.llm else None,
-        memories,
-        decisions,
-        searcher,
-        recaller,
-    )
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -243,8 +235,7 @@ def create_server(settings: Settings) -> GuardedServer:
         """Check that this server is running and can reach its database, and see how it is.
 
         Returns the server version and the versions of PostgreSQL and the pgvector extension, how
-        many of each kind of item it holds, which language model it uses (never its key), and
-        the state of the index: how many items are indexed and waiting, whether the embedding
+        many of each kind of item it holds, and the state of the index: how many items are indexed and waiting, whether the embedding
         service answers just now, its model and vector size, and how the last reindex went. Call
         this first when connecting, or when something seems wrong.
         """
@@ -615,10 +606,11 @@ def create_server(settings: Settings) -> GuardedServer:
         the oldest. It is claimed for you in the same step, and exactly one actor gets each item
         however many ask at once.
 
-        The context holds its epic and story, the rules of its story, the decisions linked to it
-        or its parents (and replaced ones, kept apart), every principle, facts and beliefs, notes
-        left by earlier holders, what it waits for, what waits for it, and similar items that are
-        only suggestions. When nothing is free this is not an error: found is false and message
+        The context holds its epic and story, the requirements of its story, the decisions linked
+        to it or its parents (past ones kept apart), every project-wide decision, the facts linked
+        to it or its parents (each saying whether a person confirmed it), notes left by earlier
+        holders, what it waits for, what waits for it, and similar items that are only
+        suggestions. When nothing is free this is not an error: found is false and message
         says how much work is held, waiting or blocked.
         """
         with _database_errors():
@@ -717,11 +709,9 @@ def create_server(settings: Settings) -> GuardedServer:
         node_id: Annotated[int | None, Field(description="Only changes to this node.")] = None,
         rule_id: Annotated[int | None, Field(description="Only changes to this rule.")] = None,
         decision_id: Annotated[
-            int | None, Field(description="Only changes to this decision or principle.")
+            int | None, Field(description="Only changes to this decision.")
         ] = None,
-        memory_id: Annotated[
-            int | None, Field(description="Only changes to this fact or belief.")
-        ] = None,
+        fact_id: Annotated[int | None, Field(description="Only changes to this fact.")] = None,
         limit: _Limit = 100,
         newest: Annotated[
             bool,
@@ -745,7 +735,7 @@ def create_server(settings: Settings) -> GuardedServer:
         Every event after the one you give is shown, in order, and none is skipped even when
         another change was still being written. Events are ordered by when their change began,
         which for two changes at the very same moment can differ from their ids. Give at most
-        one of node_id, rule_id, decision_id and memory_id. To see only the newest changes, ask
+        one of node_id, rule_id, decision_id and fact_id. To see only the newest changes, ask
         for newest, and walk back with before_event_id.
         """
         with _database_errors():
