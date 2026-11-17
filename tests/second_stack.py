@@ -58,6 +58,7 @@ class SecondStack:
             # An empty file stands in for the .env that a checkout may or may not have.
             self.env_file = Path(tempfile.mkdtemp(prefix="vrum-no-env-")) / "empty.env"
             self.env_file.write_text("", encoding="utf-8")
+            self.env["COMPOSE_ENV_FILES"] = str(self.env_file)
 
     @property
     def key(self) -> str:

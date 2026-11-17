@@ -2,9 +2,8 @@
 
 Vrum starts with no configuration at all. Every setting below has a default. To change one, copy
 `.env.example` to `.env` in the folder you run `docker compose` from, edit it, and restart the
-stack: `docker compose up -d --build --wait`. You can also set one for a single start on the
-command line, for example `VRUM_PORT=8090 docker compose up -d --build --wait`. `.env` is ignored
-by git.
+stack: `./start.sh`. You can also set one for a single start on the command line, for example
+`VRUM_PORT=8090 ./start.sh`. `.env` is ignored by git.
 
 ## The database password
 

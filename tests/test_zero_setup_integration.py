@@ -8,6 +8,7 @@ to, and removes it afterwards (see ./check.sh)."""
 
 import re
 import subprocess
+import urllib.request
 from collections.abc import Iterator
 
 import pytest
@@ -87,6 +88,16 @@ async def test_a_password_chosen_before_the_first_start_is_used_and_a_later_one_
             assert (await ok(client, "server_status"))["postgres_version"]
     finally:
         stack.close()
+
+
+async def test_the_start_script_says_where_vrum_is_live(stack: SecondStack) -> None:
+    result = stack.run("./start.sh")
+    assert result.returncode == 0, result.stdout + result.stderr
+    port = stack.base.rsplit(":", 1)[1]
+    assert "Vrum is now live." in result.stdout
+    assert f"http://localhost:{port}/board" in result.stdout
+    with urllib.request.urlopen(f"http://localhost:{port}/board", timeout=30) as reply:
+        assert reply.status == 200
 
 
 async def test_a_database_that_lost_its_password_file_says_so_in_plain_words(

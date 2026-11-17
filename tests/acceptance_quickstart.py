@@ -172,7 +172,7 @@ def read_the_readme(base: str) -> None:
         not mentioned
         and not set_there
         and "init-env" not in started
-        and "docker compose up" in first_step
+        and "./start.sh" in first_step
         and not re.search(r"\$\{[A-Z_]+:?\?", compose)
         and re.findall(r"^VRUM_DB_PASSWORD=$", env_example, re.M) == ["VRUM_DB_PASSWORD="]
         and not re.search(r"\bvr[ks]_[\w-]{8,}", text + guide),

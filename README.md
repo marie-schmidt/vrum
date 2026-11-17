@@ -45,16 +45,18 @@ and the helper scripts.)
 ```
 git clone https://github.com/marie-schmidt/vrum.git
 cd vrum
-docker compose up -d --build --wait
+./start.sh
 ```
 
 There is nothing to set up first. The first start makes a random database password and keeps it in
 a Docker volume, and the first build downloads images, so it takes a minute or two. When it
-finishes, `curl http://127.0.0.1:8000/health` answers `{"status":"ok"}`.
+finishes, the script says "Vrum is now live" and gives the address of the board.
+(`./start.sh` runs `docker compose up -d --build --wait` and then prints that message, so the plain
+command works too.)
 
-1. Open the board at `http://127.0.0.1:8000/board`. If something else already uses port 8000, start
-   Vrum with another one, for example `VRUM_PORT=8090 docker compose up -d --build --wait`, and use
-   that port in every address below.
+1. Open the board at `http://localhost:8000/board`. If something else already uses port 8000, start
+   Vrum with another one, for example `VRUM_PORT=8090 ./start.sh`, and use that port in every
+   address below.
 2. Create an account: a name, an email address and a password of at least 10 characters. Vrum keeps
    them itself and sends no email.
 3. Create a project. It opens on the Board.
