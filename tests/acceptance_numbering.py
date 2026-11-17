@@ -22,7 +22,15 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, Watched, board_url, browser_page, create_in_browser, item_rows
+from tests.board_helpers import (
+    SLOW,
+    Watched,
+    board_url,
+    browser_page,
+    create_in_browser,
+    item_rows,
+    open_tray,
+)
 from tests.helpers import (
     all_nodes,
     code_of,
@@ -245,6 +253,7 @@ async def codes_equal_references(w: Watched, client: Client) -> None:
     in_list = await page.evaluate(IN_THE_LIST)
     await w.open("#/roadmap")
     await expect(page.locator(".rm-bar")).to_have_count(3, timeout=SLOW)
+    await open_tray(page)
     on_roadmap = await page.evaluate(ON_THE_ROADMAP)
     proof(
         "M19",
