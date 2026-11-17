@@ -1,5 +1,5 @@
 // Search, in the drawer: the box in the top bar opens it, and a result opens the ordinary detail
-// panel (`sel=kind:id`) without closing it. Each result says how it matched (exact words, meaning
+// panel (`sel=kind:number`, such as `sel=story:12`) without closing it. Each result says how it matched (exact words, meaning
 // or both) and why, shows a snippet with the matched words marked, and its parent and status as
 // the graph holds them now. The counts by kind, status and epic are worked out from the whole list
 // of results, and filtering by them keeps the server's order. The drawer says how many items wait
@@ -10,11 +10,11 @@
 // search_status, search_epic, and dups with its own choices).
 
 import { Refusal, callPaged } from './api.js';
-import { recordLink, ui } from './ctx.js';
+import { recordLink, parseSel, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import * as duplicates from './duplicates.js';
 import { icon } from './icons.js';
-import { KIND, STATUS, kindIcon, statusChip, statusIcon } from './labels.js';
+import { KIND, STATUS, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, statusChip, statusIcon } from './labels.js';
 import { epicOf, store } from './store.js';
 
 const FIRST = 50;
@@ -245,10 +245,11 @@ async function load(quiet = false) {
 
 // -- what the filters keep ----------------------------------------------------------------------------
 
-// The epic an item of the graph is in: an epic, story or task by the graph, a requirement by its story.
+// The number of the epic an item of the graph is in: an epic, story or task by the graph, a
+// requirement by its story. The address (search_epic) carries that number.
 function epicOfResult(item) {
-  if (['epic', 'story', 'task'].includes(item.item_type)) return epicOf(store.nodes.get(item.id))?.id ?? null;
-  if (item.item_type === 'rule' && item.parent_id !== null) return epicOf(store.nodes.get(item.parent_id))?.id ?? null;
+  if (['epic', 'story', 'task'].includes(item.item_type)) return epicOf(store.nodes.get(item.ref))?.number ?? null;
+  if (item.item_type === 'rule' && item.parent) return epicOf(store.nodes.get(item.parent))?.number ?? null;
   return null;
 }
 
@@ -281,7 +282,7 @@ function draw() {
     parts.facets,
     facet('type', 'Kind', count(all.filter((item) => fits(item, 'type')), (item) => item.item_type), (value) => KIND[value]?.label || value, TYPES, type),
     facet('status', 'Status', count(all.filter((item) => fits(item, 'status')), (item) => item.status), (value) => STATUS[value]?.label || capital(value), null, status),
-    facet('epic', 'Epic', count(all.filter((item) => fits(item, 'epic')), (item) => epicOfItem.get(item)), (value) => `#${value} ${store.nodes.get(value)?.title || ''}`.trim(), null, epic ? String(epic) : '', epic ? 'Decisions and facts belong to no epic, so they are left out while an epic is chosen.' : null),
+    facet('epic', 'Epic', count(all.filter((item) => fits(item, 'epic')), (item) => epicOfItem.get(item)), (value) => `${nodeCode('epic', value)} ${store.nodes.get(nodeRef('epic', value))?.title || ''}`.trim(), null, epic ? String(epic) : '', epic ? 'Decisions and facts belong to no epic, so they are left out while an epic is chosen.' : null),
   );
   const visible = kept.slice(0, shown);
   put(
@@ -341,16 +342,21 @@ function snippet(text) {
   return out;
 }
 
-// The kind a record is shown with in the address: a node for an epic, story or task.
-const recordKind = (type) => (['epic', 'story', 'task'].includes(type) ? 'node' : type);
+// The code a person reads for a result: S-12 for work, #3 for a requirement, decision or fact.
+const codeOfResult = (item) => {
+  const at = parseNodeRef(item.ref);
+  return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
+};
 
 function resultRow(item) {
-  const parent = item.parent_id !== null ? `${KIND[item.parent_kind]?.label || item.parent_kind} #${item.parent_id} ${item.parent_title || ''}`.trim() : null;
+  const parentKind = item.parent ? parseNodeRef(item.parent)?.kind : null;
+  const parent = item.parent ? `${KIND[parentKind]?.label || parentKind} ${codeOf(item.parent)} ${store.nodes.get(item.parent)?.title ?? ''}`.trim() : null;
   const record = item.item_type === 'decision' || item.item_type === 'fact';
   const work = ['epic', 'story', 'task'].includes(item.item_type);
+  const at = parseSel(item.ref);
   return h(
     'li',
-    { class: `result matched-${item.matched}`, dataset: { type: item.item_type, id: item.id, matched: item.matched } },
+    { class: `result matched-${item.matched}`, dataset: { type: item.item_type, ref: item.ref, matched: item.matched, ...(work ? {} : { id: item.id }) } },
     h(
       'div',
       { class: 'entry-head' },
@@ -361,7 +367,7 @@ function resultRow(item) {
       h('span', { class: `chip matched matched-${item.matched}` }, MATCHED[item.matched] || item.matched),
       item.suggestion ? h('span', { class: 'chip suggestion' }, 'a suggestion') : null,
     ),
-    recordLink(recordKind(item.item_type), item.id, { class: 'result-title' }, `#${item.id} ${item.title}`),
+    recordLink(at.kind, at.number, { class: 'result-title' }, `${codeOfResult(item)} ${item.title}`),
     parent ? h('span', { class: 'result-parent' }, ` in ${parent}`) : null,
     record && item.label ? h('p', { class: 'quiet record-label' }, item.label) : null,
     h('p', { class: 'snippet' }, ...snippet(item.snippet)),

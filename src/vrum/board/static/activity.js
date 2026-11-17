@@ -13,7 +13,7 @@ import { clear, h, moment, plural, put } from './dom.js';
 import { CHANGE_KINDS, aboutItem, eventRow, kindOfAction } from './events.js';
 import { dialogForm, field, openDialog } from './forms.js';
 import { icon } from './icons.js';
-import { kindIcon } from './labels.js';
+import { codeOf, kindIcon, nodeRef, parseNodeRef } from './labels.js';
 import { ensureContext, sync } from './store.js';
 
 const PAGE = 100;
@@ -37,19 +37,27 @@ let life = 0; // this showing of the drawer, so that a late answer for an earlie
 let ticker = null;
 let refetching = false;
 let drawn = null; // what the claims were last drawn from
-let typed = { lease: String(DEFAULT_LEASE), id: '' }; // what is in its boxes, kept across a redraw
+let typed = { lease: String(DEFAULT_LEASE), code: '' }; // what is in its boxes, kept across a redraw
 
 // -- the filters --------------------------------------------------------------------------------------
 
-// An item as typed or in the address: 12, #12, node:12, requirement 3, decision:7, fact 5.
+// An item as typed or in the address: S-12, story:12, story 12, requirement 3, rule:3, decision:7,
+// fact 5. A piece of work comes back as { ref }, a requirement, decision or fact as { kind, id },
+// and anything else as null. A bare number names nothing, since each kind is numbered on its own.
+const LETTERS = { e: 'epic', s: 'story', t: 'task' };
+
 export function parseItem(text) {
-  const found = /^(node|rule|requirement|decision|fact)?\s*[:#]?\s*#?(\d+)$/i.exec(String(text || '').trim());
-  if (!found) return null;
-  const kind = (found[1] || 'node').toLowerCase();
-  return { kind: kind === 'requirement' ? 'rule' : kind, id: Number(found[2]) };
+  const words = String(text || '').trim().toLowerCase();
+  const code = /^([est])-(\d+)$/.exec(words);
+  if (code) return { ref: nodeRef(LETTERS[code[1]], Number(code[2])) };
+  const named = /^(epic|story|task|rule|requirement|decision|fact)\s*:?\s*#?(\d+)$/.exec(words);
+  if (!named) return null;
+  const number = Number(named[2]);
+  if (['epic', 'story', 'task'].includes(named[1])) return { ref: nodeRef(named[1], number) };
+  return { kind: named[1] === 'requirement' ? 'rule' : named[1], id: number };
 }
 
-const ITEM_ARGUMENT = { node: 'node_id', rule: 'rule_id', decision: 'decision_id', fact: 'fact_id' };
+const ITEM_HELP = 'Name an item by its code or its kind and number, such as S-12, story 12, requirement 3, decision 7 or fact 5.';
 
 function filters() {
   const text = (params.get('act_item') || '').trim();
@@ -68,7 +76,8 @@ const serverKey = (f) => `${f.actor}|${f.text}`;
 
 // What the server is asked: the actor and the one item to follow.
 function serverArguments(f) {
-  return { ...(f.actor ? { actor: f.actor } : {}), ...(f.item ? { [ITEM_ARGUMENT[f.item.kind]]: f.item.id } : {}) };
+  const item = f.item ? (f.item.ref ? { node: f.item.ref } : { [`${f.item.kind}_id`]: f.item.id }) : {};
+  return { ...(f.actor ? { actor: f.actor } : {}), ...item };
 }
 
 function keeps(event, f) {
@@ -91,18 +100,19 @@ export async function mount(element, initial) {
   older = null;
   working = null;
   drawn = null;
-  typed = { lease: String(DEFAULT_LEASE), id: '' };
+  typed = { lease: String(DEFAULT_LEASE), code: '' };
   free = [];
   loadedFor = '';
   const control = (name, tag, props = {}, ...children) => h(tag, { id: `a-${name}`, name, ...props }, ...children);
   parts = {
     actor: control('actor', 'input', { type: 'text', list: 'a-who', autocomplete: 'off', placeholder: 'a name' }),
     kind: control('kind', 'select', {}, [['', 'Everything'], ...CHANGE_KINDS.map(([value, label]) => [value, label])].map(([value, label]) => h('option', { value }, label))),
-    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: '#12, requirement 3, decision 7, fact 5' }),
+    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: 'S-12, requirement 3, decision 7, fact 5' }),
     from: control('from', 'input', { type: 'date' }),
     to: control('to', 'input', { type: 'date' }),
     who: h('datalist', { id: 'a-who' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'activity-problem' }),
+    itemProblem: h('p', { class: 'problem', role: 'alert', id: 'activity-item-problem' }),
     summary: h('p', { class: 'count', id: 'activity-count', role: 'status' }),
     feed: h('div', { id: 'feed' }),
     side: h('section', { id: 'working', 'aria-label': 'Who is working on what' }),
@@ -147,7 +157,7 @@ export async function mount(element, initial) {
   put(
     root,
     parts.side,
-    h('section', { id: 'feed-section', 'aria-label': 'Changes, newest first' }, h('h3', {}, 'Changes'), form, parts.problem, parts.summary, parts.feed),
+    h('section', { id: 'feed-section', 'aria-label': 'Changes, newest first' }, h('h3', {}, 'Changes'), form, parts.problem, parts.itemProblem, parts.summary, parts.feed),
   );
   fillForm();
   try {
@@ -278,6 +288,7 @@ function updateWho() {
 function drawFeed() {
   const f = filters();
   const rows = events.filter((event) => keeps(event, f));
+  parts.itemProblem.textContent = f.text && !f.item ? ITEM_HELP : '';
   updateWho();
   parts.summary.textContent = rows.length
     ? `${plural(rows.length, 'change')}, newest first${older !== null ? '. Older changes have not been read yet' : ''}.`
@@ -302,7 +313,7 @@ async function loadWorking() {
     free = ready.items;
     skew = Date.parse(answer.as_of) - Date.now();
     // Drawn again only when something in it changed, so that what a person is typing in it stays.
-    const seen = JSON.stringify([answer.agents, ready.items.map((node) => node.id), actor()]);
+    const seen = JSON.stringify([answer.agents, ready.items.map((node) => node.ref), actor()]);
     if (seen !== drawn) {
       drawn = seen;
       drawWorking();
@@ -349,11 +360,13 @@ function tick() {
 
 const STATE = { working: 'Working', lapsed: 'Lapsed', finished: 'Finished, with a handoff note' };
 
-const itemLink = (id, text) => recordLink('node', id, { class: 'item-link', dataset: { id } }, text);
-
-function nodeLink(work) {
-  return itemLink(work.node_id, `${work.kind} #${work.node_id} “${work.title}”`);
+// A piece of work as a link to the detail panel: "story S-12 “Log in”".
+function itemLink(ref, kind, title) {
+  const at = parseNodeRef(ref);
+  return recordLink(at.kind, at.number, { class: 'item-link', dataset: { ref } }, `${kind} ${codeOf(ref)} “${title}”`);
 }
+
+const nodeLink = (work) => itemLink(work.node, work.kind, work.title);
 
 async function attempt(job, done) {
   try {
@@ -370,12 +383,12 @@ async function attempt(job, done) {
 function releaseDialog(work, holder) {
   const note = h('textarea', { id: 'release-note', name: 'note', rows: 4 });
   const { form } = dialogForm({
-    fields: [h('p', {}, `Release ${work.kind} #${work.node_id} “${work.title}” as ${actor()}. The note is what whoever takes it next will read. ${holder !== actor() ? `It is held by ${holder}, so only ${holder} can release it.` : ''}`), field('Handoff note', note, 'What was done, how far it got, and what is left.')],
+    fields: [h('p', {}, `Release ${work.kind} ${codeOf(work.node)} “${work.title}” as ${actor()}. The note is what whoever takes it next will read. ${holder !== actor() ? `It is held by ${holder}, so only ${holder} can release it.` : ''}`), field('Handoff note', note, 'What was done, how far it got, and what is left.')],
     submit: 'Release it',
     work: async () => {
-      await call('release_claim', { actor: actor(), node_id: work.node_id, note: note.value });
+      await call('release_claim', { actor: actor(), node: work.node, note: note.value });
       form.closest('dialog')?.close();
-      notify(`Released #${work.node_id}.`);
+      notify(`Released ${codeOf(work.node)}.`);
       await sync();
       await loadWorking();
     },
@@ -387,7 +400,7 @@ function releaseDialog(work, holder) {
 function claimRow(agent, work, live) {
   return h(
     'li',
-    { class: `claim${live ? '' : ' lapsed'}`, dataset: { node: work.node_id, actor: agent.actor, live: live ? '1' : '0' } },
+    { class: `claim${live ? '' : ' lapsed'}`, dataset: { node: work.node, actor: agent.actor, live: live ? '1' : '0' } },
     h('div', { class: 'claim-main' }, kindIcon(work.kind, 14), nodeLink(work)),
     h(
       'div',
@@ -398,7 +411,7 @@ function claimRow(agent, work, live) {
     h(
       'span',
       { class: 'buttons' },
-      live ? h('button', { type: 'button', class: 'renew small', onclick: () => attempt(() => call('renew_claim', { actor: actor(), node_id: work.node_id }), `Kept #${work.node_id} for longer.`) }, 'Renew') : null,
+      live ? h('button', { type: 'button', class: 'renew small', onclick: () => attempt(() => call('renew_claim', { actor: actor(), node: work.node }), `Kept ${codeOf(work.node)} for longer.`) }, 'Renew') : null,
       h('button', { type: 'button', class: 'release small', onclick: () => releaseDialog(work, agent.actor) }, 'Release…'),
     ),
   );
@@ -409,7 +422,7 @@ function drawWorking() {
   const live = working.agents.flatMap((agent) => agent.holding.map((work) => [agent, work]));
   const lapsed = working.agents.flatMap((agent) => agent.lapsed.map((work) => [agent, work]));
   const lease = h('input', { type: 'number', id: 'lease', min: 1, max: 86400, step: 1, value: typed.lease, 'aria-describedby': 'lease-help', oninput: () => { typed.lease = lease.value; } });
-  const claimId = h('input', { type: 'text', id: 'claim-id', autocomplete: 'off', placeholder: '#12', value: typed.id, oninput: () => { typed.id = claimId.value; } });
+  const claimId = h('input', { type: 'text', id: 'claim-id', autocomplete: 'off', placeholder: 'S-12', value: typed.code, oninput: () => { typed.code = claimId.value; } });
   put(
     parts.side,
     h('h3', {}, 'Who is working on what'),
@@ -440,12 +453,13 @@ function drawWorking() {
             class: 'claim-by-id',
             onsubmit: (event) => {
               event.preventDefault();
-              const text = claimId.value.trim().replace(/^#/, '');
-              const id = /^\d+$/.test(text) ? Number(text) : text;
-              attempt(() => call('claim_node', { actor: actor(), node_id: id, lease_seconds: Number(lease.value) }), `Took #${text}.`);
+              const text = claimId.value.trim();
+              // A code or a ref is sent as the ref; anything else as typed, so that the server says what is wrong with it.
+              const ref = parseItem(text)?.ref ?? text;
+              attempt(() => call('claim_node', { actor: actor(), node: ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(ref)}.`);
             },
           },
-          h('div', { class: 'field' }, h('label', { for: 'claim-id' }, 'Or take an item by its id'), h('div', { class: 'claim-by-id-row' }, claimId, h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'))),
+          h('div', { class: 'field' }, h('label', { for: 'claim-id' }, 'Or take a story or task by its code'), h('div', { class: 'claim-by-id-row' }, claimId, h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'))),
         ),
       ),
       free.length
@@ -455,9 +469,9 @@ function drawWorking() {
             free.map((node) =>
               h(
                 'li',
-                { class: 'claim', dataset: { node: node.id } },
-                h('div', { class: 'claim-main' }, kindIcon(node.kind, 14), itemLink(node.id, `${node.kind} #${node.id} “${node.title}”`)),
-                h('button', { type: 'button', class: 'take small', onclick: () => attempt(() => call('claim_node', { actor: actor(), node_id: node.id, lease_seconds: Number(lease.value) }), `Took #${node.id}.`) }, 'Claim'),
+                { class: 'claim', dataset: { node: node.ref } },
+                h('div', { class: 'claim-main' }, kindIcon(node.kind, 14), itemLink(node.ref, node.kind, node.title)),
+                h('button', { type: 'button', class: 'take small', onclick: () => attempt(() => call('claim_node', { actor: actor(), node: node.ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(node.ref)}.`) }, 'Claim'),
               ),
             ),
           )
@@ -475,8 +489,8 @@ function agentRow(agent) {
     'li',
     { class: `agent state-${agent.state}`, dataset: { actor: agent.actor, state: agent.state } },
     h('div', { class: 'agent-line' }, icon('user', { size: 14 }), h('strong', {}, agent.actor), h('span', { class: `chip state state-${agent.state}` }, icon(STATE_ICONS[agent.state] || 'info', { size: 13 }), STATE[agent.state])),
-    agent.state === 'working' ? h('span', { class: 'quiet' }, `On ${agent.holding.map((work) => `#${work.node_id}`).join(', ')}`) : null,
-    agent.state === 'lapsed' ? h('span', { class: 'quiet' }, `On ${agent.lapsed.map((work) => `#${work.node_id}`).join(', ')}`) : null,
-    note ? h('div', { class: 'quiet' }, `Last handoff: ${note.outcome}${note.node_id ? ` on #${note.node_id}` : ''}, ${moment(note.at)}.`) : null,
+    agent.state === 'working' ? h('span', { class: 'quiet' }, `On ${agent.holding.map((work) => codeOf(work.node)).join(', ')}`) : null,
+    agent.state === 'lapsed' ? h('span', { class: 'quiet' }, `On ${agent.lapsed.map((work) => codeOf(work.node)).join(', ')}`) : null,
+    note ? h('div', { class: 'quiet' }, `Last handoff: ${note.outcome}${note.node ? ` on ${codeOf(note.node)}` : ''}, ${moment(note.at)}.`) : null,
   );
 }

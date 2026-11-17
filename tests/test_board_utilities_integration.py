@@ -29,9 +29,11 @@ from tests.board_search import (
     triples,
 )
 from tests.helpers import (
+    code_of,
     export_everything,
     make_decision,
     make_fact,
+    number_of,
     ok,
     reindexed,
     the_token,
@@ -48,11 +50,11 @@ def board(server_url: str) -> str:
     return board_url(server_url)
 
 
-async def claims_on_page(page: Page, section: str) -> set[tuple[int, str]]:
+async def claims_on_page(page: Page, section: str) -> set[tuple[str, str]]:
     rows: list[list[str]] = await page.locator(f"#{section} li.claim").evaluate_all(
         "els => els.map(e => [e.dataset.node, e.dataset.actor])"
     )
-    return {(int(node), who) for node, who in rows}
+    return {(node, who) for node, who in rows}
 
 
 # -- Activity, Tools and Status with the keyboard only, and what they show is MCP's ----------
@@ -70,12 +72,12 @@ async def test_activity_tools_and_status_open_with_the_keyboard_and_match_mcp(
         for name in ("Held", "Finished", "Loose")
     ]
     note = f"Done for {word}.\nNothing is left."
-    await ok(client, "claim_node", actor=agent, node_id=held, lease_seconds=600)
-    await ok(client, "claim_node", actor=finisher, node_id=finished)
-    await ok(client, "finish_work", actor=finisher, node_id=finished, outcome="done", note=note)
-    await ok(client, "claim_node", actor=ann, node_id=loose, lease_seconds=900)
-    await make_decision(client, f"Decided {word}", node_ids=[story])
-    await make_fact(client, f"Known {word}", node_ids=[story])
+    await ok(client, "claim_node", actor=agent, node=held, lease_seconds=600)
+    await ok(client, "claim_node", actor=finisher, node=finished)
+    await ok(client, "finish_work", actor=finisher, node=finished, outcome="done", note=note)
+    await ok(client, "claim_node", actor=ann, node=loose, lease_seconds=900)
+    await make_decision(client, f"Decided {word}", nodes=[story])
+    await make_fact(client, f"Known {word}", nodes=[story])
     await reindexed(client)
 
     async with browser_page(board, token=the_token()) as w:
@@ -91,10 +93,10 @@ async def test_activity_tools_and_status_open_with_the_keyboard_and_match_mcp(
         handoff = page.locator("#feed li.event[data-action=handoff]", has_text=finisher)
         assert spoken(await handoff.locator(".handoff-note").inner_text()) == spoken(note)
         who = (await ok(client, "who_is_working"))["agents"]
-        live = {(m["node_id"], a["actor"]) for a in who for m in a["holding"]}
+        live = {(m["node"], a["actor"]) for a in who for m in a["holding"]}
         assert {(held, agent), (loose, ann)} <= live
         assert await claims_on_page(page, "claims-live") == live
-        lapsed = {(m["node_id"], a["actor"]) for a in who for m in a["lapsed"]}
+        lapsed = {(m["node"], a["actor"]) for a in who for m in a["lapsed"]}
         assert not lapsed or await claims_on_page(page, "claims-lapsed") == lapsed
         page_agents: list[list[str]] = await page.locator("#agents li.agent").evaluate_all(
             "els => els.map(e => [e.dataset.actor, e.dataset.state])"
@@ -156,13 +158,14 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
     epic = await made(client, "epic", f"Mapped {word}")
     story = await made(client, "story", f"Story {word}", epic)
     await made(client, "story", f"Elsewhere {word}", await made(client, "epic", f"Other {word}"))
-    await ok(client, "create_rule", actor="a", title=f"Rule {word}", story_id=story)
-    decision = await make_decision(client, f"Decision {word}", node_ids=[story])
-    fact = await make_fact(client, f"Fact {word}", node_ids=[story])
+    await ok(client, "create_rule", actor="a", title=f"Rule {word}", story=story)
+    decision = await make_decision(client, f"Decision {word}", nodes=[story])
+    fact = await make_fact(client, f"Fact {word}", nodes=[story])
     await reindexed(client)
-    wanted_facts = await asked(client, word, "both", types=["fact"])
-    assert triples(wanted_facts["items"]) == [("fact", fact["id"], "both")]
     key = f"fact:{fact['id']}"
+    scope = number_of(epic)
+    wanted_facts = await asked(client, word, "both", types=["fact"])
+    assert triples(wanted_facts["items"]) == [("fact", key, "both")]
 
     # The state is made with the board's own controls...
     async with browser_page(board, token=the_token()) as first:
@@ -170,7 +173,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await first.open("#/graph")
         await page.locator("#graph-view-context").click()
         await page.locator("#graph-as-list").click()
-        await page.locator("#graph-epic").select_option(str(epic))
+        await page.locator("#graph-epic").select_option(str(scope))
         await page.locator("#global-search").fill(word)
         await page.keyboard.press("Enter")
         await result_rows(page, 7)
@@ -185,7 +188,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         assert name == "graph" and choices == {
             "view": "context",
             "as": "list",
-            "epic": str(epic),
+            "epic": str(scope),
             "drawer": "search",
             "search": word,
             "search_type": "fact",
@@ -210,7 +213,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await expect(page.locator("#graph-page")).to_have_attribute("data-as", "list")
         await expect(page.locator("#graph-view-context")).to_have_attribute("aria-pressed", "true")
         await expect(page.locator("#graph-as-list")).to_have_attribute("aria-pressed", "true")
-        await expect(page.locator("#graph-epic")).to_have_value(str(epic))
+        await expect(page.locator("#graph-epic")).to_have_value(str(scope))
         await expect(page.locator(f"#panel .record-detail[data-record='{key}']")).to_be_visible(
             timeout=SLOW
         )
@@ -230,33 +233,33 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await expect(page.locator(f".dot[data-key='{key}']")).to_have_class(
             re.compile(r"\bchosen\b")
         )
-        await expect(page.locator("#graph-epic")).to_have_value(str(epic))
+        await expect(page.locator("#graph-epic")).to_have_value(str(scope))
         assert (await address(page))[1]["sel"] == key
         await expect(page.locator(f"#panel .record-detail[data-record='{key}']")).to_be_visible()
         assert second.problems == []
 
     # The Board and the Roadmap hold their scope, filter, selection and drawers in the address too.
-    stories = await ids_of(client, f"kind:story epic:{epic}")
+    stories = await ids_of(client, f"kind:story epic:{scope}")
     assert stories == [story]
     board_address = (
-        f"#/board?epic={epic}&q=kind:story&sel=node:{story}&drawer=activity&act_actor=agent-1"
+        f"#/board?epic={scope}&q=kind:story&sel={story}&drawer=activity&act_actor=agent-1"
         "&act_kind=decisions"
     )
     roadmap_address = (
-        f"#/roadmap?q=epic:{epic}&zoom=quarter&sel=decision:{decision['id']}&drawer=search"
-        f"&dups=1&dup_min=0.95&dup_epics={epic}"
+        f"#/roadmap?q=epic:{scope}&zoom=quarter&sel=decision:{decision['id']}&drawer=search"
+        f"&dups=1&dup_min=0.95&dup_epics={scope}"
     )
     async with browser_page(board, token=the_token()) as third:
         page = third.page
         await third.open(board_address)
-        await expect(page.locator("#epic-filter")).to_have_value(str(epic), timeout=SLOW)
+        await expect(page.locator("#epic-filter")).to_have_value(str(scope), timeout=SLOW)
         await expect(page.locator("#filter")).to_have_value("kind:story")
         await cards_are(page, set(stories))
-        cards: list[int] = await page.locator(".card").evaluate_all(
-            "els => els.map(e => Number(e.dataset.id))"
+        cards: list[str] = await page.locator(".card").evaluate_all(
+            "els => els.map(e => e.dataset.ref)"
         )
         assert cards == stories
-        await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ")
+        await expect(page.locator("#panel #card-title")).to_contain_text(f"{code_of(story)} ")
         await expect(drawer(page, "activity")).to_be_visible()
         await expect(page.locator("#a-actor")).to_have_value("agent-1")
         await expect(page.locator("#a-kind")).to_have_value("decisions")
@@ -264,7 +267,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
 
         await third.go(roadmap_address)
         await on_view(page, "roadmap")
-        await expect(page.locator("#filter")).to_have_value(f"epic:{epic}", timeout=SLOW)
+        await expect(page.locator("#filter")).to_have_value(f"epic:{scope}", timeout=SLOW)
         await expect(page.locator(".rm-track")).to_have_attribute(
             "data-zoom", "quarter", timeout=SLOW
         )
@@ -273,7 +276,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         ).to_be_visible(timeout=SLOW)
         await expect(page.locator("#search-tab-dups")).to_have_attribute("aria-pressed", "true")
         await expect(page.locator("#dup-min")).to_have_value("0.95")
-        await expect(page.locator("#dup-epics")).to_have_value(str(epic))
+        await expect(page.locator("#dup-epics")).to_have_value(str(scope))
         assert third.problems == []
 
     # A fresh load of the Roadmap's address in yet another browser says the same.
@@ -281,7 +284,7 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await fourth.page.goto(f"{board}{roadmap_address}")
         await fourth.page.wait_for_selector(".rm-track", timeout=SLOW)
         await expect(fourth.page.locator("#dup-min")).to_have_value("0.95", timeout=SLOW)
-        await expect(fourth.page.locator("#filter")).to_have_value(f"epic:{epic}")
+        await expect(fourth.page.locator("#filter")).to_have_value(f"epic:{scope}")
         assert fourth.problems == []
 
 
@@ -298,8 +301,10 @@ async def test_a_draft_survives_opening_drawers_switching_presentations_and_view
     unasked = f"typed in the search box {word}"
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/graph?sel=node:{story}")
-        await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await w.open(f"#/graph?sel={story}")
+        await expect(page.locator("#panel #card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         await page.locator("#edit-body").fill(draft)
         await page.evaluate("window.__body = document.querySelector('#edit-body')")
 
@@ -339,21 +344,21 @@ async def test_a_draft_survives_opening_drawers_switching_presentations_and_view
             await expect(page.locator(button)).to_have_attribute("aria-pressed", "true")
             await kept(button)
             assert await page.locator("#search-box").input_value() == unasked, button
-            assert (await address(page))[1]["sel"] == f"node:{story}"
+            assert (await address(page))[1]["sel"] == story
         # Going from view to view takes the selected record along.
         for view in ("roadmap", "board", "graph"):
             await page.locator(f"#main-nav a[data-page={view}]").click()
             await on_view(page, view)
             await expect(page.locator("#panel #card-title")).to_be_visible()
             await kept(f"the {view} view")
-            assert (await address(page))[1]["sel"] == f"node:{story}"
+            assert (await address(page))[1]["sel"] == story
         # Closing the drawer leaves it alone as well; then the draft is saved as it was typed.
         await page.locator("#drawer-close").click()
         await expect(page.locator("#drawer")).to_be_hidden()
         await kept("closed drawer")
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text(draft, timeout=SLOW)
-        assert (await ok(client, "get_node", node_id=story))["body"] == draft
+        assert (await ok(client, "get_node", node=story))["body"] == draft
         assert w.problems == []
 
 
@@ -380,7 +385,7 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
         page = w.page
         note, chip = page.locator("#connection-note"), page.locator("#connection")
         await w.open("#/board")
-        await expect(page.locator(f".lane[data-epic='{epic}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(f".lane[data-ref='{epic}']")).to_be_visible(timeout=SLOW)
         await expect(note).to_be_hidden()
         await expect(chip).to_be_hidden()
 
@@ -394,7 +399,7 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
             assert await note.get_attribute("role") == "alert"
             above, main = await note.bounding_box(), await page.locator("#page").bounding_box()
             assert above and main and above["y"] + above["height"] <= main["y"] + 1
-            await expect(page.locator(f".lane[data-epic='{epic}']")).to_be_visible()
+            await expect(page.locator(f".lane[data-ref='{epic}']")).to_be_visible()
 
             # It stays when the person goes to another view, to a drawer and to a settings page.
             for view, marker in (("graph", "#graph-page"), ("roadmap", ".rm-track")):
@@ -440,4 +445,4 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
         # Only the failed loads that were meant are in the browser's log.
         assert [p for p in w.problems if "Failed to load resource" not in p] == []
         # Nothing was lost on the server meanwhile: it is still all there.
-        assert (await events_of(client, node_id=epic))[0]["action"] == "create"
+        assert (await events_of(client, node=epic))[0]["action"] == "create"

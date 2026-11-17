@@ -32,6 +32,26 @@ def mine() -> str:
     return f"project_id = {the_project().id}"
 
 
+def new_node(
+    kind: str,
+    parent: str | None = None,
+    title: str = "x",
+    number: int | None = None,
+    **more: str,
+) -> str:
+    """An INSERT of one node. Its number is the next one of its kind unless one is given, as the
+    server's own insert does."""
+    columns = ["kind", "number", "parent", "title", *more]
+    values = [
+        f"'{kind}'",
+        f"next_id('{kind}')" if number is None else str(number),
+        "NULL" if parent is None else f"'{parent}'",
+        f"'{title}'",
+        *(f"'{value}'" for value in more.values()),
+    ]
+    return f"INSERT INTO nodes ({', '.join(columns)}) VALUES ({', '.join(values)})"
+
+
 def test_the_database_can_be_reached_directly() -> None:
     result = run_sql("SELECT count(*) FROM nodes", as_project=True)
     assert result.returncode == 0, result.stderr
@@ -40,46 +60,42 @@ def test_the_database_can_be_reached_directly() -> None:
 async def test_the_database_refuses_a_hierarchy_that_is_not_epic_story_task(client: Client) -> None:
     epic, story, _ = await make_tree(client)
     attempts = {
-        "a story with no parent": (
-            "INSERT INTO nodes (kind, title) VALUES ('story', 'x')",
-            "node_has_a_parent_unless_epic",
-        ),
-        "a task with no parent": (
-            "INSERT INTO nodes (kind, title) VALUES ('task', 'x')",
-            "node_has_a_parent_unless_epic",
-        ),
+        "a story with no parent": (new_node("story"), "node_has_a_parent_unless_epic"),
+        "a task with no parent": (new_node("task"), "node_has_a_parent_unless_epic"),
         "an epic with a parent": (
-            f"INSERT INTO nodes (kind, parent_id, title) VALUES ('epic', {epic['id']}, 'x')",
+            new_node("epic", epic["ref"]),
             "node_has_a_parent_unless_epic",
         ),
         "a task under an epic": (
-            f"INSERT INTO nodes (kind, parent_id, title) VALUES ('task', {epic['id']}, 'x')",
+            new_node("task", epic["ref"]),
             "node_parent_has_the_right_kind",
         ),
         "a story under a story": (
-            f"INSERT INTO nodes (kind, parent_id, title) VALUES ('story', {story['id']}, 'x')",
+            new_node("story", story["ref"]),
             "node_parent_has_the_right_kind",
         ),
-        "a story under nothing that exists": (
-            "INSERT INTO nodes (kind, parent_id, title) VALUES ('story', 987654321, 'x')",
+        "a story under an epic that does not exist": (
+            new_node("story", "epic:987654321"),
+            "node_parent_exists",
+        ),
+        "a story under a bare number": (
+            new_node("story", str(epic["number"])),
             "node_parent_has_the_right_kind",
         ),
-        "an unknown kind": (
-            f"INSERT INTO nodes (kind, parent_id, title) VALUES ('saga', {epic['id']}, 'x')",
-            "node_kind_is_known",
+        "an unknown kind": (new_node("saga", epic["ref"], number=1), "node_kind_is_known"),
+        "no number of its own": (
+            new_node("epic", number=0),
+            "node_number_starts_at_one",
         ),
-        "a blank title": (
-            "INSERT INTO nodes (kind, title) VALUES ('epic', '  ')",
-            "node_title_is_not_blank",
-        ),
+        "a blank title": (new_node("epic", title="  "), "node_title_is_not_blank"),
         "the stored status ready": (
             f"UPDATE nodes SET status = 'ready', version = version + 1 "
-            f"WHERE {mine()} AND id = {story['id']}",
+            f"WHERE {mine()} AND ref = '{story['ref']}'",
             "node_status_is_known",
         ),
         "a story made its own parent": (
-            f"UPDATE nodes SET parent_id = {story['id']}, version = version + 1 "
-            f"WHERE {mine()} AND id = {story['id']}",
+            f"UPDATE nodes SET parent = '{story['ref']}', version = version + 1 "
+            f"WHERE {mine()} AND ref = '{story['ref']}'",
             "node_parent_has_the_right_kind",
         ),
     }
@@ -88,22 +104,85 @@ async def test_the_database_refuses_a_hierarchy_that_is_not_epic_story_task(clie
         assert result.returncode != 0, f"The database accepted {what}."
         assert expected in result.stderr, f"{what}: {result.stderr}"
 
-    after = await ok(client, "get_node", node_id=story["id"])
-    assert (after["status"], after["parent_id"], after["version"]) == ("ready", epic["id"], 1)
+    after = await ok(client, "get_node", node=story["ref"])
+    assert (after["status"], after["parent"], after["version"]) == ("ready", epic["ref"], 1)
 
 
-async def test_the_database_refuses_a_kind_change_and_a_change_without_a_new_version(
+async def test_the_database_keeps_a_number_once_in_its_kind_and_writes_the_reference_itself(
+    client: Client,
+) -> None:
+    epic, story, task = await make_tree(client)
+    attempts = {
+        "a number that is already an epic's": (
+            new_node("epic", number=epic["number"]),
+            "duplicate key value violates unique constraint",
+        ),
+        "a number that is already a story's": (
+            new_node("story", epic["ref"], number=story["number"]),
+            "duplicate key value violates unique constraint",
+        ),
+        "a number that is already a task's": (
+            new_node("task", story["ref"], number=task["number"]),
+            "duplicate key value violates unique constraint",
+        ),
+        "a reference written by hand": (
+            new_node("epic", ref="epic:999999999"),
+            "cannot insert a non-DEFAULT value into column",
+        ),
+        "a position written by hand": (
+            new_node("epic", kind_rank="1"),
+            "cannot insert a non-DEFAULT value into column",
+        ),
+        "a reference changed afterwards": (
+            f"UPDATE nodes SET ref = 'story:999999999', version = version + 1 "
+            f"WHERE {mine()} AND ref = '{story['ref']}'",
+            "can only be updated to DEFAULT",
+        ),
+    }
+    for what, (sql, expected) in attempts.items():
+        result = run_sql(sql)
+        assert result.returncode != 0, f"The database accepted {what}."
+        assert expected in result.stderr, f"{what}: {result.stderr}"
+
+    # A number is only ever one kind's: the same number can be an epic, a story and a task. This
+    # is tried in a transaction that is rolled back, so that no number is taken for good.
+    shared = 7_000_000_001
+    tried = run_sql(
+        "BEGIN; "
+        + "; ".join(
+            (
+                new_node("epic", number=shared),
+                new_node("story", f"epic:{shared}", number=shared),
+                new_node("task", f"story:{shared}", number=shared),
+                "SELECT string_agg(ref, ',' ORDER BY kind_rank) "
+                f"FROM nodes WHERE number = {shared}",
+            )
+        )
+        + "; ROLLBACK",
+        plain=True,
+    )
+    assert tried.returncode == 0, tried.stderr
+    assert f"epic:{shared},story:{shared},task:{shared}" in tried.stdout
+    gone = run_sql(f"SELECT count(*) FROM nodes WHERE number = {shared}", plain=True)
+    assert gone.stdout.strip() == "0"
+    assert (await ok(client, "get_node", node=story["ref"]))["number"] == story["number"]
+
+
+async def test_the_database_refuses_a_kind_or_number_change_and_a_change_without_a_new_version(
     client: Client,
 ) -> None:
     _, story, _ = await make_tree(client)
-    where = f"WHERE {mine()} AND id = {story['id']}"
-    result = run_sql(f"UPDATE nodes SET kind = 'epic', parent_id = NULL {where}")
-    assert "cannot change its kind" in result.stderr
+    where = f"WHERE {mine()} AND ref = '{story['ref']}'"
+    result = run_sql(f"UPDATE nodes SET kind = 'epic', parent = NULL {where}")
+    assert "cannot change its kind or its number" in result.stderr
+    result = run_sql(f"UPDATE nodes SET number = number + 1000000, version = version + 1 {where}")
+    assert "cannot change its kind or its number" in result.stderr
     result = run_sql(f"UPDATE nodes SET title = 'quiet edit' {where}")
     assert "raise its version by exactly one" in result.stderr
     result = run_sql(f"UPDATE nodes SET title = 'x', version = 5 {where}")
     assert "raise its version by exactly one" in result.stderr
-    assert (await ok(client, "get_node", node_id=story["id"]))["title"] == "A story"
+    after = await ok(client, "get_node", node=story["ref"])
+    assert (after["title"], after["ref"]) == ("A story", story["ref"])
 
 
 async def test_the_event_log_cannot_be_rewritten_and_nodes_with_history_cannot_be_deleted(
@@ -113,26 +192,40 @@ async def test_the_event_log_cannot_be_rewritten_and_nodes_with_history_cannot_b
     assert (
         "append-only"
         in run_sql(
-            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND node_id = {epic['id']}"
+            f"UPDATE events SET actor = 'someone' WHERE {mine()} AND node = '{epic['ref']}'"
         ).stderr
     )
     assert (
         "append-only"
-        in run_sql(f"DELETE FROM events WHERE {mine()} AND node_id = {epic['id']}").stderr
+        in run_sql(f"DELETE FROM events WHERE {mine()} AND node = '{epic['ref']}'").stderr
     )
     assert (
         "violates foreign key constraint"
-        in run_sql(f"DELETE FROM nodes WHERE {mine()} AND id = {story['id']}").stderr
+        in run_sql(f"DELETE FROM nodes WHERE {mine()} AND ref = '{story['ref']}'").stderr
     )
     assert (
         "violates check constraint"
         in run_sql(
-            f"INSERT INTO events (node_id, action, actor, after) "
-            f"VALUES ({epic['id']}, 'create', ' ', '{{}}')"
+            f"INSERT INTO events (node, action, actor, after) "
+            f"VALUES ('{epic['ref']}', 'create', ' ', '{{}}')"
+        ).stderr
+    )
+    assert (
+        "violates foreign key constraint"
+        in run_sql(
+            "INSERT INTO events (node, action, actor, after) "
+            "VALUES ('story:987654321', 'create', 'x', '{}')"
+        ).stderr
+    )
+    assert (
+        "violates foreign key constraint"
+        in run_sql(
+            f"INSERT INTO events (node, other_node, action, actor, after) "
+            f"VALUES ('{epic['ref']}', 'task:987654321', 'link_added', 'x', '{{}}')"
         ).stderr
     )
 
-    history = (await ok(client, "node_history", node_id=story["id"]))["items"]
+    history = (await ok(client, "node_history", node=story["ref"]))["items"]
     assert [event["actor"] for event in history] == ["marie"]
 
 
@@ -146,22 +239,21 @@ async def test_the_database_refuses_a_start_date_after_the_target_date_on_its_ow
         actor="marie",
         kind="task",
         title="Dated",
-        parent_id=story["id"],
+        parent=story["ref"],
         start_on=day(2),
         target_on=day(10),
     )
     attempts = {
-        "a new node that starts after its target": (
-            "INSERT INTO nodes (kind, parent_id, title, start_on, target_on) VALUES "
-            f"('task', {story['id']}, 'x', '{day(9)}', '{day(3)}')"
+        "a new node that starts after its target": new_node(
+            "task", story["ref"], start_on=day(9), target_on=day(3)
         ),
         "a start moved past the target": (
             f"UPDATE nodes SET start_on = '{day(30)}', version = version + 1 "
-            f"WHERE {mine()} AND id = {task['id']}"
+            f"WHERE {mine()} AND ref = '{task['ref']}'"
         ),
         "a target moved before the start": (
             f"UPDATE nodes SET target_on = '{day(1)}', version = version + 1 "
-            f"WHERE {mine()} AND id = {task['id']}"
+            f"WHERE {mine()} AND ref = '{task['ref']}'"
         ),
     }
     for what, sql in attempts.items():
@@ -172,23 +264,23 @@ async def test_the_database_refuses_a_start_date_after_the_target_date_on_its_ow
     # Either date alone, or none, is fine, and the same day for both.
     fine = run_sql(
         f"UPDATE nodes SET start_on = NULL, version = version + 1 "
-        f"WHERE {mine()} AND id = {task['id']}"
+        f"WHERE {mine()} AND ref = '{task['ref']}'"
     )
     assert fine.returncode == 0, fine.stderr
-    unchanged = await ok(client, "get_node", node_id=task["id"])
+    unchanged = await ok(client, "get_node", node=task["ref"])
     assert (unchanged["start_on"], unchanged["target_on"]) == (None, day(10))
 
 
 async def test_the_database_refuses_bad_links(client: Client) -> None:
     first, second = await make_tasks(client, 2)
-    a, b = first["id"], second["id"]
+    a, b = first["ref"], second["ref"]
     await needs_first(client, first, second)
-    await ok(client, "add_link", actor="marie", source_id=a, target_id=b, link_type="relates_to")
+    await ok(client, "add_link", actor="marie", source=a, target=b, link_type="relates_to")
 
-    def link(source: int, target: int, link_type: str) -> str:
+    def link(source: str, target: str, link_type: str) -> str:
         return (
-            "INSERT INTO links (source_id, target_id, link_type) "
-            f"VALUES ({source}, {target}, '{link_type}')"
+            "INSERT INTO links (source, target, link_type) "
+            f"VALUES ('{source}', '{target}', '{link_type}')"
         )
 
     attempts = {
@@ -196,8 +288,16 @@ async def test_the_database_refuses_bad_links(client: Client) -> None:
         "waiting for the same node": (link(a, a, "needs_first"), "link_is_not_to_the_same_node"),
         "an unknown link type": (link(a, b, "blocks"), "link_type_is_known"),
         "a link to a node that does not exist": (
-            link(a, 987654321, "needs_first"),
-            "violates foreign key constraint",
+            link(a, "task:987654321", "needs_first"),
+            "link_ends_at_a_node",
+        ),
+        "a link from a node that does not exist": (
+            link("story:987654321", b, "relates_to"),
+            "link_starts_at_a_node",
+        ),
+        "a link that names a node by its number alone": (
+            link(a, str(second["number"]), "relates_to"),
+            "link_ends_at_a_node",
         ),
         "a circle of waiting": (link(b, a, "needs_first"), "circle of waiting"),
         "the same link twice": (link(a, b, "needs_first"), "link_is_not_repeated"),
@@ -211,39 +311,63 @@ async def test_the_database_refuses_bad_links(client: Client) -> None:
         assert result.returncode != 0, f"The database accepted {what}."
         assert expected in result.stderr, f"{what}: {result.stderr}"
 
-    links = (await ok(client, "list_links", node_id=a))["items"]
+    links = (await ok(client, "list_links", node=a))["items"]
     assert sorted(link["link_type"] for link in links) == ["needs_first", "relates_to"]
+
+
+async def test_the_database_refuses_a_circle_of_waiting_through_nodes_of_every_kind(
+    client: Client,
+) -> None:
+    epic, story, task = await make_tree(client)
+
+    def waits(source: dict[str, object], target: dict[str, object]) -> str:
+        return (
+            "INSERT INTO links (source, target, link_type) "
+            f"VALUES ('{source['ref']}', '{target['ref']}', 'needs_first')"
+        )
+
+    for statement in (waits(task, story), waits(story, epic)):
+        assert run_sql(statement).returncode == 0
+    result = run_sql(waits(epic, task))
+    assert result.returncode != 0
+    assert "circle of waiting" in result.stderr
+    assert f"{epic['ref']} would need {task['ref']}" in result.stderr
+    assert (await ok(client, "get_node", node=task["ref"]))["waiting_on"] == [story["ref"]]
 
 
 async def test_the_database_refuses_bad_claims_and_a_second_holder(client: Client) -> None:
     epic, story, task = await make_tree(client)
-    await ok(client, "claim_node", actor="ann", node_id=task["id"])
+    await ok(client, "claim_node", actor="ann", node=task["ref"])
 
-    def claim(node: int, kind: str, actor: str, expires: str) -> str:
+    def claim(node: str, actor: str, expires: str) -> str:
         return (
-            "INSERT INTO claims (node_id, node_kind, actor, expires_at) "
-            f"VALUES ({node}, '{kind}', '{actor}', now() + interval '{expires}')"
+            "INSERT INTO claims (node, actor, expires_at) "
+            f"VALUES ('{node}', '{actor}', now() + interval '{expires}')"
         )
 
     attempts = {
         "a claim on an epic": (
-            claim(epic["id"], "epic", "bob", "1 hour"),
+            claim(epic["ref"], "bob", "1 hour"),
             "claim_is_for_a_story_or_task",
         ),
-        "a claim that names the wrong kind": (
-            claim(story["id"], "task", "bob", "1 hour"),
+        "a claim on a node that does not exist": (
+            claim("story:987654321", "bob", "1 hour"),
             "claim_is_on_a_real_node",
         ),
+        "a claim that names its node by its number alone": (
+            claim(str(task["number"]), "bob", "1 hour"),
+            "claim_is_for_a_story_or_task",
+        ),
         "a claim with no holder": (
-            claim(story["id"], "story", " ", "1 hour"),
+            claim(story["ref"], " ", "1 hour"),
             "claim_actor_is_not_blank",
         ),
         "a claim that is over before it starts": (
-            claim(story["id"], "story", "bob", "-1 hour"),
+            claim(story["ref"], "bob", "-1 hour"),
             "claim_lease_is_in_the_future",
         ),
         "a second holder of one task": (
-            claim(task["id"], "task", "bob", "1 hour"),
+            claim(task["ref"], "bob", "1 hour"),
             'duplicate key value violates unique constraint "claims_pkey"',
         ),
     }
@@ -252,11 +376,11 @@ async def test_the_database_refuses_bad_claims_and_a_second_holder(client: Clien
         assert result.returncode != 0, f"The database accepted {what}."
         assert expected in result.stderr, f"{what}: {result.stderr}"
 
-    assert (await ok(client, "get_node", node_id=task["id"]))["claimed_by"] == "ann"
-    assert (await ok(client, "get_node", node_id=story["id"]))["claimed_by"] is None
+    assert (await ok(client, "get_node", node=task["ref"]))["claimed_by"] == "ann"
+    assert (await ok(client, "get_node", node=story["ref"]))["claimed_by"] is None
     result = run_sql(
-        "INSERT INTO events (node_id, action, actor, after) "
-        f"VALUES ({task['id']}, 'delete', 'x', '{{}}')"
+        "INSERT INTO events (node, action, actor, after) "
+        f"VALUES ('{task['ref']}', 'delete', 'x', '{{}}')"
     )
     assert "event_action_is_known" in result.stderr
 
@@ -265,40 +389,52 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
     client: Client,
 ) -> None:
     epic, story, task = await make_tree(client)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
 
-    def new_rule(story_id: object, title: str = "x", status: str = "held") -> str:
+    def new_rule(story_ref: str | None, title: str = "x", status: str = "held") -> str:
+        story_sql = "NULL" if story_ref is None else f"'{story_ref}'"
         return (
-            "INSERT INTO rules (story_id, title, status) "
-            f"VALUES ({story_id}, '{title}', '{status}')"
+            f"INSERT INTO rules (story, title, status) VALUES ({story_sql}, '{title}', '{status}')"
         )
 
     attempts = {
-        "a rule in an epic": (new_rule(epic["id"]), "rule_belongs_to_a_story"),
-        "a rule in a task": (new_rule(task["id"]), "rule_belongs_to_a_story"),
-        "a rule in a story that does not exist": (new_rule(987654321), "rule_belongs_to_a_story"),
-        "a rule with a blank title": (new_rule("NULL", title=" "), "rule_title_is_not_blank"),
+        "a rule in an epic": (new_rule(epic["ref"]), "rule_is_in_a_story"),
+        "a rule in a task": (new_rule(task["ref"]), "rule_is_in_a_story"),
+        "a rule in a story that does not exist": (
+            new_rule("story:987654321"),
+            "rule_belongs_to_a_story",
+        ),
+        "a rule in a story named by its number alone": (
+            new_rule(str(story["number"])),
+            "rule_is_in_a_story",
+        ),
+        "a rule with a blank title": (new_rule(None, title=" "), "rule_title_is_not_blank"),
         "a rule with an unknown status": (
-            new_rule("NULL", status="open"),
+            new_rule(None, status="open"),
             "rule_status_is_known",
         ),
         "moving a rule into a task": (
-            f"UPDATE rules SET story_id = {task['id']}, version = version + 1 "
+            f"UPDATE rules SET story = '{task['ref']}', version = version + 1 "
             f"WHERE {mine()} AND id = {rule['id']}",
-            "rule_belongs_to_a_story",
+            "rule_is_in_a_story",
+        ),
+        "moving a rule into an epic": (
+            f"UPDATE rules SET story = '{epic['ref']}', version = version + 1 "
+            f"WHERE {mine()} AND id = {rule['id']}",
+            "rule_is_in_a_story",
         ),
         "a change to a rule without a new version": (
             f"UPDATE rules SET title = 'quiet edit' WHERE {mine()} AND id = {rule['id']}",
             "raise its version by exactly one",
         ),
         "a rule event that names no rule": (
-            f"INSERT INTO events (node_id, action, actor, after) "
-            f"VALUES ({story['id']}, 'rule_moved', 'x', '{{}}')",
+            f"INSERT INTO events (node, action, actor, after) "
+            f"VALUES ('{story['ref']}', 'rule_moved', 'x', '{{}}')",
             "event_names_what_it_is_about",
         ),
         "a node event that names a rule": (
-            f"INSERT INTO events (node_id, rule_id, action, actor, after) "
-            f"VALUES ({story['id']}, {rule['id']}, 'update', 'x', '{{}}')",
+            f"INSERT INTO events (node, rule_id, action, actor, after) "
+            f"VALUES ('{story['ref']}', {rule['id']}, 'update', 'x', '{{}}')",
             "event_names_what_it_is_about",
         ),
         "an event about nothing": (
@@ -312,8 +448,8 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
         assert expected in result.stderr, f"{what}: {result.stderr}"
 
     unchanged = await ok(client, "get_rule", rule_id=rule["id"])
-    assert (unchanged["story_id"], unchanged["title"], unchanged["version"]) == (
-        story["id"],
+    assert (unchanged["story"], unchanged["title"], unchanged["version"]) == (
+        story["ref"],
         "A rule",
         1,
     )
@@ -322,7 +458,7 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
     # names a story together with a rule, so a rule cannot be in two stories at once.
     result = run_sql(
         "SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND column_name = 'story_id'",
+        "WHERE table_schema = 'public' AND column_name = 'story'",
         plain=True,
     )
     assert result.returncode == 0 and result.stdout.strip() == "rules"
@@ -330,7 +466,7 @@ async def test_the_database_refuses_bad_rules_and_keeps_a_rule_in_one_column(
 
 async def test_a_rule_event_cannot_be_rewritten_either(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     assert (
         "append-only"
         in run_sql(
@@ -353,7 +489,7 @@ def refused_by_the_database(attempts: dict[str, tuple[str, str]]) -> None:
 
 async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    old = await make_decision(client, "Old", node_ids=[story["id"]])
+    old = await make_decision(client, "Old", nodes=[story["ref"]])
     new = await ok(
         client,
         "supersede_decision",
@@ -365,7 +501,7 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
         decided_by="Ann",
     )
     other = await make_decision(client, "Standing")
-    gone = await make_decision(client, "Given up", node_ids=[story["id"]])
+    gone = await make_decision(client, "Given up", nodes=[story["ref"]])
     await ok(client, "withdraw_decision", actor="a", decision_id=gone["id"], reason="Not needed")
     confirmed = await make_decision(client, "Confirmed")
     await confirm(client, "decision", confirmed, "Marie")
@@ -537,7 +673,13 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
             "A superseded or withdrawn decision cannot change again",
         ),
         "a link to a node that does not exist": (
-            f"INSERT INTO decision_nodes (decision_id, node_id) VALUES ({other['id']}, 987654321)",
+            f"INSERT INTO decision_nodes (decision_id, node) "
+            f"VALUES ({other['id']}, 'story:987654321')",
+            "violates foreign key constraint",
+        ),
+        "a link to a node named by its number alone": (
+            f"INSERT INTO decision_nodes (decision_id, node) "
+            f"VALUES ({other['id']}, '{story['number']}')",
             "violates foreign key constraint",
         ),
         "a link to a rule that does not exist": (
@@ -545,17 +687,17 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
             "violates foreign key constraint",
         ),
         "a link from a decision that does not exist": (
-            f"INSERT INTO decision_nodes (decision_id, node_id) VALUES (987654321, {story['id']})",
+            f"INSERT INTO decision_nodes (decision_id, node) VALUES (987654321, '{story['ref']}')",
             "violates foreign key constraint",
         ),
         "the same link twice": (
-            f"INSERT INTO decision_nodes (decision_id, node_id) "
-            f"VALUES ({new['id']}, {story['id']})",
+            f"INSERT INTO decision_nodes (decision_id, node) "
+            f"VALUES ({new['id']}, '{story['ref']}')",
             "decision_nodes_pkey",
         ),
         "a new link on a superseded decision": (
-            f"INSERT INTO decision_nodes (decision_id, node_id) "
-            f"VALUES ({old['id']}, {story['parent_id']})",
+            f"INSERT INTO decision_nodes (decision_id, node) "
+            f"VALUES ({old['id']}, '{story['parent']}')",
             "keeps the links it had",
         ),
         "removing a link from a superseded decision": (
@@ -563,8 +705,8 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
             "keeps the links it had",
         ),
         "a new link on a withdrawn decision": (
-            f"INSERT INTO decision_nodes (decision_id, node_id) "
-            f"VALUES ({gone['id']}, {story['parent_id']})",
+            f"INSERT INTO decision_nodes (decision_id, node) "
+            f"VALUES ({gone['id']}, '{story['parent']}')",
             "keeps the links it had",
         ),
         "removing a link from a withdrawn decision": (
@@ -589,10 +731,10 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
     refused_by_the_database(attempts)
 
     kept = await ok(client, "get_decision", decision_id=old["id"])
-    assert (kept["status"], kept["superseded_by_id"], kept["node_ids"]) == (
+    assert (kept["status"], kept["superseded_by_id"], kept["nodes"]) == (
         "superseded",
         new["id"],
-        [story["id"]],
+        [story["ref"]],
     )
     assert await ok(client, "get_decision", decision_id=other["id"]) == other
     assert (await ok(client, "get_decision", decision_id=confirmed["id"]))["confirmed_by"] == (
@@ -600,7 +742,7 @@ async def test_the_database_keeps_decisions_as_a_record(client: Client) -> None:
     )
     withdrawn = await ok(client, "get_decision", decision_id=ended["id"])
     assert (withdrawn["status"], withdrawn["confirmed_by"]) == ("withdrawn", "Ann")
-    assert (await ok(client, "get_decision", decision_id=gone["id"]))["node_ids"] == [story["id"]]
+    assert (await ok(client, "get_decision", decision_id=gone["id"]))["nodes"] == [story["ref"]]
 
     # While a decision is in force only its confirmation can change, and the database allows that.
     changed = run_sql(update(later, "confirmed_by = 'Bob', confirmed_at = now()"))
@@ -629,20 +771,20 @@ async def test_a_decision_event_cannot_be_rewritten_either(client: Client) -> No
 
 async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     decision = await make_decision(client, "A decision")
     early = await make_fact(client, "Earlier than the rest")
     fact = await make_fact(
         client,
         "Kept",
-        node_ids=[story["id"]],
+        nodes=[story["ref"]],
         rule_ids=[rule["id"]],
         decision_ids=[decision["id"]],
     )
     confirmed = await make_fact(client, "A confirmed fact")
     await confirm(client, "fact", confirmed, "Marie")
     old = await make_fact(
-        client, "Old", node_ids=[story["id"]], rule_ids=[rule["id"]], decision_ids=[decision["id"]]
+        client, "Old", nodes=[story["ref"]], rule_ids=[rule["id"]], decision_ids=[decision["id"]]
     )
     change = await ok(
         client,
@@ -654,7 +796,7 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
         source="s",
     )
     new = change["replacement"]
-    withdrawn = await make_fact(client, "Wrong", node_ids=[story["id"]])
+    withdrawn = await make_fact(client, "Wrong", nodes=[story["ref"]])
     await ok(client, "withdraw_fact", actor="a", fact_ids=[withdrawn["id"]], reason="Wrong")
     ended = await make_fact(client, "Confirmed, then wrong")
     await confirm(client, "fact", ended, "Ann")
@@ -802,7 +944,11 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
             "A superseded or withdrawn fact cannot change again",
         ),
         "a link to a node that does not exist": (
-            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({fact['id']}, 987654321)",
+            f"INSERT INTO fact_nodes (fact_id, node) VALUES ({fact['id']}, 'task:987654321')",
+            "violates foreign key constraint",
+        ),
+        "a link to a node named by its number alone": (
+            f"INSERT INTO fact_nodes (fact_id, node) VALUES ({fact['id']}, '{story['number']}')",
             "violates foreign key constraint",
         ),
         "a link to a rule that does not exist": (
@@ -814,11 +960,11 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
             "violates foreign key constraint",
         ),
         "a link from a fact that does not exist": (
-            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES (987654321, {story['id']})",
+            f"INSERT INTO fact_nodes (fact_id, node) VALUES (987654321, '{story['ref']}')",
             "violates foreign key constraint",
         ),
         "the same link twice": (
-            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({fact['id']}, {story['id']})",
+            f"INSERT INTO fact_nodes (fact_id, node) VALUES ({fact['id']}, '{story['ref']}')",
             "fact_nodes_pkey",
         ),
         "the same rule link twice": (
@@ -831,7 +977,7 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
             "fact_decisions_pkey",
         ),
         "a new node link on a superseded fact": (
-            f"INSERT INTO fact_nodes (fact_id, node_id) VALUES ({old['id']}, {story['parent_id']})",
+            f"INSERT INTO fact_nodes (fact_id, node) VALUES ({old['id']}, '{story['parent']}')",
             "keeps the links it had",
         ),
         "removing a node link from a superseded fact": (
@@ -847,8 +993,8 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
             "keeps the links it had",
         ),
         "a new link on a withdrawn fact": (
-            f"INSERT INTO fact_nodes (fact_id, node_id) "
-            f"VALUES ({withdrawn['id']}, {story['parent_id']})",
+            f"INSERT INTO fact_nodes (fact_id, node) "
+            f"VALUES ({withdrawn['id']}, '{story['parent']}')",
             "keeps the links it had",
         ),
         "removing a link from a withdrawn fact": (
@@ -865,8 +1011,8 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
             "violates foreign key constraint",
         ),
         "a node event that names a fact": (
-            f"INSERT INTO events (node_id, fact_id, action, actor, after) "
-            f"VALUES ({story['id']}, {fact['id']}, 'update', 'x', '{{}}')",
+            f"INSERT INTO events (node, fact_id, action, actor, after) "
+            f"VALUES ('{story['ref']}', {fact['id']}, 'update', 'x', '{{}}')",
             "event_names_what_it_is_about",
         ),
         "a rule event that names a fact": (
@@ -891,10 +1037,10 @@ async def test_the_database_keeps_facts_as_a_record(client: Client) -> None:
     kept = await ok(client, "get_fact", fact_id=fact["id"])
     assert kept == fact
     replaced = await ok(client, "get_fact", fact_id=old["id"])
-    assert (replaced["status"], replaced["superseded_by_id"], replaced["node_ids"]) == (
+    assert (replaced["status"], replaced["superseded_by_id"], replaced["nodes"]) == (
         "superseded",
         new["id"],
-        [story["id"]],
+        [story["ref"]],
     )
     assert (replaced["rule_ids"], replaced["decision_ids"]) == ([rule["id"]], [decision["id"]])
     assert (await ok(client, "get_fact", fact_id=withdrawn["id"]))["status"] == "withdrawn"
@@ -1016,3 +1162,115 @@ def test_the_schema_holds_only_the_two_context_records() -> None:
         project=None,
     )
     assert result.returncode == 0 and result.stdout.strip() == "", result.stdout
+
+
+def test_an_epic_story_or_task_has_no_integer_id_anywhere_in_the_database() -> None:
+    # A node is named by its kind and number, held as a reference (text) everywhere it is pointed
+    # at. No table or view has an integer id for it, and nothing points at one by number alone.
+    result = run_sql(
+        "SELECT string_agg(table_name || '.' || column_name, ', ' "
+        "ORDER BY table_name, column_name) "
+        "FROM information_schema.columns WHERE table_schema = 'public' AND ("
+        "column_name IN ('node_id', 'parent_id', 'other_node_id', 'source_id', 'target_id', "
+        "'story_id', 'node_kind', 'new_story_id', 'within_node_id') "
+        "OR (table_name IN ('nodes', 'node_state') AND column_name = 'id'))",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "", result.stdout
+
+    result = run_sql(
+        "SELECT string_agg(table_name || '.' || column_name || ':' || data_type, ', ' "
+        "ORDER BY table_name, column_name) FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name IN ('links', 'claims', 'rules', "
+        "'decision_nodes', 'fact_nodes', 'events', 'nodes') "
+        "AND column_name IN ('source', 'target', 'node', 'other_node', 'story', 'parent')",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0, result.stderr
+    columns = result.stdout.strip().split(", ")
+    assert columns and all(column.endswith(":text") for column in columns), columns
+    assert {
+        "claims.node",
+        "decision_nodes.node",
+        "events.node",
+        "events.other_node",
+        "fact_nodes.node",
+        "links.source",
+        "links.target",
+        "nodes.parent",
+        "rules.story",
+    } <= {column.removesuffix(":text") for column in columns}
+
+
+def test_each_kind_has_its_own_counter_in_every_project_and_there_is_no_shared_one() -> None:
+    result = run_sql(
+        "SELECT string_agg(sequencename, ',' ORDER BY sequencename) FROM pg_sequences "
+        f"WHERE schemaname = 'public' AND sequencename ~ '_{the_project().id}$'",
+        plain=True,
+        project=None,
+    )
+    assert result.returncode == 0, result.stderr
+    names = set(result.stdout.strip().split(","))
+    project = the_project().id
+    assert {f"{kind}_ids_{project}" for kind in ("epic", "story", "task")} <= names
+    assert f"nodes_ids_{project}" not in names
+
+
+async def test_a_projects_role_sees_and_writes_only_its_own_nodes_and_what_points_at_them(
+    client: Client,
+) -> None:
+    epic, story, task = await make_tree(client)
+    project = the_project().id
+
+    def seen_by_the_role(sql: str) -> str:
+        result = run_sql(sql, plain=True, as_project=True)
+        assert result.returncode == 0, result.stderr
+        return str(result.stdout.strip())
+
+    # It sees its own nodes by reference, through the table and through the view.
+    for table in ("nodes", "node_state"):
+        assert seen_by_the_role(f"SELECT count(*) FROM {table} WHERE ref = '{story['ref']}'") == "1"
+        assert (
+            seen_by_the_role(f"SELECT count(*) FROM {table} WHERE project_id <> {project}") == "0"
+        )
+    assert (
+        seen_by_the_role(f"SELECT waiting_on FROM node_state WHERE ref = '{task['ref']}'") == "{}"
+    )
+    # With no project named it sees none of them, whatever it asks for by reference.
+    nothing = run_sql(
+        f"SELECT count(*) FROM nodes WHERE ref = '{story['ref']}'",
+        plain=True,
+        project=None,
+        as_project=True,
+    )
+    assert nothing.returncode == 0 and nothing.stdout.strip() == "0", nothing.stderr
+    # It may write a node of its own project, and the database still holds it to the rules: a
+    # task cannot be moved under an epic, and the reference cannot be changed.
+    moved = run_sql(
+        f"UPDATE nodes SET parent = '{epic['ref']}', version = version + 1 "
+        f"WHERE ref = '{task['ref']}'",
+        as_project=True,
+    )
+    assert moved.returncode != 0 and "node_parent_has_the_right_kind" in moved.stderr
+    renumbered = run_sql(
+        f"UPDATE nodes SET number = number + 1000000, version = version + 1 "
+        f"WHERE ref = '{task['ref']}'",
+        as_project=True,
+    )
+    assert renumbered.returncode != 0
+    assert "cannot change its kind or its number" in renumbered.stderr
+    # It cannot delete a node, a claim's node, or write a node into another project.
+    assert (
+        "permission denied"
+        in run_sql(f"DELETE FROM nodes WHERE ref = '{task['ref']}'", as_project=True).stderr
+    )
+    other = project + 100_000
+    forged = run_sql(
+        f"INSERT INTO nodes (project_id, kind, number, title) "
+        f"VALUES ({other}, 'epic', next_id('epic'), 'forged')",
+        as_project=True,
+    )
+    assert forged.returncode != 0 and "row-level security" in forged.stderr
+    assert (await ok(client, "get_node", node=task["ref"]))["parent"] == story["ref"]

@@ -19,7 +19,15 @@ from starlette.responses import JSONResponse, Response
 from vrum.accounts import Accounts
 from vrum.board import add_board
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims, WhoIsWorking
-from vrum.common import Refusal, check_choice, clean_actor, parse_day
+from vrum.common import (
+    Ref,
+    Refusal,
+    check_choice,
+    clean_actor,
+    parse_day,
+    parse_node_ref,
+    parse_node_refs,
+)
 from vrum.config import DEFAULT_MIN_SIMILARITY, DEFAULT_OVERLAP_THRESHOLD, Settings
 from vrum.db import Database, current_project
 from vrum.decisions import Decision, DecisionPage, Decisions
@@ -68,8 +76,11 @@ class RecordConfirmation(BaseModel):
 # names only tools that exist.
 INSTRUCTIONS = """\
 Vrum is a project graph. Epics hold stories, stories hold tasks, and requirements, decisions and \
-facts are linked to them. A decision is what a named person decided; a fact is a statement with \
-its source. Each is either unconfirmed or confirmed by a named person, and either in force or \
+facts are linked to them. An epic, story or task is named by its kind and its number within that \
+kind: `epic:3`, `story:12`, `task:40` (each kind is numbered from 1 on its own, so epic:3, \
+story:3 and task:3 are three items). Every tool that names one takes and returns that reference, \
+never a bare number. A decision is what a named person decided; a fact is a statement with its \
+source. Each is either unconfirmed or confirmed by a named person, and either in force or \
 superseded or withdrawn: read both before you rely on it. Every write needs an actor: your own \
 name.
 
@@ -85,11 +96,13 @@ named person's review makes it confirmed (`set_confirmation`).
 4. End with `finish_work`: say whether it is done, blocked, dropped or released, and leave a \
 handoff note for whoever comes next. A blank note is refused.
 
-Also: `create_plan` creates a whole plan at once or nothing, `update_nodes` changes many nodes, \
+Also: `create_plan` creates a whole plan at once or nothing (its items are named by keys that are \
+not references, and it refers to existing items by reference), `update_nodes` changes many nodes, \
 `changes_since` shows only what is new since an event, and `ready_work` lists what is free. \
 `list_nodes` takes a filter text as its query argument, such as \
-`kind:task status:ready -claimed OR is:overdue`. [[node:12]] in any text refers to an item (also \
-rule, decision, fact); `find_mentions` lists who refers to one. Lists leave out bodies \
+`kind:task status:ready -claimed OR is:overdue` or `epic:3` for epic 3 and everything under it. \
+`[[story:12]]` in any text refers to an item (also `[[epic:3]]`, `[[task:40]]`, `[[rule:3]]`, \
+`[[decision:7]]`, `[[fact:5]]`); `find_mentions` lists who refers to one. Lists leave out bodies \
 unless you ask for detail. Refusals say what is wrong and what to do next. Anything holding a \
 well-known secret format is refused in every field and never stored: leave secrets out of what \
 you write. Vrum stores, retrieves and coordinates; it does not generate answers: you do the \
@@ -115,12 +128,27 @@ _Lease = Annotated[
         "86400 (24 hours). Renew it to keep it longer."
     ),
 ]
-_NodeIds = Annotated[
-    list[int] | None, Field(description="Ids of the epics, stories or tasks it affects.")
+_Node = Annotated[
+    Ref,
+    Field(
+        description="The epic, story or task, by its reference: its kind and number, such as "
+        "story:12."
+    ),
+]
+_NodeRefs = Annotated[
+    list[Ref] | None,
+    Field(
+        description="References of the epics, stories or tasks it affects, such as story:12 or "
+        "task:40."
+    ),
 ]
 _RuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it affects.")]
-_ConcernedNodeIds = Annotated[
-    list[int] | None, Field(description="Ids of the epics, stories or tasks it concerns.")
+_ConcernedNodeRefs = Annotated[
+    list[Ref] | None,
+    Field(
+        description="References of the epics, stories or tasks it concerns, such as story:12 or "
+        "task:40."
+    ),
 ]
 _ConcernedRuleIds = Annotated[list[int] | None, Field(description="Ids of the rules it concerns.")]
 _ConcernedDecisionIds = Annotated[
@@ -154,6 +182,13 @@ _Limit = Annotated[int, Field(description="How many items to return, from 1 to 2
 _After = Annotated[
     int | None,
     Field(description="Leave empty for the first page; pass next_after_id for the next."),
+]
+_AfterNode = Annotated[
+    Ref | None,
+    Field(
+        description="Leave empty for the first page; pass next_after (the reference of the last "
+        "node of the page) for the next."
+    ),
 ]
 
 # Tools that only read: they change nothing. The Tools page of the board says so from this, and
@@ -248,11 +283,12 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor,
         kind: Annotated[str, Field(description="epic, story or task.")],
         title: str,
-        parent_id: Annotated[
-            int | None,
+        parent: Annotated[
+            Ref | None,
             Field(
-                description="Required for a story (the id of its epic) and for a task (the id of "
-                "its story). An epic has no parent: leave it empty."
+                description="Required for a story (the reference of its epic, such as epic:3) and "
+                "for a task (the reference of its story, such as story:12). An epic has no "
+                "parent: leave it empty."
             ),
         ] = None,
         body: Annotated[str, Field(description="Plain text or Markdown.")] = "",
@@ -264,7 +300,9 @@ def create_server(settings: Settings) -> GuardedServer:
 
         Work is an exact hierarchy: an epic has no parent, a story belongs to one epic, and a task
         belongs to one story. Any other shape is refused. A new node starts with status new and
-        version 1. Dates are optional; a start date after the target date is refused.
+        version 1. Each kind is numbered from 1 on its own, and the new node's reference (ref) is
+        its kind and number, such as story:12: that is how every tool names it. Dates are
+        optional; a start date after the target date is refused.
 
         For an epic or a story it also says which existing ones look like the same thing
         (similar). It is created anyway: decide yourself whether it is a duplicate.
@@ -274,7 +312,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 actor=actor,
                 kind=kind,
                 title=title,
-                parent_id=parent_id,
+                parent=None if parent is None else parse_node_ref(parent, "parent"),
                 body=body,
                 priority=priority,
                 start_on=parse_day("start_on", start_on),
@@ -282,17 +320,20 @@ def create_server(settings: Settings) -> GuardedServer:
             )
 
     @mcp.tool(annotations=_READS)
-    async def get_node(node_id: int) -> NodeDetail:
+    async def get_node(node: _Node) -> NodeDetail:
         """Read one epic, story or task in full, including the version you need to change it, how
         many handoff notes it has and the latest one."""
         with _database_errors():
-            return await graph.get_node(node_id)
+            return await graph.get_node(parse_node_ref(node, "node"))
 
     @mcp.tool(annotations=_READS)
     async def list_nodes(
         kind: Annotated[str | None, Field(description="Only epic, story or task.")] = None,
-        parent_id: Annotated[
-            int | None, Field(description="Only the direct children of this node.")
+        parent: Annotated[
+            Ref | None,
+            Field(
+                description="Only the direct children of this node (its reference, such as epic:3)."
+            ),
         ] = None,
         status: Annotated[
             str | None,
@@ -323,7 +364,7 @@ def create_server(settings: Settings) -> GuardedServer:
         ] = None,
         detail: _Detail = False,
         limit: _Limit = 50,
-        after_id: _After = None,
+        after: _AfterNode = None,
         query: Annotated[
             str | None,
             Field(
@@ -331,7 +372,9 @@ def create_server(settings: Settings) -> GuardedServer:
                 "status:ready,in_progress -claimed priority:high OR kind:story. Words match "
                 "part of a title or body. field:a,b means any of these; a leading - leaves "
                 "matches out; terms side by side must all hold; OR joins alternatives. Fields: "
-                "kind, status, priority, claimed (who holds it), parent, epic, story, id, start "
+                "kind, status, priority, claimed (who holds it), epic (epic:3 is epic 3 and "
+                "everything under it), story (story:12 is story 12 and its tasks), parent "
+                "(parent:epic:3, a reference), number (number:7, with kind:), start "
                 "and target (a day, a range such as 2026-11-01..2026-12-31, or none), is "
                 "(overdue, conflict, waiting, claimed, lapsed) and no (start, target, claimed, "
                 "parent, body, waiting). claimed and waiting on their own find the items that "
@@ -339,7 +382,8 @@ def create_server(settings: Settings) -> GuardedServer:
             ),
         ] = None,
     ) -> NodePage:
-        """List nodes, oldest first, a page at a time. Every filter is optional and they combine.
+        """List nodes, epics first, then stories, then tasks, each by number, a page at a time.
+        Every filter is optional and they combine.
 
         status can also be ready: a node nobody has started whose prerequisites are all done. The
         date filters look at each node's own dates, so a node without a date never matches one.
@@ -350,7 +394,7 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await graph.list_nodes(
                 kind=kind,
-                parent_id=parent_id,
+                parent=None if parent is None else parse_node_ref(parent, "parent"),
                 status=status,
                 start_from=parse_day("start_from", start_from),
                 start_to=parse_day("start_to", start_to),
@@ -359,14 +403,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 overdue=overdue,
                 detail=detail,
                 limit=limit,
-                after_id=after_id,
+                after=None if after is None else parse_node_ref(after, "after"),
                 query=query,
             )
 
     @mcp.tool()
     async def update_node(
         actor: _Actor,
-        node_id: int,
+        node: _Node,
         expected_version: _Version,
         title: str | None = None,
         body: str | None = None,
@@ -374,8 +418,8 @@ def create_server(settings: Settings) -> GuardedServer:
             str | None, Field(description="new, in_progress, blocked, done or dropped.")
         ] = None,
         priority: Annotated[str | None, Field(description="low, normal, high or urgent.")] = None,
-        parent_id: Annotated[
-            int | None,
+        parent: Annotated[
+            Ref | None,
             Field(
                 description="Do not use this to change the parent: a node has exactly one parent, "
                 "and move_node changes it."
@@ -402,13 +446,13 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await graph.update_node(
                 actor=actor,
-                node_id=node_id,
+                node=parse_node_ref(node, "node"),
                 expected_version=expected_version,
                 title=title,
                 body=body,
                 status=status,
                 priority=priority,
-                parent_id=parent_id,
+                parent=None if parent is None else parse_node_ref(parent, "parent"),
                 start_on=parse_day("start_on", start_on),
                 target_on=parse_day("target_on", target_on),
                 clear_start_on=clear_start_on,
@@ -418,10 +462,14 @@ def create_server(settings: Settings) -> GuardedServer:
     @mcp.tool()
     async def move_node(
         actor: _Actor,
-        node_id: int,
+        node: _Node,
         expected_version: _Version,
-        new_parent_id: Annotated[
-            int, Field(description="The epic to move a story to, or the story to move a task to.")
+        new_parent: Annotated[
+            Ref,
+            Field(
+                description="The epic to move a story to, or the story to move a task to, by "
+                "reference (such as epic:3)."
+            ),
         ],
     ) -> Node:
         """Move a story to another epic, or a task to another story, in one step.
@@ -432,26 +480,33 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await graph.move_node(
                 actor=actor,
-                node_id=node_id,
+                node=parse_node_ref(node, "node"),
                 expected_version=expected_version,
-                new_parent_id=new_parent_id,
+                new_parent=parse_node_ref(new_parent, "new_parent"),
             )
 
     @mcp.tool(annotations=_READS)
-    async def node_history(node_id: int, limit: _Limit = 50, after_id: _After = None) -> EventPage:
+    async def node_history(node: _Node, limit: _Limit = 50, after_id: _After = None) -> EventPage:
         """Read everything that was ever done to one node, oldest first, a page at a time.
 
         Each event says who did it, when, what kind of change it was, and the changed fields as they
         were and as they became.
         """
         with _database_errors():
-            return await graph.node_history(node_id=node_id, limit=limit, after_id=after_id)
+            return await graph.node_history(
+                node=parse_node_ref(node, "node"), limit=limit, after_id=after_id
+            )
 
     @mcp.tool()
     async def add_link(
         actor: _Actor,
-        source_id: Annotated[int, Field(description="The node the link starts from.")],
-        target_id: Annotated[int, Field(description="The node the link points to.")],
+        source: Annotated[
+            Ref,
+            Field(description="The node the link starts from (its reference, such as story:12)."),
+        ],
+        target: Annotated[
+            Ref, Field(description="The node the link points to (its reference, such as task:4).")
+        ],
         link_type: Annotated[
             str,
             Field(
@@ -470,14 +525,22 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await links.add_link(
-                actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
+                actor=actor,
+                source=parse_node_ref(source, "source"),
+                target=parse_node_ref(target, "target"),
+                link_type=link_type,
             )
 
     @mcp.tool()
     async def remove_link(
         actor: _Actor,
-        source_id: int,
-        target_id: int,
+        source: Annotated[
+            Ref,
+            Field(description="The node the link starts from (its reference, such as story:12)."),
+        ],
+        target: Annotated[
+            Ref, Field(description="The node the link points to (its reference, such as task:4).")
+        ],
         link_type: Annotated[
             str, Field(description="needs_first, supersedes, duplicates or relates_to.")
         ],
@@ -486,12 +549,15 @@ def create_server(settings: Settings) -> GuardedServer:
         recorded in the history of both nodes."""
         with _database_errors():
             return await links.remove_link(
-                actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
+                actor=actor,
+                source=parse_node_ref(source, "source"),
+                target=parse_node_ref(target, "target"),
+                link_type=link_type,
             )
 
     @mcp.tool(annotations=_READS)
     async def list_links(
-        node_id: int,
+        node: _Node,
         link_type: Annotated[
             str | None, Field(description="Only needs_first, supersedes, duplicates or relates_to.")
         ] = None,
@@ -500,12 +566,15 @@ def create_server(settings: Settings) -> GuardedServer:
     ) -> LinkPage:
         """List every link that starts or ends at a node, a page at a time.
 
-        For a needs_first link, source_id is the node that waits and target_id is the node it
+        For a needs_first link, source is the node that waits and target is the node it
         waits for.
         """
         with _database_errors():
             return await links.list_links(
-                node_id=node_id, link_type=link_type, limit=limit, after_id=after_id
+                node=parse_node_ref(node, "node"),
+                link_type=link_type,
+                limit=limit,
+                after_id=after_id,
             )
 
     @mcp.tool(annotations=_READS)
@@ -516,17 +585,23 @@ def create_server(settings: Settings) -> GuardedServer:
         ] = None,
         detail: _Detail = False,
         limit: _Limit = 50,
-        after_id: _After = None,
+        after: _AfterNode = None,
     ) -> NodePage:
         """List work that can be started now: not started, everything it needs first is done, and
-        nobody holds a claim on it. Oldest first, a page at a time. To be handed the most urgent
-        piece with everything you need to know, use next_work; claim_node takes a specific one."""
+        nobody holds a claim on it. Stories first, then tasks, each by number, a page at a time. To
+        be handed the most urgent piece with everything you need to know, use next_work;
+        claim_node takes a specific one."""
         with _database_errors():
-            return await graph.ready_work(kind=kind, detail=detail, limit=limit, after_id=after_id)
+            return await graph.ready_work(
+                kind=kind,
+                detail=detail,
+                limit=limit,
+                after=None if after is None else parse_node_ref(after, "after"),
+            )
 
     @mcp.tool()
     async def claim_node(
-        actor: _Actor, node_id: int, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
+        actor: _Actor, node: _Node, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
     ) -> Claim:
         """Say you are working on a story or task, so that nobody else picks it up.
 
@@ -537,24 +612,24 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await claims.claim_node(
-                actor=actor, node_id=node_id, lease_seconds=lease_seconds
+                actor=actor, node=parse_node_ref(node, "node"), lease_seconds=lease_seconds
             )
 
     @mcp.tool()
     async def renew_claim(
-        actor: _Actor, node_id: int, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
+        actor: _Actor, node: _Node, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS
     ) -> Claim:
         """Keep your claim: it now lasts lease_seconds from now. Only the holder can renew, and
         only while the claim has not lapsed."""
         with _database_errors():
             return await claims.renew_claim(
-                actor=actor, node_id=node_id, lease_seconds=lease_seconds
+                actor=actor, node=parse_node_ref(node, "node"), lease_seconds=lease_seconds
             )
 
     @mcp.tool()
     async def release_claim(
         actor: _Actor,
-        node_id: int,
+        node: _Node,
         note: Annotated[
             str,
             Field(
@@ -569,7 +644,9 @@ def create_server(settings: Settings) -> GuardedServer:
         free again; use finish_work to mark it done, blocked or dropped instead.
         """
         with _database_errors():
-            return await claims.release_claim(actor=actor, node_id=node_id, note=note)
+            return await claims.release_claim(
+                actor=actor, node=parse_node_ref(node, "node"), note=note
+            )
 
     @mcp.tool(annotations=_READS)
     async def who_is_working() -> WhoIsWorking:
@@ -583,9 +660,12 @@ def create_server(settings: Settings) -> GuardedServer:
     @mcp.tool()
     async def next_work(
         actor: _Actor,
-        within_node_id: Annotated[
-            int | None,
-            Field(description="Only work inside this epic or story. Leave empty for anywhere."),
+        within_node: Annotated[
+            Ref | None,
+            Field(
+                description="Only work inside this epic or story (its reference, such as "
+                "epic:3). Leave empty for anywhere."
+            ),
         ] = None,
         peek: Annotated[
             bool, Field(description="True: look at what you would get, without claiming it.")
@@ -617,7 +697,9 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await workflow.next_work(
                 actor=actor,
-                within_node_id=within_node_id,
+                within_node=None
+                if within_node is None
+                else parse_node_ref(within_node, "within_node"),
                 peek=peek,
                 lease_seconds=lease_seconds,
                 context_chars=context_chars,
@@ -626,7 +708,7 @@ def create_server(settings: Settings) -> GuardedServer:
     @mcp.tool()
     async def finish_work(
         actor: _Actor,
-        node_id: int,
+        node: _Node,
         outcome: Annotated[
             str,
             Field(
@@ -650,7 +732,7 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await workflow.finish_work(
-                actor=actor, node_id=node_id, outcome=outcome, note=note
+                actor=actor, node=parse_node_ref(node, "node"), outcome=outcome, note=note
             )
 
     @mcp.tool()
@@ -660,24 +742,31 @@ def create_server(settings: Settings) -> GuardedServer:
             list[PlanItem],
             Field(
                 description="The epics, stories and tasks to create. Each has a key (a name only "
-                "this plan uses) so that parents, links and rules can refer to it."
+                "this plan uses, never written like a reference) so that parents, links and "
+                "rules can refer to it."
             ),
         ],
         links: Annotated[
             list[PlanLink] | None,
-            Field(description="Links between items, by key or by the id of an existing node."),
+            Field(
+                description="Links between items, by key or by the reference of an existing node."
+            ),
         ] = None,
         rules: Annotated[
             list[PlanRule] | None,
-            Field(description="Rules to record, each in a story by key or by existing id."),
+            Field(
+                description="Rules to record, each in a story by key or by the reference of an "
+                "existing story."
+            ),
         ] = None,
     ) -> PlanResult:
         """Create a whole plan at once: epics, stories, tasks, links and rules, or nothing.
 
         It is all checked first. If anything is wrong, nothing is created and every problem is
-        listed, each naming its item. There is no limit on how many items a plan has. For each
-        new epic or story that looks like something that already exists, similar says so; it was
-        created anyway.
+        listed, each naming its item. There is no limit on how many items a plan has. Each kind is
+        numbered in the order the plan lists it, and every item created is returned with its key and
+        its reference (such as story:12). For each new epic or story that looks like something
+        that already exists, similar says so; it was created anyway.
         """
         with _database_errors():
             return await workflow.create_plan(
@@ -689,12 +778,16 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor,
         changes: Annotated[
             list[NodeChange],
-            Field(description="The changes. Each names its node and the version you last read."),
+            Field(
+                description="The changes. Each names its node (by reference) and the version you "
+                "last read."
+            ),
         ],
     ) -> UpdateNodesResult:
         """Change many nodes in one call. Each change is checked and applied on its own, like
         update_node, so one stale or refused change never stops the others. The result says, for
-        every change, whether it was applied or why not."""
+        every change, whether it was applied or why not. A reference that is not written as one
+        (such as 12) refuses the whole call before anything is changed."""
         with _database_errors():
             return await workflow.update_nodes(actor=actor, changes=changes)
 
@@ -707,7 +800,10 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: Annotated[
             str | None, Field(description="Only changes made by this person or agent.")
         ] = None,
-        node_id: Annotated[int | None, Field(description="Only changes to this node.")] = None,
+        node: Annotated[
+            Ref | None,
+            Field(description="Only changes to this node (its reference, such as story:12)."),
+        ] = None,
         rule_id: Annotated[int | None, Field(description="Only changes to this rule.")] = None,
         decision_id: Annotated[
             int | None, Field(description="Only changes to this decision.")
@@ -736,14 +832,14 @@ def create_server(settings: Settings) -> GuardedServer:
         Every event after the one you give is shown, in order, and none is skipped even when
         another change was still being written. Events are ordered by when their change began,
         which for two changes at the very same moment can differ from their ids. Give at most
-        one of node_id, rule_id, decision_id and fact_id. To see only the newest changes, ask
+        one of node, rule_id, decision_id and fact_id. To see only the newest changes, ask
         for newest, and walk back with before_event_id.
         """
         with _database_errors():
             return await workflow.changes_since(
                 after_event_id=after_event_id,
                 actor=actor,
-                node_id=node_id,
+                node=None if node is None else parse_node_ref(node, "node"),
                 rule_id=rule_id,
                 decision_id=decision_id,
                 fact_id=fact_id,
@@ -760,19 +856,27 @@ def create_server(settings: Settings) -> GuardedServer:
             str, Field(description="Plain text or Markdown: the detail, or where it came from.")
         ] = "",
         status: Annotated[str, Field(description="held, settled or dropped.")] = "held",
-        story_id: Annotated[
-            int | None,
-            Field(description="The story that owns the rule. Leave empty to place it later."),
+        story: Annotated[
+            Ref | None,
+            Field(
+                description="The story that owns the rule (its reference, such as story:12). "
+                "Leave empty to place it later."
+            ),
         ] = None,
     ) -> Rule:
         """Record a rule (a requirement).
 
         A rule belongs to at most one story. One with no story is unplaced: the coverage report
-        lists it until someone places it. Rules have their own ids, separate from node ids.
+        lists it until someone places it. Rules have their own ids, separate from the epics,
+        stories and tasks, which are named by reference.
         """
         with _database_errors():
             return await rules.create_rule(
-                actor=actor, title=title, body=body, status=status, story_id=story_id
+                actor=actor,
+                title=title,
+                body=body,
+                status=status,
+                story=None if story is None else parse_node_ref(story, "story"),
             )
 
     @mcp.tool(annotations=_READS)
@@ -783,7 +887,10 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool(annotations=_READS)
     async def list_rules(
-        story_id: Annotated[int | None, Field(description="Only the rules in this story.")] = None,
+        story: Annotated[
+            Ref | None,
+            Field(description="Only the rules in this story (its reference, such as story:12)."),
+        ] = None,
         unplaced: Annotated[
             bool, Field(description="Only the rules that are in no story yet.")
         ] = False,
@@ -796,7 +903,7 @@ def create_server(settings: Settings) -> GuardedServer:
         out unless you ask for detail: see body_preview, or use get_rule."""
         with _database_errors():
             return await rules.list_rules(
-                story_id=story_id,
+                story=None if story is None else parse_node_ref(story, "story"),
                 unplaced=unplaced,
                 status=status,
                 detail=detail,
@@ -833,7 +940,12 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor,
         rule_id: int,
         expected_version: _Version,
-        story_id: Annotated[int, Field(description="The story that will own the rule.")],
+        story: Annotated[
+            Ref,
+            Field(
+                description="The story that will own the rule (its reference, such as story:12)."
+            ),
+        ],
     ) -> Rule:
         """Put an unplaced rule in a story.
 
@@ -842,7 +954,10 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await rules.place_rule(
-                actor=actor, rule_id=rule_id, expected_version=expected_version, story_id=story_id
+                actor=actor,
+                rule_id=rule_id,
+                expected_version=expected_version,
+                story=parse_node_ref(story, "story"),
             )
 
     @mcp.tool()
@@ -850,7 +965,9 @@ def create_server(settings: Settings) -> GuardedServer:
         actor: _Actor,
         rule_id: int,
         expected_version: _Version,
-        new_story_id: Annotated[int, Field(description="The story the rule moves to.")],
+        new_story: Annotated[
+            Ref, Field(description="The story the rule moves to (its reference, such as story:12).")
+        ],
     ) -> Rule:
         """Move a rule from its story to another story, in one step.
 
@@ -862,7 +979,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 actor=actor,
                 rule_id=rule_id,
                 expected_version=expected_version,
-                new_story_id=new_story_id,
+                new_story=parse_node_ref(new_story, "new_story"),
             )
 
     @mcp.tool(annotations=_READS)
@@ -888,9 +1005,12 @@ def create_server(settings: Settings) -> GuardedServer:
             int | None,
             Field(description="Leave empty for the first page of unplaced rules."),
         ] = None,
-        stories_after_id: Annotated[
-            int | None,
-            Field(description="Leave empty for the first page of stories without rules."),
+        stories_after: Annotated[
+            Ref | None,
+            Field(
+                description="Leave empty for the first page of stories without rules; pass "
+                "next_stories_after for the next."
+            ),
         ] = None,
         detail: _Detail = False,
     ) -> CoverageReport:
@@ -904,7 +1024,9 @@ def create_server(settings: Settings) -> GuardedServer:
                 detail=detail,
                 limit=limit,
                 unplaced_after_id=unplaced_after_id,
-                stories_after_id=stories_after_id,
+                stories_after=None
+                if stories_after is None
+                else parse_node_ref(stories_after, "stories_after"),
             )
 
     @mcp.tool()
@@ -929,15 +1051,15 @@ def create_server(settings: Settings) -> GuardedServer:
             ),
         ] = False,
         decided_on: _DecidedOn = None,
-        node_ids: _NodeIds = None,
+        nodes: _NodeRefs = None,
         rule_ids: _RuleIds = None,
     ) -> Decision:
         """Record a decision, and the epics, stories, tasks and rules it affects.
 
         Decisions are a record and are never edited. To change one, supersede it; to give it up,
         withdraw it. It starts unconfirmed: confirming is a separate step that a named person
-        takes (set_confirmation). Link a decision to what it affects so that recall finds it for
-        those items.
+        takes (set_confirmation). Link a decision to what it affects (nodes, by reference, and
+        rule_ids) so that recall finds it for those items.
         """
         with _database_errors():
             return await decisions.record_decision(
@@ -948,7 +1070,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 reason=reason,
                 decided_by=decided_by,
                 decided_on=decided_on,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
             )
 
@@ -987,24 +1109,31 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool()
     async def link_decision(
-        actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
+        actor: _Actor, decision_id: int, nodes: _NodeRefs = None, rule_ids: _RuleIds = None
     ) -> Decision:
         """Say that an active decision also affects more nodes or rules. Nothing is changed if any
-        id is wrong or already linked. A decision that is not active keeps the links it had."""
+        reference or id is wrong or already linked. A decision that is not active keeps the links
+        it had."""
         with _database_errors():
             return await decisions.link_decision(
-                actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
+                actor=actor,
+                decision_id=decision_id,
+                nodes=parse_node_refs(nodes, "nodes"),
+                rule_ids=rule_ids,
             )
 
     @mcp.tool()
     async def unlink_decision(
-        actor: _Actor, decision_id: int, node_ids: _NodeIds = None, rule_ids: _RuleIds = None
+        actor: _Actor, decision_id: int, nodes: _NodeRefs = None, rule_ids: _RuleIds = None
     ) -> Decision:
         """Say that an active decision no longer affects some nodes or rules. Nothing is changed if
         any of them is not linked. A decision that is not active keeps the links it had."""
         with _database_errors():
             return await decisions.unlink_decision(
-                actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids
+                actor=actor,
+                decision_id=decision_id,
+                nodes=parse_node_refs(nodes, "nodes"),
+                rule_ids=rule_ids,
             )
 
     @mcp.tool()
@@ -1029,10 +1158,10 @@ def create_server(settings: Settings) -> GuardedServer:
             bool,
             Field(
                 description="True: the new decision affects what the old one did. False: it starts "
-                "with only the ids you give."
+                "with only the references and ids you give."
             ),
         ] = True,
-        node_ids: _NodeIds = None,
+        nodes: _NodeRefs = None,
         rule_ids: _RuleIds = None,
         said_by: _SaidBy = None,
         quote: _Quote = None,
@@ -1056,7 +1185,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 decided_by=decided_by,
                 decided_on=decided_on,
                 keep_links=keep_links,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
                 said_by=said_by,
                 quote=quote,
@@ -1080,8 +1209,12 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool(annotations=_READS)
     async def recall(
-        node_id: Annotated[
-            int | None, Field(description="The epic, story or task to recall what is known for.")
+        node: Annotated[
+            Ref | None,
+            Field(
+                description="The epic, story or task to recall what is known for (its reference, "
+                "such as story:12)."
+            ),
         ] = None,
         rule_id: Annotated[
             int | None, Field(description="Or the rule to recall what is known for.")
@@ -1119,7 +1252,7 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await recaller.recall(
-                node_id=node_id,
+                node=None if node is None else parse_node_ref(node, "node"),
                 rule_id=rule_id,
                 show=show,
                 limit=limit,
@@ -1138,7 +1271,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 "what was observed. Never blank."
             ),
         ],
-        node_ids: _ConcernedNodeIds = None,
+        nodes: _ConcernedNodeRefs = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
     ) -> Fact:
@@ -1148,14 +1281,15 @@ def create_server(settings: Settings) -> GuardedServer:
         when it was wrong, withdraw it with withdraw_fact. A fact is not a decision, and it starts
         unconfirmed: confirming is a separate step that a named person takes (set_confirmation),
         so recording a fact yourself never counts as a person's review. Link it to what it
-        concerns so that recall finds it for those items.
+        concerns (nodes, by reference, rule_ids and decision_ids) so that recall finds it for
+        those items.
         """
         with _database_errors():
             return await facts.retain_fact(
                 actor=actor,
                 text=text,
                 source=source,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
@@ -1176,10 +1310,10 @@ def create_server(settings: Settings) -> GuardedServer:
             bool,
             Field(
                 description="True: the new fact concerns what the old ones did. False: it starts "
-                "with only the ids you give."
+                "with only the references and ids you give."
             ),
         ] = True,
-        node_ids: _ConcernedNodeIds = None,
+        nodes: _ConcernedNodeRefs = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
         said_by: _SaidBy = None,
@@ -1200,7 +1334,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 text=text,
                 source=source,
                 keep_links=keep_links,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
                 said_by=said_by,
@@ -1290,17 +1424,17 @@ def create_server(settings: Settings) -> GuardedServer:
     async def link_fact(
         actor: _Actor,
         fact_id: int,
-        node_ids: _ConcernedNodeIds = None,
+        nodes: _ConcernedNodeRefs = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
     ) -> Fact:
         """Say that an active fact also concerns more nodes, rules or decisions. Nothing is
-        changed if any id is wrong or already linked."""
+        changed if any reference or id is wrong or already linked."""
         with _database_errors():
             return await facts.link_fact(
                 actor=actor,
                 fact_id=fact_id,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
@@ -1309,7 +1443,7 @@ def create_server(settings: Settings) -> GuardedServer:
     async def unlink_fact(
         actor: _Actor,
         fact_id: int,
-        node_ids: _ConcernedNodeIds = None,
+        nodes: _ConcernedNodeRefs = None,
         rule_ids: _ConcernedRuleIds = None,
         decision_ids: _ConcernedDecisionIds = None,
     ) -> Fact:
@@ -1319,7 +1453,7 @@ def create_server(settings: Settings) -> GuardedServer:
             return await facts.unlink_fact(
                 actor=actor,
                 fact_id=fact_id,
-                node_ids=node_ids,
+                nodes=parse_node_refs(nodes, "nodes"),
                 rule_ids=rule_ids,
                 decision_ids=decision_ids,
             )
@@ -1339,8 +1473,12 @@ def create_server(settings: Settings) -> GuardedServer:
         confirmation: Annotated[
             str | None, Field(description="Only confirmed or unconfirmed.")
         ] = None,
-        node_id: Annotated[
-            int | None, Field(description="Only what concerns exactly this node.")
+        node: Annotated[
+            Ref | None,
+            Field(
+                description="Only what concerns exactly this node (its reference, such as "
+                "story:12)."
+            ),
         ] = None,
         rule_id: Annotated[
             int | None, Field(description="Only what concerns exactly this rule.")
@@ -1348,11 +1486,12 @@ def create_server(settings: Settings) -> GuardedServer:
         decision_id: Annotated[
             int | None, Field(description="Only what concerns this decision.")
         ] = None,
-        within_node_id: Annotated[
-            int | None,
+        within_node: Annotated[
+            Ref | None,
             Field(
-                description="Only what concerns this epic, story or task, or anything under it, "
-                "or a rule in one of those stories. One walk over a whole area."
+                description="Only what concerns this epic, story or task (its reference, such as "
+                "epic:3), or anything under it, or a rule in one of those stories. One walk over "
+                "a whole area."
             ),
         ] = None,
         limit: _Limit = 50,
@@ -1361,16 +1500,18 @@ def create_server(settings: Settings) -> GuardedServer:
         """List facts, oldest first, a page at a time. Every filter is optional.
 
         The answer says how many match in all, so you can walk every page and check that none was
-        skipped. For one area of the project, use within_node_id.
+        skipped. For one area of the project, use within_node.
         """
         with _database_errors():
             return await facts.list_facts(
                 status=status,
                 confirmation=confirmation,
-                node_id=node_id,
+                node=None if node is None else parse_node_ref(node, "node"),
                 rule_id=rule_id,
                 decision_id=decision_id,
-                within_node_id=within_node_id,
+                within_node=None
+                if within_node is None
+                else parse_node_ref(within_node, "within_node"),
                 limit=limit,
                 after_id=after_id,
             )
@@ -1455,7 +1596,10 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool(annotations=_READS)
     async def similar_items(
-        node_id: Annotated[int | None, Field(description="An epic, story or task.")] = None,
+        node: Annotated[
+            Ref | None,
+            Field(description="An epic, story or task (its reference, such as story:12)."),
+        ] = None,
         rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
         decision_id: Annotated[int | None, Field(description="Or a decision.")] = None,
         fact_id: Annotated[int | None, Field(description="Or a fact.")] = None,
@@ -1475,13 +1619,13 @@ def create_server(settings: Settings) -> GuardedServer:
     ) -> SearchPage:
         """Find items that are alike in meaning to one item or one piece of text, nearest first.
 
-        Give exactly one of node_id, rule_id, decision_id, fact_id or text. The item itself is
+        Give exactly one of node, rule_id, decision_id, fact_id or text. The item itself is
         left out. Every result is a suggestion. It needs the embedding service and the index; if
         either is not ready it says so and changes nothing.
         """
         with _database_errors():
             return await searcher.similar_items(
-                node_id=node_id,
+                node=None if node is None else parse_node_ref(node, "node"),
                 rule_id=rule_id,
                 decision_id=decision_id,
                 fact_id=fact_id,
@@ -1497,11 +1641,11 @@ def create_server(settings: Settings) -> GuardedServer:
         item_type: Annotated[
             str, Field(description="story (the default), epic or rule: what to compare.")
         ] = "story",
-        epic_ids: Annotated[
-            list[int] | None,
+        epics: Annotated[
+            list[Ref] | None,
             Field(
-                description="Only pairs where at least one of the two is in one of these epics. "
-                "Leave empty to look at everything."
+                description="Only pairs where at least one of the two is in one of these epics "
+                "(their references, such as epic:3). Leave empty to look at everything."
             ),
         ] = None,
         min_similarity: Annotated[
@@ -1530,7 +1674,7 @@ def create_server(settings: Settings) -> GuardedServer:
         with _database_errors():
             return await searcher.find_overlaps(
                 item_type=item_type,
-                epic_ids=epic_ids,
+                epics=parse_node_refs(epics, "epics"),
                 min_similarity=min_similarity,
                 include_dropped=include_dropped,
                 limit=limit,
@@ -1539,8 +1683,12 @@ def create_server(settings: Settings) -> GuardedServer:
 
     @mcp.tool(annotations=_READS)
     async def find_mentions(
-        node_id: Annotated[
-            int | None, Field(description="An epic, story or task: who refers to it.")
+        node: Annotated[
+            Ref | None,
+            Field(
+                description="An epic, story or task (its reference, such as story:12): who "
+                "refers to it."
+            ),
         ] = None,
         rule_id: Annotated[int | None, Field(description="Or a rule.")] = None,
         decision_id: Annotated[int | None, Field(description="Or a decision.")] = None,
@@ -1553,9 +1701,9 @@ def create_server(settings: Settings) -> GuardedServer:
         """List the items whose text refers to one item, or, with no item given, every reference
         written anywhere in the graph.
 
-        A reference is [[node:12]], [[rule:3]], [[decision:7]] or [[fact:5]] in the details of an
-        epic, story, task or requirement, the text or reason of a decision, or the text or source
-        of a fact. Titles are not read. It is only
+        A reference is [[epic:3]], [[story:12]], [[task:40]], [[rule:3]], [[decision:7]] or
+        [[fact:5]] in the details of an epic, story, task or requirement, the text or reason of a
+        decision, or the text or source of a fact. Titles are not read. It is only
         text: it creates no link, changes no readiness and no order, and nothing is stored for it.
         This reads the text of everything when asked. Each mention says which item holds it, where
         and a snippet around it, and, for every reference, whether the item it names exists: one
@@ -1564,7 +1712,7 @@ def create_server(settings: Settings) -> GuardedServer:
         """
         with _database_errors():
             return await references.find_mentions(
-                node_id=node_id,
+                node=None if node is None else parse_node_ref(node, "node"),
                 rule_id=rule_id,
                 decision_id=decision_id,
                 fact_id=fact_id,
@@ -1604,7 +1752,8 @@ def create_server(settings: Settings) -> GuardedServer:
         confirmation and what it concerns), and the event log.
 
         Each page holds items of one list (nodes, links, rules, decisions, facts or events), in
-        id order. Keep calling with next_after until it is empty; the first page also says how
+        a fixed order (nodes as epics, then stories, then tasks, each by number; the rest by id).
+        Keep calling with next_after until it is empty; the first page also says how
         many items each list holds in all, to check you got them all. Dates and times are text.
         Not included: claims (leases that run out) and what is worked out from the rest (what is
         ready, the search and semantic indexes).
@@ -1628,13 +1777,14 @@ def create_server(settings: Settings) -> GuardedServer:
             ),
         ],
     ) -> ImportResult:
-        """Load a whole export into this server, which must be empty. Every id, date, status,
-        confirmation and event is kept, so what is exported afterwards is identical to the file.
+        """Load a whole export into this server, which must be empty. Every number, id, date,
+        status, confirmation and event is kept, so what is exported afterwards is identical to the
+        file, and the next new epic, story or task is numbered after the highest of its own kind.
 
         It is all or nothing: the file is checked first and every problem in it is listed at once,
         and the database checks everything again as it is loaded. A server that already holds
-        anything is refused, because the ids in the file would clash with what is there: load it
-        into a fresh one, or restore a backup. A file can be as big as one request may be (see
+        anything is refused, because the numbers in the file would clash with what is there: load
+        it into a fresh one, or restore a backup. A file can be as big as one request may be (see
         VRUM_MAX_REQUEST_BYTES). scripts/import_graph.py sends a file for you. If an embedding
         service is set up, the server indexes the imported items by itself afterwards.
         """

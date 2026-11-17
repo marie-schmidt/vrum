@@ -6,10 +6,12 @@
 // to, never closer to its neighbours than room for both. A line between two rows that are not next
 // to each other passes through a lane kept for it in every row between, so no line runs through a
 // dot it does not join. Dots joined to nothing are put in a grid underneath. Nothing here draws: it
-// works out positions and routes from the sizes it is given.
+// works out positions and routes from the sizes it is given. Dots are ordered as everywhere else
+// (epics, stories, tasks, then requirements, decisions and facts, each by number: `byDot`).
+
+import { TYPE_ORDER, byDot } from './graph-data.js';
 
 const WORK_ROW = { epic: 0, story: 1, task: 2 };
-const TYPE_ORDER = { epic: 0, story: 1, task: 2, rule: 3, decision: 4, fact: 5 };
 const ROW_GAP = 68; // between one row and the next, where the lines run
 const BAND_GAP = 24; // more, between the work and the context under it
 const GAP = 24; // between two dots of a row
@@ -20,7 +22,6 @@ const MOST_LEVELS = 5; // how many rows of context lie below one another at most
 const SWEEPS = 14;
 const PASSES = 14;
 
-const byOrder = (a, b) => (TYPE_ORDER[a.type] ?? 9) - (TYPE_ORDER[b.type] ?? 9) || a.id - b.id;
 const before = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 
 // Positions and routes for these dots and lines. `size(key)` gives { w, h } of a dot. The result has
@@ -35,7 +36,7 @@ export function layered(dots, edges, size, { unit = 1 } = {}) {
   });
   const joined = new Set(live.flatMap(({ edge }) => [edge.source, edge.target]));
   const main = dots.filter((dot) => joined.has(dot.key));
-  const loose = dots.filter((dot) => !joined.has(dot.key)).sort(byOrder);
+  const loose = dots.filter((dot) => !joined.has(dot.key)).sort(byDot);
 
   // -- rows: work by its kind, context below the work, below the context it concerns ------------
   const present = [...new Set(main.filter((dot) => dot.isNode).map((dot) => WORK_ROW[dot.type] ?? 2))].sort((a, b) => a - b);
@@ -59,7 +60,7 @@ export function layered(dots, edges, size, { unit = 1 } = {}) {
   for (const [key, at] of level) rank.set(key, workRows + at);
   const rows = main.length ? Math.max(...rank.values()) + 1 : 0;
   const nodes = new Map();
-  for (const dot of [...main].sort(byOrder)) {
+  for (const dot of [...main].sort(byDot)) {
     const { w, h } = size(dot.key);
     nodes.set(dot.key, { key: dot.key, dummy: false, w, h, rank: rank.get(dot.key), x: 0, up: [], down: [] });
   }
@@ -115,7 +116,7 @@ export function layered(dots, edges, size, { unit = 1 } = {}) {
     node.piece = piece;
     if (!node.dummy) {
       const dot = known.get(node.key);
-      const rankKey = [node.rank, TYPE_ORDER[dot.type] ?? 9, dot.id];
+      const rankKey = [node.rank, TYPE_ORDER[dot.type] ?? 9, dot.number];
       if (!piece.first || before(rankKey, piece.first) < 0) piece.first = rankKey;
     }
   };

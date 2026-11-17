@@ -1,6 +1,6 @@
 # Progress
 
-Status: DONE (M0 to M7, M1A, M4A, M5B, M5C and M9 to M18 done; M8 skipped, no ledger path was given)
+Status: IN PROGRESS (M0 to M7, M1A, M4A, M5B, M5C and M9 to M18 done; M8 skipped, no ledger path was given; M19 under way)
 
 ## Inputs (from the loop file)
 
@@ -36,10 +36,13 @@ Tick in order. Each tick records the date and the commit. Each milestone keeps a
 - [x] M16. Simplify the product: work and context, without server-side generation (attempts: 1) (2026-11-16, commit c24c2b9)
 - [x] M17. Frontend redesign: the approved Vrum workbench, in light and dark (attempts: 1) (2026-11-16, commit a4f6552)
 - [x] M18. Concise, recruiter-friendly README (attempts: 1) (2026-11-16, commit a4f6552)
+- [ ] M19. Separate numbering for epics, stories and tasks, and a page for a story (attempts: 0)
 
 ## Added scope
 
 - Owner's clarification, 2026-11-16: M18 includes two screenshots of the real M17 app using the same explicitly fictional demo project: Board at the end of the overview and Graph below Getting started, showing work linked to facts and decisions. Populate the isolated screenshot project through real operations on a throwaway stack, label both images "Example project with fictional data", include alt text, and keep normal installations free of demo records. No real credentials or personal/private data may appear; remove the capture stack afterwards.
+
+- Owner's request, 2026-11-16 (after M18): epics, stories and tasks are numbered separately (they shared one counter), and the identity of one is its kind and number everywhere, with no integer id left; and clicking a story should open a full page of its details with its tasks in a table underneath. The owner first asked for a flat list of all work too, then withdrew it because the Graph's Work list already is one. Full contract and proof in `SPEC.md` (M19); the choices it leaves open are in `DECISIONS.md`.
 
 - Owner's decision, 2026-11-16: M18 follows M17 and rewrites `README.md` for a concise, recruiter-friendly introduction. Put a short problem/value overview first and practical getting-started instructions second, followed only by worthwhile supporting detail and links to deeper guides. Use concrete, natural prose without em/en dashes, promotional filler or decorative AI-style patterns. Reflect the finished M16/M17 product, preserve essential reference material in linked docs, and update documentation checks rather than retaining a long README to satisfy old layout assumptions. Full scope and proof are in `SPEC.md`; the README rewrite has not started.
 

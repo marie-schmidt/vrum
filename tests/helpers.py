@@ -60,6 +60,46 @@ async def refused(client: Client, tool: str, **arguments: Any) -> str:
 
 _NODE_EXTRAS = {"similar", "similar_checked", "similar_note", "handoff_count", "last_handoff"}
 
+# The list tools that page over nodes: they are continued by `after` (the reference of the last
+# node of a page) and say `next_after`. Every other list is continued by `after_id`.
+NODE_PAGES = {"list_nodes", "ready_work"}
+
+_CODE_LETTER = {"epic": "E", "story": "S", "task": "T"}
+_LETTER_KIND = {letter: kind for kind, letter in _CODE_LETTER.items()}
+
+
+def ref_of(kind: str, number: int) -> str:
+    """The reference of an epic, story or task, as every tool and address names it: story:12. Any
+    of the six kinds makes the key the board uses for it (rule:3, decision:7, fact:5)."""
+    return f"{kind}:{number}"
+
+
+def kind_of(ref: str) -> str:
+    """The kind in a reference: story:12 is a story."""
+    return ref.partition(":")[0]
+
+
+def number_of(ref: str) -> int:
+    """The number in a reference (or in the key of any record): story:12 is 12."""
+    return int(ref.partition(":")[2])
+
+
+def code_of(ref: str) -> str:
+    """What a person reads for the reference of an epic, story or task: story:12 is S-12."""
+    return f"{_CODE_LETTER[kind_of(ref)]}-{number_of(ref)}"
+
+
+def ref_from_code(code: str) -> str:
+    """The reference of what a person reads as a code: S-12 is story:12."""
+    letter, _, number = code.strip().partition("-")
+    assert letter in _LETTER_KIND and number.isdigit(), code
+    return ref_of(_LETTER_KIND[letter], int(number))
+
+
+def ref_order(ref: str) -> tuple[int, int]:
+    """Where a reference sorts: epics, then stories, then tasks, each by number."""
+    return list(_CODE_LETTER).index(kind_of(ref)), number_of(ref)
+
 
 def node_core(node: dict[str, Any]) -> dict[str, Any]:
     """A node without what only some tools add (the similar items of a new one, the handoff notes
@@ -68,14 +108,14 @@ def node_core(node: dict[str, Any]) -> dict[str, Any]:
 
 
 async def all_nodes(client: Client, **filters: Any) -> list[dict[str, Any]]:
-    """Every node matching the filters, following the pages."""
+    """Every node matching the filters, following the pages (by `after`, a reference)."""
     found: list[dict[str, Any]] = []
-    after_id = None
+    after = None
     while True:
-        page = await ok(client, "list_nodes", limit=200, after_id=after_id, **filters)
+        page = await ok(client, "list_nodes", limit=200, after=after, **filters)
         found.extend(page["items"])
-        after_id = page["next_after_id"]
-        if after_id is None:
+        after = page["next_after"]
+        if after is None:
             return found
 
 
@@ -83,10 +123,10 @@ async def make_tree(client: Client) -> tuple[dict[str, Any], dict[str, Any], dic
     """An epic, a story under it and a task under that, made by different actors."""
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="An epic")
     story = await ok(
-        client, "create_node", actor="marie", kind="story", title="A story", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="story", title="A story", parent=epic["ref"]
     )
     task = await ok(
-        client, "create_node", actor="agent-1", kind="task", title="A task", parent_id=story["id"]
+        client, "create_node", actor="agent-1", kind="task", title="A task", parent=story["ref"]
     )
     return epic, story, task
 
@@ -95,7 +135,7 @@ async def make_tasks(client: Client, count: int) -> list[dict[str, Any]]:
     """`count` tasks under one new story, so each test works on nodes of its own."""
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="An epic")
     story = await ok(
-        client, "create_node", actor="marie", kind="story", title="A story", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="story", title="A story", parent=epic["ref"]
     )
     return [
         await ok(
@@ -104,7 +144,7 @@ async def make_tasks(client: Client, count: int) -> list[dict[str, Any]]:
             actor="marie",
             kind="task",
             title=f"Task {number}",
-            parent_id=story["id"],
+            parent=story["ref"],
         )
         for number in range(count)
     ]
@@ -115,19 +155,19 @@ async def needs_first(client: Client, waiting: dict[str, Any], first: dict[str, 
         client,
         "add_link",
         actor="marie",
-        source_id=waiting["id"],
-        target_id=first["id"],
+        source=waiting["ref"],
+        target=first["ref"],
         link_type="needs_first",
     )
 
 
 async def set_status(client: Client, node: dict[str, Any], status: str) -> dict[str, Any]:
-    current = await ok(client, "get_node", node_id=node["id"])
+    current = await ok(client, "get_node", node=node["ref"])
     return await ok(
         client,
         "update_node",
         actor="marie",
-        node_id=node["id"],
+        node=node["ref"],
         expected_version=current["version"],
         status=status,
     )
@@ -143,13 +183,14 @@ async def make_stories(client: Client, count: int) -> list[dict[str, Any]]:
             actor="marie",
             kind="story",
             title=f"Story {number}",
-            parent_id=epic["id"],
+            parent=epic["ref"],
         )
         for number in range(count)
     ]
 
 
 async def make_rule(client: Client, title: str = "A rule", **arguments: Any) -> dict[str, Any]:
+    """A rule (pass `story=` with the reference of a story to place it)."""
     return await ok(client, "create_rule", actor="marie", title=title, **arguments)
 
 
@@ -168,13 +209,13 @@ async def whole_coverage_report(client: Client) -> dict[str, Any]:
         unplaced.extend(report["unplaced_rules"])
     report = await ok(client, "coverage_report", show="stories_without_rules", limit=200)
     stories = list(report["stories_without_rules"])
-    while report["next_stories_after_id"] is not None:
+    while report["next_stories_after"] is not None:
         report = await ok(
             client,
             "coverage_report",
             show="stories_without_rules",
             limit=200,
-            stories_after_id=report["next_stories_after_id"],
+            stories_after=report["next_stories_after"],
         )
         stories.extend(report["stories_without_rules"])
     return {
@@ -363,9 +404,10 @@ async def export_everything(client: Client, limit: int = 200) -> dict[str, Any]:
 
 async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     """One of everything the graph holds, made through the tools: all three kinds of node with
-    dates, every kind of link, a rule placed and one not, a decision that was replaced, a
-    principle, facts that were replaced and retracted, beliefs that are confirmed, stale, replaced
-    and promoted to a decision, a handoff, and a claim. Returns each by a short name."""
+    dates, every kind of link, a rule placed and one not, a decision that was replaced, one that
+    was withdrawn and a project-wide one, facts that were replaced, withdrawn and confirmed, a
+    handoff, and a claim. Returns each by a short name (a node has `ref`; a rule, decision or fact
+    has `id`)."""
     word = unique_word()
     epic = await ok(
         client,
@@ -385,7 +427,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
             actor="ann",
             kind=kind,
             title=f"{title} {word}",
-            parent_id=parent["id"],
+            parent=parent["ref"],
             **more,
         )
 
@@ -395,7 +437,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     task2 = await node("task", "Check the password", story1, target_on="2026-12-10")
     task3 = await node("task", "Send the code", story2)
     await ok(
-        client, "update_node", actor="ann", node_id=task1["id"], expected_version=1, status="done"
+        client, "update_node", actor="ann", node=task1["ref"], expected_version=1, status="done"
     )
     for source, target, link_type in (
         (task2, task1, "needs_first"),
@@ -407,23 +449,23 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
             client,
             "add_link",
             actor="ann",
-            source_id=source["id"],
-            target_id=target["id"],
+            source=source["ref"],
+            target=target["ref"],
             link_type=link_type,
         )
-    await ok(client, "claim_node", actor="ann", node_id=task2["id"])
+    await ok(client, "claim_node", actor="ann", node=task2["ref"])
     await ok(
         client,
         "finish_work",
         actor="ann",
-        node_id=task2["id"],
+        node=task2["ref"],
         outcome="blocked",
         note="Waiting for the design of the form.",
     )
-    await ok(client, "claim_node", actor="bob", node_id=task3["id"])
+    await ok(client, "claim_node", actor="bob", node=task3["ref"])
 
     rule1 = await ok(
-        client, "create_rule", actor="ann", title=f"Rule one {word}", story_id=story1["id"]
+        client, "create_rule", actor="ann", title=f"Rule one {word}", story=story1["ref"]
     )
     rule2 = await ok(
         client, "create_rule", actor="ann", title=f"Rule two {word}", body="Not placed."
@@ -438,7 +480,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     )
 
     decision1 = await make_decision(
-        client, f"Use email {word}", node_ids=[story1["id"]], rule_ids=[rule1["id"]]
+        client, f"Use email {word}", nodes=[story1["ref"]], rule_ids=[rule1["id"]]
     )
     await ok(
         client,
@@ -484,7 +526,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     fact1 = await make_fact(
         client,
         f"People log in on phones {word}",
-        node_ids=[story1["id"]],
+        nodes=[story1["ref"]],
         rule_ids=[rule1["id"]],
         decision_ids=[decision2["id"]],
     )
@@ -551,3 +593,6 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         "fact5": fact5,
         "fact6": fact6,
     }
+
+
+M19_HELPERS_READY = True

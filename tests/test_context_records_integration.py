@@ -58,9 +58,16 @@ async def everything_known(client: Client) -> dict[str, Any]:
 
 async def briefing(client: Client, epic: dict[str, Any]) -> dict[str, Any]:
     """The context an agent would be given for the free work under this epic, looked at only."""
-    answer = await ok(client, "next_work", actor="reader", within_node_id=epic["id"], peek=True)
+    answer = await ok(client, "next_work", actor="reader", within_node=epic["ref"], peek=True)
     assert answer["found"] and answer["claim"] is None, answer["message"]
     return dict(answer["context"])
+
+
+async def mentions(client: Client, ref: str) -> list[dict[str, Any]]:
+    """Every mention of one epic, story or task (all of them fit one page here)."""
+    page = await ok(client, "find_mentions", node=ref, limit=200)
+    assert page["next_offset"] is None
+    return list(page["items"])
 
 
 def shared(record: dict[str, Any], other: dict[str, Any]) -> bool:
@@ -76,7 +83,7 @@ async def test_a_fact_and_a_decision_have_the_same_ids_and_fields_in_every_read(
 ) -> None:
     word = unique_word()
     epic, story, task = await make_tree(client)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     decision = await ok(
         client,
         "record_decision",
@@ -86,7 +93,7 @@ async def test_a_fact_and_a_decision_have_the_same_ids_and_fields_in_every_read(
         reason="Fewer moving parts to run",
         decided_by="Marie",
         decided_on="2026-11-01",
-        node_ids=[story["id"]],
+        nodes=[story["ref"]],
         rule_ids=[rule["id"]],
     )
     fact = await ok(
@@ -95,7 +102,7 @@ async def test_a_fact_and_a_decision_have_the_same_ids_and_fields_in_every_read(
         actor="agent-2",
         text=f"The build takes four minutes {word}",
         source="Timed on Marie's laptop",
-        node_ids=[task["id"]],
+        nodes=[task["ref"]],
         rule_ids=[rule["id"]],
         decision_ids=[decision["id"]],
     )
@@ -110,44 +117,42 @@ async def test_a_fact_and_a_decision_have_the_same_ids_and_fields_in_every_read(
     # The fact: get, list (by each thing it concerns and by area), recall and the briefing.
     assert await ok(client, "get_fact", fact_id=fact["id"]) == fact
     for filters in (
-        {"node_id": task["id"]},
+        {"node": task["ref"]},
         {"rule_id": rule["id"]},
         {"decision_id": decision["id"]},
-        {"within_node_id": epic["id"]},
-        {"within_node_id": story["id"]},
+        {"within_node": epic["ref"]},
+        {"within_node": story["ref"]},
     ):
         assert await every(client, "list_facts", **filters) == [fact], filters
-    for target in ({"node_id": task["id"]}, {"rule_id": rule["id"]}):
+    for target in ({"node": task["ref"]}, {"rule_id": rule["id"]}):
         recalled = (await ok(client, "recall", **target))["facts"]["items"]
         assert [entry["fact"] for entry in recalled] == [fact], target
         assert recalled[0]["why"].startswith("linked directly to this")
-    for target in ({"node_id": story["id"]},):
+    for target in ({"node": story["ref"]},):
         assert (await ok(client, "recall", **target))["facts"]["items"] == []
 
     # The decision: the same.
     assert await ok(client, "get_decision", decision_id=decision["id"]) == decision
     listed = await every(client, "list_decisions")
     assert [d for d in listed if d["id"] == decision["id"]] == [decision]
-    for target in ({"node_id": story["id"]}, {"rule_id": rule["id"]}):
+    for target in ({"node": story["ref"]}, {"rule_id": rule["id"]}):
         recalled = (await ok(client, "recall", **target))["active_decisions"]["items"]
         assert [entry["decision"] for entry in recalled] == [decision], target
     # What the decision says about its facts: the fact names the decision, not the other way round.
-    assert (await ok(client, "get_decision", decision_id=decision["id"]))["node_ids"] == [
-        story["id"]
-    ]
+    assert (await ok(client, "get_decision", decision_id=decision["id"]))["nodes"] == [story["ref"]]
     assert await every(client, "list_facts", decision_id=decision["id"]) == [fact]
 
     # The briefing an agent is given for the task holds both, with the same fields.
-    taken = await ok(client, "next_work", actor="ann", within_node_id=epic["id"])
-    assert taken["work"]["id"] == task["id"]
+    taken = await ok(client, "next_work", actor="ann", within_node=epic["ref"])
+    assert taken["work"]["ref"] == task["ref"]
     context = taken["context"]
     (in_briefing,) = [d for d in context["active_decisions"] if d["id"] == decision["id"]]
-    assert shared(decision, in_briefing) and in_briefing["linked_to"] == [story["id"]]
+    assert shared(decision, in_briefing) and in_briefing["linked_to"] == [story["ref"]]
     assert {"title", "text", "reason", "decided_by", "decided_on", "confirmation"} <= set(
         in_briefing
     )
     (fact_in_briefing,) = context["facts"]
-    assert shared(fact, fact_in_briefing) and fact_in_briefing["linked_to"] == [task["id"]]
+    assert shared(fact, fact_in_briefing) and fact_in_briefing["linked_to"] == [task["ref"]]
     assert {"text", "source", "recorded_by", "confirmation"} <= set(fact_in_briefing)
 
     # Search by exact words finds the same ids, and says what each is.
@@ -179,7 +184,7 @@ async def test_confirmation_and_lifecycle_are_told_apart_and_the_history_keeps_b
     client: Client,
 ) -> None:
     epic, story, _ = await make_tree(client)
-    on_story = {"node_ids": [story["id"]]}
+    on_story = {"nodes": [story["ref"]]}
 
     async def a_fact(text: str, confirmed_by: str | None, ending: str | None) -> dict[str, Any]:
         fact = await make_fact(client, text, **on_story)
@@ -278,7 +283,7 @@ async def test_confirmation_and_lifecycle_are_told_apart_and_the_history_keeps_b
 
     # Recall gives the ones in force and the ones that are not in different sections, each saying
     # both things.
-    recalled = await ok(client, "recall", node_id=story["id"], limit=200)
+    recalled = await ok(client, "recall", node=story["ref"], limit=200)
     for section, noun, records in (
         ("facts", "fact", facts),
         ("past_facts", "fact", facts),
@@ -363,12 +368,12 @@ async def test_blank_sources_and_reasons_and_unauthorised_changes_leave_nothing_
     project = make_project(owner)
     async with connect(project.mcp_url, project.key) as client:
         (story,) = await make_stories(client, 1)
-        plain_fact = await make_fact(client, "Not looked at", node_ids=[story["id"]])
-        reviewed_fact = await make_fact(client, "Looked at by Marie", node_ids=[story["id"]])
+        plain_fact = await make_fact(client, "Not looked at", nodes=[story["ref"]])
+        reviewed_fact = await make_fact(client, "Looked at by Marie", nodes=[story["ref"]])
         await confirm(client, "fact", reviewed_fact, "Marie")
         ended_fact = await make_fact(client, "Gone")
         await ok(client, "withdraw_fact", actor="a", fact_ids=[ended_fact["id"]], reason="Wrong")
-        plain_decision = await make_decision(client, "Not looked at", node_ids=[story["id"]])
+        plain_decision = await make_decision(client, "Not looked at", nodes=[story["ref"]])
         reviewed_decision = await make_decision(client, "Looked at by Marie", project_wide=True)
         await confirm(client, "decision", reviewed_decision, "Marie")
         ended_decision = await make_decision(client, "Gone")
@@ -573,7 +578,7 @@ async def test_blank_sources_and_reasons_and_unauthorised_changes_leave_nothing_
                 {
                     "actor": "a",
                     "fact_id": plain_fact["id"],
-                    "node_ids": [story["parent_id"]],
+                    "nodes": [story["parent"]],
                     "rule_ids": [987654321],
                 },
             ),
@@ -583,7 +588,7 @@ async def test_blank_sources_and_reasons_and_unauthorised_changes_leave_nothing_
                     "actor": "a",
                     "text": "Half right",
                     "source": "s",
-                    "node_ids": [story["id"]],
+                    "nodes": [story["ref"]],
                     "decision_ids": [987654321],
                 },
             ),
@@ -639,7 +644,7 @@ async def test_blank_sources_and_reasons_and_unauthorised_changes_leave_nothing_
                 ),
                 (
                     "link_decision",
-                    {"actor": "a", "decision_id": plain_decision["id"], "node_ids": [story["id"]]},
+                    {"actor": "a", "decision_id": plain_decision["id"], "nodes": [story["ref"]]},
                 ),
             ):
                 assert "There is no" in await refused(stranger, tool, **arguments)
@@ -695,7 +700,7 @@ async def test_a_project_wide_decision_is_in_its_projects_briefing_and_recall_an
         assert context["project_wide_decisions"][0]["title"] == wide["title"]
         assert context["project_wide_decisions"][0]["confirmation"] == "unconfirmed"
         assert context["active_decisions"] == []
-        recalled = await ok(ours, "recall", node_id=epic["id"])
+        recalled = await ok(ours, "recall", node=epic["ref"])
         assert [e["decision"] for e in recalled["project_wide_decisions"]["items"]] == [wide]
         assert recalled["project_wide_decisions"]["items"][0]["why"] == (
             "a project-wide decision, so it applies throughout the project"
@@ -706,7 +711,7 @@ async def test_a_project_wide_decision_is_in_its_projects_briefing_and_recall_an
         # their search, and ours is not theirs to read, confirm or end.
         their_context = await briefing(others, other_epic)
         assert their_context["project_wide_decisions"] == []
-        their_recall = await ok(others, "recall", node_id=other_task["id"])
+        their_recall = await ok(others, "recall", node=other_task["ref"])
         assert their_recall["project_wide_decisions"]["items"] == []
         assert (await ok(others, "list_decisions", project_wide=True))["total"] == 0
         assert (await ok(others, "search", query=word, mode="words"))["items"] == []
@@ -738,7 +743,56 @@ async def test_a_project_wide_decision_is_in_its_projects_briefing_and_recall_an
         # Ending ours takes it out of ours and changes nothing of theirs.
         await ok(ours, "withdraw_decision", actor="a", decision_id=wide["id"], reason="No longer")
         assert (await briefing(ours, epic))["project_wide_decisions"] == []
-        assert (await ok(ours, "recall", node_id=epic["id"]))["project_wide_decisions"][
-            "items"
-        ] == []
+        assert (await ok(ours, "recall", node=epic["ref"]))["project_wide_decisions"]["items"] == []
         assert ids((await briefing(others, other_epic))["project_wide_decisions"]) == [own["id"]]
+
+
+# -- (e) epics, stories and tasks are numbered on their own, so records must not be mixed up -------
+
+
+async def test_records_linked_to_items_with_the_same_number_stay_with_their_own_item() -> None:
+    """In a new project the first epic, the first story and the first task are epic:1, story:1 and
+    task:1: three items. What is linked to one of them, or written about it, is not found for
+    another."""
+    project = make_project(register())
+    async with connect(project.mcp_url, project.key) as client:
+        epic, story, task = await make_tree(client)
+        items = {"epic": epic, "story": story, "task": task}
+        assert [item["ref"] for item in items.values()] == ["epic:1", "story:1", "task:1"]
+        assert [item["number"] for item in items.values()] == [1, 1, 1]
+        decisions = {
+            kind: await make_decision(client, f"About the {kind}", nodes=[item["ref"]])
+            for kind, item in items.items()
+        }
+        facts = {
+            kind: await make_fact(client, f"A fact about the {kind}", nodes=[item["ref"]])
+            for kind, item in items.items()
+        }
+        for kind, item in items.items():
+            assert decisions[kind]["nodes"] == facts[kind]["nodes"] == [item["ref"]]
+            recalled = await ok(client, "recall", node=item["ref"])
+            assert [e["decision"]["id"] for e in recalled["active_decisions"]["items"]] == [
+                decisions[kind]["id"]
+            ]
+            assert [e["fact"]["id"] for e in recalled["facts"]["items"]] == [facts[kind]["id"]]
+            assert await every(client, "list_facts", node=item["ref"]) == [facts[kind]]
+            history = (await ok(client, "node_history", node=item["ref"]))["items"]
+            assert [e["decision_id"] for e in history if e["action"] == "decision_linked"] == [
+                decisions[kind]["id"]
+            ]
+            assert [e["fact_id"] for e in history if e["action"] == "fact_linked"] == [
+                facts[kind]["id"]
+            ]
+        # Everything under an item is its own area: the epic holds all three, the task only its own.
+        for within, kinds in (
+            ("epic:1", ["epic", "story", "task"]),
+            ("story:1", ["story", "task"]),
+            ("task:1", ["task"]),
+        ):
+            found = await every(client, "list_facts", within_node=within)
+            assert ids(found) == [facts[kind]["id"] for kind in kinds], within
+        # A text that names one of them is a mention of that one only.
+        await make_fact(client, "See [[task:1]] and nothing else")
+        assert [m["source"]["item_type"] for m in await mentions(client, "task:1")] == ["fact"]
+        assert await mentions(client, "story:1") == []
+        assert await mentions(client, "epic:1") == []

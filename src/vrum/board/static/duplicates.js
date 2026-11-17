@@ -4,13 +4,13 @@
 // the epics, and can mark a pair as `duplicates` or `relates_to` with one click, which is the same
 // add_link an agent calls. Looking never writes: nothing is linked unless a person clicks one of
 // the buttons of a pair, and one click makes exactly one link. The choices are in the address:
-// dup_type, dup_min, dup_epics and dup_unlinked.
+// dup_type, dup_min, dup_epics (epic numbers, such as 3,7) and dup_unlinked.
 
 import { Refusal, call, callAll } from './api.js';
-import { actor, notify, recordLink, ui } from './ctx.js';
+import { actor, notify, parseSel, recordLink, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, STATUS, kindIcon, statusChip } from './labels.js';
+import { KIND, STATUS, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, statusChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { ensure, ensureContext, store, sync } from './store.js';
 
@@ -33,12 +33,16 @@ let pairs = []; // what has been read so far
 let total = 0;
 let nextOffset = null;
 let threshold = null; // what the server used
-let bodies = new Map(); // "type:id" -> details, for the side-by-side view
+let bodies = new Map(); // ref -> details, for the side-by-side view
 let rest = null; // the pairs not yet shown, when only the unmarked ones are listed
 let generation = 0;
 let loadedFor = '';
 
-const keyOf = (item) => `${item.item_type}:${item.id}`;
+// What a person reads for an item: S-12 for work, #3 for a requirement.
+const codeOfItem = (item) => {
+  const at = parseNodeRef(item.ref);
+  return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
+};
 const asking = (from) => ASKING.map((name) => from.get(name) || '').join('|');
 const itemType = () => (TYPES.some(([value]) => value === params.get('dup_type')) ? params.get('dup_type') : 'story');
 
@@ -77,7 +81,7 @@ export function mount(element, initial) {
       h('div', { class: 'dup-fields' },
         h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
         h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike (0 to 1)'), min),
-        h('div', { class: 'field dup-epics-field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (ids)'), epics),
+        h('div', { class: 'field dup-epics-field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (numbers)'), epics),
       ),
       h('label', { class: 'check', for: 'dup-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
       h(
@@ -123,18 +127,26 @@ export function again() {
 
 // -- reading from the server ---------------------------------------------------------------------
 
-// Numbers go as numbers; anything else goes as it is, so that the server says what is wrong with it.
-const epicIds = () => (params.get('dup_epics') || '').split(/[\s,]+/).filter(Boolean).map((id) => (/^\d+$/.test(id) ? Number(id) : id));
+// An epic as typed (3, E-3 or epic:3) is sent as its ref; anything else goes as it is, so that the
+// server says what is wrong with it.
+const epicRefs = () =>
+  (params.get('dup_epics') || '')
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map((text) => {
+      const number = /^(?:e-)?(\d+)$/i.exec(text);
+      return number ? nodeRef('epic', Number(number[1])) : text;
+    });
 
 async function read(offset, size = PAGE) {
   const asked = params.get('dup_min');
-  const epics = epicIds();
+  const epics = epicRefs();
   return call('find_overlaps', {
     item_type: itemType(),
     limit: size,
     offset,
     ...(asked !== null && asked !== '' ? { min_similarity: Number(asked) } : {}),
-    ...(epics.length ? { epic_ids: epics } : {}),
+    ...(epics.length ? { epics } : {}),
   });
 }
 
@@ -151,12 +163,13 @@ async function readEvery() {
 }
 
 // The words of the items in these pairs, for the side-by-side view: the work items with their
-// details in one filtered read, and the requirements from those the board already holds.
+// details in one filtered read for each kind, and the requirements from those the board already holds.
 async function describe(items) {
-  const wanted = items.filter((item) => !bodies.has(keyOf(item)));
-  const nodes = wanted.filter((item) => item.item_type !== 'rule').map((item) => item.id);
-  if (nodes.length) {
-    for (const node of await callAll('list_nodes', { query: `id:${nodes.join(',')}`, detail: true })) bodies.set(`${node.kind}:${node.id}`, node.body || '');
+  const wanted = items.filter((item) => !bodies.has(item.ref));
+  for (const type of ['epic', 'story', 'task']) {
+    const numbers = wanted.filter((item) => item.item_type === type).map((item) => parseNodeRef(item.ref).number);
+    if (!numbers.length) continue;
+    for (const node of await callAll('list_nodes', { query: `kind:${type} number:${numbers.join(',')}`, detail: true })) bodies.set(node.ref, node.body || '');
   }
   if (wanted.some((item) => item.item_type === 'rule')) {
     await ensure('rules');
@@ -263,19 +276,19 @@ function draw() {
 }
 
 function side(item) {
-  const text = bodies.get(keyOf(item));
-  const kind = item.item_type === 'rule' ? 'rule' : 'node';
+  const text = bodies.get(item.ref);
+  const at = parseSel(item.ref);
   return h(
     'div',
-    { class: 'side', dataset: { type: item.item_type, id: item.id } },
+    { class: 'side', dataset: { type: item.item_type, ref: item.ref } },
     h(
       'div',
       { class: 'entry-head' },
-      h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), `${KIND[item.item_type].label} #${item.id}`),
+      h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), `${KIND[item.item_type].label} ${codeOfItem(item)}`),
       STATUS[item.status] ? statusChip(item.status) : h('span', { class: 'chip' }, item.status),
     ),
-    h('h4', {}, recordLink(kind, item.id, {}, item.title)),
-    item.epic_id !== null ? h('p', { class: 'quiet side-epic' }, `In epic #${item.epic_id} ${item.epic_title || ''}`.trim()) : null,
+    h('h4', {}, recordLink(at.kind, at.number, {}, item.title)),
+    item.epic ? h('p', { class: 'quiet side-epic' }, `In epic ${codeOf(item.epic)} ${store.nodes.get(item.epic)?.title ?? ''}`.trim()) : null,
     h('div', { class: 'side-body' }, text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.')),
   );
 }
@@ -283,8 +296,8 @@ function side(item) {
 // One click, one link: the same add_link an agent calls.
 async function link(pair, type) {
   try {
-    await call('add_link', { actor: actor(), source_id: pair.first.id, target_id: pair.second.id, link_type: type });
-    notify(`Marked #${pair.first.id} and #${pair.second.id} as ${MARKS[type].told}.`);
+    await call('add_link', { actor: actor(), source: pair.first.ref, target: pair.second.ref, link_type: type });
+    notify(`Marked ${codeOfItem(pair.first)} and ${codeOfItem(pair.second)} as ${MARKS[type].told}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });
@@ -312,7 +325,7 @@ function pairRow(pair) {
     : [h('span', { class: 'quiet' }, 'Requirements cannot be linked to each other. Open both to compare them.')];
   return h(
     'li',
-    { class: 'pair', dataset: { first: pair.first.id, second: pair.second.id, similarity: pair.similarity } },
+    { class: 'pair', dataset: { first: pair.first.ref, second: pair.second.ref, similarity: pair.similarity } },
     h(
       'p',
       { class: 'score' },

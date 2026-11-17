@@ -38,6 +38,12 @@ def nothing_in(document: dict[str, Any]) -> bool:
     return all(not document[name] for name in SECTIONS)
 
 
+def next_number(document: dict[str, Any], kind: str) -> int:
+    """The number the next epic, story or task of this kind gets after the nodes of a file: each
+    kind is numbered on from its own highest."""
+    return max((n["number"] for n in document["nodes"] if n["kind"] == kind), default=0) + 1
+
+
 async def distinct_transactions(stack: SecondStack) -> int:
     result = stack.compose(
         "exec", "-T", "db", "psql", "-U", "vrum", "-d", "vrum", "-tA", "-c",
@@ -70,7 +76,7 @@ async def a_world_with_references(client: Client) -> dict[str, dict[str, Any]]:
         title="Mentions",
         body=(
             f"See [[fact:{world['fact1']['id']}]], [[decision:{world['wide']['id']}]], "
-            f"[[rule:{world['rule1']['id']}]] and [[node:{world['story1']['id']}]]."
+            f"[[rule:{world['rule1']['id']}]] and [[{world['story1']['ref']}]]."
         ),
     )
     return world
@@ -87,8 +93,8 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
         world = await a_world_with_references(client)
         original = await export_everything(client)
         mentions = await every_mention(client)
-        recalled = await ok(client, "recall", node_id=world["task3"]["id"])
-        briefed = await ok(client, "recall", node_id=world["story1"]["id"])
+        recalled = await ok(client, "recall", node=world["task3"]["ref"])
+        briefed = await ok(client, "recall", node=world["story1"]["ref"])
     assert mentions and recalled["project_wide_decisions"]["count"] == 1
     exported = tmp_path / "vrum-export.json"
     result = stack.python("export_graph.py", stack.url, exported)
@@ -111,16 +117,18 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
     assert f"Imported {sum(original['counts'].values())} items" in loaded.stdout
     async with stack.client() as client:
         assert await export_everything(client) == original
-        top = {name: max(item["id"] for item in original[name]) for name in SECTIONS}
+        top = {
+            name: max(item["id"] for item in original[name]) for name in SECTIONS if name != "nodes"
+        }
         # What is loaded works like anything else: it can be read, searched and followed ...
-        epic = await ok(client, "get_node", node_id=world["epic"]["id"])
+        epic = await ok(client, "get_node", node=world["epic"]["ref"])
         assert epic["title"] == world["epic"]["title"] and epic["status"] == "ready"
         word = str(world["epic"]["title"]).split()[-1]
         found = await ok(client, "search", query=word, mode="words", limit=200)
-        assert {(i["item_type"], i["id"]) for i in found["items"]} >= {
-            ("epic", world["epic"]["id"]),
-            ("fact", world["fact1"]["id"]),
-            ("decision", world["wide"]["id"]),
+        assert {i["ref"] for i in found["items"]} >= {
+            world["epic"]["ref"],
+            f"fact:{world['fact1']['id']}",
+            f"decision:{world['wide']['id']}",
         }
         # ... what a person confirmed is still confirmed, by whom and when, and what ended keeps
         # what it was confirmed as ...
@@ -136,16 +144,26 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
         assert replaced["confirmation"] == "confirmed" and replaced["supersedes_ids"] == []
         # ... a project-wide decision still applies throughout the project, and what recall and
         # find_mentions answer is what they answered before ...
-        assert await ok(client, "recall", node_id=world["task3"]["id"]) == recalled
-        assert await ok(client, "recall", node_id=world["story1"]["id"]) == briefed
+        assert await ok(client, "recall", node=world["task3"]["ref"]) == recalled
+        assert await ok(client, "recall", node=world["story1"]["ref"]) == briefed
         assert await every_mention(client) == mentions
-        # ... new items carry on from the highest id in the file, their changes after the loaded
-        # history ...
+        # ... new items carry on from the highest number of their own kind in the file, their
+        # changes after the loaded history ...
         new = await ok(client, "create_node", actor="ann", kind="epic", title="After the import")
-        assert new["id"] == top["nodes"] + 1
+        assert new["ref"] == f"epic:{next_number(original, 'epic')}"
         changes = await ok(client, "changes_since", after_event_id=top["events"], limit=50)
-        assert [event["node_id"] for event in changes["items"]] == [new["id"]]
+        assert [event["node"] for event in changes["items"]] == [new["ref"]]
         assert changes["items"][0]["id"] == top["events"] + 1
+        story = await ok(
+            client, "create_node", actor="ann", kind="story", title="Story", parent=new["ref"]
+        )
+        task = await ok(
+            client, "create_node", actor="ann", kind="task", title="Task", parent=story["ref"]
+        )
+        assert (story["ref"], task["ref"]) == (
+            f"story:{next_number(original, 'story')}",
+            f"task:{next_number(original, 'task')}",
+        )
         # ... confirmation can be changed after the import, by a person, and only while active ...
         again = await ok(
             client,
@@ -204,31 +222,53 @@ async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, An
 
     epic = next(n for n in good["nodes"] if n["kind"] == "epic")
     task = next(n for n in good["nodes"] if n["kind"] == "task")
-    other = next(n for n in good["nodes"] if n["kind"] == "task" and n["id"] != task["id"])
+    other = next(n for n in good["nodes"] if n["kind"] == "task" and n["number"] != task["number"])
     confirmed_fact = next(f for f in good["facts"] if f["confirmed_by"] and f["status"] == "active")
     replaced_fact = next(f for f in good["facts"] if f["status"] == "superseded")
     withdrawn_fact = next(f for f in good["facts"] if f["status"] == "withdrawn")
     linked_fact = next(f for f in good["facts"] if f["decision_ids"])
 
     def lose_the_epic(bad: dict[str, Any]) -> None:
-        bad["nodes"] = [n for n in bad["nodes"] if n["id"] != epic["id"]]
+        bad["nodes"] = [
+            n for n in bad["nodes"] if (n["kind"], n["number"]) != ("epic", epic["number"])
+        ]
         bad["counts"]["nodes"] -= 1
 
     message = await refusal(lose_the_epic)
     assert "nothing was imported" in message and "is not in the file" in message
-    assert f"parent_id={epic['id']}" in message
+    assert f"parent=epic:{epic['number']}" in message
 
     def nameless(bad: dict[str, Any]) -> None:
         del bad["nodes"][0]["title"]
-        bad["nodes"][1]["id"] = "seven"
+        bad["nodes"][1]["number"] = "seven"
         bad["nodes"][2]["status"] = "finished"
         bad["links"][0]["extra"] = 1
+        bad["nodes"][4]["id"] = 7
 
     message = await refusal(nameless)
     assert "nodes[0].title: Field required" in message
-    assert "nodes[1].id: Input should be a valid integer" in message
+    assert "nodes[1].number: Input should be a valid integer" in message
     assert "nodes[2].status: Input should be" in message
     assert "links[0].extra: Extra inputs are not permitted" in message
+    # A node has no id: it is its kind and its number.
+    assert "nodes[4].id: Extra inputs are not permitted" in message
+
+    def parent_of_the_wrong_kind(bad: dict[str, Any]) -> None:
+        stories = [n for n in bad["nodes"] if n["kind"] == "story"]
+        stories[0]["parent"] = f"story:{stories[1]['number']}"
+
+    message = await refusal(parent_of_the_wrong_kind)
+    assert "must be an epic" in message and "nothing was imported" in message
+
+    def not_refs(bad: dict[str, Any]) -> None:
+        bad["nodes"][1]["parent"] = "Epic:1"
+        bad["facts"][0]["nodes"] = ["12"]
+        bad["events"][0]["node"] = "node:3"
+
+    message = await refusal(not_refs)
+    meant = "must name an epic, story or task by its kind and number, such as story:12"
+    for place in ("nodes[1].parent", "facts[0].nodes[0]", "events[0].node"):
+        assert f"{place}: {meant}" in message, (place, message)
 
     message = await refusal(lambda bad: bad.__setitem__("format", "something-else"))
     assert "format:" in message and "vrum-export" in message
@@ -294,13 +334,16 @@ async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, An
     def circle(bad: dict[str, Any]) -> None:
         top = max(link["id"] for link in bad["links"]) + 1
         for number, (source, target) in enumerate(
-            ((task["id"], other["id"]), (other["id"], task["id"]))
+            (
+                (f"task:{task['number']}", f"task:{other['number']}"),
+                (f"task:{other['number']}", f"task:{task['number']}"),
+            )
         ):
             bad["links"].append(
                 {
                     "id": top + number,
-                    "source_id": source,
-                    "target_id": target,
+                    "source": source,
+                    "target": target,
                     "link_type": "needs_first",
                     "created_at": "2026-11-15T10:00:00.000000Z",
                 }
@@ -363,14 +406,14 @@ async def test_a_backup_restores_into_a_fresh_container_and_the_export_is_identi
         assert await distinct_transactions(stack) == 1
         last = original["events"][-1]["id"]
         new = await ok(client, "create_node", actor="ann", kind="epic", title="After the restore")
-        assert new["id"] == max(node["id"] for node in original["nodes"]) + 1
+        assert new["ref"] == f"epic:{next_number(original, 'epic')}"
         changes = await ok(client, "changes_since", after_event_id=last, limit=50)
-        assert [event["node_id"] for event in changes["items"]] == [new["id"]]
+        assert [event["node"] for event in changes["items"]] == [new["ref"]]
         # What a person confirmed is still confirmed, and the numbers of facts and decisions carry
         # on after the restore as they do after an import.
         confirmed = await ok(client, "get_fact", fact_id=world["fact1"]["id"])
         assert (confirmed["confirmation"], confirmed["confirmed_by"]) == ("confirmed", "Marie")
-        recalled = await ok(client, "recall", node_id=world["task3"]["id"])
+        recalled = await ok(client, "recall", node=world["task3"]["ref"])
         assert [i["decision"]["id"] for i in recalled["project_wide_decisions"]["items"]] == [
             world["wide"]["id"]
         ]

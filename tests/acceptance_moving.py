@@ -21,7 +21,9 @@ from tests.helpers import (
     confirm,
     connect,
     export_everything,
+    kind_of,
     make_fact,
+    number_of,
     ok,
     refused,
     rich_world,
@@ -82,6 +84,11 @@ def references_in(text: str) -> list[str]:
     return re.findall(r"\[\[([^\]]+)\]\]", text)
 
 
+def key_of(ref: str) -> tuple[str, int]:
+    """What a file is called after: the kind and the number in a reference (story:12)."""
+    return kind_of(ref), number_of(ref)
+
+
 def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, int]:
     """One file per item, and every connection in the graph a reference at both ends, to a file
     that exists. Returns (files, references, connections)."""
@@ -92,26 +99,24 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     for stem in files:
         kind, number, _ = stem.split("-", 2)
         stem_of[(kind, int(number))] = stem
-    node_kind = {n["id"]: n["kind"] for n in document["nodes"]}
     pairs: list[tuple[tuple[str, int], tuple[str, int]]] = []
     for n in document["nodes"]:
-        if n["parent_id"] is not None:
-            pairs.append(((n["kind"], n["id"]), (node_kind[n["parent_id"]], n["parent_id"])))
+        if n["parent"] is not None:
+            pairs.append(((n["kind"], n["number"]), key_of(n["parent"])))
     for link in document["links"]:
-        a, b = link["source_id"], link["target_id"]
-        pairs.append(((node_kind[a], a), (node_kind[b], b)))
+        pairs.append((key_of(link["source"]), key_of(link["target"])))
     for rule in document["rules"]:
-        if rule["story_id"] is not None:
-            pairs.append((("rule", rule["id"]), ("story", rule["story_id"])))
+        if rule["story"] is not None:
+            pairs.append((("rule", rule["id"]), key_of(rule["story"])))
     for d in document["decisions"]:
         here = ("decision", d["id"])
-        pairs += [(here, (node_kind[x], x)) for x in d["node_ids"]]
+        pairs += [(here, key_of(x)) for x in d["nodes"]]
         pairs += [(here, ("rule", x)) for x in d["rule_ids"]]
         if d["superseded_by_id"] is not None:
             pairs.append((here, ("decision", d["superseded_by_id"])))
     for f in document["facts"]:
         here = ("fact", f["id"])
-        pairs += [(here, (node_kind[x], x)) for x in f["node_ids"]]
+        pairs += [(here, key_of(x)) for x in f["nodes"]]
         pairs += [(here, ("rule", x)) for x in f["rule_ids"]]
         pairs += [(here, ("decision", x)) for x in f["decision_ids"]]
         if f["superseded_by_id"] is not None:
@@ -151,7 +156,7 @@ def reads_as_two_records(folder: Path, world: dict[str, dict[str, Any]], mention
         and ", as it was when it ended" in text_of("fact", world["fact6"]["id"])
         and "- Kind: project-wide decision" in text_of("decision", world["wide"]["id"])
         and "## Reason" in text_of("decision", world["decision2"]["id"])
-        and f"[[{stem_of('story', world['story1']['id'])}]]" in text_of("fact", mention)
+        and f"[[{stem_of('story', number_of(world['story1']['ref']))}]]" in text_of("fact", mention)
         and f"[[{stem_of('decision', world['wide']['id'])}]]" in text_of("fact", mention)
         and not re.search(r"belief|principle", "\n".join(files.values()), re.IGNORECASE)
     )
@@ -165,12 +170,12 @@ async def knowledge(
     mentions = {
         name: (await ok(client, "find_mentions", limit=200, **target))["items"]
         for name, target in (
-            ("story", {"node_id": world["story1"]["id"]}),
+            ("story", {"node": world["story1"]["ref"]}),
             ("project-wide decision", {"decision_id": world["wide"]["id"]}),
         )
     }
-    recall = await ok(client, "recall", node_id=story["id"], limit=50)
-    briefing = await ok(client, "next_work", actor="briefing", within_node_id=epic["id"], peek=True)
+    recall = await ok(client, "recall", node=story["ref"], limit=50)
+    briefing = await ok(client, "next_work", actor="briefing", within_node=epic["ref"], peek=True)
     return {
         "mentions": mentions,
         "recall": recall,
@@ -197,8 +202,8 @@ async def moving() -> None:
         epic, story, _ = await tree(client, 1)
         mention = await make_fact(
             client,
-            f"Follows [[node:{world['story1']['id']}]] and [[decision:{world['wide']['id']}]]",
-            node_ids=[story["id"]],
+            f"Follows [[{world['story1']['ref']}]] and [[decision:{world['wide']['id']}]]",
+            nodes=[story["ref"]],
             source="The design review",
         )
         await confirm(client, "fact", mention, "Marie")
@@ -262,7 +267,7 @@ async def moving() -> None:
         and refusal.returncode == 1
         and "already holds data" in refusal.stderr
         and "Restored from" in restored.stdout
-        and [e["node_id"] for e in feed["items"]] == [new["id"]],
+        and [e["node"] for e in feed["items"]] == [new["ref"]],
         f"{summary}; {backup.stat().st_size:,} bytes in {time.monotonic() - started:.0f} seconds; "
         "a restore over live data was refused; the change feed works after the restore",
     )
@@ -282,7 +287,9 @@ async def moving() -> None:
         empty = await export_everything(client)
         bad = copy.deepcopy(original)
         gone = next(n for n in bad["nodes"] if n["kind"] == "epic")
-        bad["nodes"] = [n for n in bad["nodes"] if n["id"] != gone["id"]]
+        bad["nodes"] = [
+            n for n in bad["nodes"] if (n["kind"], n["number"]) != ("epic", gone["number"])
+        ]
         bad["counts"]["nodes"] -= 1
         message = await refused(client, "import_graph", actor="ann", document=bad)
         fresh = await export_everything(client)
@@ -306,20 +313,27 @@ async def moving() -> None:
     )
     async with connect(URL, empty_project.key) as client:
         after = await export_everything(client)
-        top = max(n["id"] for n in original["nodes"])
+        highest = {
+            kind: max(n["number"] for n in original["nodes"] if n["kind"] == kind)
+            for kind in ("epic", "story", "task")
+        }
         now_told = await knowledge(client, world, story, epic)
         now_past = await histories(client, world)
-        new = await ok(client, "create_node", actor="ann", kind="epic", title="After the import")
+        new_epic, new_story, new_task = await tree(client, 1)
         second = await refused(client, "import_graph", actor="ann", document=original)
     proof(
         "M7",
-        "an export loaded into an empty project comes back identical, with new ids continuing "
-        "after the highest one, and a second import into it is refused",
+        "an export loaded into an empty project comes back identical, with epics, stories and "
+        "tasks each going on after the highest number of their own kind, and a second import "
+        "into it is refused",
         after == original
-        and new["id"] == top + 1
+        and [new_epic["number"], new_story["number"], new_task["number"]]
+        == [highest["epic"] + 1, highest["story"] + 1, highest["task"] + 1]
         and "already holds data" in second
         and "Imported" in loaded.stdout,
-        f"{counts(original)}; {exported.stat().st_size:,} bytes; next node {new['id']} after {top}",
+        f"{counts(original)}; {exported.stat().st_size:,} bytes; the next epic, story and task "
+        f"are {new_epic['ref']}, {new_story['ref']} and {new_task['ref']}, after "
+        f"{highest['epic']}, {highest['story']} and {highest['task']}",
     )
     actions = {e["action"] for e in original["events"]}
     wide = next(d for d in after["decisions"] if d["id"] == world["wide"]["id"])

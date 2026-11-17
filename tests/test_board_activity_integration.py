@@ -3,8 +3,10 @@ checked against a real MCP client (see ./check.sh): what agents do shows in plai
 seconds, in the drawer over any view, with the handoff note in full; the new fact and decision
 actions say who did what and on whose word; who is working on what follows claims with a countdown
 to their leases; a person takes, renews and releases work under a typed name; and the feed's
-filters (in the address, with the prefix act_) give what `changes_since` gives. Names and titles
-carry a unique word, so each test looks only at what it made."""
+filters (in the address, with the prefix act_) give what `changes_since` gives. Work is named by
+its reference to the tools (`task:40`) and by its code in the words (`T-40`); the drawer's item
+filter and its claim box take either, or the words (`task 40`). Names and titles carry a unique
+word, so each test looks only at what it made."""
 
 import datetime
 from typing import Any
@@ -18,6 +20,7 @@ from tests.board_m14 import events_of, feed_becomes, feed_ids, spoken
 from tests.board_m14 import feed_row as row
 from tests.board_search import VIEWS, address, drawer, keyboard_to_activity, on_view
 from tests.helpers import (
+    code_of,
     confirm,
     day,
     make_decision,
@@ -27,6 +30,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.helpers import number_of as number
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -49,7 +53,7 @@ async def test_what_an_agent_does_shows_in_plain_words_with_the_note_in_full(
     epic = await made(client, "epic", f"Epic {word}")
     story = await made(client, "story", f"Story {word}", epic)
     task = await made(client, "task", f"Work {word}", story)
-    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story_id=story)
+    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story=story)
     note = f"Built the whole thing for {word}. Nothing is left, but check the logs."
 
     async with browser_page(board, token=the_token()) as w:
@@ -63,10 +67,10 @@ async def test_what_an_agent_does_shows_in_plain_words_with_the_note_in_full(
         )
         await page.evaluate("window.__same = 'same page'")
 
-        taken = await ok(client, "next_work", actor=agent, within_node_id=epic)
-        assert taken["found"] and taken["work"]["id"] == task
+        taken = await ok(client, "next_work", actor=agent, within_node=epic)
+        assert taken["found"] and taken["work"]["ref"] == task
         # In plain words, with the actor, and the claim in who is working on what with a countdown.
-        await expect(row(page, f"took task #{task} “Work {word}”")).to_contain_text(
+        await expect(row(page, f"took task {code_of(task)} “Work {word}”")).to_contain_text(
             agent, timeout=NEWS
         )
         claim = page.locator(f"#claims-live li.claim[data-node='{task}']")
@@ -84,8 +88,8 @@ async def test_what_an_agent_does_shows_in_plain_words_with_the_note_in_full(
             expected_version=1,
             title=f"Renamed {word}",
         )
-        decided = await make_decision(client, f"Decided {word}", actor=agent, node_ids=[story])
-        await ok(client, "finish_work", actor=agent, node_id=task, outcome="done", note=note)
+        decided = await make_decision(client, f"Decided {word}", actor=agent, nodes=[story])
+        await ok(client, "finish_work", actor=agent, node=task, outcome="done", note=note)
 
         await expect(row(page, f"changed requirement {rule['id']}")).to_contain_text(
             f"title: “Rule {word}” → “Renamed {word}”", timeout=NEWS
@@ -93,14 +97,13 @@ async def test_what_an_agent_does_shows_in_plain_words_with_the_note_in_full(
         await expect(row(page, f"recorded decision {decided['id']}")).to_contain_text(
             f"“Decided {word}”, decided by Marie", timeout=NEWS
         )
-        done = row(page, f"finished their work on task #{task}")
-        await expect(done).to_contain_text(
-            f"{agent} finished their work on task #{task}", timeout=NEWS
-        )
+        finished = f"finished their work on task {code_of(task)}"
+        done = row(page, finished)
+        await expect(done).to_contain_text(f"{agent} {finished}", timeout=NEWS)
         await expect(done).to_contain_text("(done) and left this handoff note")
         # The note is shown in full, in the row.
         assert spoken(await done.locator(".handoff-note").inner_text()) == note
-        await expect(row(page, f"let go of task #{task}")).to_be_visible()
+        await expect(row(page, f"let go of task {code_of(task)}")).to_be_visible()
 
         # The claim is gone, and the agent now says finished with a handoff note.
         await expect(claim).to_have_count(0, timeout=NEWS)
@@ -123,9 +126,9 @@ async def test_facts_and_decisions_are_told_with_who_did_what_and_on_whose_word(
     story = await made(client, "story", f"Story {word}", epic)
     other = await made(client, "story", f"Other {word}", epic)
     decision = await make_decision(
-        client, f"Use email {word}", actor=agent, node_ids=[story], project_wide=True
+        client, f"Use email {word}", actor=agent, nodes=[story], project_wide=True
     )
-    fact = await make_fact(client, f"People log in on phones {word}", actor=agent, node_ids=[story])
+    fact = await make_fact(client, f"People log in on phones {word}", actor=agent, nodes=[story])
     await confirm(client, "decision", decision, person, actor=agent)
     await confirm(client, "fact", fact, person, actor=agent)
     await ok(
@@ -151,8 +154,8 @@ async def test_facts_and_decisions_are_told_with_who_did_what_and_on_whose_word(
         quote="Let us have both.",
     )
     second = await make_fact(client, f"Codes arrive quickly {word}", actor=agent)
-    await ok(client, "link_fact", actor=agent, fact_id=second["id"], node_ids=[other])
-    await ok(client, "unlink_fact", actor=agent, fact_id=second["id"], node_ids=[other])
+    await ok(client, "link_fact", actor=agent, fact_id=second["id"], nodes=[other])
+    await ok(client, "unlink_fact", actor=agent, fact_id=second["id"], nodes=[other])
     await confirm(client, "fact", second, person, actor=agent)
     await ok(
         client,
@@ -223,7 +226,8 @@ async def test_facts_and_decisions_are_told_with_who_did_what_and_on_whose_word(
         )
         linked = await said("fact_linked", sid)
         assert linked == (
-            f"linked fact {sid} “Codes arrive quickly {word}” to story #{other} “Other {word}”."
+            f"linked fact {sid} “Codes arrive quickly {word}” to "
+            f"story {code_of(other)} “Other {word}”."
         )
         assert (await said("fact_unlinked", sid)).startswith(f"unlinked fact {sid} ")
         assert w.problems == []
@@ -261,30 +265,30 @@ async def test_a_person_claims_renews_and_releases_under_the_typed_name(
     epic = await made(client, "epic", f"Epic {word}")
     story = await made(client, "story", f"Story {word}", epic)
     mine, theirs = [await made(client, "task", f"{n} {word}", story) for n in ("Mine", "Theirs")]
-    await ok(client, "claim_node", actor=f"agent-{word}", node_id=theirs, lease_seconds=900)
+    await ok(client, "claim_node", actor=f"agent-{word}", node=theirs, lease_seconds=900)
 
     async with browser_page(board, token=the_token(), name=name) as w:
         page = w.page
         await w.open("#/board?drawer=activity")
         await expect(page.locator("#acting-as")).to_contain_text(f"act as {name}", timeout=SLOW)
         await page.locator("#lease").fill("60")
-        await page.locator("#claim-id").fill(f"#{mine}")
+        await page.locator("#claim-id").fill(code_of(mine))
         await page.locator("#claim-by-id-go").click()
         # The drawer says so in words and a countdown, and the server has it under the typed name.
         claim = page.locator(f"#claims-live li.claim[data-node='{mine}']")
         await expect(claim).to_contain_text(f"held by {name}", timeout=NEWS)
-        node = await ok(client, "get_node", node_id=mine)
+        node = await ok(client, "get_node", node=mine)
         assert node["claimed_by"] == name
-        await expect(row(page, f"{name} took task #{mine}")).to_be_visible(timeout=NEWS)
+        await expect(row(page, f"{name} took task {code_of(mine)}")).to_be_visible(timeout=NEWS)
         await expect(page.locator(f"#agents li.agent[data-actor='{name}']")).to_have_attribute(
             "data-state", "working"
         )
-        before = (await ok(client, "get_node", node_id=mine))["claim_expires_at"]
+        before = (await ok(client, "get_node", node=mine))["claim_expires_at"]
 
         # Renew keeps it for the default lease, which is much longer than the 60 seconds.
         await claim.locator("button.renew").click()
-        await expect(row(page, f"{name} kept task #{mine}")).to_be_visible(timeout=NEWS)
-        after = (await ok(client, "get_node", node_id=mine))["claim_expires_at"]
+        await expect(row(page, f"{name} kept task {code_of(mine)}")).to_be_visible(timeout=NEWS)
+        after = (await ok(client, "get_node", node=mine))["claim_expires_at"]
         gained = datetime.datetime.fromisoformat(after) - datetime.datetime.fromisoformat(before)
         assert gained > datetime.timedelta(minutes=10)
 
@@ -294,11 +298,11 @@ async def test_a_person_claims_renews_and_releases_under_the_typed_name(
         await dialog.locator("#release-note").fill(f"Stopped here for {word}.")
         await dialog.get_by_role("button", name="Release it").click()
         await expect(dialog).to_have_count(0, timeout=SLOW)
-        released = await ok(client, "get_node", node_id=mine)
+        released = await ok(client, "get_node", node=mine)
         assert released["claimed_by"] is None and released["status"] == "ready"
         assert released["last_handoff"]["actor"] == name
         assert released["last_handoff"]["note"] == f"Stopped here for {word}."
-        done = row(page, f"{name} finished their work on task #{mine}")
+        done = row(page, f"{name} finished their work on task {code_of(mine)}")
         await expect(done.locator(".handoff-note")).to_have_text(
             f"Stopped here for {word}.", timeout=NEWS
         )
@@ -316,9 +320,9 @@ async def test_a_person_claims_renews_and_releases_under_the_typed_name(
         await expect(problem).not_to_have_text("", timeout=SLOW)
         plain(
             await problem.inner_text(),
-            await refused(client, "release_claim", actor=name, node_id=theirs, note="Not mine."),
+            await refused(client, "release_claim", actor=name, node=theirs, note="Not mine."),
         )
-        assert (await ok(client, "get_node", node_id=theirs))["claimed_by"] == f"agent-{word}"
+        assert (await ok(client, "get_node", node=theirs))["claimed_by"] == f"agent-{word}"
         await dialog.get_by_role("button", name="Cancel").click()
         assert w.problems == []
 
@@ -336,7 +340,8 @@ async def test_a_claim_that_runs_out_moves_to_lapsed_and_the_state_follows(
         page = w.page
         await w.open("#/graph?drawer=activity")
         await page.locator("#lease").fill("3")
-        await page.locator("#claim-id").fill(str(task))
+        # The words a person writes for the kind and the number work as well as the code.
+        await page.locator("#claim-id").fill(f"task {number(task)}")
         await page.locator("#claim-by-id-go").click()
         live = page.locator(f"#claims-live li.claim[data-node='{task}']")
         await expect(live).to_be_visible(timeout=NEWS)
@@ -349,11 +354,11 @@ async def test_a_claim_that_runs_out_moves_to_lapsed_and_the_state_follows(
         await expect(lapsed.locator(".countdown")).to_contain_text("ran out")
         await expect(live).to_have_count(0)
         await expect(agent_row).to_have_attribute("data-state", "lapsed")
-        node = await ok(client, "get_node", node_id=task)
+        node = await ok(client, "get_node", node=task)
         assert node["claimed_by"] is None and node["lapsed_claim_by"] == name
         who = {a["actor"]: a for a in (await ok(client, "who_is_working"))["agents"]}
         assert who[name]["state"] == "lapsed"
-        assert [h["node_id"] for h in who[name]["lapsed"]] == [task]
+        assert [h["node"] for h in who[name]["lapsed"]] == [task]
         # The holder can still let go of it, with a note, and then it is neither.
         await lapsed.locator("button.release").click()
         dialog = page.locator("dialog.modal")
@@ -365,24 +370,28 @@ async def test_a_claim_that_runs_out_moves_to_lapsed_and_the_state_follows(
         assert w.problems == []
 
 
-async def test_the_free_list_is_the_servers_ready_work_and_a_bad_id_is_refused_in_its_words(
+async def test_the_free_list_is_the_servers_ready_work_and_a_bad_ref_is_refused_in_its_words(
     client: Client, board: str
 ) -> None:
-    free = [n["id"] for n in (await ok(client, "ready_work", limit=10))["items"]]
+    free = [n["ref"] for n in (await ok(client, "ready_work", limit=10))["items"]]
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/board?drawer=activity")
         listed = page.locator("#free li.claim")
         await expect(listed).to_have_count(len(free), timeout=SLOW)
-        assert [int(await e.get_attribute("data-node") or 0) for e in await listed.all()] == free
-        await page.locator("#claim-id").fill("999999999")
-        await page.locator("#claim-by-id-go").click()
-        notice = page.locator("#notices .notice.refusal")
-        await expect(notice).to_be_visible(timeout=SLOW)
-        plain(
-            await notice.locator(".notice-text").inner_text(),
-            await refused(client, "claim_node", actor="Tester", node_id=999999999),
-        )
+        assert [await e.get_attribute("data-node") for e in await listed.all()] == free
+        # A bare number names nothing, since each kind is numbered on its own; and a task that
+        # does not exist is refused too. Each time the page says what the server says (the newest
+        # notice is the first one).
+        notices = page.locator("#notices .notice.refusal")
+        for count, bad in enumerate(("999999999", "task:999999999"), start=1):
+            await page.locator("#claim-id").fill(bad)
+            await page.locator("#claim-by-id-go").click()
+            await expect(notices).to_have_count(count, timeout=SLOW)
+            plain(
+                await notices.first.locator(".notice-text").inner_text(),
+                await refused(client, "claim_node", actor="Tester", node=bad),
+            )
         assert w.problems == []
 
 
@@ -396,24 +405,24 @@ async def test_the_feeds_filters_in_the_address_give_what_changes_since_gives(
     ann, bob = f"ann-{word}", f"bob-{word}"
     epic = await ok(client, "create_node", actor=ann, kind="epic", title=f"Epic {word}")
     story = await ok(
-        client, "create_node", actor=ann, kind="story", title=f"Story {word}", parent_id=epic["id"]
+        client, "create_node", actor=ann, kind="story", title=f"Story {word}", parent=epic["ref"]
     )
     other = await ok(
-        client, "create_node", actor=bob, kind="story", title=f"Other {word}", parent_id=epic["id"]
+        client, "create_node", actor=bob, kind="story", title=f"Other {word}", parent=epic["ref"]
     )
-    rule = await ok(client, "create_rule", actor=ann, title=f"Rule {word}", story_id=story["id"])
+    rule = await ok(client, "create_rule", actor=ann, title=f"Rule {word}", story=story["ref"])
     await ok(
         client,
         "move_rule",
         actor=ann,
         rule_id=rule["id"],
         expected_version=1,
-        new_story_id=other["id"],
+        new_story=other["ref"],
     )
-    decision = await make_decision(client, f"Decision {word}", actor=bob, node_ids=[story["id"]])
-    fact = await make_fact(client, f"A fact {word}", actor=bob, node_ids=[story["id"]])
-    await ok(client, "claim_node", actor=bob, node_id=story["id"])
-    assert await events_of(client, node_id=epic["id"])
+    decision = await make_decision(client, f"Decision {word}", actor=bob, nodes=[story["ref"]])
+    fact = await make_fact(client, f"A fact {word}", actor=bob, nodes=[story["ref"]])
+    await ok(client, "claim_node", actor=bob, node=story["ref"])
+    assert await events_of(client, node=epic["ref"])
 
     async with browser_page(board, token=the_token()) as w:
         page = w.page
@@ -433,7 +442,8 @@ async def test_the_feeds_filters_in_the_address_give_what_changes_since_gives(
         await shown(f"act_actor={ann}&act_kind=requirements", rules_only)
         # The spec's own sentence: a requirement moved from one story to another.
         await expect(row(page, f"{ann} moved requirement {rule['id']}")).to_contain_text(
-            f"from story #{story['id']} “Story {word}” to story #{other['id']} “Other {word}”"
+            f"from story {code_of(story['ref'])} “Story {word}” "
+            f"to story {code_of(other['ref'])} “Other {word}”"
         )
         bob_events = await events_of(client, actor=bob)
         for kind, prefix in (("decisions", "decision_"), ("facts", "fact_")):
@@ -441,13 +451,16 @@ async def test_the_feeds_filters_in_the_address_give_what_changes_since_gives(
                 f"act_actor={bob}&act_kind={kind}",
                 [e for e in bob_events if e["action"].startswith(prefix)],
             )
-        # An item: a requirement, a decision, a fact and a node each give exactly the server's
-        # answer.
+        # An item: a requirement, a decision, a fact and a piece of work each give exactly the
+        # server's answer. A piece of work is named by its code, or by its kind and number (a
+        # plus sign is a space in an address), or by its reference.
         for item, filters in (
             (f"rule:{rule['id']}", {"rule_id": rule["id"]}),
             (f"decision+{decision['id']}", {"decision_id": decision["id"]}),
             (f"fact:{fact['id']}", {"fact_id": fact["id"]}),
-            (f"%23{story['id']}", {"node_id": story["id"]}),
+            (code_of(story["ref"]), {"node": story["ref"]}),
+            (f"story+{number(story['ref'])}", {"node": story["ref"]}),
+            (story["ref"], {"node": story["ref"]}),
         ):
             await shown(f"act_item={item}", await events_of(client, **filters))
         # The days: today keeps everything of today, and a day in the future keeps nothing.
@@ -480,6 +493,13 @@ async def test_the_feeds_filters_in_the_address_give_what_changes_since_gives(
             await refused(client, "changes_since", rule_id=999999999),
         )
         assert await page.locator("#feed li.event").count() == 0
+        await w.go("#/board?drawer=activity&act_item=task:999999999")
+        await expect(page.locator("#activity-problem")).not_to_have_text("", timeout=SLOW)
+        plain(
+            await page.locator("#activity-problem").inner_text(),
+            await refused(client, "changes_since", node="task:999999999"),
+        )
+        assert await page.locator("#feed li.event").count() == 0
         assert w.problems == []
 
 
@@ -489,14 +509,14 @@ async def test_older_changes_are_read_when_asked_for_and_the_feed_never_repeats_
     word = unique_word()
     actor = f"busy-{word}"
     epic = await ok(client, "create_node", actor=actor, kind="epic", title=f"Busy {word}")
-    for number in range(104):
+    for count in range(104):
         await ok(
             client,
             "create_node",
             actor=actor,
             kind="story",
-            title=f"S{number} {word}",
-            parent_id=epic["id"],
+            title=f"S{count} {word}",
+            parent=epic["ref"],
         )
     everything = await events_of(client, actor=actor)
     assert len(everything) == 105
@@ -520,7 +540,7 @@ async def test_older_changes_are_read_when_asked_for_and_the_feed_never_repeats_
             actor=actor,
             kind="story",
             title=f"New {word}",
-            parent_id=epic["id"],
+            parent=epic["ref"],
         )
         await expect(page.locator("#feed li.event")).to_have_count(106, timeout=NEWS)
         ids = await feed_ids(page)
@@ -569,8 +589,10 @@ async def test_activity_opens_by_keyboard_from_every_view_and_leaves_a_draft_in_
 
         # With a record selected, the drawer and the detail panel are open together, the drawer on
         # the left and the panel on the right.
-        await w.open(f"#/graph?sel=node:{story}&drawer=activity&act_actor={agent}")
-        await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await w.open(f"#/graph?sel={story}&drawer=activity&act_actor={agent}")
+        await expect(page.locator("#panel #card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         await expect(drawer(page, "activity")).to_be_visible()
         boxes = [await page.locator(s).bounding_box() for s in ("#drawer", "#page", "#panel")]
         assert all(boxes)
@@ -587,7 +609,7 @@ async def test_activity_opens_by_keyboard_from_every_view_and_leaves_a_draft_in_
             actor=agent,
             kind="task",
             title=f"News {word}",
-            parent_id=story,
+            parent=story,
         )
         await expect(row(page, f"{agent} created task")).to_be_visible(timeout=NEWS)
         for step in ("news", "closed", "opened"):
@@ -601,5 +623,5 @@ async def test_activity_opens_by_keyboard_from_every_view_and_leaves_a_draft_in_
             assert await page.locator("#edit-body").input_value() == draft, step
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text(draft, timeout=SLOW)
-        assert (await ok(client, "get_node", node_id=story))["body"] == draft
+        assert (await ok(client, "get_node", node=story))["body"] == draft
         assert w.problems == []

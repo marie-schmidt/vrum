@@ -62,7 +62,7 @@ async def test_it_starts_with_nothing_set_and_keeps_its_own_password_and_its_dat
     start_again(stack)
     assert password_of(stack) == password
     async with stack.client() as client:
-        assert (await ok(client, "get_node", node_id=made["id"]))["title"] == "Kept"
+        assert (await ok(client, "get_node", node=made["ref"]))["title"] == "Kept"
 
     # Deleting the data too is a new install, with a new password.
     stack.destroy()

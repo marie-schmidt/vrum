@@ -93,7 +93,7 @@ export function describeNode(dot, cfg, epicIndex) {
 export function labelledBox(dot, info, m) {
   const u = m.u;
   const pad = 12 * u;
-  const head = `${info.kind.toUpperCase()} · ${dot.id}`;
+  const head = `${info.kind.toUpperCase()} · ${dot.isNode ? dot.code : dot.number}`;
   const headWidth = 18 * u + head.length * m.kind * 0.68;
   const stateWidth = info.state ? (info.state.icon ? 18 * u : 0) + width(m, info.state.word, m.kind, 600) + 14 * u : 0;
   const wanted = width(m, dot.title, m.base) + 2 * pad;

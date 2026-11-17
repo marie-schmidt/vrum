@@ -16,6 +16,7 @@ import { wordmark } from './brand.js';
 import { actor, ui, viewLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
+import { codeOf } from './labels.js';
 import { epics, store } from './store.js';
 
 const aside = document.getElementById('sidebar');
@@ -261,23 +262,24 @@ function drawEpics() {
   const chosen = ui.page === 'board' ? ui.params.get('epic') : null;
   const list = parts.epicList;
   const made = parts.epicItems;
-  for (const [id, item] of made) {
-    if (!found.some((epic) => epic.id === id)) {
+  for (const [ref, item] of made) {
+    if (!found.some((epic) => epic.ref === ref)) {
       item.li.remove();
-      made.delete(id);
+      made.delete(ref);
     }
   }
   found.forEach((epic, at) => {
-    let item = made.get(epic.id);
+    let item = made.get(epic.ref);
     if (!item) {
       const label = h('span', { class: 'side-label' });
-      const link = viewLink('board', { epic: epic.id }, { class: 'side-item epic-link', dataset: { epic: epic.id } }, icon('epic', { size: 16 }), label);
+      // The address names an epic by its number: #/board?epic=3.
+      const link = viewLink('board', { epic: epic.number }, { class: 'side-item epic-link', dataset: { ref: epic.ref } }, icon('epic', { size: 16 }), label);
       item = { li: h('li', {}, link), link, label };
-      made.set(epic.id, item);
+      made.set(epic.ref, item);
     }
     item.label.textContent = epic.title;
-    item.link.title = `#${epic.id} ${epic.title}`;
-    if (String(epic.id) === chosen) item.link.setAttribute('aria-current', 'true');
+    item.link.title = `${codeOf(epic.ref)} ${epic.title}`;
+    if (String(epic.number) === chosen) item.link.setAttribute('aria-current', 'true');
     else item.link.removeAttribute('aria-current');
     if (list.children[at] !== item.li) list.insertBefore(item.li, list.children[at] || null);
   });

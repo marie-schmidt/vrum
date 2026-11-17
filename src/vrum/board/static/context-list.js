@@ -111,7 +111,7 @@ function recordSection(kind) {
     last = ctx;
     const focused = frame.body.contains(document.activeElement) ? document.activeElement.closest('[data-key]')?.dataset.key : null;
     const inScope = [...ctx.shown.dots.values()].filter((dot) => dot.type === kind);
-    const kept = inScope.filter((dot) => keeps(dot.record)).sort((a, b) => b.id - a.id); // the newest on top
+    const kept = inScope.filter((dot) => keeps(dot.record)).sort((a, b) => b.record.id - a.record.id); // the newest on top
     frame.setCount(kept.length, inScope.length);
     // The chosen record is always among the rows drawn.
     const at = kept.findIndex((dot) => dot.key === ctx.cfg.sel?.key);

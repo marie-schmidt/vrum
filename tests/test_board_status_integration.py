@@ -151,10 +151,8 @@ async def test_the_downloaded_export_is_the_mcp_export(
     epic = await made(client, "epic", f"Exported {word}")
     story = await made(client, "story", f"Story {word}", epic)
     await made(client, "task", f"Task {word}", story)
-    decision = await make_decision(client, f"Decision {word}", node_ids=[story])
-    fact = await make_fact(
-        client, f"A fact {word}", node_ids=[story], decision_ids=[decision["id"]]
-    )
+    decision = await make_decision(client, f"Decision {word}", nodes=[story])
+    fact = await make_fact(client, f"A fact {word}", nodes=[story], decision_ids=[decision["id"]])
     await ok(
         client,
         "set_confirmation",

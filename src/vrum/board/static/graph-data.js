@@ -3,10 +3,14 @@
 // the list writes it out, so both show the same records and the same relationships. Nothing here
 // draws or keeps anything.
 //
-// A record is named the way the address names it: node:12 (an epic, story or task), rule:3 (shown
-// as a requirement), decision:7 or fact:5. That name is the key of its dot and of its row.
+// A record is named the way the address names it: epic:3, story:12 or task:40 (the ref the server
+// sends), rule:3 (shown as a requirement), decision:7 or fact:5. That name is the key of its dot and
+// of its row. Every dot has a `key`, a `kind` (which is also its `type`), a `number` (its number
+// within its kind; a requirement's, decision's or fact's own `id`) and a `code` for a person to read
+// (S-12 for work, #3 for the rest). A piece of work also has its `ref`; the others keep their `id`.
 
 import { parseSel as readSel } from './ctx.js';
+import { KIND_ORDER, byRef, nodeCode, nodeRef, parseNodeRef } from './labels.js';
 import { epicOf, epics, store } from './store.js';
 
 // The most dots drawn at once. Above it a whole project shows one dot for each epic.
@@ -17,15 +21,19 @@ export const PRESET_WORDS = { work: 'Work', context: 'Context', everything: 'Eve
 export const PRESENTATIONS = ['map', 'list'];
 export const COLOURS = ['kind', 'status', 'epic'];
 
-// What each kind of dot is called and drawn as. `kind` is what the address calls it.
+// What each kind of dot is called and drawn as.
 export const TYPES = {
-  epic: { label: 'Epic', plural: 'Epics', sign: '■', kind: 'node' },
-  story: { label: 'Story', plural: 'Stories', sign: '●', kind: 'node' },
-  task: { label: 'Task', plural: 'Tasks', sign: '◆', kind: 'node' },
-  rule: { label: 'Requirement', plural: 'Requirements', sign: '▲', kind: 'rule' },
-  decision: { label: 'Decision', plural: 'Decisions', sign: '⬢', kind: 'decision' },
-  fact: { label: 'Fact', plural: 'Facts', sign: '▪', kind: 'fact' },
+  epic: { label: 'Epic', plural: 'Epics', sign: '■' },
+  story: { label: 'Story', plural: 'Stories', sign: '●' },
+  task: { label: 'Task', plural: 'Tasks', sign: '◆' },
+  rule: { label: 'Requirement', plural: 'Requirements', sign: '▲' },
+  decision: { label: 'Decision', plural: 'Decisions', sign: '⬢' },
+  fact: { label: 'Fact', plural: 'Facts', sign: '▪' },
 };
+
+// Where dots sort: epics, stories, tasks, then requirements, decisions and facts, each by number.
+export const TYPE_ORDER = { ...KIND_ORDER, rule: 3, decision: 4, fact: 5 };
+export const byDot = (a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.number - b.number;
 
 // How each kind of line reads from one end and from the other, and which switch turns it off.
 export const EDGE = {
@@ -52,19 +60,24 @@ export const LINK_SWITCHES = [
 
 const list = (params, name) => new Set((params.get(name) || '').split(',').filter(Boolean));
 const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
-export const keyOf = (kind, id) => `${kind}:${id}`;
+export const keyOf = (kind, number) => `${kind}:${number}`;
 
-// `sel` in the address: node:12, rule:3, decision:7 or fact:5.
+// The number of an epic's ref, which is what `epic=` in the address carries.
+export const epicNumber = (ref) => parseNodeRef(ref)?.number ?? null;
+
+// `sel` in the address: epic:3, story:12, task:40, rule:3, decision:7 or fact:5.
 function parseSel(text) {
   const found = readSel(text);
-  return found && { ...found, key: keyOf(found.kind, found.id) };
+  return found && { ...found, key: keyOf(found.kind, found.number) };
 }
 
-// The choices the address holds. With an epic in it the scope is that epic, with scope=local it
-// is what is around the chosen record, and otherwise it is the whole project.
+// The choices the address holds. With an epic in it the scope is that epic (`epic` is its ref; the
+// address carries its number), with scope=local it is what is around the chosen record, and
+// otherwise it is the whole project.
 export function settings(params) {
   const depth = Number(params.get('depth')) || 1;
-  const epic = Number(params.get('epic')) || null;
+  const number = Number(params.get('epic')) || null;
+  const epic = number ? nodeRef('epic', number) : null;
   const known = epic && store.nodes.get(epic)?.kind === 'epic' ? epic : null;
   return {
     view: pick(params.get('view'), PRESETS, 'work'),
@@ -104,14 +117,14 @@ const clip = (text, size) => {
 
 // The words an assistive technology reads for a dot, and a row's tooltip.
 export function wordsFor(dot) {
-  const what = `${TYPES[dot.type].label} ${dot.id}: ${dot.title}`;
+  const what = `${TYPES[dot.type].label} ${dot.number}: ${dot.title}`;
   if (dot.type === 'decision' || dot.type === 'fact') {
     const record = dot.record;
     const sure = dot.confirmation === 'confirmed' ? `Confirmed${record.confirmed_by ? ` by ${record.confirmed_by}` : ''}` : 'Unconfirmed';
     const life = record.status === 'active' ? 'In force' : record.status === 'superseded' ? 'Replaced' : 'Withdrawn';
     return `${what}. ${sure}. ${life}.${dot.projectWide ? ' Applies throughout the project.' : ''}`;
   }
-  if (dot.type === 'rule') return `${what}. ${dot.status === 'held' ? 'Held' : dot.status === 'settled' ? 'Settled' : 'Dropped'}.${dot.record.story_id === null ? ' In no story.' : ''}`;
+  if (dot.type === 'rule') return `${what}. ${dot.status === 'held' ? 'Held' : dot.status === 'settled' ? 'Settled' : 'Dropped'}.${dot.record.story === null ? ' In no story.' : ''}`;
   return `${what}. ${dot.status.replace('_', ' ')}.`;
 }
 
@@ -125,23 +138,23 @@ export function universe(cfg) {
 
   for (const node of store.nodes.values()) {
     if (cfg.hideKind.has(node.kind) || cfg.hideStatus.has(node.status)) continue;
-    add({ key: keyOf('node', node.id), kind: 'node', type: node.kind, id: node.id, title: node.title, status: node.status, epicId: epicOf(node)?.id ?? null, isNode: true, ended: false, record: node });
+    add({ key: node.ref, kind: node.kind, type: node.kind, ref: node.ref, number: node.number, code: nodeCode(node.kind, node.number), title: node.title, status: node.status, epic: epicOf(node)?.ref ?? null, isNode: true, ended: false, record: node });
   }
   if (context) {
     if (!cfg.hideKind.has('rule')) {
       for (const rule of store.rules || []) {
-        const story = rule.story_id === null ? null : store.nodes.get(rule.story_id);
-        add({ key: keyOf('rule', rule.id), kind: 'rule', type: 'rule', id: rule.id, title: rule.title, status: rule.status, epicId: story ? epicOf(story)?.id ?? null : null, ended: rule.status === 'dropped', text: rule.body_preview || rule.body || '', record: rule });
+        const story = rule.story === null ? null : store.nodes.get(rule.story);
+        add({ key: keyOf('rule', rule.id), kind: 'rule', type: 'rule', id: rule.id, number: rule.id, code: `#${rule.id}`, title: rule.title, status: rule.status, epic: story ? epicOf(story)?.ref ?? null : null, ended: rule.status === 'dropped', text: rule.body_preview || rule.body || '', record: rule });
       }
     }
     if (!cfg.hideKind.has('decision')) {
       for (const decision of store.decisions || []) {
-        add({ key: keyOf('decision', decision.id), kind: 'decision', type: 'decision', id: decision.id, title: decision.title, status: decision.status, epicId: null, ended: decision.status !== 'active', confirmation: confirmationOf(decision), projectWide: Boolean(decision.project_wide), text: `${decision.text} Why: ${decision.reason}`, record: decision });
+        add({ key: keyOf('decision', decision.id), kind: 'decision', type: 'decision', id: decision.id, number: decision.id, code: `#${decision.id}`, title: decision.title, status: decision.status, epic: null, ended: decision.status !== 'active', confirmation: confirmationOf(decision), projectWide: Boolean(decision.project_wide), text: `${decision.text} Why: ${decision.reason}`, record: decision });
       }
     }
     if (!cfg.hideKind.has('fact')) {
       for (const fact of store.facts || []) {
-        add({ key: keyOf('fact', fact.id), kind: 'fact', type: 'fact', id: fact.id, title: clip(fact.text, 60), status: fact.status, epicId: null, ended: fact.status !== 'active', confirmation: confirmationOf(fact), text: fact.text, record: fact });
+        add({ key: keyOf('fact', fact.id), kind: 'fact', type: 'fact', id: fact.id, number: fact.id, code: `#${fact.id}`, title: clip(fact.text, 60), status: fact.status, epic: null, ended: fact.status !== 'active', confirmation: confirmationOf(fact), text: fact.text, record: fact });
       }
     }
   }
@@ -152,18 +165,18 @@ export function universe(cfg) {
   };
   if (work) {
     for (const node of store.nodes.values()) {
-      if (node.parent_id !== null) edge('hierarchy', keyOf('node', node.parent_id), keyOf('node', node.id));
+      if (node.parent !== null) edge('hierarchy', node.parent, node.ref);
     }
-    for (const link of store.links) edge(link.link_type, keyOf('node', link.source_id), keyOf('node', link.target_id));
+    for (const link of store.links) edge(link.link_type, link.source, link.target);
   }
   if (context) {
     for (const rule of store.rules || []) {
-      if (rule.story_id !== null) edge('placed', keyOf('rule', rule.id), keyOf('node', rule.story_id));
+      if (rule.story !== null) edge('placed', keyOf('rule', rule.id), rule.story);
     }
     for (const [kind, records] of [['decision', store.decisions], ['fact', store.facts]]) {
       for (const record of records || []) {
         const from = keyOf(kind, record.id);
-        for (const id of record.node_ids || []) edge('concerns', from, keyOf('node', id));
+        for (const ref of record.nodes || []) edge('concerns', from, ref);
         for (const id of record.rule_ids || []) edge('concerns', from, keyOf('rule', id));
         for (const id of record.decision_ids || []) edge('concerns', from, keyOf('decision', id));
         const older = new Set(record.supersedes_ids || []);
@@ -177,12 +190,10 @@ export function universe(cfg) {
   if (cfg.mentions) {
     // The line runs from the record whose text holds the reference to the record it names. Only
     // references to things that exist, between dots that are drawn, make a line.
-    const kindOf = (type) => (['epic', 'story', 'task', 'node'].includes(type) ? 'node' : type);
     const seen = new Set();
     for (const mention of store.references || []) {
       if (!mention.target.exists) continue;
-      const from = keyOf(kindOf(mention.source.item_type), mention.source.id);
-      const to = keyOf(kindOf(mention.target.kind), mention.target.id);
+      const [from, to] = [mention.source.ref, mention.target.ref];
       if (seen.has(`${from}>${to}`)) continue;
       seen.add(`${from}>${to}`);
       edge('mention', from, to);
@@ -202,7 +213,7 @@ export function neighboursOf(key, edges, dots) {
     if (!other) continue;
     found.push({ dot: other, edge, outgoing });
   }
-  return found.sort((a, b) => a.edge.type.localeCompare(b.edge.type) || a.dot.id - b.dot.id);
+  return found.sort((a, b) => a.edge.type.localeCompare(b.edge.type) || byDot(a.dot, b.dot));
 }
 
 export const relationWords = ({ edge, outgoing }) => (outgoing ? EDGE[edge.type].label : EDGE[edge.type].back);
@@ -213,7 +224,7 @@ export const chosenKey = (cfg) => cfg.sel?.key ?? null;
 function subset(all, keys, notice, extra = {}) {
   const dots = new Map([...all.dots].filter(([key]) => keys.has(key)));
   const edges = all.edges.filter((edge) => keys.has(edge.source) && keys.has(edge.target));
-  return { dots, edges, collapsed: false, notice, epicId: null, ...extra };
+  return { dots, edges, collapsed: false, notice, epic: null, ...extra };
 }
 
 // One dot for each epic, with the number of dots under it, and one line between two epics
@@ -221,20 +232,19 @@ function subset(all, keys, notice, extra = {}) {
 function collapse(all) {
   const counts = new Map();
   for (const dot of all.dots.values()) {
-    if (dot.isNode && dot.epicId !== null) counts.set(dot.epicId, (counts.get(dot.epicId) || 0) + 1);
+    if (dot.isNode && dot.epic !== null) counts.set(dot.epic, (counts.get(dot.epic) || 0) + 1);
   }
   const dots = new Map();
   for (const epic of epics()) {
-    const key = keyOf('node', epic.id);
-    if (!all.dots.has(key)) continue;
-    dots.set(key, { ...all.dots.get(key), collapsed: true, count: (counts.get(epic.id) || 1) - 1 });
+    if (!all.dots.has(epic.ref)) continue;
+    dots.set(epic.ref, { ...all.dots.get(epic.ref), collapsed: true, count: (counts.get(epic.ref) || 1) - 1 });
   }
   const between = new Map();
   for (const edge of all.edges) {
     const [a, b] = [all.dots.get(edge.source), all.dots.get(edge.target)];
-    if (edge.type === 'hierarchy' || !a?.isNode || !b?.isNode || a.epicId === b.epicId) continue;
-    const pair = [a.epicId, b.epicId].sort((x, y) => x - y).join('-');
-    const found = between.get(pair) || { type: 'collapsed', source: keyOf('node', a.epicId), target: keyOf('node', b.epicId), count: 0 };
+    if (edge.type === 'hierarchy' || !a?.isNode || !b?.isNode || a.epic === b.epic) continue;
+    const pair = [a.epic, b.epic].sort(byRef).join('-');
+    const found = between.get(pair) || { type: 'collapsed', source: a.epic, target: b.epic, count: 0 };
     found.count += 1;
     between.set(pair, found);
   }
@@ -274,20 +284,20 @@ function contextInScope(all, insideKeys, everything) {
   for (const dot of records) {
     const work = touched.get(root(dot.key));
     const loose = !work || work.size === 0;
-    const unplaced = dot.type === 'rule' && dot.record.story_id === null;
+    const unplaced = dot.type === 'rule' && dot.record.story === null;
     if (everything || loose || unplaced || dot.projectWide || [...work].some((key) => insideKeys.has(key))) keep.add(dot.key);
   }
   return keep;
 }
 
-// The part of the universe to show. `matched` is the set of work ids a work filter (`q`) asked
+// The part of the universe to show. `matched` is the set of work refs a work filter (`q`) asked
 // for, or null for no filter. `notice` says anything the person has to be told about it.
 export function view(cfg, all, matched = null) {
   const work = showsWork(cfg);
   const chosen = chosenKey(cfg);
   if (cfg.scope === 'local') {
     if (!chosen || !all.dots.has(chosen)) {
-      return { dots: new Map(), edges: [], collapsed: false, notice: 'Choose a record, a dot or one from the list, to see what is around it.', epicId: null };
+      return { dots: new Map(), edges: [], collapsed: false, notice: 'Choose a record, a dot or one from the list, to see what is around it.', epic: null };
     }
     const reached = new Set([chosen]);
     let frontier = [chosen];
@@ -309,14 +319,14 @@ export function view(cfg, all, matched = null) {
   const unfiltered = cfg.scope === 'all' && !matched;
   if (unfiltered && all.dots.size > DOT_LIMIT) {
     if (!work) {
-      return { dots: new Map(), edges: [], collapsed: false, notice: `There are ${all.dots.size.toLocaleString()} records, more than the ${DOT_LIMIT.toLocaleString()} dots that can be drawn at once. Choose an epic, or use the list.`, epicId: null };
+      return { dots: new Map(), edges: [], collapsed: false, notice: `There are ${all.dots.size.toLocaleString()} records, more than the ${DOT_LIMIT.toLocaleString()} dots that can be drawn at once. Choose an epic, or use the list.`, epic: null };
     }
-    return { ...collapse(all), collapsed: true, notice: `This project has ${all.dots.size.toLocaleString()} dots, more than the ${DOT_LIMIT.toLocaleString()} that can be drawn at once, so each epic is one dot. Choose an epic’s dot to open that epic, or use the list.`, epicId: null };
+    return { ...collapse(all), collapsed: true, notice: `This project has ${all.dots.size.toLocaleString()} dots, more than the ${DOT_LIMIT.toLocaleString()} that can be drawn at once, so each epic is one dot. Choose an epic’s dot to open that epic, or use the list.`, epic: null };
   }
 
   const nodes = [...all.dots.values()].filter((dot) => dot.isNode);
   const inside = new Set(
-    nodes.filter((dot) => (cfg.scope === 'all' || dot.epicId === cfg.epic) && (!matched || matched.has(dot.id))).map((dot) => dot.key),
+    nodes.filter((dot) => (cfg.scope === 'all' || dot.epic === cfg.epic) && (!matched || matched.has(dot.key))).map((dot) => dot.key),
   );
   const keep = new Set(work ? inside : []);
   const outside = new Set();
@@ -324,8 +334,8 @@ export function view(cfg, all, matched = null) {
     // The branches above what matched stay, so that a match is still seen in its place.
     for (const key of inside) {
       let up = all.dots.get(key);
-      while (up && up.record.parent_id !== null) {
-        const parentKey = keyOf('node', up.record.parent_id);
+      while (up && up.record.parent !== null) {
+        const parentKey = up.record.parent;
         if (!all.dots.has(parentKey)) break;
         if (!inside.has(parentKey)) outside.add(parentKey);
         up = all.dots.get(parentKey);
@@ -345,7 +355,7 @@ export function view(cfg, all, matched = null) {
       }
     }
   }
-  const shown = subset(all, new Set([...keep, ...outside]), '', { epicId: cfg.epic });
+  const shown = subset(all, new Set([...keep, ...outside]), '', { epic: cfg.epic });
   for (const key of outside) if (!keep.has(key)) shown.dots.get(key).outside = true;
   if (!shown.dots.size) {
     shown.notice = matched ? 'Nothing matches the filter.' : all.dots.size ? 'There is nothing in this scope.' : 'There is nothing to show yet.';
@@ -372,5 +382,5 @@ export function drawable(cfg, shown) {
     for (const key of [...keep]) if (shown.dots.get(key).isNode && key !== chosen && !joined.has(key)) keep.delete(key);
   }
   if (keep.size === shown.dots.size) return shown;
-  return subset(shown, keep, shown.notice, { epicId: shown.epicId });
+  return subset(shown, keep, shown.notice, { epic: shown.epic });
 }

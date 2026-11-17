@@ -11,25 +11,28 @@ from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from tests.board_helpers import SLOW
-from tests.helpers import ok
+from tests.helpers import NODE_PAGES, ok
 
 
 async def every_item(client: Client, tool: str, **arguments: Any) -> list[dict[str, Any]]:
-    """Every item of a list tool that pages by after_id."""
+    """Every item of a list tool, following its pages (a page of nodes is continued by `after`,
+    a reference; every other list by `after_id`)."""
+    start, more = ("after", "next_after") if tool in NODE_PAGES else ("after_id", "next_after_id")
     items: list[dict[str, Any]] = []
-    after: int | None = None
+    after: int | str | None = None
     while True:
         page = await ok(
-            client, tool, limit=200, **({} if after is None else {"after_id": after}), **arguments
+            client, tool, limit=200, **({} if after is None else {start: after}), **arguments
         )
         items.extend(page["items"])
-        after = page.get("next_after_id")
+        after = page.get(more)
         if after is None:
             return items
 
 
-async def ids_of(client: Client, query: str) -> list[int]:
-    return [node["id"] for node in await every_item(client, "list_nodes", query=query)]
+async def ids_of(client: Client, query: str) -> list[str]:
+    """The references of the nodes a filter finds, in the order the server gives them."""
+    return [node["ref"] for node in await every_item(client, "list_nodes", query=query)]
 
 
 # -- the Activity feed -------------------------------------------------------------------------

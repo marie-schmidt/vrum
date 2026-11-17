@@ -14,7 +14,8 @@ const EXAMPLES = [
   ['no:target', 'with no target date; no:start, no:claimed, no:parent and no:body work too'],
   ['claimed:ann,bob', 'held by Ann or Bob; claimed on its own means held by anyone'],
   ['invoice -draft', 'words in the title or body; quote a phrase to keep it together'],
-  ['epic:12', 'in epic 12 (also story:, parent: and id:)'],
+  ['epic:3', 'in epic 3 and everything under it (story:12 is a story and its tasks, parent:epic:3 is what sits directly under epic 3)'],
+  ['kind:story number:12', 'story 12 (number: goes with kind:, since each kind is numbered on its own)'],
 ];
 
 export function filterBar({ value, onSubmit }) {
@@ -63,7 +64,7 @@ export function filterBar({ value, onSubmit }) {
     h(
       'p',
       {},
-      'Type words and field:value terms. Terms side by side must all hold; OR between groups means either group; a leading - leaves matches out; a comma means any of these values. The fields are kind, status, priority, claimed, parent, epic, story, id, start, target, is and no. Agents use the same text as the query of list_nodes.',
+      'Type words and field:value terms. Terms side by side must all hold; OR between groups means either group; a leading - leaves matches out; a comma means any of these values. The fields are kind, status, priority, claimed, parent, epic, story, number, start, target, is and no. Agents use the same text as the query of list_nodes.',
     ),
     h(
       'ul',

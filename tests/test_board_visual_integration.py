@@ -14,13 +14,14 @@ import pytest
 from mcp import Client
 from playwright.async_api import expect
 
-from tests.board_helpers import SLOW
+from tests.board_helpers import SLOW, item_address, ref_slug
 from tests.board_layout import (
     BY_NAME,
     OLD_GLYPHS,
     SHOTS,
     THEMES,
     UNBROKEN,
+    Stop,
     World,
     cards,
     frames,
@@ -33,7 +34,7 @@ from tests.board_layout import (
     the_world,
     visit,
 )
-from tests.helpers import all_nodes, connect, ok
+from tests.helpers import all_nodes, code_of, connect, ok, ref_from_code
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -41,7 +42,14 @@ themes = pytest.mark.parametrize("theme", THEMES)
 WIDE = BY_NAME["1600"]
 PHONE = BY_NAME["390"]
 TOLERANCE = 1.0  # CSS pixels: two edges that are meant to line up differ by no more than this
-PHONE_SCREENS = {"board", "graph-work-map", "graph-context-list", "roadmap", "panel-decision"}
+PHONE_SCREENS = {
+    "board",
+    "graph-work-map",
+    "graph-context-list",
+    "roadmap",
+    "item-story",
+    "panel-decision",
+}
 
 
 # -- 1. cards: one size, aligned rows, aligned columns -------------------------------------
@@ -196,12 +204,7 @@ async def test_panel_labels_and_values_line_up_in_columns_and_on_one_line(
     async with layout_page(world.board, screen, theme) as w:
         await open_address(w, "#/board")
         for name in ("D1", "S2", "X1", "Y1"):
-            kind = (
-                "decision" if name.startswith("X") else "fact" if name.startswith("Y") else "node"
-            )
-            await w.page.evaluate(
-                "(h) => { location.hash = h; }", f"#/board?sel={kind}:{world[name]}"
-            )
+            await w.page.evaluate("(h) => { location.hash = h; }", f"#/board?sel={world[name]}")
             await w.page.wait_for_selector("#panel dl.detail-grid", state="attached", timeout=SLOW)
             await settle(w.page)
             grids = await w.page.evaluate(PANEL_ALIGNMENT)
@@ -266,7 +269,7 @@ METERS = """
   const track = m.getBoundingClientRect(); const bar = fill.getBoundingClientRect();
   const owner = m.closest('.lane, .card');
   return { kind: owner.classList.contains('lane') ? 'lane' : 'card',
-    id: Number(owner.dataset.epic || owner.dataset.id),
+    ref: owner.dataset.ref,
     text: (m.parentElement.querySelector('.progress-text')
       || m.parentElement.firstElementChild || {}).textContent,
     now: Number(m.getAttribute('aria-valuenow')), max: Number(m.getAttribute('aria-valuemax')),
@@ -294,12 +297,12 @@ def contrast_of(first: str, second: str) -> float:
     return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
-async def truth(client: Client) -> dict[int, tuple[int, int]]:
+async def truth(client: Client) -> dict[str, tuple[int, int]]:
     """Tasks done out of tasks that are not dropped, for every epic and story, counted from the
     tasks themselves (and checked against what list_nodes says of each)."""
     nodes = await all_nodes(client)
-    by_id = {node["id"]: node for node in nodes}
-    found: dict[int, tuple[int, int]] = {}
+    by_ref = {node["ref"]: node for node in nodes}
+    found: dict[str, tuple[int, int]] = {}
     for node in nodes:
         if node["kind"] == "task":
             continue
@@ -309,15 +312,15 @@ async def truth(client: Client) -> dict[int, tuple[int, int]]:
             if task["kind"] == "task"
             and task["status"] != "dropped"
             and (
-                task["parent_id"] == node["id"]
+                task["parent"] == node["ref"]
                 if node["kind"] == "story"
-                else by_id[task["parent_id"]]["parent_id"] == node["id"]
-                and by_id[task["parent_id"]]["status"] != "dropped"
+                else by_ref[task["parent"]]["parent"] == node["ref"]
+                and by_ref[task["parent"]]["status"] != "dropped"
             )
         ]
         done = sum(1 for task in tasks if task["status"] == "done")
         assert (node["progress_done"], node["progress_total"]) == (done, len(tasks)), node
-        found[node["id"]] = (done, len(tasks))
+        found[node["ref"]] = (done, len(tasks))
     return found
 
 
@@ -334,14 +337,14 @@ async def test_progress_bars_show_the_real_done_and_total_and_an_empty_epic_show
         await open_address(w, "#/board")
         await settle(w.page)
         meters = await w.page.evaluate(METERS)
-        lanes = {meter["id"]: meter for meter in meters if meter["kind"] == "lane"}
+        lanes = {meter["ref"]: meter for meter in meters if meter["kind"] == "lane"}
         assert set(lanes) == {world[name] for name in ("E1", "E2", "E3", "E4", "E5", "E6")}
-        for ident, meter in {
+        for ref, meter in {
             **lanes,
-            **{m["id"]: m for m in meters if m["kind"] == "card"},
+            **{m["ref"]: m for m in meters if m["kind"] == "card"},
         }.items():
-            done, total = real[ident]
-            where = (meter["kind"], ident, meter)
+            done, total = real[ref]
+            where = (meter["kind"], ref, meter)
             assert meter["role"] == "progressbar" and meter["label"], where
             assert (meter["now"], meter["max"]) == (done, max(total, 1)), where
             assert meter["text"] and meter["text"].startswith(f"{done} of {total} task"), where
@@ -355,7 +358,7 @@ async def test_progress_bars_show_the_real_done_and_total_and_an_empty_epic_show
         assert lanes[world["E5"]]["ratio"] == pytest.approx(1)
         assert 0 < lanes[world["E1"]]["ratio"] < 1 or real[world["E1"]][0] == 0
         # The epic list and the Roadmap or the panel say the same numbers.
-        await w.page.evaluate("(h) => { location.hash = h; }", f"#/board?sel=node:{world['E5']}")
+        await w.page.evaluate("(h) => { location.hash = h; }", f"#/board?sel={world['E5']}")
         await w.page.wait_for_selector("#panel .progress .meter", timeout=SLOW)
         panel = await w.page.locator("#panel .progress").inner_text()
         assert "2 of 2" in panel
@@ -422,12 +425,12 @@ async def test_node_labels_stay_inside_their_nodes_and_nodes_and_lines_do_not_co
 ) -> None:
     world = await the_world(server_url)
     scopes = [
-        ("E1 work", f"#/graph?view=work&as=map&epic={world['E1']}", "layered"),
-        ("E1 context", f"#/graph?view=context&as=map&epic={world['E1']}", "layered"),
-        ("E1 everything", f"#/graph?view=everything&as=map&epic={world['E1']}", "layered"),
-        ("E2 everything", f"#/graph?view=everything&as=map&epic={world['E2']}", "layered"),
-        ("E3 everything", f"#/graph?view=everything&as=map&epic={world['E3']}", "layered"),
-        ("E5 work", f"#/graph?view=work&as=map&epic={world['E5']}", "layered"),
+        ("E1 work", f"#/graph?view=work&as=map&epic={world.number('E1')}", "layered"),
+        ("E1 context", f"#/graph?view=context&as=map&epic={world.number('E1')}", "layered"),
+        ("E1 everything", f"#/graph?view=everything&as=map&epic={world.number('E1')}", "layered"),
+        ("E2 everything", f"#/graph?view=everything&as=map&epic={world.number('E2')}", "layered"),
+        ("E3 everything", f"#/graph?view=everything&as=map&epic={world.number('E3')}", "layered"),
+        ("E5 work", f"#/graph?view=work&as=map&epic={world.number('E5')}", "layered"),
         ("all epics", "#/graph?view=everything&as=map", "compact"),
     ]
     async with layout_page(world.board, screen, theme) as w:
@@ -525,9 +528,9 @@ async def test_node_labels_stay_inside_their_nodes_and_nodes_and_lines_do_not_co
                 assert zoom >= 0.9, f"{name} is fitted at {zoom:.2f}: its words are too small"
         assert not problems, "\n".join(problems)
         # A node whose words are cut short opens a panel that has the whole of them.
-        assert f"fact:{world['Y2']}" in cut, "the long fact is drawn cut short"
-        await open_map(w, world, f"#/graph?view=everything&as=map&epic={world['E3']}")
-        await w.page.locator(f"svg#graph-svg .dot[data-key='fact:{world['Y2']}']").focus()
+        assert world["Y2"] in cut, "the long fact is drawn cut short"
+        await open_map(w, world, f"#/graph?view=everything&as=map&epic={world.number('E3')}")
+        await w.page.locator(f"svg#graph-svg .dot[data-key='{world['Y2']}']").focus()
         await w.page.keyboard.press("Enter")
         await expect(w.page.locator("#panel .record-text")).to_contain_text(UNBROKEN, timeout=SLOW)
 
@@ -543,8 +546,8 @@ async def test_the_panel_beside_the_map_does_not_cover_the_map_or_its_furniture(
         drawn = await open_map(
             w,
             world,
-            f"#/graph?view=everything&as=map&epic={world['E1']}",
-            panel=f"&sel=decision:{world['X1']}",
+            f"#/graph?view=everything&as=map&epic={world.number('E1')}",
+            panel=f"&sel={world['X1']}",
         )
         await w.page.wait_for_selector("#panel .detail", timeout=SLOW)
         await settle(w.page)
@@ -559,7 +562,7 @@ async def test_the_panel_beside_the_map_does_not_cover_the_map_or_its_furniture(
         for dot in drawn["dots"]:
             assert not meets(dot["shape"], panel), dot["label"]
         # The chosen node is marked, and its record is what the panel shows.
-        chosen = w.page.locator(f"svg#graph-svg .dot.chosen[data-key='decision:{world['X1']}']")
+        chosen = w.page.locator(f"svg#graph-svg .dot.chosen[data-key='{world['X1']}']")
         await expect(chosen).to_have_count(1)
         assert "Claims expire" in await w.page.locator("#record-title").inner_text()
 
@@ -584,7 +587,7 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         str(len(nodes) + held + settled + decisions + facts),
         str(sum(1 for node in nodes if node["span_start"] or node["span_end"])),
     ]
-    epics = sorted((node for node in nodes if node["kind"] == "epic"), key=lambda n: n["id"])
+    epics = sorted((node for node in nodes if node["kind"] == "epic"), key=lambda n: n["number"])
     by_status = {
         status: 0 for status in ("new", "ready", "in_progress", "blocked", "done", "dropped")
     }
@@ -609,10 +612,10 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         await expect(links.nth(1)).not_to_have_attribute("aria-current", "page")
         # Its Epics are the real epics, in order, each with its layered icon.
         assert await page.locator("#epics-heading").text_content() == "Epics"
-        listed = page.locator("#epic-list a[data-epic]")
+        listed = page.locator("#epic-list a[data-ref]")
         assert [
-            await listed.nth(at).get_attribute("data-epic") for at in range(await listed.count())
-        ] == [str(epic["id"]) for epic in epics]
+            await listed.nth(at).get_attribute("data-ref") for at in range(await listed.count())
+        ] == [epic["ref"] for epic in epics]
         assert [await listed.nth(at).inner_text() for at in range(await listed.count())] == [
             epic["title"] for epic in epics
         ]
@@ -660,15 +663,15 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         lanes = page.locator(".lane")
         assert await lanes.count() == len(epics)
         for epic in epics:
-            lane = page.locator(f".lane[data-epic='{epic['id']}']")
+            lane = page.locator(f".lane[data-ref='{epic['ref']}']")
             assert await lane.locator(".lane-title").inner_text() == epic["title"]
-            assert await lane.locator(".lane-head .id").inner_text() == f"#{epic['id']}"
+            assert await lane.locator(".lane-head .id").inner_text() == f"E-{epic['number']}"
             assert await lane.locator(".add-story").count() == 1
             assert "task" in await lane.locator(".progress-text").inner_text()
         # The Graph: the three views, the epic, Map and List, the legend, the zoom, and the panel.
         await w.page.evaluate(
             "(h) => { location.hash = h; }",
-            f"#/graph?view=everything&as=map&epic={world['E1']}&sel=decision:{world['X1']}",
+            f"#/graph?view=everything&as=map&epic={world.number('E1')}&sel={world['X1']}",
         )
         await page.wait_for_selector("svg#graph-svg[data-ready=true]", timeout=SLOW)
         await page.wait_for_selector("#panel .detail", timeout=SLOW)
@@ -691,7 +694,7 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         ]
         assert await page.locator("#graph-epic").evaluate(
             "(s) => s.selectedOptions[0].textContent"
-        ) == (f"#{world['E1']} Run and see it all")
+        ) == (f"E-{world.number('E1')} Run and see it all")
         legend = await page.locator("#graph-legend").inner_text()
         assert "Hierarchy" in legend and "Context link" in legend
         assert re.fullmatch(r"\d+%", await page.locator("#zoom-level").inner_text())
@@ -703,9 +706,9 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         )
         # The panel is what MCP says of the decision: kind, number, state, title, text, reason.
         async with connect(server_url, world.project.key) as client:
-            record = await ok(client, "get_decision", decision_id=world["X1"])
+            record = await ok(client, "get_decision", decision_id=world.number("X1"))
         label = (await page.locator("#panel .detail-label").inner_text()).strip().lower()
-        assert label.endswith("decision") and f"#{world['X1']}" in label, label
+        assert label.endswith("decision") and f"#{world.number('X1')}" in label, label
         assert (await page.locator("#record-title").inner_text()).strip().endswith(record["title"])
         assert (
             "Confirmed"
@@ -721,7 +724,201 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         assert rows[:2] == ["Confirmation", "Applies to"], rows
 
 
-# -- 8. every screen can be looked at, in both themes -----------------------------------------
+# -- 8. the page of an item: its real children in a table, its details beside each other ----
+
+TABLE = """
+() => [...document.querySelectorAll('#item-table tbody tr')].map((tr) => {
+  const text = (selector) => {
+    const e = tr.querySelector(selector);
+    return e ? e.textContent.replace(/\\s+/g, ' ').trim() : null;
+  };
+  return { ref: tr.dataset.ref, id: tr.id, code: text('th.cell-item'), title: text('td.cell-title'),
+    status: text('td.cell-status'), priority: text('td.cell-priority'), held: text('td.cell-held'),
+    date: text('.item-date'), overdue: !!tr.querySelector('.overdue'),
+    waiting: [...tr.querySelectorAll('td.cell-waiting a')]
+      .map((a) => [a.textContent.trim(), a.href]),
+    progress: text('.item-progress-text'),
+    link: tr.querySelector('a.item-code-link').getAttribute('href'),
+    look: tr.querySelector('button.quick-look').getAttribute('aria-label') };
+})
+"""
+
+PAGE_BOXES = """
+() => {
+  const box = (selector) => {
+    const e = document.querySelector(selector);
+    if (!e || !e.checkVisibility()) return null;
+    const r = e.getBoundingClientRect();
+    return { l: r.left, t: r.top, r: r.right, b: r.bottom };
+  };
+  return { title: box('#item-title'), details: box('#item-details'), main: box('.card-main'),
+    side: box('.card-side'), summary: box('.card-summary'), children: box('#item-children'),
+    region: box('#item-region'), part: box('#item-part') };
+}
+"""
+
+STATUS_WORDS = {
+    "new": "New",
+    "ready": "Ready",
+    "in_progress": "In progress",
+    "blocked": "Blocked",
+    "done": "Done",
+    "dropped": "Dropped",
+}
+
+
+COLUMNS = {
+    "epic": ["Item", "Title", "Status", "Progress", "Priority", "Held by", "Due", "Waiting for"],
+    "story": ["Item", "Title", "Status", "Priority", "Held by", "Due", "Waiting for"],
+}
+
+
+def item_stop(world: World, name: str, ready: str = "#item-table tbody tr") -> Stop:
+    return Stop(name, item_address(world[name]), ready, "item")
+
+
+@pytest.mark.parametrize("screen", [WIDE, BY_NAME["768"], PHONE], ids=["1600", "768", "390"])
+@themes
+async def test_an_items_page_names_it_by_its_code_and_tables_its_real_children(
+    server_url: str, theme: str, screen: Any
+) -> None:
+    world = await the_world(server_url)
+    truth: dict[str, tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]] = {}
+    async with connect(server_url, world.project.key) as client:
+        for name in ("E1", "E3", "S2", "S5"):
+            node = await ok(client, "get_node", node=world[name])
+            parent = await ok(client, "get_node", node=node["parent"]) if node["parent"] else None
+            children = await all_nodes(client, parent=world[name])
+            truth[name] = (node, sorted(children, key=lambda child: child["number"]), parent)
+    assert len(truth["E1"][1]) == 2 and len(truth["S2"][1]) >= 5
+    async with layout_page(world.board, screen, theme) as w:
+        page = w.page
+        await open_address(w, "#/board")
+        for name, (node, children, parent) in truth.items():
+            await visit(w, item_stop(world, name))
+            ref, under = node["ref"], "stories" if node["kind"] == "epic" else "tasks"
+            # What it is, by its code and its title, and where it sits.
+            title = " ".join((await page.locator("#item-title").inner_text()).split())
+            assert title == f"{code_of(ref)} {node['title']}", title
+            what = " ".join((await page.locator("#item-what").inner_text()).split())
+            if parent is None:
+                assert what == f"Epic with {len(children)} stories", what
+            else:
+                assert what == f"Story in {code_of(parent['ref'])} {parent['title']}", what
+            # What is under it: how many, said the same way in the count, the heading and the
+            # table's caption.
+            heading = await page.locator("#item-children-title").inner_text()
+            assert heading == f"{under.capitalize()} in {code_of(ref)}", heading
+            assert await page.locator("#item-count").inner_text() == f"{len(children)} {under}"
+            assert await page.locator("#item-table caption").inner_text() == heading
+            heads: list[str] = await page.locator("#item-table thead th button.sort").evaluate_all(
+                "els => els.map((e) => e.textContent.trim())"
+            )
+            assert heads == COLUMNS[node["kind"]], heads
+            # The rows are what MCP lists as its children, by number, each with its own numbers.
+            rows = await page.evaluate(TABLE)
+            assert [row["ref"] for row in rows] == [child["ref"] for child in children]
+            for row, child in zip(rows, children, strict=True):
+                where = (name, child["ref"], row)
+                assert row["id"] == f"row-{ref_slug(child['ref'])}", where
+                assert row["code"] == code_of(child["ref"]), where
+                assert row["title"] == child["title"], where
+                assert row["status"] == STATUS_WORDS[child["status"]], where
+                assert row["priority"] == child["priority"].capitalize(), where
+                assert row["held"] == (child["claimed_by"] or "—"), where
+                assert row["date"] == (str(child["target_on"])[:10] if child["target_on"] else None)
+                assert row["overdue"] == bool(child["overdue"]), where
+                assert [code for code, _ in row["waiting"]] == [
+                    code_of(other) for other in child["waiting_on"]
+                ], where
+                for code, href in row["waiting"]:
+                    assert href.endswith(item_address(ref_from_code(code))), where
+                assert row["link"].endswith(item_address(child["ref"])), where
+                assert row["look"] == f"Quick look at {code_of(child['ref'])}", where
+                if node["kind"] == "epic":
+                    done, total = child["progress_done"], child["progress_total"]
+                    assert row["progress"] == (f"{done} of {total} done" if total else None), where
+    held = [child for child in truth["S2"][1] if child["claimed_by"]]
+    waiting = [child for child in truth["S2"][1] if child["waiting_on"]]
+    assert held and waiting, "the story has a held task and one that waits"
+
+
+@pytest.mark.parametrize("screen", [WIDE, BY_NAME["768"], PHONE], ids=["1600", "768", "390"])
+@themes
+async def test_an_items_page_lays_its_details_out_to_the_width_and_lines_up_with_its_table(
+    server_url: str, theme: str, screen: Any
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, theme) as w:
+        page = w.page
+        await open_address(w, "#/board")
+        for name in ("S2", "S5", "E1"):
+            await visit(w, item_stop(world, name))
+            await shoot(page, f"item-{name}-{theme}-{screen.name}")
+            found = await page.evaluate(PAGE_BOXES)
+            for part in ("title", "details", "main", "side", "children", "region"):
+                assert found[part] is not None, (name, part)
+            # One page: the title, the details and the table start at the same left edge, and
+            # the table's region is as wide as they are.
+            lefts = {part: round(found[part]["l"], 1) for part in ("title", "details", "children")}
+            assert max(lefts.values()) - min(lefts.values()) <= TOLERANCE, (name, lefts)
+            assert abs(found["region"]["r"] - found["details"]["r"]) <= TOLERANCE, (name, found)
+            # The details come first, the table under them, never beside them.
+            assert found["children"]["t"] >= found["details"]["b"] - 0.5, (name, found)
+            # A main column and a side column when the page is wide enough, one column when not.
+            two = screen.width >= 1100
+            main, side = found["main"], found["side"]
+            if two:
+                assert side["l"] >= main["r"] - 0.5, (name, "side beside main", main, side)
+                assert abs(side["t"] - main["t"]) <= TOLERANCE, (name, main, side)
+            else:
+                assert side["t"] >= main["b"] - 0.5, (name, "side under main", main, side)
+                assert abs(side["l"] - main["l"]) <= TOLERANCE, (name, main, side)
+            # Nothing of the page is outside the window.
+            for part, box in found.items():
+                if box is not None:
+                    assert box["l"] >= -0.5 and box["r"] <= screen.width + 0.5, (name, part, box)
+
+
+@pytest.mark.parametrize("screen", [WIDE, PHONE], ids=["1600", "390"])
+@themes
+async def test_an_items_page_with_nothing_under_it_says_so_and_offers_the_first_one(
+    server_url: str, theme: str, screen: Any
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, theme) as w:
+        page = w.page
+        await open_address(w, "#/board")
+        ref = world["E4"]
+        await visit(w, item_stop(world, "E4", "#item-empty .empty-text"))
+        assert await page.locator("#item-count").inner_text() == "0 stories"
+        assert await page.locator("#item-empty .empty-text").inner_text() == "No stories yet."
+        await expect(page.locator("#item-region")).to_be_hidden()
+        assert await page.locator("#item-table").count() == 0
+        # The one button that adds a story under this epic is in the empty state; it opens the form
+        # for a story in this epic.
+        add = page.locator("#new-child")
+        assert (await add.inner_text()).strip() == "New story"
+        assert "primary" in (await add.get_attribute("class") or "")
+        await add.click()
+        dialog = page.locator("dialog.modal[open]")
+        await expect(dialog).to_be_visible()
+        assert await dialog.locator("#new-kind").input_value() == "story"
+        assert await dialog.locator("#new-parent").input_value() == ref
+        await page.keyboard.press("Escape")
+        await expect(dialog).to_be_hidden()
+        # A task has no table at all: it says which story it is part of, and links to it.
+        await visit(w, item_stop(world, "D1", "#item-part-title"))
+        part = " ".join((await page.locator("#item-part-title").inner_text()).split())
+        async with connect(server_url, world.project.key) as client:
+            story = await ok(client, "get_node", node=world["S5"])
+        assert part == f"Part of {code_of(world['S5'])} {story['title']}", part
+        href = await page.locator("#item-part-title a").get_attribute("href")
+        assert href is not None and href.endswith(item_address(world["S5"])), href
+        assert await page.locator("#item-table").count() == 0
+
+
+# -- 9. every screen can be looked at, in both themes -----------------------------------------
 
 
 @themes

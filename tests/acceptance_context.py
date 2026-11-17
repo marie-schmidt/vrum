@@ -31,8 +31,18 @@ from tests.board_context import (
     tally,
 )
 from tests.board_helpers import SLOW, board_url, browser_page, made
-from tests.helpers import confirm, connect, make_decision, make_fact, ok, refused, unique_word
-from tests.test_board_context_integration import MARIE, chosen_picker
+from tests.helpers import (
+    code_of,
+    confirm,
+    connect,
+    make_decision,
+    make_fact,
+    number_of,
+    ok,
+    refused,
+    unique_word,
+)
+from tests.test_board_context_integration import MARIE, chosen_picker, context_list
 from tests.world import make_project, register
 
 
@@ -60,18 +70,16 @@ async def recording() -> None:
         epic = await made(client, "epic", f"Context {word}")
         story = await made(client, "story", f"Concerned story {word}", epic)
         rule = (
-            await ok(
-                client, "create_rule", actor="agent-1", title=f"Concerned {word}", story_id=story
-            )
+            await ok(client, "create_rule", actor="agent-1", title=f"Concerned {word}", story=story)
         )["id"]
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+            await graph_open(w, context_list(epic))
             await page.locator("#record-fact").click()
             box = dialog(page)
             await box.locator("#record-fact-text").fill(f"Fact about {word}")
             await box.locator("#record-fact-source").fill(f"The call with Marie {word}")
-            await chosen_picker(page, f"#{story}", f"requirement {rule}")
+            await chosen_picker(page, code_of(story), f"requirement {rule}")
             await box.get_by_role("button", name="Record the fact").click()
             await expect(box).to_have_count(0, timeout=SLOW)
             await page.locator("#record-decision").click()
@@ -80,11 +88,11 @@ async def recording() -> None:
             await box.locator("#record-decision-text").fill(f"What was decided {word}")
             await box.locator("#record-decision-reason").fill(f"Because of {word}")
             await box.locator("#record-decision-by").fill(MARIE)
-            await chosen_picker(page, f"#{story}")
+            await chosen_picker(page, code_of(story))
             await box.get_by_role("button", name="Record the decision").click()
             await expect(box).to_have_count(0, timeout=SLOW)
 
-            facts = (await ok(client, "list_facts", node_id=story))["items"]
+            facts = (await ok(client, "list_facts", node=story))["items"]
             decisions = (await ok(client, "list_decisions"))["items"]
             assert len(facts) == 1 and len(decisions) == 1, (facts, decisions)
             fact = await ok(client, "get_fact", fact_id=facts[0]["id"])
@@ -96,10 +104,10 @@ async def recording() -> None:
                 == (f"Fact about {word}", f"The call with Marie {word}", ADA)
                 and (fact["status"], fact["confirmation"], fact["confirmed_by"])
                 == ("active", "unconfirmed", None)
-                and (fact["node_ids"], fact["rule_ids"]) == ([story], [rule])
+                and (fact["nodes"], fact["rule_ids"]) == ([story], [rule])
                 and (decision["title"], decision["reason"], decision["decided_by"])
                 == (f"Decision {word}", f"Because of {word}", MARIE)
-                and (decision["project_wide"], decision["node_ids"]) == (False, [story])
+                and (decision["project_wide"], decision["nodes"]) == (False, [story])
                 and [(e["action"], e["actor"]) for e in events]
                 == [("decision_recorded", ADA), ("decision_linked", ADA)]
             )
@@ -120,9 +128,9 @@ async def recording() -> None:
             for key, record in ((fact_key, fact), (decision_key, decision)):
                 await expect(dot(page, key)).to_have_attribute("data-id", str(record["id"]))
                 await expect(dot(page, key)).to_have_attribute("data-confirmation", "unconfirmed")
-            await expect(edge(page, "concerns", fact_key, f"node:{story}")).to_have_count(1)
+            await expect(edge(page, "concerns", fact_key, story)).to_have_count(1)
             await expect(edge(page, "concerns", fact_key, f"rule:{rule}")).to_have_count(1)
-            await expect(edge(page, "concerns", decision_key, f"node:{story}")).to_have_count(1)
+            await expect(edge(page, "concerns", decision_key, story)).to_have_count(1)
             # Choosing the dot opens it in the shared detail panel, with every field.
             await dot(page, fact_key).click()
             detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
@@ -135,16 +143,18 @@ async def recording() -> None:
                 f"Because of {word}", timeout=SLOW
             )
             # Exact recall, section by section, for the story and for the requirement.
-            for target in (f"node:{story}", f"rule:{rule}"):
-                await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={target}")
+            for target in (story, f"rule:{rule}"):
+                await w.go(context_list(epic, f"&sel={target}"))
                 await expect(panel(page).locator(".recall-section")).not_to_have_count(
                     0, timeout=SLOW
                 )
                 kind, ident = target.split(":")
                 await recall_matches(
-                    client, page, **{("node_id" if kind == "node" else "rule_id"): int(ident)}
+                    client,
+                    page,
+                    **({"rule_id": int(ident)} if kind == "rule" else {"node": target}),
                 )
-            recalled = await ok(client, "recall", node_id=story)
+            recalled = await ok(client, "recall", node=story)
             in_recall = (
                 [i["fact"]["id"] for i in recalled["facts"]["items"]],
                 [i["decision"]["id"] for i in recalled["active_decisions"]["items"]],
@@ -169,12 +179,12 @@ async def confirming() -> None:
     async with fresh_project(URL) as (client, board, project):
         epic = await made(client, "epic", f"Confirming {word}")
         story = await made(client, "story", f"Reviewed story {word}", epic)
-        fact = await make_fact(client, f"Reviewed fact {word}", node_ids=[story])
-        decision = await make_decision(client, f"Reviewed decision {word}", node_ids=[story])
+        fact = await make_fact(client, f"Reviewed fact {word}", nodes=[story])
+        decision = await make_decision(client, f"Reviewed decision {word}", nodes=[story])
         fact_key, decision_key = f"fact:{fact['id']}", f"decision:{decision['id']}"
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic}&sel={fact_key}")
+            await graph_open(w, context_list(epic, f"&sel={fact_key}"))
             detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
             select = detail.locator(".confirmation-select")
             await expect(select).to_have_value("unconfirmed", timeout=SLOW)
@@ -211,9 +221,9 @@ async def confirming() -> None:
             await expect(dot(page, decision_key)).to_have_attribute(
                 "data-confirmation", "unconfirmed"
             )
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+            await w.go(context_list(epic, f"&sel={story}"))
             await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-            await recall_matches(client, page, node_id=story)
+            await recall_matches(client, page, node=story)
             # A decision is confirmed from its row of the list, by the same dropdown.
             await expect(listed(page, decision_key)).to_be_visible(timeout=SLOW)
             await (
@@ -231,7 +241,7 @@ async def confirming() -> None:
             )
             decided = await ok(client, "get_decision", decision_id=decision["id"])
             # Un-confirming needs the person and their words: refused when either is blank.
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={fact_key}")
+            await w.go(context_list(epic, f"&sel={fact_key}"))
             await expect(select).to_have_value("confirmed", timeout=SLOW)
             away = {"actor": "x", "kind": "fact", "record_id": fact["id"]}
             nobody = await refused(
@@ -305,15 +315,15 @@ async def ending_a_fact() -> None:
     async with fresh_project(URL) as (client, board, project):
         epic = await made(client, "epic", f"Ending {word}")
         story = await made(client, "story", f"Ended story {word}", epic)
-        old = await make_fact(client, f"Old fact {word}", node_ids=[story], source=f"A call {word}")
+        old = await make_fact(client, f"Old fact {word}", nodes=[story], source=f"A call {word}")
         await confirm(client, "fact", old, MARIE)
-        wrong = await make_fact(client, f"Wrong fact {word}", node_ids=[story])
+        wrong = await make_fact(client, f"Wrong fact {word}", nodes=[story])
         await confirm(client, "fact", wrong, MARIE)
-        slip = await make_fact(client, f"Slip {word}", node_ids=[story])
+        slip = await make_fact(client, f"Slip {word}", nodes=[story])
         old_key, wrong_key, slip_key = (f"fact:{f['id']}" for f in (old, wrong, slip))
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+            await graph_open(w, context_list(epic))
             before = await tally(client)
             await listed(page, old_key).locator("button.supersede-record").click()
             box = dialog(page)
@@ -364,19 +374,19 @@ async def ending_a_fact() -> None:
             await expect(detail.locator(".confirmation-note")).to_contain_text(
                 "keeps the confirmation"
             )
-            await w.go(f"#/graph?view=context&as=map&epic={epic}&ended=1")
+            await w.go(f"#/graph?view=context&as=map&epic={number_of(epic)}&ended=1")
             await expect(dot(page, old_key)).to_have_attribute(
                 "data-status", "superseded", timeout=SLOW
             )
             await expect(dot(page, old_key)).to_have_attribute("data-confirmation", "confirmed")
             await expect(edge(page, "replaces", new_key, old_key)).to_have_count(1)
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+            await w.go(context_list(epic, f"&sel={story}"))
             await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-            await recall_matches(client, page, node_id=story)
-            past = (await ok(client, "recall", node_id=story))["past_facts"]["items"]
+            await recall_matches(client, page, node=story)
+            past = (await ok(client, "recall", node=story))["past_facts"]["items"]
             # Withdrawing a confirmed fact needs the person's word too; an unconfirmed one needs a
             # reason only.
-            await w.go(f"#/graph?view=context&as=list&epic={epic}")
+            await w.go(context_list(epic))
             await lifecycle_filter(page, "facts", "active")
             await listed(page, wrong_key).locator("button.withdraw-record").click()
             box = dialog(page)
@@ -422,7 +432,7 @@ async def ending_a_fact() -> None:
         and nothing_written
         and (ended["status"], ended["status_reason"]) == ("superseded", "Measured again")
         and (ended["confirmation"], ended["confirmed_by"]) == ("confirmed", MARIE)
-        and (new["confirmation"], new["supersedes_ids"], new["node_ids"])
+        and (new["confirmation"], new["supersedes_ids"], new["nodes"])
         == ("unconfirmed", [old["id"]], [story])
         and (events[-1]["action"], events[-1]["actor"]) == ("fact_superseded", ADA)
         and [(i["fact"]["id"], i["fact"]["confirmation"]) for i in past]
@@ -447,13 +457,13 @@ async def ending_a_decision() -> None:
     async with fresh_project(URL) as (client, board, project):
         epic = await made(client, "epic", f"Deciding {word}")
         story = await made(client, "story", f"Decided story {word}", epic)
-        old = await make_decision(client, f"Old decision {word}", node_ids=[story])
+        old = await make_decision(client, f"Old decision {word}", nodes=[story])
         await confirm(client, "decision", old, MARIE)
-        drop = await make_decision(client, f"Dropped decision {word}", node_ids=[story])
+        drop = await make_decision(client, f"Dropped decision {word}", nodes=[story])
         old_key, drop_key = f"decision:{old['id']}", f"decision:{drop['id']}"
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+            await graph_open(w, context_list(epic))
             before = await tally(client)
             await listed(page, old_key).locator("button.supersede-record").click()
             box = dialog(page)
@@ -498,10 +508,10 @@ async def ending_a_decision() -> None:
             await expect(detail.locator("[data-part=lifecycle] .chain")).to_contain_text(
                 f"Replaced by #{new['id']}", timeout=SLOW
             )
-            await w.go(f"#/graph?view=context&as=map&epic={epic}&ended=1")
+            await w.go(f"#/graph?view=context&as=map&epic={number_of(epic)}&ended=1")
             await expect(edge(page, "replaces", new_key, old_key)).to_have_count(1, timeout=SLOW)
             # Withdrawing an unconfirmed decision needs only a reason, which is never blank.
-            await w.go(f"#/graph?view=context&as=list&epic={epic}")
+            await w.go(context_list(epic))
             await lifecycle_filter(page, "decisions", "active")
             await listed(page, drop_key).locator("button.withdraw-record").click()
             box = dialog(page)
@@ -515,10 +525,10 @@ async def ending_a_decision() -> None:
             await box.get_by_role("button", name="Withdraw", exact=True).click()
             await expect(box).to_have_count(0, timeout=SLOW)
             dropped = await ok(client, "get_decision", decision_id=drop["id"])
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+            await w.go(context_list(epic, f"&sel={story}"))
             await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-            await recall_matches(client, page, node_id=story)
-            recalled = await ok(client, "recall", node_id=story)
+            await recall_matches(client, page, node=story)
+            recalled = await ok(client, "recall", node=story)
             assert w.problems == [], w.problems
     proof(
         "M16",
@@ -552,24 +562,24 @@ async def blanks() -> None:
     async with fresh_project(URL) as (client, board, project):
         epic = await made(client, "epic", f"Blanks {word}")
         story = await made(client, "story", f"Blank story {word}", epic)
-        fact = await make_fact(client, f"Kept fact {word}", node_ids=[story])
+        fact = await make_fact(client, f"Kept fact {word}", nodes=[story])
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+            await graph_open(w, context_list(epic))
             before = await tally(client)
             no_source = await refused(
                 client, "retain_fact", actor="x", text=f"No source {word}", source="",
-                node_ids=[story],
+                nodes=[story],
             )  # fmt: skip
             await page.locator("#record-fact").click()
             box = dialog(page)
             await box.locator("#record-fact-text").fill(f"No source {word}")
-            await chosen_picker(page, f"#{story}")
+            await chosen_picker(page, code_of(story))
             await box.get_by_role("button", name="Record the fact").click()
             await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
             source_words = await refusal_in(page).inner_text()
             typed = await box.locator("#record-fact-text").input_value()
-            await expect(box.locator(f".picker li[data-ref='node:{story}']")).to_be_visible()
+            await expect(box.locator(f".picker li[data-ref='{story}']")).to_be_visible()
             await box.get_by_role("button", name="Cancel").click()
             await page.locator("#record-decision").click()
             box = dialog(page)
@@ -647,7 +657,7 @@ async def project_wide() -> None:
         await make_decision(b, wide_b, project_wide=True)
         async with browser_page(board_url(URL, first), token=first.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic_a}")
+            await graph_open(w, context_list(epic_a))
             await page.locator("#record-decision").click()
             box = dialog(page)
             await box.locator("#record-decision-title").fill(wide_a)
@@ -662,39 +672,40 @@ async def project_wide() -> None:
             row = listed(page, key)
             await expect(row).to_have_attribute("data-project-wide", "true", timeout=SLOW)
             await expect(row.locator(".chip.project-wide")).to_contain_text("Project-wide")
-            recalled = await ok(a, "recall", node_id=story_a)
+            recalled = await ok(a, "recall", node=story_a)
             wide_items = recalled["project_wide_decisions"]["items"]
-            brief = await ok(a, "next_work", actor="agent-a", within_node_id=epic_a, peek=True)
+            brief = await ok(a, "next_work", actor="agent-a", within_node=epic_a, peek=True)
             wide_brief = brief["context"]["project_wide_decisions"]
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}&sel=node:{story_a}")
+            await w.go(context_list(epic_a, f"&sel={story_a}"))
             await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-            await recall_matches(a, page, node_id=story_a)
+            await recall_matches(a, page, node=story_a)
             entry = panel(page).locator(
                 f"[data-section=project_wide_decisions] li.record[data-record='{key}']"
             )
             await expect(entry).to_have_attribute("data-confirmation", "unconfirmed")
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}")
+            await w.go(context_list(epic_a))
             await listed(page, key).locator(".confirmation-select").select_option("confirmed")
             box = dialog(page)
             await box.locator("#confirm-person").fill(MARIE)
             await box.get_by_role("button", name="Confirm", exact=True).click()
             await expect(box).to_have_count(0, timeout=SLOW)
-            confirmed = (await ok(a, "recall", node_id=story_a))["project_wide_decisions"]["items"][
-                0
-            ]["decision"]
-            brief = await ok(a, "next_work", actor="agent-a", within_node_id=epic_a, peek=True)
+            confirmed = (await ok(a, "recall", node=story_a))["project_wide_decisions"]["items"][0][
+                "decision"
+            ]
+            brief = await ok(a, "next_work", actor="agent-a", within_node=epic_a, peek=True)
             [after] = brief["context"]["project_wide_decisions"]
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}&sel=node:{story_a}")
+            await w.go(context_list(epic_a, f"&sel={story_a}"))
             await expect(entry).to_have_attribute("data-confirmation", "confirmed", timeout=SLOW)
             assert w.problems == [], w.problems
         # The other project hears nothing of it: not in recall, the briefing, its list or its page.
-        recalled_b = await ok(b, "recall", node_id=story_b)
-        brief_b = await ok(b, "next_work", actor="agent-b", within_node_id=epic_b, peek=True)
+        # Both projects have an epic:1 and a story:1: a reference names an item of one project.
+        recalled_b = await ok(b, "recall", node=story_b)
+        brief_b = await ok(b, "next_work", actor="agent-b", within_node=epic_b, peek=True)
         async with browser_page(
             board_url(URL, second), token=second.key, name=ADA, keep_bodies=True
         ) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic_b}")
+            await graph_open(w, context_list(epic_b))
             await expect(page.locator("#ctx-decisions-count")).to_have_attribute(
                 "data-total", "1", timeout=SLOW
             )
@@ -709,9 +720,10 @@ async def project_wide() -> None:
             "M16",
             "a project-wide decision recorded on the board is in the recall of every item of its "
             "project and in its next_work briefing, unconfirmed until a person confirms it and "
-            "then saying who; the other project's recall, briefing, list, page and responses "
-            "never hold it",
-            [i["decision"]["title"] for i in wide_items] == [wide_a]
+            "then saying who; the other project, which has the very same references (epic:1, "
+            "story:1), never holds it in its recall, briefing, list, page or responses",
+            (epic_a, story_a) == (epic_b, story_b) == ("epic:1", "story:1")
+            and [i["decision"]["title"] for i in wide_items] == [wide_a]
             and wide_items[0]["decision"]["confirmation"] == "unconfirmed"
             and recalled["active_decisions"]["items"] == []
             and [(d["title"], d["confirmation"]) for d in wide_brief] == [(wide_a, "unconfirmed")]

@@ -26,6 +26,7 @@ from tests.acceptance_finding import finding
 from tests.acceptance_graph import graph
 from tests.acceptance_hardening import hardening
 from tests.acceptance_moving import moving
+from tests.acceptance_numbering import numbering
 from tests.acceptance_quickstart import quickstart
 from tests.acceptance_scenario import (
     PROOFS,
@@ -58,6 +59,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "accounts": accounts,
     "appearance": appearance,
     "quickstart": quickstart,
+    "numbering": numbering,
     "moving": moving,
 }
 

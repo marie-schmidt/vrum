@@ -24,8 +24,9 @@ This page describes every part of it. For a first look, see the README's
   passwords for one address stop that address for ten minutes.
 - **A project** is a private workspace: its own epics, stories and tasks, requirements, decisions,
   facts, claims, history and search. After signing in you see your own projects, with a box to
-  create the first one when you have none. Each project numbers its own items from 1, so item 12 in
-  one project is not item 12 in another. Nothing is shared between projects, and a project can only
+  create the first one when you have none. Each project numbers its own items from 1, and each kind
+  on its own: a project can have epic 1, story 1 and task 1, shown as E-1, S-1 and T-1. Item S-12 in
+  one project is not S-12 in another. Nothing is shared between projects, and a project can only
   be reached by its owner and by the agents the owner gave a key to. The database itself enforces
   this: every row belongs to one project and cannot refer to a row of another.
 - **A project's address** is `/board/p/<number>`. An address copied to another account opens
@@ -56,7 +57,7 @@ A project has three views: **Board**, **Graph** and **Roadmap**. A project opens
 - **Drawers.** Search and Activity open as a drawer on the left of whichever view you are on, one
   at a time.
 - **The detail panel** on the right shows whichever item, requirement, decision or fact you chose,
-  on any view.
+  on any view. An epic, story or task also opens on **its own page** (see below).
 - Opening a drawer, switching between the Map and the List of the Graph, changing the appearance or
   moving to another view never discards what you were typing in the detail panel or in a drawer.
 - **A narrow window** (under 1100 pixels) hides the sidebar. The menu button in the top bar opens it
@@ -101,7 +102,29 @@ to pin it, zoom and pan, colour by kind, status or epic, show replaced, withdraw
 records, show the `[[references]]` written in texts, and filter by kind, status and kind of line.
 The filter box takes the work filter language. A list of the chosen record's neighbours beside the
 map does everything a click on it does, from the keyboard. Choose a dot or a row to open it in the
-detail panel.
+detail panel. In the List, the title of an epic or a story opens its own page, and the small
+magnifier beside it opens the detail panel instead.
+
+## Naming items
+
+Epics, stories and tasks are numbered separately, within a project. The board writes an item as a
+letter and its number: **E-3** (epic 3), **S-12** (story 12) and **T-40** (task 40). Agents, the
+address and the text of a note name it as the kind and number: `epic:3`, `story:12`, `task:40`.
+Requirements, decisions and facts keep their own numbers and are written `#7` beside their kind.
+
+## An item's own page
+
+Choose **Open full page** in the detail panel of an epic, story or task, or the title of an epic or
+story in the Graph's List, to see it as a full page (`#/item?item=story:12`).
+
+- At the top, the item's title, where it sits and everything the detail panel shows: its status,
+  progress, dates, details and the form to change them (at the version you saw), its links, its
+  requirements, the facts and decisions that concern it, what mentions it and its history. If an
+  agent changes it while you are editing, the page says so and what you typed stays.
+- Under it, **a table of what is under it**: a story's tasks, or an epic's stories with their
+  progress. A task has nothing under it, and says which story it is part of. Each column's heading
+  sorts the table. **New task** (or **New story**) adds one, and the magnifier on a row opens that
+  item in the detail panel at the right without leaving the page.
 
 ## Requirements
 
@@ -221,9 +244,10 @@ small renderer: headings, paragraphs, lists, emphasis, code, quotes and web addr
 a new tab. Raw HTML is never rendered and nothing is loaded from elsewhere, so a script or image tag
 is shown as the text it is.
 
-Write `[[node:12]]`, `[[rule:3]]`, `[[decision:7]]` or `[[fact:5]]` in any text to refer to an item.
+Write `[[epic:3]]`, `[[story:12]]`, `[[task:40]]`, `[[rule:3]]`, `[[decision:7]]` or `[[fact:5]]` in any
+text to refer to an item.
 It is shown as a link with the item's current title (and follows a rename), or plainly as missing
-when nothing has that id, and it opens the item in the detail panel. Typing `[[` in an editor
+when nothing has that number, and it opens the item in the detail panel. Typing `[[` in an editor
 offers a pick-list. A reference is only text: it makes no link and changes no readiness and no
 order. Every item shows **Mentioned in**, the items whose text refers to it (the `find_mentions`
 tool works this out when asked and stores nothing), and the graph has a **References** switch that
@@ -232,8 +256,8 @@ draws them. Titles are not read for references.
 ## Jump to
 
 Press Ctrl+K (⌘K on a Mac), or use the button in the top bar, on any view. Type a word of an item's
-title, its id (`12`, `#12`, `requirement 3`, `decision 7`, `fact 5`) or the name of a view, drawer or
-settings page, and Enter goes there.
+title, its code (`S-12`, `story 12`, `requirement 3`, `decision 7`, `fact 5`) or the name of a view,
+drawer or settings page, and Enter goes there.
 
 ## Activity
 
@@ -280,8 +304,10 @@ work, and for the agents' `list_nodes` tool (as `query`), with the same answer f
 
 - Words find items whose title or details contain them, whatever the case: `login "reset password"`.
 - `field:value` narrows by a field, and commas mean "any of these": `status:ready,in_progress`. The
-  fields are `kind`, `status`, `priority`, `claimed`, `parent`, `epic`, `story`, `id`, `start`,
-  `target`, `is` and `no`.
+  fields are `kind`, `status`, `priority`, `claimed`, `parent`, `epic`, `story`, `number`, `start`,
+  `target`, `is` and `no`. `epic:3` is epic 3 and everything under it, `story:12` is story 12 and
+  its tasks, `parent:epic:3` is what is directly under epic 3, and `number:7` with `kind:task` is
+  task 7.
 - A leading `-` leaves things out: `-status:done`, `-claimed` (not held by anyone).
 - `claimed` and `waiting` alone mean held by someone and waiting on something. `no:field` means
   empty (`no:start`, `no:target`, `no:claimed`, `no:parent`, `no:body`, `no:waiting`).
@@ -300,8 +326,10 @@ Everything you choose lives in the address after the `#` (never a session or a k
 be reproduced by opening the same address, and the server keeps no saved views.
 
 - The view is `#/board`, `#/graph` or `#/roadmap` (or `#/access`, `#/tools`, `#/status`).
-- After it come the choices: `sel=node:12` (or `rule:3`, `decision:7`, `fact:5`) for the record open
-  in the detail panel; `q=` for the work filter and `epic=` for an epic.
+- After it come the choices: `sel=story:12` (or `epic:3`, `task:40`, `rule:3`, `decision:7`,
+  `fact:5`) for the record open in the detail panel; `q=` for the work filter and `epic=` (the
+  epic's number) for an epic.
+- An item's own page is `#/item?item=story:12`.
 - For the Graph: `view=work`, `context` or `everything`, and `as=map` or `list`.
 - For the Roadmap: `group=` and `zoom=`.
 - For the drawers: `drawer=search` or `drawer=activity`, with `search=`, `search_mode=` and the

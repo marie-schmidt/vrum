@@ -9,8 +9,8 @@ import { actor, notify } from './ctx.js';
 import { h, plural } from './dom.js';
 import { parentChoices } from './create.js';
 import { recordKind } from './entries.js';
-import { clip, dialogForm, field, fieldRow, openDialog, picker, refuse } from './forms.js';
-import { kindIcon } from './labels.js';
+import { clip, dialogForm, field, fieldRow, openDialog, pickedRef, picker, refuse } from './forms.js';
+import { codeOf, kindIcon, nodeWords, parseNodeRef } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { kindWords, loadTargets } from './references.js';
 import { store, sync, titleOf } from './store.js';
@@ -25,8 +25,10 @@ const text = (id, name, value = '') => named(h('input', { type: 'text', name, va
 const area = (id, name, rows, value = '') => named(withReferences(h('textarea', { name, rows, value })), id);
 const date = (id, name) => named(h('input', { type: 'date', name }), id);
 
+// What a record concerns, as the picker holds it: an epic, story or task by its reference
+// (`nodes`), a requirement or a decision by its id.
 const refsOf = (value) => [
-  ...(value.node_ids || []).map((id) => ({ type: 'node', id })),
+  ...(value.nodes || []).map((ref) => ({ type: 'node', id: ref })),
   ...(value.rule_ids || []).map((id) => ({ type: 'rule', id })),
   ...(value.decision_ids || []).map((id) => ({ type: 'decision', id })),
 ];
@@ -66,7 +68,7 @@ const replacingBlock = (records, kind) =>
 
 // -- recording a fact ------------------------------------------------------------------------------
 
-// `prefill`: { text, source, node_ids, rule_ids, decision_ids, onDone } to start from.
+// `prefill`: { text, source, nodes, rule_ids, decision_ids, onDone } to start from (`nodes` are references).
 export async function recordFactDialog(prefill = {}) {
   await titlesIfPossible();
   const body = area('record-fact-text', 'text', 4, prefill.text || '');
@@ -95,7 +97,7 @@ export async function recordFactDialog(prefill = {}) {
 
 // -- recording a decision --------------------------------------------------------------------------
 
-// `prefill`: { title, text, reason, decided_by, project_wide, node_ids, rule_ids, onDone }.
+// `prefill`: { title, text, reason, decided_by, project_wide, nodes, rule_ids, onDone }.
 export async function recordDecisionDialog(prefill = {}) {
   await titlesIfPossible();
   const title = text('record-decision-title', 'title', prefill.title || '');
@@ -265,12 +267,13 @@ export async function linkDialog(record) {
   const shown = h('ul', { class: 'plain concerns-list' });
   const problem = h('p', { class: 'problem', role: 'alert' });
   const name = (ref) => {
-    if (ref.type === 'node') return `#${ref.id} ${titleOf(ref.id)}`;
+    if (ref.type === 'node') return `${codeOf(ref.id)} ${titleOf(ref.id)}`;
     const list = (ref.type === 'rule' ? store.rules : store.decisions) || [];
     const item = list.find((entry) => entry.id === ref.id);
     return `${ref.type === 'rule' ? 'requirement' : 'decision'} #${ref.id}${item ? ` ${clip(item.title, 60)}` : ''}`;
   };
-  const kindOf = (ref) => (ref.type === 'node' ? store.nodes.get(ref.id)?.kind || 'story' : ref.type);
+  const kindOf = (ref) => (ref.type === 'node' ? parseNodeRef(ref.id)?.kind || 'story' : ref.type);
+  const LISTS = { node: 'nodes', rule: 'rule_ids', decision: 'decision_ids' };
   const draw = () => {
     const refs = refsOf(current);
     shown.replaceChildren(
@@ -278,10 +281,10 @@ export async function linkDialog(record) {
         ? refs.map((ref) =>
             h(
               'li',
-              { dataset: { ref: `${ref.type}:${ref.id}` } },
+              { dataset: { ref: pickedRef(ref) } },
               kindIcon(kindOf(ref), 16),
               h('span', { class: 'concern-name' }, name(ref)),
-              h('button', { type: 'button', class: 'unlink small', 'aria-label': `Take out ${name(ref)}`, onclick: () => change(tools.remove, { [`${ref.type}_ids`]: [ref.id] }) }, 'Take out'),
+              h('button', { type: 'button', class: 'unlink small', 'aria-label': `Take out ${name(ref)}`, onclick: () => change(tools.remove, { [LISTS[ref.type]]: [ref.id] }) }, 'Take out'),
             ),
           )
         : [h('li', { class: 'quiet' }, 'It concerns nothing yet.')]),
@@ -290,7 +293,7 @@ export async function linkDialog(record) {
   const change = async (tool, ids) => {
     problem.replaceChildren();
     if (!Object.keys(ids).length) {
-      refuse(problem, 'Choose what to add first: type an id such as #12, or pick from the list.');
+      refuse(problem, 'Choose what to add first: type a code such as S-12, or pick from the list.');
       return;
     }
     try {
@@ -368,14 +371,15 @@ const REQUIREMENT_STATUSES = [
   ['dropped', 'Dropped'],
 ];
 
-// Writes a requirement (a rule), or changes one. `story` is where a new one goes, to start with;
+// Writes a requirement (a rule), or changes one. `story` is the reference of the story a new one goes
+// in, to start with;
 // `rule` is the one to change, at the version the person saw. `onDone(requirement)` runs after.
 export function requirementDialog({ rule = null, story = null, onDone = null } = {}) {
   const title = text('requirement-title', 'title', rule?.title || '');
   const body = area('requirement-body', 'body', 6, rule?.body || '');
   const status = named(h('select', { name: 'status', value: rule?.status || 'held' }, REQUIREMENT_STATUSES.map(([value, label]) => h('option', { value }, label))), 'requirement-status');
   const where = named(h('select', { name: 'story' }, h('option', { value: '' }, 'Not in a story yet (place it later)'), parentChoices('task')), 'requirement-story');
-  if (story !== null) where.value = String(story);
+  if (story !== null) where.value = story;
   const { form } = dialogForm({
     fields: [
       field('The requirement, stated briefly', title),
@@ -386,7 +390,7 @@ export function requirementDialog({ rule = null, story = null, onDone = null } =
     work: async () => {
       let made;
       if (!rule) {
-        made = await call('create_rule', { actor: actor(), title: title.value, body: body.value, status: status.value, story_id: where.value ? Number(where.value) : null });
+        made = await call('create_rule', { actor: actor(), title: title.value, body: body.value, status: status.value, story: where.value || null });
         notify(`Created requirement #${made.id}, “${made.title}”.`);
       } else {
         const args = { actor: actor(), rule_id: rule.id, expected_version: rule.version };
@@ -409,9 +413,9 @@ export function requirementDialog({ rule = null, story = null, onDone = null } =
 
 // Puts a requirement that is in no story into one, or moves one from its story to another.
 export function placeRequirementDialog(rule, { onDone = null } = {}) {
-  const placing = rule.story_id === null || rule.story_id === undefined;
+  const placing = rule.story === null || rule.story === undefined;
   const where = named(h('select', { name: 'story' }, parentChoices('task')), 'requirement-target');
-  const here = placing ? 'It is in no story yet.' : `It is in story #${rule.story_id} ${titleOf(rule.story_id)}.`;
+  const here = placing ? 'It is in no story yet.' : `It is in story ${codeOf(rule.story)} ${titleOf(rule.story)}.`;
   const { form } = dialogForm({
     fields: [
       h('p', {}, h('strong', {}, `Requirement #${rule.id}: ${rule.title}`)),
@@ -425,10 +429,10 @@ export function placeRequirementDialog(rule, { onDone = null } = {}) {
         actor: actor(),
         rule_id: rule.id,
         expected_version: rule.version,
-        ...(placing ? { story_id: Number(where.value) } : { new_story_id: Number(where.value) }),
+        ...(placing ? { story: where.value } : { new_story: where.value }),
       });
       box.close();
-      notify(`${placing ? 'Put' : 'Moved'} requirement #${rule.id} ${placing ? 'in' : 'to'} story #${where.value}.`);
+      notify(`${placing ? 'Put' : 'Moved'} requirement #${rule.id} ${placing ? 'in' : 'to'} ${nodeWords(where.value)}.`);
       await sync();
       onDone?.(made);
     },

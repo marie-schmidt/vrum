@@ -10,6 +10,9 @@ The language: words and `field:value` terms.
     group.
   - `no:field` finds the items where it is empty. `claimed` and `waiting` on their own find the
     items that have one, and `-claimed` the ones that do not.
+  - `epic:3` finds epic 3 and everything under it, `story:12` story 12 and its tasks, `number:7`
+    the items with that number (with `kind:` to say which kind), and `parent:epic:3` the items
+    directly under epic:3 (a parent is written as a reference, a kind and a number).
   - `start:` and `target:` take a day (2026-11-30), a range (2026-11-01..2026-12-31, either end
     may be left off) or `none`. `is:overdue` finds the overdue ones.
 Everything a person typed is passed to the database as a value, never as part of the statement."""
@@ -19,7 +22,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from vrum.common import Refusal
+from vrum.common import Refusal, is_node_ref
 
 # What a question can be about. A test checks that each of these is handled.
 KINDS = ("epic", "story", "task")
@@ -33,7 +36,7 @@ FIELDS = (
     "parent",
     "epic",
     "story",
-    "id",
+    "number",
     "start",
     "target",
     "is",
@@ -47,17 +50,19 @@ MAX_QUERY_CHARS = 2000
 
 _HELP = (
     "Use words, and field:value terms such as kind:task, status:ready,in_progress, priority:high, "
-    "claimed:ann, target:2026-11-01..2026-12-31 or is:overdue; a leading - leaves matches out, "
-    "no:field finds the empty ones, and OR joins alternatives. Put a word in quotes to search for "
-    "it as it is."
+    "epic:3, parent:story:12, claimed:ann, target:2026-11-01..2026-12-31 or is:overdue; a leading "
+    "- leaves matches out, no:field finds the empty ones, and OR joins alternatives. Put a word "
+    "in quotes to search for it as it is."
 )
 
-# The condition for each way a node can be found, on the node_state view.
+# The condition for each way a node can be found, on the node_state view. An epic or a story is
+# named by its number as the person types it (`epic:3`), and the database knows it by its
+# reference (`epic:3`), so the two meet here.
 _EPIC = (
-    "(CASE kind WHEN 'epic' THEN id WHEN 'story' THEN parent_id ELSE "
-    "(SELECT p.parent_id FROM nodes p WHERE p.id = node_state.parent_id) END)"
+    "(CASE kind WHEN 'epic' THEN ref WHEN 'story' THEN parent ELSE "
+    "(SELECT p.parent FROM nodes p WHERE p.ref = node_state.parent) END)"
 )
-_STORY = "(CASE kind WHEN 'story' THEN id WHEN 'task' THEN parent_id END)"
+_STORY = "(CASE kind WHEN 'story' THEN ref WHEN 'task' THEN parent END)"
 _FLAG_SQL = {
     "overdue": "overdue",
     "conflict": "cardinality(schedule_conflicts) > 0",
@@ -69,7 +74,7 @@ _EMPTY_SQL = {
     "start": "start_on IS NULL",
     "target": "target_on IS NULL",
     "claimed": "claimed_by IS NULL",
-    "parent": "parent_id IS NULL",
+    "parent": "parent IS NULL",
     "body": "btrim(body) = ''",
     "waiting": "cardinality(waiting_on) = 0",
 }
@@ -174,14 +179,29 @@ def _choice(term: Term, label: str, allowed: tuple[str, ...]) -> list[str]:
 def _whole_numbers(term: Term) -> list[int]:
     numbers = []
     for value in term.values:
-        cleaned = value.strip().removeprefix("#")
-        if not cleaned.isdecimal():
+        cleaned = value.strip()
+        # At most 18 digits, as in a reference, so that it always fits the database's number.
+        if not cleaned.isdecimal() or len(cleaned) > 18:
             raise _refuse(
                 f"in {term.text!r}, {term.field} needs a whole number such as {term.field}:12, "
                 f"but one value is {value!r}."
             )
         numbers.append(int(cleaned))
     return numbers
+
+
+def _references(term: Term) -> list[str]:
+    """The references a `parent:` term names, such as epic:3, each in its one written form."""
+    found = []
+    for value in term.values:
+        cleaned = value.strip().lower()
+        if not is_node_ref(cleaned):
+            raise _refuse(
+                f"in {term.text!r}, {term.field} needs the reference of an epic or a story, a kind "
+                f"and a number, such as {term.field}:epic:3, but one value is {value!r}."
+            )
+        found.append(cleaned)
+    return found
 
 
 def _day(term: Term, value: str) -> date:
@@ -265,9 +285,14 @@ def _condition(term: Term, params: _Params) -> str:
     if field == "claimed":
         names = [value.strip().lower() for value in term.values]
         return f"lower(claimed_by) = ANY({params.add(names)})"
-    if field in ("parent", "id", "epic", "story"):
-        expression = {"parent": "parent_id", "id": "id", "epic": _EPIC, "story": _STORY}[field]
-        return f"{expression} = ANY({params.add(_whole_numbers(term))})"
+    if field == "number":
+        return f"number = ANY({params.add(_whole_numbers(term))})"
+    if field == "parent":
+        return f"parent = ANY({params.add(_references(term))})"
+    if field in ("epic", "story"):
+        refs = [f"{field}:{number}" for number in _whole_numbers(term)]
+        expression = _EPIC if field == "epic" else _STORY
+        return f"{expression} = ANY({params.add(refs)})"
     if field in ("start", "target"):
         return _dates(term, f"{field}_on", params)
     if field == "is":
@@ -283,6 +308,7 @@ def _example(field: str) -> str:
         "status": "ready",
         "priority": "high",
         "claimed": "ann",
+        "parent": "epic:3",
         "is": "overdue",
         "no": "claimed",
         "start": "2026-11-01..2026-12-31",

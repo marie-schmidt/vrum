@@ -52,14 +52,21 @@ class Side:
 
 @dataclass
 class OnlyThere:
-    """Ids in the third project that no other project has: the extras it was given."""
+    """What the third project has that no other project has: the extras it was given. Epics,
+    stories and tasks are named by reference (such as task:13); the other kinds by id."""
 
-    epic: int
-    story: int
-    node: int
+    epic: str
+    story: str
+    node: str
     rule: int
     decision: int
     fact: int
+
+
+def nowhere(ref: str) -> str:
+    """What a tool says of an epic, story or task that is not in the project."""
+    kind, _, number = ref.partition(":")
+    return f"There is no {kind} {number} in this project"
 
 
 async def with_more(client: Client) -> OnlyThere:
@@ -70,7 +77,7 @@ async def with_more(client: Client) -> OnlyThere:
         actor="ann",
         kind="story",
         title="Only here story",
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
     task = story
     for number in range(10):
@@ -80,7 +87,7 @@ async def with_more(client: Client) -> OnlyThere:
             actor="ann",
             kind="task",
             title=f"Only here task {number}",
-            parent_id=story["id"],
+            parent=story["ref"],
         )
     rule = await ok(client, "create_rule", actor="ann", title="Only here rule")
     for number in range(3):
@@ -92,9 +99,9 @@ async def with_more(client: Client) -> OnlyThere:
     for number in range(12):
         fact = await make_fact(client, f"Only here fact {number}")
     return OnlyThere(
-        epic=epic["id"],
-        story=story["id"],
-        node=task["id"],
+        epic=epic["ref"],
+        story=story["ref"],
+        node=task["ref"],
         rule=rule["id"],
         decision=decision["id"],
         fact=fact["id"],
@@ -130,7 +137,7 @@ def owns(side: Side, others: list[Side], found: Any) -> None:
 # -- every tool shows only its own project -------------------------------------------------------
 
 
-async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_same_numbers() -> (
+async def test_each_project_holds_only_its_own_records_though_their_references_are_the_same() -> (
     None
 ):
     async with three_projects() as (a1, a2, b1, _):
@@ -141,7 +148,10 @@ async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_
             assert nodes and all(
                 side.word in str(node["title"]) or "Only here" in node["title"] for node in nodes
             )
-            assert {1, 2, 3, 4, 5, 6} <= {node["id"] for node in nodes}
+            # Each project counts each kind from 1 on its own.
+            assert {"epic:1", "story:1", "story:2", "task:1", "task:2", "task:3"} <= {
+                node["ref"] for node in nodes
+            }
             for tool in ("list_rules", "list_decisions", "list_facts"):
                 found = await ok(side.client, tool, limit=200)
                 owns(side, others, found["items"])
@@ -158,12 +168,13 @@ async def test_each_project_holds_only_its_own_records_though_their_ids_are_the_
             assert counts["decisions"] == exported["counts"]["decisions"]
             assert counts["facts"] == exported["counts"]["facts"]
             assert counts["epics"] + counts["stories"] + counts["tasks"] == len(exported["nodes"])
-        # The same number names a different record in each project.
-        titles = {
-            side.project.id: (await ok(side.client, "get_node", node_id=1))["title"]
-            for side in sides
-        }
-        assert len(set(titles.values())) == 3
+        # The same reference names a different record in each project.
+        for ref in ("epic:1", "story:1", "task:1"):
+            titles = {
+                side.project.id: (await ok(side.client, "get_node", node=ref))["title"]
+                for side in sides
+            }
+            assert len(set(titles.values())) == 3, ref
         # The third has more than the others, and the others know nothing of those.
         assert len(await all_nodes(b1.client)) > len(await all_nodes(a1.client))
 
@@ -176,7 +187,7 @@ async def test_a_project_wide_decision_applies_throughout_its_project_and_no_oth
             wide = side.world["wide"]
             # A task that no decision names: the project-wide decision of the project still
             # applies to it, in its recall.
-            recalled = await ok(side.client, "recall", node_id=side.world["task3"]["id"])
+            recalled = await ok(side.client, "recall", node=side.world["task3"]["ref"])
             assert [
                 item["decision"]["id"] for item in recalled["project_wide_decisions"]["items"]
             ] == [wide["id"]]
@@ -191,10 +202,10 @@ async def test_a_project_wide_decision_applies_throughout_its_project_and_no_oth
                 actor="ann",
                 kind="story",
                 title=f"A free story {side.word}",
-                parent_id=epic["id"],
+                parent=epic["ref"],
             )
             seen = await ok(
-                side.client, "next_work", actor="agent-x", within_node_id=epic["id"], peek=True
+                side.client, "next_work", actor="agent-x", within_node=epic["ref"], peek=True
             )
             assert seen["found"] and seen["peeked"]
             briefing = seen["context"]["project_wide_decisions"]
@@ -217,10 +228,10 @@ async def test_a_project_wide_decision_applies_throughout_its_project_and_no_oth
             owns(side, others, exported["decisions"])
 
 
-# -- an id that exists only elsewhere
+# -- a reference or an id that exists only elsewhere
 
 
-async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_nothing_moves() -> (
+async def test_a_guessed_reference_or_id_from_another_project_is_refused_and_nothing_moves() -> (
     None
 ):
     async with three_projects() as (a1, a2, b1, there):
@@ -228,28 +239,28 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
         before_b1 = await export_everything(b1.client)
         mine = a1.world
         guesses: list[tuple[str, dict[str, Any], str]] = [
-            ("get_node", {"node_id": there.node}, f"no node with id {there.node}"),
-            ("node_history", {"node_id": there.node}, f"no node with id {there.node}"),
+            ("get_node", {"node": there.node}, nowhere(there.node)),
+            ("node_history", {"node": there.node}, nowhere(there.node)),
             (
                 "update_node",
-                {"actor": "x", "node_id": there.node, "expected_version": 1, "title": "hijacked"},
-                f"no node with id {there.node}",
+                {"actor": "x", "node": there.node, "expected_version": 1, "title": "hijacked"},
+                nowhere(there.node),
             ),
-            ("claim_node", {"actor": "x", "node_id": there.node}, f"no node with id {there.node}"),
+            ("claim_node", {"actor": "x", "node": there.node}, nowhere(there.node)),
             (
                 "create_node",
-                {"actor": "x", "kind": "story", "title": "orphan", "parent_id": there.epic},
-                f"no node with id {there.epic}",
+                {"actor": "x", "kind": "story", "title": "orphan", "parent": there.epic},
+                nowhere(there.epic),
             ),
             (
                 "add_link",
                 {
                     "actor": "x",
-                    "source_id": mine["story1"]["id"],
-                    "target_id": there.node,
+                    "source": mine["story1"]["ref"],
+                    "target": there.node,
                     "link_type": "relates_to",
                 },
-                f"no node with id {there.node}",
+                nowhere(there.node),
             ),
             ("get_rule", {"rule_id": there.rule}, f"no rule with id {there.rule}"),
             (
@@ -259,8 +270,8 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
             ),
             (
                 "create_rule",
-                {"actor": "x", "title": "in a foreign story", "story_id": there.story},
-                f"{there.story}",
+                {"actor": "x", "title": "in a foreign story", "story": there.story},
+                nowhere(there.story),
             ),
             (
                 "get_decision",
@@ -287,9 +298,9 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
                     "text": "t",
                     "reason": "r",
                     "decided_by": "x",
-                    "node_ids": [there.node],
+                    "nodes": [there.node],
                 },
-                f"no node with id {there.node}",
+                nowhere(there.node),
             ),
             ("get_fact", {"fact_id": there.fact}, f"no fact with id {there.fact}"),
             ("fact_history", {"fact_id": there.fact}, f"no fact with id {there.fact}"),
@@ -321,13 +332,13 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
             ),
             (
                 "link_fact",
-                {"actor": "x", "fact_id": mine["fact2"]["id"], "node_ids": [there.node]},
-                f"no node with id {there.node}",
+                {"actor": "x", "fact_id": mine["fact2"]["id"], "nodes": [there.node]},
+                nowhere(there.node),
             ),
             (
                 "link_decision",
-                {"actor": "x", "decision_id": mine["wide"]["id"], "node_ids": [there.node]},
-                f"no node with id {there.node}",
+                {"actor": "x", "decision_id": mine["wide"]["id"], "nodes": [there.node]},
+                nowhere(there.node),
             ),
             (
                 "retain_fact",
@@ -375,21 +386,19 @@ async def test_a_guessed_id_that_exists_only_in_another_project_is_refused_and_n
             ),
             (
                 "finish_work",
-                {"actor": "x", "node_id": there.node, "outcome": "done", "note": "n"},
-                f"{there.node}",
+                {"actor": "x", "node": there.node, "outcome": "done", "note": "n"},
+                nowhere(there.node),
             ),
         ]
         for tool, arguments, words in guesses:
             said = await refused(a1.client, tool, **arguments)
             assert words in said, (tool, said)
         # The sibling project of the same account is no different.
-        assert f"no node with id {there.node}" in await refused(
-            a2.client, "get_node", node_id=there.node
-        )
+        assert nowhere(there.node) in await refused(a2.client, "get_node", node=there.node)
         # Nothing was created or changed, in either project.
         assert await export_everything(a1.client) == before_a1
         assert await export_everything(b1.client) == before_b1
-        assert (await ok(b1.client, "get_node", node_id=there.node))["version"] == 1
+        assert (await ok(b1.client, "get_node", node=there.node))["version"] == 1
 
 
 async def test_arguments_and_names_that_claim_to_be_someone_else_grant_nothing() -> None:
@@ -426,9 +435,11 @@ async def test_arguments_and_names_that_claim_to_be_someone_else_grant_nothing()
             else None
         )
         if node is not None:
-            history = await ok(a1.client, "node_history", node_id=node["id"])
+            history = await ok(a1.client, "node_history", node=node["ref"])
             assert history["items"][0]["actor"] == "the owner of the third project"
-        assert "no node with id" in await refused(b1.client, "get_node", node_id=10_000)
+        assert "There is no task 10000 in this project" in await refused(
+            b1.client, "get_node", node="task:10000"
+        )
 
 
 # -- search, similar items, overlaps and recall
@@ -461,7 +472,7 @@ async def test_search_by_words_and_by_meaning_similar_items_overlaps_and_recall_
             overlaps = await ok(side.client, "find_overlaps", min_similarity=0.0)
             for other in others:
                 assert other.word not in json.dumps(overlaps)
-            owns(side, others, await ok(side.client, "recall", node_id=side.world["story1"]["id"]))
+            owns(side, others, await ok(side.client, "recall", node=side.world["story1"]["ref"]))
             # The index of a project holds exactly that project's own embeddable items.
             counts = (await ok(side.client, "server_status"))["counts"]
             embeddable = sum(
@@ -490,10 +501,10 @@ async def test_claims_who_is_working_ready_work_and_the_change_feed_are_each_pro
             actor="ann",
             kind="story",
             title=f"A free story {a1.word}",
-            parent_id=a1.world["epic"]["id"],
+            parent=a1.world["epic"]["ref"],
         )
         taken = await ok(a1.client, "next_work", actor="agent-zed")
-        assert taken["work"]["id"] == free["id"] and taken["claim"] is not None
+        assert taken["work"]["ref"] == free["ref"] and taken["claim"] is not None
         assert a1.word in json.dumps(taken)
         for side in (a2, b1):
             assert "agent-zed" not in json.dumps(await ok(side.client, "who_is_working"))
@@ -505,7 +516,7 @@ async def test_claims_who_is_working_ready_work_and_the_change_feed_are_each_pro
             a1.client,
             "finish_work",
             actor="agent-zed",
-            node_id=taken["work"]["id"],
+            node=taken["work"]["ref"],
             outcome="released",
             note="Nothing done.",
         )
@@ -531,22 +542,26 @@ async def test_the_database_refuses_a_reference_from_one_project_to_another_even
         mine = a1.world
         # The owner of the database, who is not held back by the row filter, still cannot join
         # what is not joined: the project is part of every key.
-        assert "node_parent_has_the_right_kind" in sql_refused(
-            "INSERT INTO nodes (project_id, id, kind, parent_id, title) "
-            f"VALUES ({one}, 9001, 'story', {there.epic}, 'x')"
+        assert "node_parent_exists" in sql_refused(
+            "INSERT INTO nodes (project_id, kind, number, parent, title) "
+            f"VALUES ({one}, 'story', 9001, '{there.epic}', 'x')"
         )
         assert "link_ends_at_a_node" in sql_refused(
-            "INSERT INTO links (project_id, source_id, target_id, link_type) "
-            f"VALUES ({one}, {mine['story1']['id']}, {there.node}, 'relates_to')",
+            "INSERT INTO links (project_id, source, target, link_type) "
+            f"VALUES ({one}, '{mine['story1']['ref']}', '{there.node}', 'relates_to')",
             project=one,
         )
-        assert "violates foreign key constraint" in sql_refused(
-            "INSERT INTO decision_nodes (project_id, decision_id, node_id) "
-            f"VALUES ({one}, {mine['wide']['id']}, {there.node})"
+        assert "claim_is_on_a_real_node" in sql_refused(
+            "INSERT INTO claims (project_id, node, actor, expires_at) "
+            f"VALUES ({one}, '{there.node}', 'x', now() + interval '1 hour')"
         )
         assert "violates foreign key constraint" in sql_refused(
-            "INSERT INTO fact_nodes (project_id, fact_id, node_id) "
-            f"VALUES ({one}, {mine['fact2']['id']}, {there.node})"
+            "INSERT INTO decision_nodes (project_id, decision_id, node) "
+            f"VALUES ({one}, {mine['wide']['id']}, '{there.node}')"
+        )
+        assert "violates foreign key constraint" in sql_refused(
+            "INSERT INTO fact_nodes (project_id, fact_id, node) "
+            f"VALUES ({one}, {mine['fact2']['id']}, '{there.node}')"
         )
         assert "violates foreign key constraint" in sql_refused(
             "INSERT INTO fact_rules (project_id, fact_id, rule_id) "
@@ -557,8 +572,8 @@ async def test_the_database_refuses_a_reference_from_one_project_to_another_even
             f"VALUES ({one}, {mine['fact2']['id']}, {there.decision})"
         )
         assert "violates foreign key constraint" in sql_refused(
-            "INSERT INTO events (project_id, id, node_id, action, actor, after) "
-            f"VALUES ({one}, 999999, {there.node}, 'update', 'x', '{{}}')"
+            "INSERT INTO events (project_id, id, node, action, actor, after) "
+            f"VALUES ({one}, 999999, '{there.node}', 'update', 'x', '{{}}')"
         )
         # Replacement cannot cross either: not a fact's, not a decision's.
         assert "violates foreign key constraint" in sql_refused(
@@ -570,13 +585,13 @@ async def test_the_database_refuses_a_reference_from_one_project_to_another_even
             f"WHERE project_id = {one} AND id = {mine['wide']['id']}"
         )
         assert "rule_belongs_to_a_story" in sql_refused(
-            f"UPDATE rules SET story_id = {there.story}, version = version + 1 "
+            f"UPDATE rules SET story = '{there.story}', version = version + 1 "
             f"WHERE project_id = {one} AND id = {mine['rule2']['id']}"
         )
         # A row cannot be moved to another project.
         assert "cannot move to another project" in sql_refused(
             f"UPDATE nodes SET project_id = {three}, version = version + 1 "
-            f"WHERE project_id = {one} AND id = {mine['task1']['id']}"
+            f"WHERE project_id = {one} AND ref = '{mine['task1']['ref']}'"
         )
         assert await export_everything(a1.client) == before_a1
         assert await export_everything(b1.client) == before_b1
@@ -595,25 +610,38 @@ async def test_a_projects_database_role_sees_and_writes_only_its_own_rows_and_no
         mine = len(await all_nodes(a1.client))
         assert count("SELECT count(*) FROM nodes", one) == str(mine)
         assert count(f"SELECT count(*) FROM nodes WHERE project_id = {three}", one) == "0"
-        assert count(f"SELECT count(*) FROM nodes WHERE id = {there.node}", one) == "0"
-        assert count(f"SELECT count(*) FROM node_state WHERE id = {there.node}", one) == "0"
+        # A reference every project has names only this project's own item.
+        assert count("SELECT count(*) FROM nodes WHERE ref = 'epic:1'", one) == "1"
+        assert count("SELECT count(*) FROM node_state WHERE ref = 'epic:1'", one) == "1"
+        # One that only the third project has is not seen, even when asked for by its project.
+        for table in ("nodes", "node_state"):
+            assert (
+                count(
+                    f"SELECT count(*) FROM {table} "
+                    f"WHERE project_id = {three} AND ref = '{there.node}'",
+                    one,
+                )
+                == "0"
+            )
         # With no project named at all, nothing is seen and nothing can be written.
         assert count("SELECT count(*) FROM nodes", None) == "0"
         assert count("SELECT count(*) FROM events", None) == "0"
         assert "No project is named" in sql_refused(
-            "INSERT INTO nodes (kind, title) VALUES ('epic', 'nowhere')", as_project=True
+            "INSERT INTO nodes (kind, number, title) VALUES ('epic', next_id('epic'), 'nowhere')",
+            as_project=True,
         )
         # Another project's number written into a row is refused by the row filter.
         forged = sql_refused(
-            f"INSERT INTO nodes (project_id, kind, title) VALUES ({three}, 'epic', 'forged')",
+            "INSERT INTO nodes (project_id, kind, number, title) "
+            f"VALUES ({three}, 'epic', next_id('epic'), 'forged')",
             project=one,
             as_project=True,
         )
         assert "row-level security" in forged
         # A row of another project cannot be changed or deleted: it is not there to be touched.
         changed = run_sql(
-            f"UPDATE nodes SET title = 'x', version = version + 1 WHERE id = {there.node} "
-            "RETURNING id",
+            f"UPDATE nodes SET title = 'x', version = version + 1 "
+            f"WHERE project_id = {three} AND ref = '{there.node}' RETURNING ref",
             plain=True,
             project=one,
             as_project=True,
@@ -635,7 +663,7 @@ async def test_a_projects_database_role_sees_and_writes_only_its_own_rows_and_no
                 f"SELECT count(*) FROM {table}", project=one, as_project=True
             )
         assert await export_everything(b1.client) == before_b1
-        assert (await ok(b1.client, "get_node", node_id=there.node))["title"] != "x"
+        assert (await ok(b1.client, "get_node", node=there.node))["title"] != "x"
         assert (await ok(b1.client, "get_fact", fact_id=there.fact))["confirmed_by"] is None
         assert (await ok(b1.client, "get_decision", decision_id=there.decision))[
             "confirmed_by"
@@ -703,12 +731,26 @@ async def test_a_projects_export_loads_into_an_empty_project_of_the_same_person_
             # A project that holds something refuses a second import, and says why.
             said = await refused(loaded, "import_graph", actor="marie", document=document)
             assert "already holds data" in said and "Nothing was imported" in said
-            # New work continues after the highest id in the file.
-            highest = max(node["id"] for node in document["nodes"])
-            made = await ok(
-                loaded, "create_node", actor="ann", kind="epic", title="After the import"
-            )
-            assert made["id"] == highest + 1
+            # New work continues after the highest number of its own kind in the file.
+            for kind in ("epic", "story", "task"):
+                highest = max(node["number"] for node in document["nodes"] if node["kind"] == kind)
+                parent = None
+                if kind != "epic":
+                    parent_kind = "epic" if kind == "story" else "story"
+                    parent = next(
+                        f"{parent_kind}:{node['number']}"
+                        for node in document["nodes"]
+                        if node["kind"] == parent_kind
+                    )
+                made = await ok(
+                    loaded,
+                    "create_node",
+                    actor="ann",
+                    kind=kind,
+                    title="After the import",
+                    parent=parent,
+                )
+                assert made["ref"] == f"{kind}:{highest + 1}"
             status = await ok(loaded, "server_status")
             assert (
                 status["counts"]["epics"]

@@ -341,7 +341,7 @@ async def test_a_request_just_under_the_limit_is_accepted(client: Client) -> Non
     node = await ok(client, "create_node", actor="ann", kind="epic", title="A long one", body=body)
 
     assert node["body"] == body
-    assert (await ok(client, "get_node", node_id=node["id"]))["body"] == body
+    assert (await ok(client, "get_node", node=node["ref"]))["body"] == body
 
 
 async def test_a_text_too_long_to_be_searched_is_refused_plainly_and_not_as_a_broken_database(
@@ -372,14 +372,14 @@ async def a_world(client: Client) -> dict[str, Any]:
     """One of everything a write can name, with a claim held by ann, for the cases below."""
     epic = await ok(client, "create_node", actor="ann", kind="epic", title="An epic")
     story = await ok(
-        client, "create_node", actor="ann", kind="story", title="A story", parent_id=epic["id"]
+        client, "create_node", actor="ann", kind="story", title="A story", parent=epic["ref"]
     )
     task = await ok(
-        client, "create_node", actor="ann", kind="task", title="A task", parent_id=story["id"]
+        client, "create_node", actor="ann", kind="task", title="A task", parent=story["ref"]
     )
-    await ok(client, "claim_node", actor="ann", node_id=task["id"])
-    rule = await ok(client, "create_rule", actor="ann", title="A rule", story_id=story["id"])
-    decision = await make_decision(client, "A decision", node_ids=[story["id"]])
+    await ok(client, "claim_node", actor="ann", node=task["ref"])
+    rule = await ok(client, "create_rule", actor="ann", title="A rule", story=story["ref"])
+    decision = await make_decision(client, "A decision", nodes=[story["ref"]])
     fact = await make_fact(client, "A fact")
     return {
         "story": story,
@@ -393,7 +393,7 @@ async def a_world(client: Client) -> dict[str, Any]:
 def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
     """(tool, a function from a text to the arguments with that text in the field, the field the
     refusal should name)."""
-    story, task, rule = world["story"]["id"], world["task"]["id"], world["rule"]["id"]
+    story, task, rule = world["story"]["ref"], world["task"]["ref"], world["rule"]["id"]
     decision, fact = world["decision"]["id"], world["fact"]["id"]
 
     def plan(secret: str, where: str) -> dict[str, Any]:
@@ -427,9 +427,9 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         "record_id": decision,
         "confirmation": "unconfirmed",
     }
-    task_edit = {"actor": "a", "node_id": task, "expected_version": 1}
+    task_edit = {"actor": "a", "node": task, "expected_version": 1}
     rule_edit = {"actor": "a", "rule_id": rule, "expected_version": 1}
-    claimed = {"actor": "ann", "node_id": task}
+    claimed = {"actor": "ann", "node": task}
     created = {"actor": "a", "kind": "epic", "title": "t"}
     return [
         edit("create_node", "title", actor="a", kind="epic"),
@@ -442,8 +442,8 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
             lambda s: {
                 "actor": "a",
                 "changes": [
-                    {"node_id": task, "expected_version": 1, "priority": "high"},
-                    {"node_id": task, "expected_version": 1, "title": s},
+                    {"node": task, "expected_version": 1, "priority": "high"},
+                    {"node": task, "expected_version": 1, "title": s},
                 ],
             },
             "changes[1].title",
@@ -452,7 +452,7 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
             "update_nodes",
             lambda s: {
                 "actor": "a",
-                "changes": [{"node_id": task, "expected_version": 1, "body": s}],
+                "changes": [{"node": task, "expected_version": 1, "body": s}],
             },
             "changes[0].body",
         ),
@@ -485,8 +485,8 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         edit("set_confirmation", "quote", **unconfirm_decision, person="Marie"),
         edit("finish_work", "note", **claimed, outcome="done"),
         edit("release_claim", "note", **claimed),
-        edit("claim_node", "actor", node_id=task),
-        edit("add_link", "actor", source_id=story, target_id=task, link_type="relates_to"),
+        edit("claim_node", "actor", node=task),
+        edit("add_link", "actor", source=story, target=task, link_type="relates_to"),
         edit("search", "query"),
         edit("similar_items", "text"),
     ]
@@ -499,7 +499,7 @@ async def test_a_secret_in_any_free_text_field_is_refused_and_nothing_is_stored_
     secret = a_secret()
     cases = secret_cases(world)
     assert len(cases) >= 40
-    task_before = await ok(client, "get_node", node_id=world["task"]["id"])
+    task_before = await ok(client, "get_node", node=world["task"]["ref"])
     before = count_everything()
 
     for tool, build, path in cases:
@@ -513,7 +513,7 @@ async def test_a_secret_in_any_free_text_field_is_refused_and_nothing_is_stored_
 
     assert count_everything() == before
     assert stored_anywhere(secret) == 0
-    assert await ok(client, "get_node", node_id=world["task"]["id"]) == task_before
+    assert await ok(client, "get_node", node=world["task"]["ref"]) == task_before
 
 
 async def test_ordinary_text_that_talks_about_secrets_is_not_refused(client: Client) -> None:
@@ -526,7 +526,7 @@ async def test_ordinary_text_that_talks_about_secrets_is_not_refused(client: Cli
     node = await ok(client, "create_node", actor="ann", kind="epic", title="Passwords", body=text)
     fact = await make_fact(client, text)
 
-    assert (await ok(client, "get_node", node_id=node["id"]))["body"] == text
+    assert (await ok(client, "get_node", node=node["ref"]))["body"] == text
     assert fact["text"] == text
     decision = await make_decision(client, "Passwords", text=text, reason=text)
     assert (decision["text"], decision["reason"]) == (text, text)
@@ -543,13 +543,13 @@ async def test_arguments_that_do_not_fit_are_refused_in_plain_words_without_repe
 
     missing = await refused(client, "create_node", kind="epic", title="t", body=big_body)
     wrong_type = await refused(client, "list_nodes", limit=f"not a number {word}")
-    several = await refused(client, "get_node", node_id=[1, 2], extra=word)
+    several = await refused(client, "get_node", node=[1, 2], extra=word)
 
     assert "the arguments are not valid" in missing and "actor: Field required" in missing
     assert word not in missing and len(missing) < 500
     assert "limit: Input should be a valid integer" in wrong_type and word not in wrong_type
     assert "Nothing was changed" in wrong_type and "against the tool's description" in wrong_type
-    assert "node_id:" in several and word not in several
+    assert "node:" in several and word not in several
     for message in (missing, wrong_type, several):
         assert "pydantic" not in message and "input_value" not in message
     # A secret in a field of the wrong type is a secret first, and is not repeated either.
@@ -635,12 +635,12 @@ async def test_a_page_size_outside_one_to_two_hundred_is_refused_in_plain_words(
 ) -> None:
     world = await a_world(client)
     needs: dict[str, dict[str, Any]] = {
-        "node_history": {"node_id": world["task"]["id"]},
-        "list_links": {"node_id": world["task"]["id"]},
+        "node_history": {"node": world["task"]["ref"]},
+        "list_links": {"node": world["task"]["ref"]},
         "rule_history": {"rule_id": world["rule"]["id"]},
         "decision_history": {"decision_id": world["decision"]["id"]},
         "fact_history": {"fact_id": world["fact"]["id"]},
-        "recall": {"node_id": world["story"]["id"]},
+        "recall": {"node": world["story"]["ref"]},
         "search": {"query": "anything"},
         "similar_items": {"text": "anything"},
     }
@@ -685,10 +685,10 @@ async def test_the_logs_say_what_happened_and_hold_no_key_no_password_no_session
     recorded = await make_fact(client, f"A fact {content}", source=f"A source {content}")
     await confirm(client, "fact", recorded, person=f"Reviewer {content}", quote=f"Quote {content}")
     await make_decision(client, f"Decision {content}", reason=f"Reason {content}")
-    await refused(client, "claim_node", actor=actor, node_id=999999999)
+    await refused(client, "claim_node", actor=actor, node="task:999999999")
     await refused(client, "create_node", actor=actor, kind="epic", title="t", body=secret)
     await refused(client, "create_node", actor=secret, kind="epic", title="t")
-    await refused(client, "get_node", node_id=999999999)
+    await refused(client, "get_node", node="task:999999999")
     await refused(client, "list_nodes", limit="x")
     revoked = a_revoked_key()
     request(server_url, key=wrong)

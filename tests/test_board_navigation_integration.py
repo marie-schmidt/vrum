@@ -13,7 +13,7 @@ from mcp import Client
 from playwright.async_api import Page, expect
 
 from tests.board_helpers import GONE, PAGES, SETTINGS, SLOW, VIEWS, board_url, browser_page, made
-from tests.helpers import connect, ok, the_token, unique_word
+from tests.helpers import code_of, connect, number_of, ok, the_token, unique_word
 from tests.world import make_project, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -110,8 +110,8 @@ async def test_the_quick_switcher_offers_the_three_views_the_drawers_and_the_set
         # opens by name.
         await page.locator("#switcher-input").fill(word)
         await page.keyboard.press("Enter")
-        await expect(page.locator("#card-title")).to_contain_text(f"#{epic} ", timeout=SLOW)
-        assert page.url.split("#")[1].startswith("/roadmap") and f"sel=node:{epic}" in page.url
+        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(epic)} ", timeout=SLOW)
+        assert page.url.split("#")[1].startswith("/roadmap") and f"sel={epic}" in page.url
         await page.keyboard.press("Control+k")
         await page.locator("#switcher-input").fill("activity")
         await page.keyboard.press("Enter")
@@ -238,7 +238,7 @@ async def test_the_addresses_of_pages_that_are_gone_land_on_the_board_and_nothin
             await on_page(page, "board")
         # Opened as a bookmark would be, in a fresh load, and with the old choice for an item.
         for name in GONE:
-            await page.goto(f"{board}#/{name}?card={epic}")
+            await page.goto(f"{board}#/{name}?card={number_of(epic)}")
             await on_page(page, "board")
             assert page.url.endswith("#/board"), (name, page.url)
             await expect(page.locator("#panel")).to_be_hidden()
@@ -276,12 +276,14 @@ async def test_the_search_box_is_on_every_view_and_opens_the_search_drawer_with_
             assert page.url.split("#")[1].startswith(f"/{name}")
             # The words are found, with how they matched, and a result opens the ordinary detail
             # panel on this view without closing the drawer.
-            row = page.locator(f"#search-results li.result[data-type=story][data-id='{story}']")
+            row = page.locator(f"#search-results li.result[data-type=story][data-ref='{story}']")
             await expect(row).to_be_visible(timeout=SLOW)
             assert await row.get_attribute("data-matched") in {"words", "both"}
             await row.locator("a.result-title").click()
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
-            assert f"sel=node:{story}" in page.url
+            await expect(page.locator("#card-title")).to_contain_text(
+                f"{code_of(story)} ", timeout=SLOW
+            )
+            assert f"sel={story}" in page.url
             assert page.url.split("#")[1].startswith(f"/{name}")
             await expect(drawer).to_be_visible()
             await page.locator("#drawer-close").click()
@@ -350,7 +352,7 @@ async def test_the_activity_button_opens_the_drawer_from_every_view_and_works_fr
         await expect(
             page.locator("#feed li.event", has_text=f"Activity {word}").first
         ).to_be_visible(timeout=SLOW)
-        assert epic > 0
+        assert epic.startswith("epic:")
         assert w.problems == [], w.problems
 
 
@@ -365,8 +367,10 @@ async def test_a_draft_in_the_panel_survives_opening_drawers_and_changing_views(
     story = await made(client, "story", f"Story {word}", epic)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/board?epic={epic}&sel=node:{story}")
-        await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await expect(page.locator("#card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         await page.locator("#edit-title").fill(f"My draft {word}")
         await page.locator("#edit-body").fill(f"Half a thought {word}")
         await page.evaluate("window.__panel = document.getElementById('edit-title'); true")
@@ -391,16 +395,16 @@ async def test_a_draft_in_the_panel_survives_opening_drawers_and_changing_views(
         for name in ("graph", "roadmap", "board", "graph"):
             await page.locator(f"#main-nav a[data-page={name}]").click()
             await on_page(page, name)
-            assert f"sel=node:{story}" in page.url
+            assert f"sel={story}" in page.url
             await draft_is_kept()
         await page.locator("#graph-as-list").click()
         await page.locator("#graph-view-everything").click()
         await expect(page.locator("#graph-page")).to_have_attribute("data-as", "list")
         await expect(page.locator("#graph-page")).to_have_attribute("data-view", "everything")
-        assert "as=list" in page.url and f"sel=node:{story}" in page.url
+        assert "as=list" in page.url and f"sel={story}" in page.url
         await draft_is_kept()
         # Nothing was saved by any of it.
-        assert (await ok(client, "get_node", node_id=story))["version"] == 1
+        assert (await ok(client, "get_node", node=story))["version"] == 1
         assert w.problems == [], w.problems
 
 
@@ -423,9 +427,9 @@ async def test_switching_project_with_late_answers_shows_nothing_of_the_first_in
 
         async with browser_page(first.address, token=first.key, name=None, keep_bodies=True) as w:
             page = w.page
-            await w.open(f"#/board?drawer=search&search=first+{word}&sel=node:{story_one}")
+            await w.open(f"#/board?drawer=search&search=first+{word}&sel={story_one}")
             await expect(page.locator("#card-title")).to_contain_text(
-                f"#{story_one} ", timeout=SLOW
+                f"{code_of(story_one)} ", timeout=SLOW
             )
             await expect(page.locator("#search-results li.result").first).to_be_visible(
                 timeout=SLOW
@@ -475,7 +479,7 @@ async def test_switching_project_with_late_answers_shows_nothing_of_the_first_in
                 "#/roadmap",
                 "#/board?drawer=activity",
                 f"#/board?drawer=search&search=first+{word}",
-                f"#/board?sel=node:{story_one}",
+                f"#/board?sel={story_one}",
             ):
                 await w.go(address)
                 await asyncio.sleep(1)
@@ -513,8 +517,9 @@ async def test_two_choices_made_one_right_after_the_other_both_reach_the_address
         # and each change has to build on the one before it, not on the address as it was.
         await page.locator("#graph-view-context").click()
         await page.locator("#graph-as-list").click()
-        await page.locator("#graph-epic").select_option(str(epic))
+        await page.locator("#graph-epic").select_option(str(number_of(epic)))
         await expect(page.locator("#graph-page")).to_have_attribute("data-view", "context")
         await expect(page.locator("#graph-page")).to_have_attribute("data-as", "list")
         address = await page.evaluate("location.hash")
-        assert "view=context" in address and "as=list" in address and f"epic={epic}" in address
+        assert "view=context" in address and "as=list" in address
+        assert f"epic={number_of(epic)}" in address

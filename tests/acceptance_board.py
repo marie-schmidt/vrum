@@ -30,12 +30,14 @@ from tests.board_helpers import (
 )
 from tests.helpers import (
     all_nodes,
+    code_of,
     connect,
     day,
     embeddings_stopped,
     make_decision,
     make_fact,
     make_rule,
+    number_of,
     ok,
     refused,
     reindexed,
@@ -124,24 +126,24 @@ async def agents_show_up(client: Client, page_url: str, token: str) -> None:
         first = await made(client, "task", f"Template {word}", story)
         second = await made(client, "task", f"Send it {word}", story)
         await ok(
-            client, "add_link", actor="agent-1", source_id=second, target_id=first,
+            client, "add_link", actor="agent-1", source=second, target=first,
             link_type="needs_first",
         )  # fmt: skip
-        await ok(client, "claim_node", actor="agent-2", node_id=first)
+        await ok(client, "claim_node", actor="agent-2", node=first)
         await ok(
-            client, "update_node", actor="agent-2", node_id=first, expected_version=1,
+            client, "update_node", actor="agent-2", node=first, expected_version=1,
             status="in_progress",
         )  # fmt: skip
         started = time.monotonic()
         await expect(
-            cell(w.page, epic, "ready").locator(f".card[data-id='{story}']")
+            cell(w.page, epic, "ready").locator(f".card[data-ref='{story}']")
         ).to_be_visible(timeout=SLOW)
         await expect(
-            cell(w.page, epic, "in_progress").locator(f".card[data-id='{first}']")
+            cell(w.page, epic, "in_progress").locator(f".card[data-ref='{first}']")
         ).to_contain_text("Held by agent-2")
         await expect(
-            cell(w.page, epic, "new").locator(f".card[data-id='{second}']")
-        ).to_contain_text(f"Waiting for #{first} Template {word}")
+            cell(w.page, epic, "new").locator(f".card[data-ref='{second}']")
+        ).to_contain_text(f"Waiting for {code_of(first)} Template {word}")
         seconds = time.monotonic() - started
         proof(
             "M10",
@@ -178,9 +180,9 @@ async def asked(client: Client) -> dict[str, int]:
     }
 
 
-async def busy_project(client: Client) -> int:
+async def busy_project(client: Client) -> str:
     """Work in every state the strip counts, a requirement in no story, a story with no
-    requirement. Gives the epic."""
+    requirement. Gives the reference of the epic."""
     word = unique_word()
     epic = await made(client, "epic", f"Counted {word}")
     story = await made(client, "story", f"Story {word}", epic)
@@ -205,19 +207,17 @@ async def busy_project(client: Client) -> int:
         ("dropped", "dropped"),
     ):
         await ok(
-            client, "update_node", actor="a", node_id=tasks[name], expected_version=1, status=status
+            client, "update_node", actor="a", node=tasks[name], expected_version=1, status=status
         )
     await ok(
-        client, "add_link", actor="a", source_id=tasks["waiting"], target_id=tasks["free"],
+        client, "add_link", actor="a", source=tasks["waiting"], target=tasks["free"],
         link_type="needs_first",
     )  # fmt: skip
-    await ok(client, "claim_node", actor=f"holder-{word}", node_id=tasks["held"], lease_seconds=600)
-    await ok(
-        client, "claim_node", actor=f"quitter-{word}", node_id=tasks["lapsing"], lease_seconds=1
-    )
+    await ok(client, "claim_node", actor=f"holder-{word}", node=tasks["held"], lease_seconds=600)
+    await ok(client, "claim_node", actor=f"quitter-{word}", node=tasks["lapsing"], lease_seconds=1)
     await make_rule(client, f"Unplaced {word}")
     placed = await made(client, "story", f"Has a requirement {word}", epic)
-    await make_rule(client, f"Placed {word}", story_id=placed)
+    await make_rule(client, f"Placed {word}", story=placed)
     await asyncio.sleep(1.5)  # a claim of one second has lapsed
     return epic
 
@@ -258,7 +258,7 @@ async def attention() -> None:
             await follow(key)
             matched = await all_nodes(client, query=query)
             await expect(page.locator("#filter")).to_have_value(query, timeout=SLOW)
-            await cards_are(page, {n["id"] for n in matched if n["kind"] != "epic"})
+            await cards_are(page, {n["ref"] for n in matched if n["kind"] != "epic"})
             landed[key] = len(matched)
         report = await whole_coverage_report(client)
         await follow("unplaced")
@@ -274,9 +274,8 @@ async def attention() -> None:
         await expect(part.locator("h3")).to_have_text(
             f"Stories with no requirement ({expected['bare']})", timeout=SLOW
         )
-        bare_ids = {
-            int(await row.get_attribute("data-story") or 0)
-            for row in await part.locator("li").all()
+        bare_refs = {
+            str(await row.get_attribute("data-story")) for row in await part.locator("li").all()
         }
         proof(
             "M14",
@@ -285,9 +284,9 @@ async def attention() -> None:
             "with no requirement in the coverage report",
             landed == {k: expected[k] for k in landed}
             and unplaced_ids == {rule["id"] for rule in report["unplaced_rules"]}
-            and bare_ids == {story["id"] for story in report["stories_without_rules"]},
+            and bare_refs == {story["ref"] for story in report["stories_without_rules"]},
             f"{sum(landed.values())} cards, {len(unplaced_ids)} requirements, "
-            f"{len(bare_ids)} stories",
+            f"{len(bare_refs)} stories",
         )
         assert w.problems == [], w.problems
 
@@ -309,51 +308,51 @@ async def people_edit(client: Client, page_url: str, token: str) -> None:
         other = await create_in_browser(page, "story", f"Profile {word}", epic)
         task = await create_in_browser(page, "task", f"Login form {word}", story)
         friend = await create_in_browser(page, "task", f"Logout {word}", story)
-        await w.go(f"#/board?epic={epic}&sel=node:{task}")
-        await expect(page.locator("#card-title")).to_contain_text(f"#{task} ")
+        await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
+        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
         await page.locator("#edit-title").fill(f"Login form, better {word}")
         await page.locator("#edit-body").fill("Email and password, then a code.")
         await page.locator("#edit-priority").select_option("high")
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text("Email and password")
         await page.drag_and_drop(
-            f".card[data-id='{task}']", f".cell[data-epic='{epic}'][data-status='in_progress']"
+            f".card[data-ref='{task}']", f".cell[data-epic='{epic}'][data-status='in_progress']"
         )
         await expect(
-            cell(page, epic, "in_progress").locator(f".card[data-id='{task}']")
+            cell(page, epic, "in_progress").locator(f".card[data-ref='{task}']")
         ).to_be_visible()
         # With the panel open the columns are wider than the room: scroll the target into view.
         await cell(page, epic, "done").scroll_into_view_if_needed()
         await page.drag_and_drop(
-            f".card[data-id='{task}']", f".cell[data-epic='{epic}'][data-status='done']"
+            f".card[data-ref='{task}']", f".cell[data-epic='{epic}'][data-status='done']"
         )
-        await expect(cell(page, epic, "done").locator(f".card[data-id='{task}']")).to_be_visible()
-        await w.go(f"#/board?epic={epic}&sel=node:{task}")
+        await expect(cell(page, epic, "done").locator(f".card[data-ref='{task}']")).to_be_visible()
+        await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
         await expect(page.locator("#panel .card-detail .chips")).to_contain_text("Done")
-        await page.locator("#move-parent").select_option(str(other))
+        await page.locator("#move-parent").select_option(other)
         await page.get_by_role("button", name="Move", exact=True).click()
         await expect(page.locator("#panel .card-detail > p", has_text="In story")).to_contain_text(
-            f"#{other} Profile"
+            f"{code_of(other)} Profile"
         )
         await page.locator("#link-relation").select_option("relates_to:out")
-        await page.locator("#link-target").fill(f"#{friend}")
+        await page.locator("#link-target").fill(code_of(friend))
         await page.get_by_role("button", name="Add", exact=True).click()
         await expect(page.locator("#panel .remove-link")).to_have_count(1)
         await page.locator("#panel .remove-link").click()
         await expect(page.locator("#panel .remove-link")).to_have_count(0)
         assert w.problems == [], w.problems
 
-    final = await ok(client, "get_node", node_id=task)
-    events = (await ok(client, "node_history", node_id=task, limit=200))["items"]
-    listed = [n["id"] for n in (await ok(client, "list_nodes", parent_id=other))["items"]]
-    links = (await ok(client, "list_links", node_id=task))["items"]
+    final = await ok(client, "get_node", node=task)
+    events = (await ok(client, "node_history", node=task, limit=200))["items"]
+    listed = [n["ref"] for n in (await ok(client, "list_nodes", parent=other))["items"]]
+    links = (await ok(client, "list_links", node=task))["items"]
     proof(
         "M10",
         "what a person does in the browser (create, edit, drag to in progress and done, move, add "
         "and remove a link) is what get, list and history then show, with their name and versions",
         (final["title"], final["body"], final["priority"], final["status"])
         == (f"Login form, better {word}", "Email and password, then a code.", "high", "done")
-        and (final["parent_id"], final["version"]) == (other, 5)
+        and (final["parent"], final["version"]) == (other, 5)
         and listed == [task]
         and links == []
         and [(e["action"], e["actor"]) for e in events]
@@ -377,32 +376,30 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
     first = await made(client, "task", f"First {word}", story)
     second = await made(client, "task", f"Second {word}", story)
     dated = await made(client, "task", f"Dated {word}", story, start_on=day(2), target_on=day(9))
-    await ok(
-        client, "add_link", actor="a", source_id=second, target_id=first, link_type="needs_first"
-    )
+    await ok(client, "add_link", actor="a", source=second, target=first, link_type="needs_first")
     say_ready = await refused(
-        client, "update_node", actor="x", node_id=second, expected_version=1, status="ready"
+        client, "update_node", actor="x", node=second, expected_version=1, status="ready"
     )
     say_cycle = await refused(
-        client, "add_link", actor="x", source_id=first, target_id=second, link_type="needs_first"
+        client, "add_link", actor="x", source=first, target=second, link_type="needs_first"
     )
     say_blank = await refused(
-        client, "update_node", actor="  ", node_id=story, expected_version=1, title="x"
+        client, "update_node", actor="  ", node=story, expected_version=1, title="x"
     )
     say_dates = await refused(
-        client, "update_node", actor="x", node_id=dated, expected_version=1, start_on=day(12)
+        client, "update_node", actor="x", node=dated, expected_version=1, start_on=day(12)
     )
     before = (
-        await ok(client, "get_node", node_id=second),
-        await ok(client, "list_links", node_id=first),
-        await ok(client, "get_node", node_id=dated),
+        await ok(client, "get_node", node=second),
+        await ok(client, "list_links", node=first),
+        await ok(client, "get_node", node=dated),
     )
     async with browser_page(page_url, token=token) as w:
         page = w.page
-        await w.open(f"#/board?epic={epic}")
-        await expect(cell(page, epic, "new").locator(f".card[data-id='{second}']")).to_be_visible()
+        await w.open(f"#/board?epic={number_of(epic)}")
+        await expect(cell(page, epic, "new").locator(f".card[data-ref='{second}']")).to_be_visible()
         await page.drag_and_drop(
-            f".card[data-id='{second}']", f".cell[data-epic='{epic}'][data-status='ready']"
+            f".card[data-ref='{second}']", f".cell[data-epic='{epic}'][data-status='ready']"
         )
         ready_words = await page.locator(".notice.refusal .notice-text").first.inner_text()
         proof(
@@ -412,9 +409,9 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
             same_words(ready_words, say_ready),
             f'"{clip(ready_words, 80)}"',
         )
-        await w.go(f"#/board?epic={epic}&sel=node:{first}")
+        await w.go(f"#/board?epic={number_of(epic)}&sel={first}")
         await page.locator("#link-relation").select_option("needs_first:out")
-        await page.locator("#link-target").fill(f"#{second}")
+        await page.locator("#link-target").fill(code_of(second))
         await page.get_by_role("button", name="Add", exact=True).click()
         cycle = page.locator("#panel .inline-form .problem").last
         await expect(cycle).not_to_be_empty()
@@ -424,19 +421,19 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
             "a link that makes a cycle is refused with the words add_link gives, and what was "
             "typed stays",
             same_words(cycle_words, say_cycle)
-            and await page.locator("#link-target").input_value() == f"#{second}",
+            and await page.locator("#link-target").input_value() == code_of(second),
             f'"{clip(cycle_words, 80)}"',
         )
-        await w.go(f"#/board?epic={epic}&sel=node:{story}")
+        await w.go(f"#/board?epic={number_of(epic)}&sel={story}")
         title = page.locator("#edit-title")
         await title.fill("My title")
         await ok(
-            client, "update_node", actor="agent-1", node_id=story, expected_version=1,
+            client, "update_node", actor="agent-1", node=story, expected_version=1,
             title="Agent title",
         )  # fmt: skip
         await expect(page.locator("#panel .notice.changed")).to_be_visible(timeout=SLOW)
         say_stale = await refused(
-            client, "update_node", actor="x", node_id=story, expected_version=1, title="y"
+            client, "update_node", actor="x", node=story, expected_version=1, title="y"
         )
         await page.get_by_role("button", name="Save changes").click()
         stale = page.locator("#panel .edit .problem .refusal-text")
@@ -465,7 +462,7 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
             f'"{clip(blank_words, 80)}"',
         )
         await page.evaluate("localStorage.setItem('vrum.actor', 'Tester')")
-        await w.go(f"#/board?epic={epic}&sel=node:{dated}")
+        await w.go(f"#/board?epic={number_of(epic)}&sel={dated}")
         await page.locator("#edit-start").fill(day(12))
         await page.get_by_role("button", name="Save changes").click()
         late = page.locator("#panel .edit .problem .refusal-text")
@@ -480,14 +477,14 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
             f'"{clip(late_words, 80)}"',
         )
     after = (
-        await ok(client, "get_node", node_id=second),
-        await ok(client, "list_links", node_id=first),
-        await ok(client, "get_node", node_id=dated),
+        await ok(client, "get_node", node=second),
+        await ok(client, "list_links", node=first),
+        await ok(client, "get_node", node=dated),
     )
     proof(
         "M10",
         "none of the five refusals changed the graph",
-        after == before and (await ok(client, "get_node", node_id=story))["title"] == "Agent title",
+        after == before and (await ok(client, "get_node", node=story))["title"] == "Agent title",
     )
 
 
@@ -514,12 +511,12 @@ async def index_follows(client: Client, page_url: str, token: str) -> None:
     await reindexed(client)
     async with browser_page(page_url, token=token) as w:
         page = w.page
-        await w.open(f"#/board?epic={epic}&sel=node:{story}")
+        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
         await page.locator("#edit-body").fill(f"The phrase {word} appears here")
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text(f"The phrase {word}")
         found = await ok(client, "search", query=word, mode="words")
-        by_words = [i["id"] for i in found["items"] if i["item_type"] == "story"] == [story]
+        by_words = [i["ref"] for i in found["items"] if i["item_type"] == "story"] == [story]
         await settle(client)
         await expect(page.locator("#index-state")).to_have_text("Index: 0 waiting", timeout=SLOW)
         proof(
@@ -535,9 +532,7 @@ async def index_follows(client: Client, page_url: str, token: str) -> None:
             await expect(page.locator("#panel .card-detail")).to_contain_text(
                 f"second phrase {later}"
             )
-            saved = (
-                f"second phrase {later}" in (await ok(client, "get_node", node_id=story))["body"]
-            )
+            saved = f"second phrase {later}" in (await ok(client, "get_node", node=story))["body"]
             one = await waiting(client) == before + 1
             await expect(page.locator("#index-state")).to_have_text(
                 "Index: 1 waiting", timeout=SLOW
@@ -552,7 +547,7 @@ async def index_follows(client: Client, page_url: str, token: str) -> None:
             "with the embedding service stopped the edit still saves and the board and search both "
             "say one item waits; when it is back the count reaches zero and the item is found by "
             "meaning",
-            saved and one and {i["id"]: i["matched"] for i in again["items"]}[story] == "both",
+            saved and one and {i["ref"]: i["matched"] for i in again["items"]}[story] == "both",
         )
 
 
@@ -566,30 +561,31 @@ async def only_text(client: Client, page_url: str, token: str) -> None:
     story = await made(client, "story", f"<i>{word}</i>", epic)
     fact = await make_fact(
         client, f'<img src=x onerror="window.__ran=4"> a fact {word}',
-        source=f"<b>the source</b> {word}", node_ids=[story],
+        source=f"<b>the source</b> {word}", nodes=[story],
     )  # fmt: skip
     decision = await make_decision(
         client, f"<u>A decision</u> {word}",
         text="<script>window.__ran=5</script> what was decided",
-        reason='<img src=x onerror="window.__ran=6"> why', node_ids=[story],
+        reason='<img src=x onerror="window.__ran=6"> why', nodes=[story],
     )  # fmt: skip
     _, headers, _ = http("GET", page_url)
+    scope = number_of(epic)
     async with browser_page(page_url, token=token) as w:
         page = w.page
-        await w.open(f"#/board?epic={epic}")
-        await expect(page.locator(f"section.lane[data-epic='{epic}']")).to_contain_text(markup)
-        await w.go(f"#/board?epic={epic}&sel=fact:{fact['id']}")
+        await w.open(f"#/board?epic={scope}")
+        await expect(page.locator(f"section.lane[data-ref='{epic}']")).to_contain_text(markup)
+        await w.go(f"#/board?epic={scope}&sel=fact:{fact['id']}")
         await expect(page.locator("#panel .record-detail .source")).to_contain_text(
             f"<b>the source</b> {word}", timeout=SLOW
         )
-        await w.go(f"#/board?epic={epic}&sel=decision:{decision['id']}")
+        await w.go(f"#/board?epic={scope}&sel=decision:{decision['id']}")
         await expect(page.locator("#panel .record-detail .reason")).to_contain_text(
             '<img src=x onerror="window.__ran=6"> why', timeout=SLOW
         )
-        await w.go(f"#/board?epic={epic}&drawer=search&search={word}&search_mode=words")
+        await w.go(f"#/board?epic={scope}&drawer=search&search={word}&search_mode=words")
         await expect(page.locator("#search-results li.result")).to_have_count(4, timeout=SLOW)
-        await w.go(f"#/graph?epic={epic}")
-        await expect(page.locator(f".dot[data-key='node:{epic}']")).to_be_visible(timeout=SLOW)
+        await w.go(f"#/graph?epic={scope}")
+        await expect(page.locator(f".dot[data-key='{epic}']")).to_be_visible(timeout=SLOW)
         ran = await page.evaluate("typeof window.__ran")
         stray = await page.locator("img[src='x'], script:not([src]), b, u").count()
         policy = headers["content-security-policy"]
@@ -657,16 +653,18 @@ async def days_work() -> None:
         story = await create_in_browser(page, "story", f"Invoices {word}", epic)
         task = await create_in_browser(page, "task", f"Template {word}", story)
         later = await create_in_browser(page, "task", f"Send them {word}", story)
-        listed = {n["id"]: n for n in (await ok(agent, "list_nodes", limit=200))["items"]}
-        for node_id in (story, task, later):
-            await expect(page.locator(f".card[data-id='{node_id}']")).to_have_attribute(
-                "data-status", listed[node_id]["status"]
+        listed = {n["ref"]: n for n in (await ok(agent, "list_nodes", limit=200))["items"]}
+        for ref in (story, task, later):
+            await expect(page.locator(f".card[data-ref='{ref}']")).to_have_attribute(
+                "data-status", listed[ref]["status"]
             )
-        await page.locator(f".card[data-id='{story}']").click()
-        await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await page.locator(f".card[data-ref='{story}']").click()
+        await expect(page.locator("#card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         await page.locator("#panel button.add-requirement").click()
         dialog = page.locator("dialog.modal")
-        await expect(dialog.locator("#requirement-story")).to_have_value(str(story))
+        await expect(dialog.locator("#requirement-story")).to_have_value(story)
         await dialog.locator("#requirement-title").fill(f"Every invoice shows its VAT {word}")
         await dialog.get_by_role("button", name="Create the requirement").click()
         row = panel.locator("[data-part=requirements] li.requirement")
@@ -681,46 +679,50 @@ async def days_work() -> None:
             "M16",
             "the day starts on the Board in an empty project: a story or task with no parent is "
             "refused in the tool's words, an epic, a story and two tasks made there are the ones "
-            "MCP lists, and a requirement is placed on the story from its panel by the person",
+            "MCP lists, numbered from 1 each kind on its own, and a requirement is placed on the "
+            "story from its panel by the person",
             same_words(story_words, said_story)
             and same_words(task_words, said_task)
             and set(listed) == {epic, story, task, later}
             and [listed[i]["kind"] for i in (epic, story, task, later)]
             == ["epic", "story", "task", "task"]
-            and (listed[story]["parent_id"], listed[task]["parent_id"]) == (epic, story)
-            and (rule["story_id"], rule["title"]) == (story, f"Every invoice shows its VAT {word}")
+            and [listed[i]["number"] for i in (epic, story, task, later)] == [1, 1, 1, 2]
+            and (listed[story]["parent"], listed[task]["parent"]) == (epic, story)
+            and (rule["story"], rule["title"]) == (story, f"Every invoice shows its VAT {word}")
             and history_of_rule[0]["actor"] == ACTOR,
-            f"epic {epic}, story {story}, tasks {task} and {later}, requirement {rule_id}",
+            f"{code_of(epic)}, {code_of(story)}, {code_of(task)} and {code_of(later)}, "
+            f"requirement {rule_id}",
         )
 
         # -- what agents know: facts and decisions, then ready work claimed through MCP
         fact = await make_fact(
-            agent, f"VAT is 19 percent {word}", source="The tax office site", node_ids=[task]
+            agent, f"VAT is 19 percent {word}", source="The tax office site", nodes=[task]
         )
-        decision = await make_decision(agent, f"Round per line {word}", node_ids=[task])
+        decision = await make_decision(agent, f"Round per line {word}", nodes=[task])
         wide = await make_decision(agent, f"Always in euros {word}", project_wide=True)
         taken = await ok(agent, "next_work", actor="agent-keyed")
         briefing = taken["context"]
-        await expect(page.locator(f".card[data-id='{task}']")).to_contain_text(
+        await expect(page.locator(f".card[data-ref='{task}']")).to_contain_text(
             "Held by agent-keyed", timeout=SLOW
         )
-        await page.locator(f".card[data-id='{task}']").click()
+        await page.locator(f".card[data-ref='{task}']").click()
         await page.locator("#activity-open").click()
         drawer = page.locator("#drawer[data-drawer=activity]")
         await expect(drawer).to_be_visible(timeout=SLOW)
         claim = drawer.locator(f"#claims-live .claim[data-node='{task}']")
         await expect(claim).to_have_attribute("data-actor", "agent-keyed", timeout=SLOW)
         await expect(claim).to_have_attribute("data-live", "1")
-        await expect(
-            drawer.locator("#feed li.event[data-action=claimed]", has_text=f"#{task}").first
-        ).to_contain_text("agent-keyed", timeout=SLOW)
+        taking = drawer.locator(
+            "#feed li.event[data-action=claimed]", has=page.locator(f"a[data-ref='{task}']")
+        )
+        await expect(taking.first).to_contain_text("agent-keyed", timeout=SLOW)
         working = await ok(agent, "who_is_working")
         mine = next(a for a in working["agents"] if a["actor"] == "agent-keyed")
         await expect(panel.locator(".card-detail")).to_contain_text("Held by agent-keyed")
 
         # -- the panel holds the context the agent was briefed with, and the history
         await expect(panel.locator("[data-section=facts] li.record")).to_have_count(1)
-        recalled = await ok(agent, "recall", node_id=task, limit=50)
+        recalled = await ok(agent, "recall", node=task, limit=50)
 
         def held(section: str) -> list[int]:
             return [
@@ -738,8 +740,8 @@ async def days_work() -> None:
             "M16",
             "ready work claimed through MCP shows on its card, in the panel and as a live claim "
             "in the Activity drawer, where who is working on what is the server's own list",
-            taken["work"]["id"] == task
-            and [h["node_id"] for h in mine["holding"]] == [task]
+            taken["work"]["ref"] == task
+            and [h["node"] for h in mine["holding"]] == [task]
             and [r["id"] for r in briefing["rules"]] == [rule_id],
             "held by agent-keyed",
         )
@@ -762,31 +764,33 @@ async def days_work() -> None:
 
         # -- the handoff
         await ok(
-            agent, "finish_work", actor="agent-keyed", node_id=task, outcome="done",
+            agent, "finish_work", actor="agent-keyed", node=task, outcome="done",
             note=f"Built the template; VAT is a field, not a constant {word}.",
         )  # fmt: skip
-        handoff = drawer.locator("#feed li.event[data-action=handoff]", has_text=f"#{task}")
+        handoff = drawer.locator(
+            "#feed li.event[data-action=handoff]", has=page.locator(f"a[data-ref='{task}']")
+        )
         await expect(handoff.first).to_contain_text("agent-keyed", timeout=SLOW)
         await expect(handoff.first).to_contain_text(f"VAT is a field, not a constant {word}")
         await expect(claim).to_have_count(0, timeout=SLOW)
-        await expect(cell(page, epic, "done").locator(f".card[data-id='{task}']")).to_be_visible(
+        await expect(cell(page, epic, "done").locator(f".card[data-ref='{task}']")).to_be_visible(
             timeout=SLOW
         )
         last = panel.locator("[data-part=handoff]")
         await expect(last).to_contain_text(f"VAT is a field, not a constant {word}", timeout=SLOW)
-        events = (await ok(agent, "node_history", node_id=task, limit=200))["items"]
+        events = (await ok(agent, "node_history", node=task, limit=200))["items"]
         in_panel = await panel.locator("[data-part=history] li").evaluate_all(
             "els => els.map(e => Number(e.dataset.event))"
         )
         proof(
             "M16",
             "after finish_work the handoff note is in the drawer in full and in the panel, the "
-            "claim is gone and the card is in Done, and the panel's history is the node's "
+            "claim is gone and the card is in Done, and the panel's history is the item's "
             "history, newest first",
             {"create", "claimed", "handoff"} <= {e["action"] for e in events}
             and sorted(in_panel) == sorted(e["id"] for e in events)
             and in_panel == sorted(in_panel, reverse=True)
-            and (await ok(agent, "get_node", node_id=task))["status"] == "done",
+            and (await ok(agent, "get_node", node=task))["status"] == "done",
             f"{len(events)} events",
         )
 
@@ -794,55 +798,55 @@ async def days_work() -> None:
         await page.locator("#drawer-close").click()
         await page.locator("#main-nav a[data-page=graph]").click()
         await expect(page.locator("#graph-page")).to_be_visible(timeout=SLOW)
-        await expect(page.locator("#card-title")).to_contain_text(f"#{task} ")
-        dot = page.locator(f".dot[data-key='node:{task}']")
+        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
+        dot = page.locator(f".dot[data-key='{task}']")
         await expect(dot).to_have_attribute("data-status", "done", timeout=SLOW)
         await page.locator("#graph-view-context").click()
         for key in (f"fact:{fact['id']}", f"decision:{decision['id']}", f"rule:{rule_id}"):
             await expect(page.locator(f".dot[data-key='{key}']")).to_be_visible(timeout=SLOW)
 
         # -- refusals, from the existing owners: a cycle, a stale edit, a claim, a date
-        await ok(
-            agent, "add_link", actor="a", source_id=later, target_id=task, link_type="needs_first"
-        )
+        await ok(agent, "add_link", actor="a", source=later, target=task, link_type="needs_first")
         say_cycle = await refused(
-            agent, "add_link", actor=ACTOR, source_id=task, target_id=later, link_type="needs_first"
+            agent, "add_link", actor=ACTOR, source=task, target=later, link_type="needs_first"
         )
-        before = {i: await ok(agent, "get_node", node_id=i) for i in (task, later)}
-        await w.go(f"#/board?epic={epic}&sel=node:{task}")
-        await expect(page.locator("#card-title")).to_contain_text(f"#{task} ", timeout=SLOW)
+        before = {i: await ok(agent, "get_node", node=i) for i in (task, later)}
+        await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
+        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
         await page.locator("#link-relation").select_option("needs_first:out")
-        await page.locator("#link-target").fill(f"#{later}")
+        await page.locator("#link-target").fill(code_of(later))
         await page.get_by_role("button", name="Add", exact=True).click()
         problem = page.locator("#panel .inline-form .problem").last
         await expect(problem).not_to_be_empty(timeout=SLOW)
         cycle_words = await problem.inner_text()
-        await w.go(f"#/board?epic={epic}&sel=node:{later}")
-        await expect(page.locator("#card-title")).to_contain_text(f"#{later} ", timeout=SLOW)
+        await w.go(f"#/board?epic={number_of(epic)}&sel={later}")
+        await expect(page.locator("#card-title")).to_contain_text(
+            f"{code_of(later)} ", timeout=SLOW
+        )
         await page.locator("#edit-title").fill(f"My title {word}")
-        version = (await ok(agent, "get_node", node_id=later))["version"]
+        version = (await ok(agent, "get_node", node=later))["version"]
         await ok(
-            agent, "update_node", actor="agent-keyed", node_id=later, expected_version=version,
+            agent, "update_node", actor="agent-keyed", node=later, expected_version=version,
             title=f"Agent title {word}",
         )  # fmt: skip
         say_stale = await refused(
-            agent, "update_node", actor=ACTOR, node_id=later, expected_version=version, title="x"
+            agent, "update_node", actor=ACTOR, node=later, expected_version=version, title="x"
         )
         await page.get_by_role("button", name="Save changes").click()
         stale = page.locator("#panel .edit .problem .refusal-text")
         await expect(stale).to_be_visible(timeout=SLOW)
         stale_words = await stale.inner_text()
-        await ok(agent, "claim_node", actor="agent-b", node_id=later)
-        say_claim = await refused(agent, "claim_node", actor=ACTOR, node_id=later)
+        await ok(agent, "claim_node", actor="agent-b", node=later)
+        say_claim = await refused(agent, "claim_node", actor=ACTOR, node=later)
         await page.locator("#activity-open").click()
         await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible(timeout=SLOW)
-        await page.locator("#claim-id").fill(f"#{later}")
+        await page.locator("#claim-id").fill(code_of(later))
         await page.locator("#claim-by-id-go").click()
         refusal = page.locator(".notice.refusal .notice-text").first
         await expect(refusal).to_be_visible(timeout=SLOW)
         claim_words = await refusal.inner_text()
-        held_by = (await ok(agent, "get_node", node_id=later))["claimed_by"]
-        await ok(agent, "release_claim", actor="agent-b", node_id=later, note="Not today.")
+        held_by = (await ok(agent, "get_node", node=later))["claimed_by"]
+        await ok(agent, "release_claim", actor="agent-b", node=later, note="Not today.")
         await page.locator("#drawer-close").click()
         proof(
             "M16",
@@ -853,43 +857,43 @@ async def days_work() -> None:
             and same_words(claim_words, say_claim)
             and "agent-b" in say_claim
             and held_by == "agent-b"
-            and (await ok(agent, "get_node", node_id=task))["version"] == before[task]["version"]
+            and (await ok(agent, "get_node", node=task))["version"] == before[task]["version"]
             and await page.locator("#edit-title").input_value() == f"My title {word}"
-            and (await ok(agent, "get_node", node_id=later))["title"] == f"Agent title {word}",
+            and (await ok(agent, "get_node", node=later))["title"] == f"Agent title {word}",
             f'"{clip(claim_words, 70)}"',
         )
 
         # -- the Roadmap: schedule the work
         await page.locator("#main-nav a[data-page=roadmap]").click()
         await expect(page.locator("h1")).to_have_text("Roadmap", timeout=SLOW)
-        await w.go(f"#/roadmap?q=epic:{epic}&sel=node:{task}")
-        await expect(page.locator(f".tray-item[data-id='{later}']")).to_be_visible(timeout=SLOW)
-        await expect(page.locator("#card-title")).to_contain_text(f"#{task} ", timeout=SLOW)
+        await w.go(f"#/roadmap?q=epic:{number_of(epic)}&sel={task}")
+        await expect(page.locator(f".tray-item[data-ref='{later}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
         line = await timeline(page)
         first_start = line["today"] + datetime.timedelta(days=2)
         await page.locator("#edit-start").fill(first_start.isoformat())
         await page.locator("#edit-target").fill((first_start + datetime.timedelta(6)).isoformat())
         await page.get_by_role("button", name="Save changes").click()
-        await expect(page.locator(f".rm-bar[data-id='{task}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(f".rm-bar[data-ref='{task}']")).to_be_visible(timeout=SLOW)
         at = ((line["today"] - line["origin"]).days + 12) * line["ppd"]
         await page.drag_and_drop(
-            f".tray-item[data-id='{later}'] .tray-drag",
+            f".tray-item[data-ref='{later}'] .tray-drag",
             ".rm-rows",
             target_position={"x": at + line["ppd"] / 2, "y": 60},
         )
-        await expect(page.locator(f".rm-bar[data-id='{later}']")).to_be_visible(timeout=SLOW)
-        scheduled = {i: await ok(agent, "get_node", node_id=i) for i in (task, later)}
+        await expect(page.locator(f".rm-bar[data-ref='{later}']")).to_be_visible(timeout=SLOW)
+        scheduled = {i: await ok(agent, "get_node", node=i) for i in (task, later)}
         bars_say = []
         by_whom = []
-        for node_id in (task, later):
-            bar = page.locator(f".rm-bar[data-id='{node_id}']")
+        for ref in (task, later):
+            bar = page.locator(f".rm-bar[data-ref='{ref}']")
             bars_say.append(
                 (await bar.get_attribute("data-start"), await bar.get_attribute("data-end"))
-                == (scheduled[node_id]["start_on"], scheduled[node_id]["target_on"])
+                == (scheduled[ref]["start_on"], scheduled[ref]["target_on"])
             )
             changes = [
                 e
-                for e in (await ok(agent, "node_history", node_id=node_id, limit=200))["items"]
+                for e in (await ok(agent, "node_history", node=ref, limit=200))["items"]
                 if e["action"] == "update" and "start_on" in e["after"]
             ]
             by_whom.append(
@@ -901,7 +905,7 @@ async def days_work() -> None:
         node = scheduled[later]
         too_late = (on(node["start_on"]) + datetime.timedelta(days=30)).isoformat()
         say_date = await refused(
-            agent, "update_node", actor=ACTOR, node_id=later,
+            agent, "update_node", actor=ACTOR, node=later,
             expected_version=node["version"], start_on=too_late,
         )  # fmt: skip
         await drag_bar(page, later, 30, "start")
@@ -920,7 +924,7 @@ async def days_work() -> None:
             == datetime.timedelta(10)
             and placed == {epic, story, task, later}
             and same_words(date_words, say_date)
-            and (await ok(agent, "get_node", node_id=later))["start_on"] == node["start_on"],
+            and (await ok(agent, "get_node", node=later))["start_on"] == node["start_on"],
             f"{scheduled[task]['start_on']} and {scheduled[later]['start_on']}",
         )
         assert w.problems == [], w.problems

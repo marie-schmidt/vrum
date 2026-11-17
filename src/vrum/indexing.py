@@ -7,7 +7,11 @@ reindex job below does it, on request and in the background. Everything else onl
 One index holds every project's items, each with its project, and a project's work sees only its
 own rows of it (the database enforces that, as it does for the graph). The job that keeps it
 current works for every project, so it runs with no project named; a request to reindex is for one
-project and reports on that project."""
+project and reports on that project.
+
+An item is kept in the index under its type and one number: an epic, story or task by its number
+within its kind (unique, since the type says which kind), a requirement, decision or fact by its
+id."""
 
 import asyncio
 import logging
@@ -30,6 +34,7 @@ from vrum.embeddings import (
     EmbeddingUnavailable,
     vector_literal,
 )
+from vrum.items import NamedItem, named
 
 log = logging.getLogger("vrum.indexing")
 
@@ -91,9 +96,7 @@ async def snapshot(conn: AsyncConnection, model: str | None) -> IndexSnapshot:
     )
 
 
-class FailedItem(BaseModel):
-    item_type: str
-    id: int
+class FailedItem(NamedItem):
     reason: str
 
 
@@ -423,8 +426,6 @@ async def _embed_batch(
             done.append((row, vector_literal(vector)))
         except EmbeddingRejected as error:
             failed.append(
-                FailedItem(
-                    item_type=str(row["item_type"]), id=int(str(row["id"])), reason=str(error)
-                )
+                FailedItem(**named(str(row["item_type"]), int(str(row["id"]))), reason=str(error))
             )
     return done, failed

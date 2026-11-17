@@ -19,6 +19,8 @@ from typing import Any
 from mcp import Client
 from vrum_client import connect
 
+from vrum.common import split_node_ref
+
 DUPLICATES = [
     (
         (
@@ -114,7 +116,12 @@ async def call(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
     return dict(result.structured_content)
 
 
-async def story(client: Client, epic: int, text: tuple[str, str]) -> int:
+def by_number(pair: tuple[str, str]) -> tuple[int, int]:
+    """Stories of one kind in the order they were made: `story:2` before `story:10`."""
+    return split_node_ref(pair[0])[1], split_node_ref(pair[1])[1]
+
+
+async def story(client: Client, epic: str, text: tuple[str, str]) -> str:
     made = await call(
         client,
         "create_node",
@@ -122,9 +129,9 @@ async def story(client: Client, epic: int, text: tuple[str, str]) -> int:
         kind="story",
         title=text[0],
         body=text[1],
-        parent_id=epic,
+        parent=epic,
     )
-    return int(made["id"])
+    return str(made["ref"])
 
 
 async def main(url: str) -> None:
@@ -146,9 +153,9 @@ async def main(url: str) -> None:
             kind="epic",
             title=f"Real-model check B ({stamp})",
         )
-        firsts = [await story(client, epic_a["id"], pair[0]) for pair in DUPLICATES]
-        seconds = [await story(client, epic_b["id"], pair[1]) for pair in DUPLICATES]
-        related = [await story(client, epic_b["id"], text) for text in RELATED]
+        firsts = [await story(client, epic_a["ref"], pair[0]) for pair in DUPLICATES]
+        seconds = [await story(client, epic_b["ref"], pair[1]) for pair in DUPLICATES]
+        related = [await story(client, epic_b["ref"], text) for text in RELATED]
 
         # No reindex is asked for: the server's own job should index them.
         started = time.monotonic()
@@ -164,14 +171,14 @@ async def main(url: str) -> None:
             f"the server's own job indexed everything in {time.monotonic() - started:.0f} seconds"
         )
 
-        pairs: dict[tuple[int, int], float] = {}
+        pairs: dict[tuple[str, str], float] = {}
         offset = 0
         while True:
             overlaps = await call(
-                client, "find_overlaps", epic_ids=[epic_a["id"]], limit=200, offset=offset
+                client, "find_overlaps", epics=[epic_a["ref"]], limit=200, offset=offset
             )
             for item in overlaps["items"]:
-                pairs[(item["first"]["id"], item["second"]["id"])] = item["similarity"]
+                pairs[(item["first"]["ref"], item["second"]["ref"])] = item["similarity"]
             if overlaps["next_offset"] is None:
                 break
             offset = overlaps["next_offset"]
@@ -192,18 +199,16 @@ async def main(url: str) -> None:
             f"{len(close & flagged)} of {len(close)} related but different flagged, "
             f"{len(unrelated & flagged)} of {len(unrelated)} unrelated pairs flagged"
         )
-        scored = [pairs[p] for p in sorted(duplicates & flagged)]
+        scored = [pairs[p] for p in sorted(duplicates & flagged, key=by_number)]
         if scored:
             print(
                 f"  flagged duplicates scored {min(scored):.2f} to {max(scored):.2f}, "
                 f"mean {statistics.mean(scored):.2f}"
             )
-        titles = {
-            node: (await call(client, "get_node", node_id=node))["title"] for node in everyone
-        }
-        for first, second in sorted(duplicates - flagged):
+        titles = {ref: (await call(client, "get_node", node=ref))["title"] for ref in everyone}
+        for first, second in sorted(duplicates - flagged, key=by_number):
             print(f"  missed: {titles[first]!r} and {titles[second]!r}")
-        for first, second in sorted(unrelated & flagged):
+        for first, second in sorted(unrelated & flagged, key=by_number):
             print(
                 f"  flagged, though not a duplicate: {titles[first]!r} and {titles[second]!r} "
                 f"({pairs[(first, second)]:.2f})"
@@ -212,10 +217,10 @@ async def main(url: str) -> None:
         print("\nsearch by meaning (what a person might type):")
         for query, target in QUERIES:
             answer = await call(client, "search", query=query, mode="meaning", limit=100)
-            ranked = [item["id"] for item in answer["items"] if item["id"] in everyone]
+            ranked = [item["ref"] for item in answer["items"] if item["ref"] in everyone]
             wanted = firsts[target]
             place = ranked.index(wanted) + 1 if wanted in ranked else None
-            score = next((i["similarity"] for i in answer["items"] if i["id"] == wanted), None)
+            score = next((i["similarity"] for i in answer["items"] if i["ref"] == wanted), None)
             print(f"  {query!r}: its story is result {place} with score {score}")
 
         phrase = await call(client, "search", query='"Role based access"', mode="words")

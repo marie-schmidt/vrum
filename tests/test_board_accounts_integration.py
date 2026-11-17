@@ -49,7 +49,7 @@ async def register_in_the_browser(w, name: str, email: str, password: str) -> No
     await w.page.locator("#register-submit").click()
 
 
-async def create_in_the_browser(w, kind: str, title: str, parent: int | None = None) -> int:  # type: ignore[no-untyped-def]
+async def create_in_the_browser(w, kind: str, title: str, parent: str | None = None) -> str:  # type: ignore[no-untyped-def]
     return await create_in_browser(w.page, kind, title, parent)
 
 
@@ -89,7 +89,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         epic = await create_in_the_browser(w, "epic", f"Portal {word}")
         story = await create_in_the_browser(w, "story", f"Sign in {word}", epic)
         task = await create_in_the_browser(w, "task", f"Login form {word}", story)
-        await expect(w.page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
 
         # An agent key made on the project's own page (the Settings menu's Agent access) reaches
         # the same records over MCP.
@@ -106,7 +106,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
             assert sorted(node["title"] for node in nodes) == sorted(
                 [f"Portal {word}", f"Sign in {word}", f"Login form {word}"]
             )
-            assert {node["id"] for node in nodes} == {epic, story, task}
+            assert {node["ref"] for node in nodes} == {epic, story, task}
 
         # Sign out, and the old session is of no use; sign back in with the email and password.
         await w.page.locator("#sign-out").click()
@@ -130,7 +130,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         assert f"/board/p/{project_number}" in w.page.url
         await w.go("#/board")
         for item in (story, task):
-            await expect(w.page.locator(f".card[data-id='{item}']").first).to_be_visible(
+            await expect(w.page.locator(f".card[data-ref='{item}']").first).to_be_visible(
                 timeout=SLOW
             )
         await expect(w.page.get_by_role("region", name=f"Epic Portal {word}")).to_be_visible(
@@ -338,15 +338,15 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
                 actor="agent",
                 kind="story",
                 title=f"A story {word}",
-                parent_id=task,
+                parent=task,
             )
             taken = await ok(agent, "next_work", actor="agent-keyed")
-            assert taken["work"]["id"] == story["id"] and taken["claim"] is not None
+            assert taken["work"]["ref"] == story["ref"] and taken["claim"] is not None
             await ok(
                 agent,
                 "finish_work",
                 actor="agent-keyed",
-                node_id=story["id"],
+                node=story["ref"],
                 outcome="done",
                 note="Done with the key from the board.",
             )
@@ -432,7 +432,7 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
         browser_page(project.address, token=project.key, name=None) as w,
     ):
         epic = await made(agent, "epic", f"Under the bar {word}")
-        await w.open(f"#/board?drawer=activity&sel=node:{epic}")
+        await w.open(f"#/board?drawer=activity&sel={epic}")
         await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         await expect(w.page.locator("#drawer")).to_be_visible(timeout=SLOW)
         await expect(w.page.locator("#panel")).to_be_visible(timeout=SLOW)

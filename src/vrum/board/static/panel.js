@@ -1,5 +1,5 @@
 // The shared detail panel: one epic, story, task, requirement, decision or fact, or the coverage
-// report. What it shows is in the address (sel=node:12, sel=fact:5, or panel=coverage), so a link
+// report. What it shows is in the address (sel=story:12, sel=fact:5, or panel=coverage), so a link
 // opens it on any page. The panel is mounted once and keeps its key while the page, the drawers or
 // the Graph's presentation change, so a draft typed in it is never drawn over.
 
@@ -9,6 +9,7 @@ import { clear, h } from './dom.js';
 import { renderCard } from './card.js';
 import { renderCoverage } from './coverage.js';
 import { icon } from './icons.js';
+import { KIND, isNodeKind } from './labels.js';
 import { loadingView, renderRecord, renderRule, stateView } from './records.js';
 import { store } from './store.js';
 
@@ -57,7 +58,7 @@ const closes = () => ui.navigate({ sel: null, panel: null });
 const say = (message, refusal = true) => clear(aside).append(stateView(message, { refusal, onClose: closes }));
 
 function draw(wanted, state) {
-  if (wanted.kind === 'node') return renderCard(aside, wanted.id, state);
+  if (isNodeKind(wanted.kind)) return renderCard(aside, wanted.ref, state);
   if (wanted.kind === 'rule') return renderRule(aside, wanted.id, state);
   return renderRecord(aside, wanted.kind, wanted.id, state);
 }
@@ -65,7 +66,7 @@ function draw(wanted, state) {
 export async function show(params) {
   const typed = params.get('sel');
   const wanted = parseSel(typed);
-  const key = wanted ? `${wanted.kind}:${wanted.id}` : typed ? `unknown:${typed}` : params.get('panel') === 'coverage' ? 'coverage' : null;
+  const key = wanted ? wanted.ref : typed ? `unknown:${typed}` : params.get('panel') === 'coverage' ? 'coverage' : null;
   if (key === null) return hide();
   if (shown && shown.key === key) return;
   if (!shown) {
@@ -87,7 +88,7 @@ export async function show(params) {
   layout.classList.add('with-panel');
   clear(aside).append(loadingView());
   if (key.startsWith('unknown:')) {
-    say('That address does not name something the board can show. It looks like sel=node:12, sel=rule:3, sel=decision:7 or sel=fact:5.');
+    say('That address does not name something the board can show. It looks like sel=story:12, sel=rule:3, sel=decision:7 or sel=fact:5.');
     return;
   }
   try {
@@ -126,18 +127,19 @@ function banner(text, onLoad) {
 
 const named = (value) => value !== null && value !== undefined;
 
-// What an event says about the open item. `direct` is that it names the item itself, so that the
-// panel can say who changed it; `touches` is that the panel may now read differently.
-function relevance(event, kind, id, state) {
-  const mark = `[[${kind}:${id}]]`;
-  const direct = kind === 'node' ? event.node_id === id || event.other_node_id === id : event[`${kind}_id`] === id;
+// What an event says about the open item, named by its kind and number (`ref` is its reference).
+// `direct` is that it names the item itself, so that the panel can say who changed it; `touches` is
+// that the panel may now read differently.
+function relevance(event, { kind, number, ref }, state) {
+  const mark = `[[${ref}]]`;
+  const direct = isNodeKind(kind) ? event.node === ref || event.other_node === ref : event[`${kind}_id`] === number;
   // An item that adds or drops a reference to this one in its words changes its "Mentioned in",
   // which is a list read from the server, not from the store.
   const rewording = JSON.stringify([event.before, event.after]).includes(mark);
   if (kind === 'fact' || kind === 'decision') {
     // News about something it concerns changes how the panel names it.
     const concerned = state.concerns
-      ? (named(event.node_id) && state.concerns.node.includes(event.node_id)) ||
+      ? (named(event.node) && state.concerns.node.includes(event.node)) ||
         (named(event.rule_id) && state.concerns.rule.includes(event.rule_id)) ||
         (named(event.decision_id) && state.concerns.decision.includes(event.decision_id))
       : false;
@@ -145,9 +147,9 @@ function relevance(event, kind, id, state) {
   }
   // A requirement, an epic, a story or a task also reads the facts, decisions and requirements
   // that concern it, and an event that names no item at all may be about any of them.
-  const story = kind === 'rule' ? Number(aside.querySelector('.rule-detail')?.dataset.story) : null;
-  const context = named(event.fact_id) || named(event.decision_id) || named(event.rule_id) || event.node_id === null;
-  return { direct, touches: direct || rewording || context || (story !== null && event.node_id === story) };
+  const story = kind === 'rule' ? aside.querySelector('.rule-detail')?.dataset.story || null : null;
+  const context = named(event.fact_id) || named(event.decision_id) || named(event.rule_id) || event.node === null;
+  return { direct, touches: direct || rewording || context || (story !== null && event.node === story) };
 }
 
 // Something changed on the server. Show it, unless the person is typing: then offer it.
@@ -159,14 +161,13 @@ export async function refresh(events) {
     return;
   }
   if (key.startsWith('unknown:')) return;
-  const [kind, idText] = key.split(':');
-  const id = Number(idText);
-  if (kind === 'node' && !store.nodes.has(id)) {
+  const open = parseSel(key);
+  if (isNodeKind(open.kind) && !store.nodes.has(open.ref)) {
     aside.querySelector('.changed')?.remove();
-    say(`Item #${id} is no longer there.`, false);
+    say(`${KIND[open.kind].label} ${open.number} is no longer there.`, false);
     return;
   }
-  const seen = events.map((event) => relevance(event, kind, id, state));
+  const seen = events.map((event) => relevance(event, open, state));
   if (!seen.some((one) => one.touches)) return;
   if (typing(state)) {
     const who = events.find((event, at) => seen[at].direct);

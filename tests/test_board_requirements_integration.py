@@ -3,7 +3,8 @@ edited, placed in a story and moved to another from the Graph's context list and
 report in the shared detail panel, in a real headless browser, and checked against a real MCP client
 (`get_rule`, `rule_history`, `coverage_report`). Every refusal is compared word for word with what
 the same attempt gets through MCP. Each test works in a project of its own, so that the coverage
-report is small enough to compare in full."""
+report is small enough to compare in full. A story is named by its reference (`story:12`): the
+requirement's `story` is one, and so are the `data-story` and `data-group` of the page."""
 
 import re
 from typing import Any
@@ -23,6 +24,7 @@ from tests.board_context import (
     refusal_in,
 )
 from tests.board_helpers import SLOW, browser_page, hold_back_news, made, plain
+from tests.helpers import number_of as number
 from tests.helpers import ok, refused, whole_coverage_report
 from tests.world import Project
 
@@ -41,14 +43,14 @@ def _browser(board: str, project: Project) -> Any:
     return browser_page(board, token=project.key, name=ADA)
 
 
-def group(page: Page, story: int) -> Locator:
+def group(page: Page, story: str) -> Locator:
     return page.locator(f"#requirement-groups section[data-group='{story}']")
 
 
-async def rule_in(client: Client, title: str, story: int | None = None, **more: Any) -> int:
+async def rule_in(client: Client, title: str, story: str | None = None, **more: Any) -> int:
     fields: dict[str, Any] = {"actor": "agent-1", "title": title, **more}
     if story:
-        fields["story_id"] = story
+        fields["story"] = story
     return int((await ok(client, "create_rule", **fields))["id"])
 
 
@@ -116,7 +118,7 @@ async def test_a_new_requirement_is_unassigned_until_it_is_placed_and_then_moved
             await expect(newest).to_contain_text("Created in the browser", timeout=SLOW)
             rule = int(await newest.get_attribute("data-id") or 0)
             made_rule = await ok(client, "get_rule", rule_id=rule)
-            assert (made_rule["story_id"], made_rule["status"], made_rule["version"]) == (
+            assert (made_rule["story"], made_rule["status"], made_rule["version"]) == (
                 None,
                 "held",
                 1,
@@ -146,21 +148,19 @@ async def test_a_new_requirement_is_unassigned_until_it_is_placed_and_then_moved
             assert await box.locator("#requirement-target").evaluate(
                 "e => document.activeElement === e"
             )
-            await box.locator("#requirement-target").select_option(str(first))
+            await box.locator("#requirement-target").select_option(first)
             await box.get_by_role("button", name="Put in the story").click()
-            await expect(rule_row(page, rule)).to_have_attribute(
-                "data-story", str(first), timeout=SLOW
-            )
+            await expect(rule_row(page, rule)).to_have_attribute("data-story", first, timeout=SLOW)
             await expect(group(page, first).locator(f"li[data-id='{rule}']")).to_be_visible()
             await expect(page.locator(f"#unplaced-group li[data-id='{rule}']")).to_have_count(0)
             assert await summary_says(page, client) == (0, 1)
             placed = await ok(client, "get_rule", rule_id=rule)
-            assert (placed["story_id"], placed["version"]) == (first, 2)
+            assert (placed["story"], placed["version"]) == (first, 2)
 
             # A requirement in a story is moved, from a dialog, in one step, to another story.
             await rule_row(page, rule).get_by_role("button", name="Move to another story…").click()
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(str(second))
+            await box.locator("#requirement-target").select_option(second)
             await box.get_by_role("button", name="Move to the story").click()
             await expect(group(page, second).locator(f"li[data-id='{rule}']")).to_be_visible(
                 timeout=SLOW
@@ -178,7 +178,7 @@ async def test_a_new_requirement_is_unassigned_until_it_is_placed_and_then_moved
             assert w.problems == [], w.problems
 
         moved = await ok(client, "get_rule", rule_id=rule)
-        assert (moved["story_id"], moved["version"]) == (first, 4)
+        assert (moved["story"], moved["version"]) == (first, 4)
         events = await history(client, rule)
         assert [(e["action"], e["actor"]) for e in events] == [
             ("rule_created", ADA),
@@ -186,16 +186,16 @@ async def test_a_new_requirement_is_unassigned_until_it_is_placed_and_then_moved
             ("rule_moved", ADA),
             ("rule_moved", ADA),
         ]
-        assert events[2]["before"] == {"story_id": first, "version": 2}
-        assert events[2]["after"] == {"story_id": second, "version": 3}
+        assert events[2]["before"] == {"story": first, "version": 2}
+        assert events[2]["after"] == {"story": second, "version": 3}
         for story in (first, second):
-            story_events = (await ok(client, "node_history", node_id=story, limit=200))["items"]
+            story_events = (await ok(client, "node_history", node=story, limit=200))["items"]
             assert events[2]["id"] in [e["id"] for e in story_events]
-        in_first = (await ok(client, "list_rules", story_id=first))["items"]
+        in_first = (await ok(client, "list_rules", story=first))["items"]
         assert [r["id"] for r in in_first] == [rule]
-        assert sorted(
-            r["id"] for r in (await ok(client, "list_rules", story_id=second))["items"]
-        ) == [anchor]
+        assert sorted(r["id"] for r in (await ok(client, "list_rules", story=second))["items"]) == [
+            anchor
+        ]
         assert third and (await coverage_numbers(client)) == (0, 1)
 
 
@@ -251,7 +251,7 @@ async def test_a_requirement_is_edited_with_its_version_and_stale_or_blank_chang
                 title="",
                 body="",
                 status="held",
-                story_id=None,
+                story=None,
             )
             await page.locator("#new-requirement").click()
             box = dialog(page)
@@ -265,11 +265,11 @@ async def test_a_requirement_is_edited_with_its_version_and_stale_or_blank_chang
 
             # Moving it to the story it is already in is refused in the server's words.
             same = await refused(
-                client, "move_rule", actor="x", rule_id=rule, expected_version=2, new_story_id=story
+                client, "move_rule", actor="x", rule_id=rule, expected_version=2, new_story=story
             )
             await row.get_by_role("button", name="Move to another story…").click()
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(str(story))
+            await box.locator("#requirement-target").select_option(story)
             await box.get_by_role("button", name="Move to the story").click()
             await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
             plain(await refusal_in(page).inner_text(), same)
@@ -288,7 +288,7 @@ async def test_a_requirement_is_edited_with_its_version_and_stale_or_blank_chang
                 .locator("li.requirement")
                 .evaluate_all("els => els.map(e => Number(e.dataset.id))")
             )
-            listed_by_server = (await ok(client, "list_rules", story_id=story))["items"]
+            listed_by_server = (await ok(client, "list_rules", story=story))["items"]
             assert sorted(in_story) == sorted(r["id"] for r in listed_by_server) == [rule, gone]
             await page.locator("#ctx-requirements-placement").select_option("unplaced")
             await expect(rule_row(page, rule)).to_have_count(0)
@@ -337,19 +337,19 @@ async def test_a_requirement_is_edited_with_its_version_and_stale_or_blank_chang
                 actor="agent-1",
                 rule_id=loose,
                 expected_version=1,
-                story_id=other,
+                story=other,
             )
             already = await refused(
-                client, "place_rule", actor="x", rule_id=loose, expected_version=1, story_id=story
+                client, "place_rule", actor="x", rule_id=loose, expected_version=1, story=story
             )
             await button.click()
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(str(story))
+            await box.locator("#requirement-target").select_option(story)
             await box.get_by_role("button", name="Put in the story").click()
             await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
             plain(await refusal_in(page).inner_text(), already)
             await box.get_by_role("button", name="Cancel").click()
-            assert (await ok(client, "get_rule", rule_id=loose))["story_id"] == other
+            assert (await ok(client, "get_rule", rule_id=loose))["story"] == other
             assert w.problems == [], w.problems
 
 
@@ -374,7 +374,7 @@ async def test_the_coverage_report_equals_coverage_report_and_a_drop_on_a_story_
             page = w.page
             # Scoped to one epic, the requirements in no story are still listed (nothing else would
             # lead a person to them), and the sentence above them says what the whole project says.
-            await graph_open(w, f"{LIST}&epic={epic_b}")
+            await graph_open(w, f"{LIST}&epic={number(epic_b)}")
             await expect(rule_row(page, loose_a)).to_be_visible(timeout=SLOW)
             await expect(rule_row(page, loose_b)).to_be_visible()
             await expect(rule_row(page, placed)).to_have_count(0)
@@ -397,24 +397,23 @@ async def test_the_coverage_report_equals_coverage_report_and_a_drop_on_a_story_
             unplaced_ids = await lists.locator("li[data-rule]").evaluate_all(
                 "els => els.map(e => Number(e.dataset.rule))"
             )
-            story_ids = await lists.locator("li[data-story]").evaluate_all(
-                "els => els.map(e => Number(e.dataset.story))"
+            story_refs = await lists.locator("li[data-story]").evaluate_all(
+                "els => els.map(e => e.dataset.story)"
             )
             assert unplaced_ids == [r["id"] for r in report["unplaced_rules"]]
-            assert story_ids == [s["id"] for s in report["stories_without_rules"]]
-            assert sorted(story_ids) == [s2, s3, s4]  # a story whose only requirement is dropped
+            assert story_refs == [s["ref"] for s in report["stories_without_rules"]]
+            # A story whose only requirement is dropped has none that count.
+            assert sorted(story_refs) == sorted([s2, s3, s4])
 
             # Dragging a requirement that is in no story onto a story of the report places it.
-            await w.go(f"{LIST}&epic={epic_a}&panel=coverage")
+            await w.go(f"{LIST}&epic={number(epic_a)}&panel=coverage")
             await expect(rule_row(page, loose_a)).to_be_visible(timeout=SLOW)
             await expect(lists.locator(f"li[data-story='{s3}']")).to_have_count(1, timeout=SLOW)
             source = f"#graph-list [data-key='rule:{loose_a}']"
             await page.drag_and_drop(source, f"#panel li[data-story='{s3}']")
-            await expect(rule_row(page, loose_a)).to_have_attribute(
-                "data-story", str(s3), timeout=SLOW
-            )
+            await expect(rule_row(page, loose_a)).to_have_attribute("data-story", s3, timeout=SLOW)
             placed_now = await ok(client, "get_rule", rule_id=loose_a)
-            assert (placed_now["story_id"], placed_now["version"]) == (s3, 2)
+            assert (placed_now["story"], placed_now["version"]) == (s3, 2)
             assert await summary_says(page, client) == (1, 2)
             await expect(lists.locator("[data-part=unplaced-requirements] h3")).to_have_text(
                 "Requirements in no story (1)", timeout=SLOW
@@ -425,11 +424,9 @@ async def test_the_coverage_report_equals_coverage_report_and_a_drop_on_a_story_
             await move_by_drag(
                 page, rule_row(page, loose_a), lists.locator(f"li[data-story='{s2}']")
             )
-            await expect(rule_row(page, loose_a)).to_have_attribute(
-                "data-story", str(s2), timeout=SLOW
-            )
+            await expect(rule_row(page, loose_a)).to_have_attribute("data-story", s2, timeout=SLOW)
             moved = await ok(client, "get_rule", rule_id=loose_a)
-            assert (moved["story_id"], moved["version"]) == (s2, 3)
+            assert (moved["story"], moved["version"]) == (s2, 3)
             assert await summary_says(page, client) == (1, 2)
             await expect(lists.locator(f"li[data-story='{s3}']")).to_have_count(1, timeout=SLOW)
             await expect(lists.locator(f"li[data-story='{s2}']")).to_have_count(0)

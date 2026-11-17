@@ -14,10 +14,21 @@ from typing import Any
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
-from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size
+from vrum.common import (
+    Refusal,
+    check_choice,
+    fetch_all,
+    fetch_one,
+    page_size,
+    parse_node_ref,
+    parse_node_refs,
+    split_node_ref,
+)
 from vrum.db import Database
 from vrum.embeddings import BATCH_SIZE, EmbeddingRejected, EmbeddingUnavailable, vector_literal
+from vrum.graph import require_node
 from vrum.indexing import Indexer, IndexSnapshot, snapshot
+from vrum.items import NamedItem, named
 from vrum.records import label_of
 
 ITEM_TYPES = ("epic", "story", "task", "rule", "decision", "fact")
@@ -60,11 +71,7 @@ class IndexNote(BaseModel):
     )
 
 
-class SearchResult(BaseModel):
-    item_type: str = Field(description="epic, story, task, rule, decision or fact.")
-    id: int = Field(
-        description="Its id, in the id space of its type: a node, rule, decision or fact."
-    )
+class SearchResult(NamedItem):
     title: str
     label: str = Field(
         description="What this is, in plain words. For a decision or fact it says whether it is "
@@ -75,8 +82,9 @@ class SearchResult(BaseModel):
         "requirements."
     )
     status: str = Field(description="Its status now, read from the graph.")
-    parent_id: int | None = Field(
-        description="Its parent now: the epic of a story, the story of a task or a rule."
+    parent: str | None = Field(
+        description="Its parent now, as a ref: the epic of a story, the story of a task or a "
+        "requirement."
     )
     parent_kind: str | None
     parent_title: str | None
@@ -111,12 +119,13 @@ class SearchPage(BaseModel):
     index: IndexNote
 
 
-class OverlapItem(BaseModel):
-    item_type: str
-    id: int
+class OverlapItem(NamedItem):
     title: str
     status: str
-    epic_id: int | None
+    epic: str | None = Field(
+        description="The ref of its epic (itself, for an epic). Empty for a requirement that is "
+        "not placed in a story."
+    )
     epic_title: str | None
 
 
@@ -143,6 +152,7 @@ class OverlapPage(BaseModel):
 @dataclass
 class _Candidate:
     item_type: str
+    # An epic, story or task's number within its kind (the type says which); anything else's id.
     id: int
     words_rank: int | None = None
     meaning_rank: int | None = None
@@ -335,7 +345,7 @@ class Searcher:
     async def similar_items(
         self,
         *,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         decision_id: int | None,
         fact_id: int | None,
@@ -351,7 +361,7 @@ class Searcher:
         given = [
             name
             for name, value in (
-                ("node_id", node_id),
+                ("node", node),
                 ("rule_id", rule_id),
                 ("decision_id", decision_id),
                 ("fact_id", fact_id),
@@ -361,13 +371,15 @@ class Searcher:
         ]
         if len(given) != 1:
             raise Refusal(
-                "Give exactly one of node_id, rule_id, decision_id, fact_id or text: the thing "
+                "Give exactly one of node, rule_id, decision_id, fact_id or text: the thing "
                 "to find similar items for."
             )
+        if node is not None:
+            node = parse_node_ref(node, "node")
         wanted_types = _check_types(types)
         floor = _check_similarity(min_similarity, self._min_similarity, "min_similarity")
         found = await self._similar(
-            node_id=node_id,
+            node=node,
             rule_id=rule_id,
             decision_id=decision_id,
             fact_id=fact_id,
@@ -394,18 +406,20 @@ class Searcher:
     async def similar(
         self,
         *,
-        node_id: int | None = None,
+        node: str | None = None,
         rule_id: int | None = None,
         wanted_types: list[str],
         exclude: set[tuple[str, int]],
         limit: int,
         timeout: float | None = None,
     ) -> tuple[list[SearchResult], int, IndexNote]:
-        """Active items like a node or rule, for a recall or the context of work: what is alike
-        apart from the exact links. Never refuses: when meaning is not possible, the note says
-        so. `timeout` is how long to wait for the embedding service."""
+        """Active items like a node (given by its ref) or rule, for a recall or the context of
+        work: what is alike apart from the exact links. Never refuses: when meaning is not
+        possible, the note says so. `exclude` holds (type, number) pairs: the number of an epic,
+        story or task within its kind, the id of anything else. `timeout` is how long to wait for
+        the embedding service."""
         found = await self._similar(
-            node_id=node_id,
+            node=node,
             rule_id=rule_id,
             decision_id=None,
             fact_id=None,
@@ -427,7 +441,7 @@ class Searcher:
     async def _similar(
         self,
         *,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         decision_id: int | None,
         fact_id: int | None,
@@ -448,7 +462,7 @@ class Searcher:
         model = client.model if client else None
         async with self._database.transaction() as conn:
             state = await snapshot(conn, model)
-            source = await _source(conn, node_id, rule_id, decision_id, fact_id, text)
+            source = await _source(conn, node, rule_id, decision_id, fact_id, text)
             stored = None
             if source.item is not None and state.usable_with(model or ""):
                 stored = await _stored_vector(conn, source.item)
@@ -554,7 +568,7 @@ class Searcher:
         self,
         *,
         item_type: str,
-        epic_ids: list[int] | None,
+        epics: list[str] | None,
         min_similarity: float | None,
         include_dropped: bool,
         limit: int,
@@ -565,7 +579,12 @@ class Searcher:
         if offset < 0:
             raise Refusal(f"offset must be 0 or more, but it is {offset}.")
         threshold = _check_similarity(min_similarity, self._overlap_threshold, "min_similarity")
-        scoped = list(dict.fromkeys(epic_ids or []))
+        scoped = parse_node_refs(epics, "epics")
+        not_epics = [ref for ref in scoped if not ref.startswith("epic:")]
+        if not_epics:
+            raise Refusal(
+                f"epics must name epics, such as epic:3, but {', '.join(not_epics)} is not an epic."
+            )
         client = self._indexer.client
         model = client.model if client else None
         async with self._database.transaction() as conn:
@@ -575,21 +594,8 @@ class Searcher:
                     state, "not_configured" if client is None else "index_not_ready"
                 )
                 raise Refusal(f"Finding overlaps needs the index, which is not ready. {note.note}")
-            if scoped:
-                found = {
-                    row["id"]
-                    for row in await fetch_all(
-                        conn,
-                        "SELECT id FROM nodes WHERE id = ANY(%s) AND kind = 'epic'",
-                        (scoped,),
-                    )
-                }
-                missing = [str(epic) for epic in scoped if epic not in found]
-                if missing:
-                    raise Refusal(
-                        f"There is no epic with id {', '.join(missing)}. Use list_nodes with "
-                        "kind epic to find the id you want."
-                    )
+            for epic in scoped:
+                await require_node(conn, epic)
             params = {
                 "dropped": include_dropped,
                 "max_distance": 1.0 - threshold,
@@ -603,8 +609,8 @@ class Searcher:
             if not rows and offset > 0:
                 counted = await fetch_one(conn, _OVERLAP_COUNTS[item_type], params)
                 total = int(counted["total"]) if counted else 0
-            ids = sorted({row["a_id"] for row in rows} | {row["b_id"] for row in rows})
-            described = await _overlap_items(conn, item_type, ids)
+            numbers = sorted({row["a_id"] for row in rows} | {row["b_id"] for row in rows})
+            described = await _overlap_items(conn, item_type, numbers)
             links = await _links_between(conn, item_type, [(r["a_id"], r["b_id"]) for r in rows])
         return OverlapPage(
             items=[
@@ -715,19 +721,31 @@ async def _statuses(
     """The status of each item now: for work, with `ready` worked out."""
     found: dict[tuple[str, int], str] = {}
     for kinds, sql in _STATUS_QUERIES:
-        ids = [item_id for kind, item_id in pairs if kind in kinds]
-        if not ids:
+        wanted = [(kind, item_id) for kind, item_id in pairs if kind in kinds]
+        if not wanted:
             continue
-        for row in await fetch_all(conn, sql, (ids,)):
+        params = {"ids": [item_id for _, item_id in wanted], "refs": _refs(wanted)}
+        for row in await fetch_all(conn, sql, params):
             found[(row["item_type"], row["id"])] = row["status"]
     return found
 
 
+def _refs(pairs: list[tuple[str, int]]) -> list[str]:
+    """The refs of epics, stories and tasks given as (kind, number), to look them up by."""
+    return [f"{kind}:{number}" for kind, number in pairs]
+
+
 _STATUS_QUERIES = (
-    (_NODE_TYPES, "SELECT kind AS item_type, id, status FROM node_state WHERE id = ANY(%s)"),
-    (("rule",), "SELECT 'rule' AS item_type, id, status FROM rules WHERE id = ANY(%s)"),
-    (("decision",), "SELECT 'decision' AS item_type, id, status FROM decisions WHERE id = ANY(%s)"),
-    (("fact",), "SELECT 'fact' AS item_type, id, status FROM facts WHERE id = ANY(%s)"),
+    (
+        _NODE_TYPES,
+        "SELECT kind AS item_type, number AS id, status FROM node_state WHERE ref = ANY(%(refs)s)",
+    ),
+    (("rule",), "SELECT 'rule' AS item_type, id, status FROM rules WHERE id = ANY(%(ids)s)"),
+    (
+        ("decision",),
+        "SELECT 'decision' AS item_type, id, status FROM decisions WHERE id = ANY(%(ids)s)",
+    ),
+    (("fact",), "SELECT 'fact' AS item_type, id, status FROM facts WHERE id = ANY(%(ids)s)"),
 )
 
 
@@ -758,10 +776,13 @@ async def _details(
     found: dict[tuple[str, int], dict[str, Any]] = {}
     params = {"q": query, "opts": _HIGHLIGHT}
     for kinds, sql in _DETAIL_QUERIES:
-        ids = [item_id for kind, item_id in pairs if kind in kinds]
-        if not ids:
+        wanted = [(kind, item_id) for kind, item_id in pairs if kind in kinds]
+        if not wanted:
             continue
-        for row in await fetch_all(conn, sql, {**params, "ids": ids}):
+        rows = await fetch_all(
+            conn, sql, {**params, "ids": [item_id for _, item_id in wanted], "refs": _refs(wanted)}
+        )
+        for row in rows:
             found[(row["item_type"], row["id"])] = row
     return found
 
@@ -769,25 +790,25 @@ async def _details(
 _DETAIL_QUERIES = (
     (
         _NODE_TYPES,
-        "SELECT s.kind AS item_type, s.id, s.title, s.status, s.parent_id, p.kind AS parent_kind, "
-        "p.title AS parent_title, initcap(s.kind) AS label, "
+        "SELECT s.kind AS item_type, s.number AS id, s.title, s.status, s.parent, "
+        "p.kind AS parent_kind, p.title AS parent_title, initcap(s.kind) AS label, "
         "s.title || E'\\n' || s.body AS content, "
         + _HEADLINE.format(search="n.search", content="s.title || E'\\n' || s.body")
-        + " AS headline FROM node_state s JOIN nodes n ON n.id = s.id "
-        "LEFT JOIN nodes p ON p.id = s.parent_id WHERE s.id = ANY(%(ids)s)",
+        + " AS headline FROM node_state s JOIN nodes n ON n.ref = s.ref "
+        "LEFT JOIN nodes p ON p.ref = s.parent WHERE s.ref = ANY(%(refs)s)",
     ),
     (
         ("rule",),
-        "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.story_id AS parent_id, "
+        "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.story AS parent, "
         "'story' AS parent_kind, p.title AS parent_title, 'Requirement' AS label, "
         "r.title || E'\\n' || r.body AS content, "
         + _HEADLINE.format(search="r.search", content="r.title || E'\\n' || r.body")
-        + " AS headline FROM rules r LEFT JOIN nodes p ON p.id = r.story_id "
+        + " AS headline FROM rules r LEFT JOIN nodes p ON p.ref = r.story "
         "WHERE r.id = ANY(%(ids)s)",
     ),
     (
         ("decision",),
-        "SELECT 'decision' AS item_type, d.id, d.title, d.status, NULL::bigint AS parent_id, "
+        "SELECT 'decision' AS item_type, d.id, d.title, d.status, NULL::text AS parent, "
         "NULL::text AS parent_kind, NULL::text AS parent_title, d.project_wide, "
         "d.confirmed_by, d.confirmed_at, "
         "d.title || E'\\n' || d.text || E'\\n' || d.reason AS content, "
@@ -799,7 +820,7 @@ _DETAIL_QUERIES = (
     (
         ("fact",),
         "SELECT 'fact' AS item_type, f.id, left(f.text, 90) AS title, f.status, "
-        "NULL::bigint AS parent_id, NULL::text AS parent_kind, NULL::text AS parent_title, "
+        "NULL::text AS parent, NULL::text AS parent_kind, NULL::text AS parent_title, "
         "f.source, f.confirmed_by, f.confirmed_at, f.text AS content, "
         + _HEADLINE.format(search="f.search", content="f.text")
         + " AS headline FROM facts f WHERE f.id = ANY(%(ids)s)",
@@ -840,13 +861,12 @@ def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
     snippet = _squash(headline) if headline else _short(row["content"], 200)
     title = _short(row["title"], 90) if item_type == "fact" else row["title"]
     return SearchResult(
-        item_type=item_type,
-        id=row["id"],
+        **named(item_type, row["id"]),
         title=title,
         label=label,
         confirmation=confirmation,
         status=row["status"],
-        parent_id=row["parent_id"],
+        parent=row["parent"],
         parent_kind=row["parent_kind"],
         parent_title=row["parent_title"],
         matched=matched,
@@ -866,24 +886,27 @@ class _Source:
 
 async def _source(
     conn: AsyncConnection,
-    node_id: int | None,
+    node: str | None,
     rule_id: int | None,
     decision_id: int | None,
     fact_id: int | None,
     text: str | None,
 ) -> _Source:
-    """The item or text that similar items are wanted for, as one text."""
+    """The item or text that similar items are wanted for, as one text. The item is named as the
+    index names it: its type and its number (of an epic, story or task within its kind) or id."""
     if text is not None:
         return _Source(None, text)
-    if node_id is not None:
+    if node is not None:
+        await require_node(conn, node)
+        kind, number = split_node_ref(node)
         row = await fetch_one(
             conn,
-            "SELECT kind AS item_type, btrim(title || E'\\n' || body) AS content FROM nodes "
-            "WHERE id = %s",
-            (node_id,),
+            "SELECT btrim(title || E'\\n' || body) AS content FROM nodes WHERE ref = %s",
+            (node,),
         )
-        missing = f"There is no node with id {node_id}. Use list_nodes to find the id you want."
-    elif rule_id is not None:
+        assert row is not None
+        return _Source((kind, number), row["content"])
+    if rule_id is not None:
         row = await fetch_one(
             conn,
             "SELECT 'rule' AS item_type, btrim(title || E'\\n' || body) AS content FROM rules "
@@ -913,7 +936,7 @@ async def _source(
         missing = f"There is no fact with id {fact_id}. Use list_facts to find the id you want."
     if row is None:
         raise Refusal(missing)
-    item_id = node_id or rule_id or decision_id or fact_id
+    item_id = rule_id or decision_id or fact_id
     assert item_id is not None
     return _Source((row["item_type"], item_id), row["content"])
 
@@ -932,38 +955,39 @@ async def _stored_vector(conn: AsyncConnection, item: tuple[str, int]) -> str | 
 
 
 # Pairs of items of one type in different epics that are alike, from the index. An item changed
-# since it was indexed is left out until it is indexed again.
+# since it was indexed is left out until it is indexed again. `id` is the number of an epic or
+# story within its kind, or a rule's id; `epic` is the ref of the item's epic.
 _OVERLAP_ITEMS = {
     "epic": (
-        "SELECT i.item_id AS id, i.embedding, n.id AS epic_id FROM semantic_index i "
+        "SELECT i.item_id AS id, i.embedding, n.ref AS epic FROM semantic_index i "
         "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
         "AND s.id = i.item_id "
         "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
-        "AND n.id = i.item_id "
+        "AND n.kind = 'epic' AND n.number = i.item_id "
         "WHERE i.item_type = 'epic' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "story": (
-        "SELECT i.item_id AS id, i.embedding, n.parent_id AS epic_id FROM semantic_index i "
+        "SELECT i.item_id AS id, i.embedding, n.parent AS epic FROM semantic_index i "
         "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
         "AND s.id = i.item_id "
         "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
-        "AND n.id = i.item_id "
+        "AND n.kind = 'story' AND n.number = i.item_id "
         "WHERE i.item_type = 'story' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "rule": (
-        "SELECT i.item_id AS id, i.embedding, p.parent_id AS epic_id FROM semantic_index i "
+        "SELECT i.item_id AS id, i.embedding, p.parent AS epic FROM semantic_index i "
         "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
         "AND s.id = i.item_id "
         "AND s.content_hash = i.content_hash JOIN rules r ON r.project_id = i.project_id "
         "AND r.id = i.item_id "
-        "LEFT JOIN nodes p ON p.project_id = r.project_id AND p.id = r.story_id "
+        "LEFT JOIN nodes p ON p.project_id = r.project_id AND p.ref = r.story "
         "WHERE i.item_type = 'rule' AND (%(dropped)s OR r.status <> 'dropped')"
     ),
 }
 _OVERLAP_PAIRS = (
-    "FROM cur a JOIN cur b ON a.id < b.id AND a.epic_id IS DISTINCT FROM b.epic_id "
+    "FROM cur a JOIN cur b ON a.id < b.id AND a.epic IS DISTINCT FROM b.epic "
     "WHERE (a.embedding <=> b.embedding) <= %(max_distance)s "
-    "AND (NOT %(scoped)s OR a.epic_id = ANY(%(epics)s) OR b.epic_id = ANY(%(epics)s))"
+    "AND (NOT %(scoped)s OR a.epic = ANY(%(epics)s) OR b.epic = ANY(%(epics)s))"
 )
 _OVERLAPS = {
     kind: (
@@ -981,50 +1005,51 @@ _OVERLAP_COUNTS = {
 
 
 async def _overlap_items(
-    conn: AsyncConnection, item_type: str, ids: list[int]
+    conn: AsyncConnection, item_type: str, numbers: list[int]
 ) -> dict[int, OverlapItem]:
-    if not ids:
+    """The items of one type as a result shows them, by number (a rule's id)."""
+    if not numbers:
         return {}
     if item_type == "rule":
         sql = (
-            "SELECT r.id, r.title, r.status, p.parent_id AS epic_id, e.title AS epic_title "
-            "FROM rules r LEFT JOIN nodes p ON p.id = r.story_id "
-            "LEFT JOIN nodes e ON e.id = p.parent_id WHERE r.id = ANY(%s)"
+            "SELECT r.id, r.title, r.status, p.parent AS epic, e.title AS epic_title "
+            "FROM rules r LEFT JOIN nodes p ON p.ref = r.story "
+            "LEFT JOIN nodes e ON e.ref = p.parent WHERE r.id = ANY(%(numbers)s)"
         )
     else:
         sql = (
-            "SELECT s.id, s.title, s.status, e.id AS epic_id, e.title AS epic_title "
-            "FROM node_state s JOIN nodes e ON e.id = CASE s.kind WHEN 'epic' THEN s.id "
-            "ELSE s.parent_id END WHERE s.id = ANY(%s)"
+            "SELECT s.number AS id, s.title, s.status, e.ref AS epic, e.title AS epic_title "
+            "FROM node_state s JOIN nodes e ON e.ref = CASE s.kind WHEN 'epic' THEN s.ref "
+            "ELSE s.parent END WHERE s.kind = %(item_type)s AND s.number = ANY(%(numbers)s)"
         )
     return {
         row["id"]: OverlapItem(
-            item_type=item_type,
-            id=row["id"],
+            **named(item_type, row["id"]),
             title=row["title"],
             status=row["status"],
-            epic_id=row["epic_id"],
+            epic=row["epic"],
             epic_title=row["epic_title"],
         )
-        for row in await fetch_all(conn, sql, (ids,))
+        for row in await fetch_all(conn, sql, {"item_type": item_type, "numbers": numbers})
     }
 
 
 async def _links_between(
     conn: AsyncConnection, item_type: str, pairs: list[tuple[int, int]]
 ) -> dict[tuple[int, int], list[str]]:
-    """The link types already between each pair of nodes. Rules are not linked to each other."""
+    """The link types already between each pair of nodes (given by their numbers, of one kind).
+    Rules are not linked to each other."""
     if item_type == "rule" or not pairs:
         return {}
-    ids = sorted({item for pair in pairs for item in pair})
+    refs = sorted({f"{item_type}:{number}" for pair in pairs for number in pair})
     rows = await fetch_all(
         conn,
-        "SELECT source_id, target_id, link_type FROM links "
-        "WHERE source_id = ANY(%(ids)s) AND target_id = ANY(%(ids)s) ORDER BY id",
-        {"ids": ids},
+        "SELECT source, target, link_type FROM links "
+        "WHERE source = ANY(%(refs)s) AND target = ANY(%(refs)s) ORDER BY id",
+        {"refs": refs},
     )
     found: dict[tuple[int, int], list[str]] = {}
     for row in rows:
-        key = (min(row["source_id"], row["target_id"]), max(row["source_id"], row["target_id"]))
-        found.setdefault(key, []).append(row["link_type"])
+        first, second = split_node_ref(row["source"])[1], split_node_ref(row["target"])[1]
+        found.setdefault((min(first, second), max(first, second)), []).append(row["link_type"])
     return found

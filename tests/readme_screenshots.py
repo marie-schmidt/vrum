@@ -8,7 +8,8 @@ the real board in the light theme.
 
 It registers a fictional account and project through the board's own HTTP API, fills the project
 through real MCP calls (as the agents and people of the story would), and writes
-docs/screenshots/board.png and docs/screenshots/graph.png, both of the same project.
+docs/screenshots/board.png and docs/screenshots/graph.png, both of the same project (or into the
+folder VRUM_README_SHOTS names, to try it without changing them).
 
 It refuses to run unless the server is on this machine and has never held another account: the
 account it makes must be the first one. Run it against a stack that was just built, and take the
@@ -18,6 +19,7 @@ session exist only in this run and in that stack; nothing is written anywhere bu
 
 import asyncio
 import datetime
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -31,7 +33,12 @@ from playwright.async_api import Page, async_playwright
 
 from tests.world import SESSION_COOKIE, Person, api
 
-OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
+# The README's two pictures, unless VRUM_README_SHOTS names another folder (to try the tool without
+# touching them).
+OUT = Path(
+    os.environ.get("VRUM_README_SHOTS")
+    or Path(__file__).resolve().parent.parent / "docs" / "screenshots"
+)
 # Wide enough for the sidebar to be a column (the board puts it over the page below 1100 pixels)
 # and for all six columns to be in view, and no wider, so that the text is still legible when the
 # image is shown at about 800 pixels.
@@ -98,7 +105,7 @@ def in_days(days: int) -> str:
 
 async def populate(url: str, key: str) -> dict[str, int]:
     """A small pickup-ordering project for a bakery, made through the same MCP operations an
-    agent or the board uses. Returns the ids the screenshots need."""
+    agent or the board uses. Returns the numbers of the records the screenshots need."""
     headers = {"Authorization": f"Bearer {key}"}
     async with (
         create_mcp_http_client(headers=headers) as http,
@@ -270,14 +277,14 @@ async def populate(url: str, key: str) -> dict[str, int]:
                 },
             ],
         )
-        made = {item["key"]: int(item["id"]) for item in plan["created"]}
+        made = {item["key"]: str(item["ref"]) for item in plan["created"]}
         rules = [int(rule) for rule in plan["rule_ids"]]
         await call(
             client,
             "link_decision",
             actor=OWNER,
             decision_id=hosted["id"],
-            node_ids=[made["pay"], made["redirect"]],
+            nodes=[made["pay"], made["redirect"]],
             rule_ids=[rules[3]],
         )
         await call(
@@ -285,7 +292,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
             "link_decision",
             actor=OWNER,
             decision_id=slots["id"],
-            node_ids=[made["slots"], made["capacity"]],
+            nodes=[made["slots"], made["capacity"]],
             rule_ids=[rules[1]],
         )
         capacity = await call(
@@ -294,7 +301,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
             actor=OWNER,
             text="The kitchen can prepare at most 12 orders in each 15 minute window.",
             source="The head baker, in the planning call on 4 November.",
-            node_ids=[made["slots"], made["capacity"]],
+            nodes=[made["slots"], made["capacity"]],
             decision_ids=[slots["id"]],
         )
         await call(
@@ -303,7 +310,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
             actor=OWNER,
             text="Most customers look at the shop's website on a phone.",
             source="The shop's analytics export for October.",
-            node_ids=[made["menu"], made["page"]],
+            nodes=[made["menu"], made["page"]],
         )
         await call(
             client,
@@ -333,10 +340,10 @@ async def populate(url: str, key: str) -> dict[str, int]:
                 client,
                 "next_work",
                 actor=AGENT,
-                within_node_id=made[story],
+                within_node=made[story],
                 lease_seconds=lease_seconds,
             )
-            if work["work"] is None or work["work"]["id"] != made[expected]:
+            if work["work"] is None or work["work"]["ref"] != made[expected]:
                 raise Stopped(f"The agent was handed something other than {expected}: {work}")
 
         async def end(task: str, outcome: str, note: str) -> None:
@@ -344,7 +351,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
                 client,
                 "finish_work",
                 actor=AGENT,
-                node_id=made[task],
+                node=made[task],
                 outcome=outcome,
                 note=note,
             )
@@ -453,7 +460,7 @@ async def main(url: str) -> None:
     await capture(base, person, project_id, ids)
     for name in ("board.png", "graph.png"):
         size = (OUT / name).stat().st_size
-        print(f"docs/screenshots/{name}: {size // 1024} KB")
+        print(f"{OUT / name}: {size // 1024} KB")
 
 
 if __name__ == "__main__":

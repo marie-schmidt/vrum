@@ -23,6 +23,7 @@ import {
   TYPES,
   chosenKey,
   drawable,
+  epicNumber,
   needs,
   neighboursOf,
   relationWords,
@@ -35,7 +36,7 @@ import {
 } from './graph-data.js';
 import { describeNode, drawNode, labelledBox, metricsOf, tileBox } from './graph-nodes.js';
 import { icon } from './icons.js';
-import { STATUS, STATUSES, kindIcon } from './labels.js';
+import { STATUS, STATUSES, kindIcon, nodeCode } from './labels.js';
 import { freeRoute, layered, plannedRoute, straightRoute } from './layered.js';
 import { createLayout } from './layout.js';
 import { openRecord } from './records.js';
@@ -412,7 +413,7 @@ async function matchedWork(text) {
     return null;
   }
   const rows = await loadRows(text, bar);
-  return rows ? new Set(rows.map((row) => row.id)) : null;
+  return rows ? new Set(rows.map((row) => row.ref)) : null;
 }
 
 async function draw() {
@@ -449,13 +450,13 @@ function syncControls() {
     const current = group === parts.views ? cfg.view : cfg.as;
     for (const button of group.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.value === current));
   }
-  const choices = epics().sort((a, b) => a.id - b.id);
-  const signature = choices.map((epic) => `${epic.id}:${epic.title}`).join('|');
+  const choices = epics().sort((a, b) => a.number - b.number);
+  const signature = choices.map((epic) => `${epic.ref}:${epic.title}`).join('|');
   if (signature !== parts.epicSignature) {
     parts.epicSignature = signature;
-    parts.epicSelect.replaceChildren(h('option', { value: '' }, 'All epics'), ...choices.map((epic) => h('option', { value: epic.id }, `#${epic.id} ${epic.title}`)));
+    parts.epicSelect.replaceChildren(h('option', { value: '' }, 'All epics'), ...choices.map((epic) => h('option', { value: epic.number }, `${nodeCode(epic.kind, epic.number)} ${epic.title}`)));
   }
-  parts.epicSelect.value = cfg.epic ? String(cfg.epic) : '';
+  parts.epicSelect.value = cfg.epic ? String(epicNumber(cfg.epic)) : '';
   parts.reach.value = cfg.scope === 'local' ? String(cfg.depth) : '';
   parts.colour.value = cfg.colour;
   // The filter box takes what the address says only when the address changed, so that words
@@ -487,7 +488,7 @@ function drawNotice() {
   const map = cfg.as === 'map';
   const count = map ? (drawn.collapsed ? all.dots.size : drawn.dots.size) : shown.dots.size;
   put(parts.scope, problem ? 'Selected scope · not loaded' : `Selected scope · ${plural(count, 'record')}`);
-  const where = cfg.scope === 'epic' && cfg.epic ? all.dots.get(`node:${cfg.epic}`)?.title || 'This epic' : cfg.scope === 'local' && chosen ? `Around ${all.dots.get(chosen)?.title || 'the chosen record'}` : 'All epics';
+  const where = cfg.scope === 'epic' && cfg.epic ? all.dots.get(cfg.epic)?.title || 'This epic' : cfg.scope === 'local' && chosen ? `Around ${all.dots.get(chosen)?.title || 'the chosen record'}` : 'All epics';
   put(parts.caption, h('span', { class: 'gm-where' }, `${where} / ${SCOPE_WORDS[cfg.view]}`), map && !shown.collapsed && drawn.dots.size ? h('span', { class: 'gm-counts' }, `${plural(drawn.dots.size, 'record')} · ${plural(drawn.edges.length, 'line')}`) : null);
   // An empty map says why in the middle of the map, so the notice does not say it twice.
   const words = [map && !drawn.dots.size ? '' : shown.notice, modeNote].filter(Boolean).join(' ');
@@ -575,7 +576,7 @@ function scrollToChoice() {
 
 // -- the map --------------------------------------------------------------------------------------
 
-const epicIndex = (dot) => epics().sort((a, b) => a.id - b.id).findIndex((epic) => epic.id === dot.epicId);
+const epicIndex = (dot) => epics().sort((a, b) => a.number - b.number).findIndex((epic) => epic.ref === dot.epic);
 
 // Which way the map is laid out. Few enough nodes, and not too many in a row: rows with every node
 // labelled. Otherwise tiles, with the force layout, and a word about it.
@@ -607,7 +608,7 @@ function drawMap() {
   if (mode === 'layered') layout.assign(plan.positions);
   else layout.settle(dots.length > 400 ? 120 : 260);
   renderMap();
-  const shape = [mode, cfg.view, cfg.scope, drawn.epicId, cfg.depth, cfg.q, cfg.scope === 'local' ? chosenKey(cfg) : '', drawn.collapsed, dots.length > 0].join('|');
+  const shape = [mode, cfg.view, cfg.scope, drawn.epic, cfg.depth, cfg.q, cfg.scope === 'local' ? chosenKey(cfg) : '', drawn.collapsed, dots.length > 0].join('|');
   if (shape !== lastShape) {
     lastShape = shape;
     fit();
@@ -622,7 +623,7 @@ function drawMap() {
 }
 
 function describe(dot) {
-  const detail = dot.collapsed ? `${TYPES[dot.type].label} ${dot.id}: ${dot.title}, with ${plural(dot.count, 'item')} under it` : wordsFor(dot);
+  const detail = dot.collapsed ? `${TYPES[dot.type].label} ${dot.number}: ${dot.title}, with ${plural(dot.count, 'item')} under it` : wordsFor(dot);
   return `${detail}${layout.isPinned(dot.key) ? ' Pinned.' : ''}`;
 }
 
@@ -677,7 +678,9 @@ function renderMap() {
         'data-key': dot.key,
         'data-kind': dot.kind,
         'data-type': dot.type,
-        'data-id': dot.id,
+        'data-ref': dot.ref ?? null,
+        'data-number': dot.number,
+        'data-id': dot.isNode ? null : dot.id,
         'data-status': dot.status,
         'data-confirmation': dot.confirmation || null,
         'data-outside': dot.outside ? 'true' : null,
@@ -782,7 +785,7 @@ function showTip(key) {
   parts.tip.hidden = !dot;
   parts.tip.dataset.key = dot ? wanted : '';
   if (!dot) return;
-  put(parts.tip, h('strong', {}, `${TYPES[dot.type].label} ${dot.id}`), ' ', dot.title);
+  put(parts.tip, h('strong', {}, `${TYPES[dot.type].label} ${dot.code}`), ' ', dot.title);
   placeTip();
 }
 
@@ -954,12 +957,12 @@ function choose(key) {
   if (!dot) return;
   announce(`Chosen: ${dot.title}`);
   if (dot.collapsed) {
-    ui.navigate({ scope: null, epic: dot.id, sel: key, panel: null });
-  } else if (cfg.scope === 'epic' && dot.epicId && dot.epicId !== shown.epicId) {
+    ui.navigate({ scope: null, epic: epicNumber(dot.ref), sel: key, panel: null });
+  } else if (cfg.scope === 'epic' && dot.epic && dot.epic !== shown.epic) {
     // A dot of another epic, drawn because it is joined to this one: show that epic.
-    ui.navigate({ epic: dot.epicId, sel: key, panel: null });
+    ui.navigate({ epic: epicNumber(dot.epic), sel: key, panel: null });
   } else {
-    openRecord(dot.kind, dot.id);
+    openRecord(dot.type, dot.number);
   }
 }
 
@@ -992,7 +995,7 @@ function neighbourButton(entry) {
       'button',
       { type: 'button', class: 'neighbour small', 'data-key': dot.key, 'data-relation': entry.edge.type, onclick: () => choose(dot.key) },
       kindIcon(dot.type, 14),
-      h('span', { class: 'neighbour-words' }, h('strong', {}, relationWords(entry)), ` ${TYPES[dot.type].label} #${dot.id} ${dot.title}`),
+      h('span', { class: 'neighbour-words' }, h('strong', {}, relationWords(entry)), ` ${TYPES[dot.type].label} ${dot.code} ${dot.title}`),
     ),
   );
 }
@@ -1011,7 +1014,7 @@ function drawSide() {
   }
   parts.chosen.append(
     h('h2', {}, 'Chosen record'),
-    h('p', { class: 'gm-chosen-title' }, kindIcon(dot.type, 14), h('strong', {}, `${TYPES[dot.type].label} #${dot.id}`), ` ${dot.title}`),
+    h('p', { class: 'gm-chosen-title' }, kindIcon(dot.type, 14), h('strong', {}, `${TYPES[dot.type].label} ${dot.code}`), ` ${dot.title}`),
     h('button', { type: 'button', class: 'small', id: 'pin', onclick: () => togglePin(dot.key) }, layout.isPinned(dot.key) ? 'Unpin this node' : 'Pin this node in place'),
   );
   const near = neighboursOf(dot.key, all.edges, all.dots);

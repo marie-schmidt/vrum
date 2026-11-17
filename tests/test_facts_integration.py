@@ -18,6 +18,7 @@ from tests.helpers import (
     ok,
     race_mixed,
     race_results,
+    ref_order,
     refused,
     run_sql,
 )
@@ -38,7 +39,7 @@ FACT_FIELDS = {
     "confirmation",
     "confirmed_by",
     "confirmed_at",
-    "node_ids",
+    "nodes",
     "rule_ids",
     "decision_ids",
 }
@@ -113,7 +114,7 @@ def instant(text: str) -> datetime:
 
 async def test_a_fact_is_recorded_with_its_source_and_what_it_concerns(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     decision = await make_decision(client, "Keep one database")
 
     fact = await ok(
@@ -122,7 +123,7 @@ async def test_a_fact_is_recorded_with_its_source_and_what_it_concerns(client: C
         actor="agent-1",
         text="The build takes four minutes.",
         source="Timed it on Marie's laptop",
-        node_ids=[story["id"]],
+        nodes=[story["ref"]],
         rule_ids=[rule["id"]],
         decision_ids=[decision["id"]],
     )
@@ -137,7 +138,7 @@ async def test_a_fact_is_recorded_with_its_source_and_what_it_concerns(client: C
         None,
     )
     assert fact["recorded_at"]
-    assert fact["node_ids"] == [story["id"]] and fact["rule_ids"] == [rule["id"]]
+    assert fact["nodes"] == [story["ref"]] and fact["rule_ids"] == [rule["id"]]
     assert fact["decision_ids"] == [decision["id"]]
     # Recording is not confirming: nobody has looked at it yet, and the words say so.
     assert (fact["confirmation"], fact["confirmed_by"], fact["confirmed_at"]) == (
@@ -162,18 +163,18 @@ async def test_a_fact_is_recorded_with_its_source_and_what_it_concerns(client: C
     }
 
     # What it concerns shows in the histories of those things.
-    for tool, key, thing in (
-        ("node_history", "node_id", story),
-        ("rule_history", "rule_id", rule),
-        ("decision_history", "decision_id", decision),
+    for tool, argument in (
+        ("node_history", {"node": story["ref"]}),
+        ("rule_history", {"rule_id": rule["id"]}),
+        ("decision_history", {"decision_id": decision["id"]}),
     ):
-        events = (await ok(client, tool, **{key: thing["id"]}))["items"]
+        events = (await ok(client, tool, **argument))["items"]
         assert any(
             event["fact_id"] == fact["id"] and event["action"] == "fact_linked" for event in events
         ), f"{tool} does not show the fact"
 
     plain = await make_fact(client)
-    assert (plain["node_ids"], plain["rule_ids"], plain["decision_ids"]) == ([], [], [])
+    assert (plain["nodes"], plain["rule_ids"], plain["decision_ids"]) == ([], [], [])
 
 
 async def test_recording_a_fact_never_confirms_it_whoever_records_it(client: Client) -> None:
@@ -214,7 +215,10 @@ async def test_a_fact_that_is_blank_unsourced_or_about_nothing_is_refused(client
         ({"source": "  "}, "A fact needs its source"),
         ({"source": ""}, "A fact needs its source"),
         ({"text": " "}, "A fact needs its text"),
-        ({"node_ids": [987654321]}, "There is no node with id 987654321, so the fact cannot be"),
+        (
+            {"nodes": ["story:987654321"]},
+            "There is no story 987654321 in this project, so the fact cannot be",
+        ),
         ({"rule_ids": [987654321]}, "There is no rule with id 987654321"),
         ({"decision_ids": [987654321]}, "There is no decision with id 987654321"),
         ({"actor": " "}, "Say who is making this change"),
@@ -222,22 +226,22 @@ async def test_a_fact_that_is_blank_unsourced_or_about_nothing_is_refused(client
         assert expected in await refused(client, "retain_fact", **{**base, **change})
 
     # A refused fact leaves nothing behind, not even a link made before the bad one was found.
-    mixed = {**base, "node_ids": [story["id"]], "decision_ids": [987654321]}
+    mixed = {**base, "nodes": [story["ref"]], "decision_ids": [987654321]}
     await refused(client, "retain_fact", **mixed)
     assert await tally(client) == before
-    assert (await ok(client, "list_facts", node_id=story["id"]))["total"] == 0
+    assert (await ok(client, "list_facts", node=story["ref"]))["total"] == 0
 
 
 async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     decision = await make_decision(client, "A decision")
     old = await make_fact(
         client,
         "The limit is 10.",
-        node_ids=[story["id"]],
+        nodes=[story["ref"]],
         rule_ids=[rule["id"]],
         decision_ids=[decision["id"]],
     )
@@ -260,7 +264,7 @@ async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
     )
     assert new["confirmation"] == "unconfirmed"
     # What the old one concerned carries over.
-    assert new["node_ids"] == [story["id"]] and new["rule_ids"] == [rule["id"]]
+    assert new["nodes"] == [story["ref"]] and new["rule_ids"] == [rule["id"]]
     assert new["decision_ids"] == [decision["id"]]
     gone = await get(client, old)
     assert (gone["status"], gone["superseded_by_id"], gone["status_reason"]) == (
@@ -272,16 +276,16 @@ async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
     assert (gone["text"], gone["source"]) == ("The limit is 10.", "The team call")
     assert gone["label"].startswith("Superseded fact, not confirmed by a person")
     # It keeps the links it had, as a record.
-    assert gone["node_ids"] == [story["id"]] and gone["rule_ids"] == [rule["id"]]
+    assert gone["nodes"] == [story["ref"]] and gone["rule_ids"] == [rule["id"]]
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     assert ids(facts_in(result["facts"])) == [new["id"]]
     past = result["past_facts"]["items"]
     assert [(entry["fact"]["id"], entry["fact"]["status"]) for entry in past] == [
         (old["id"], "superseded")
     ]
     assert past[0]["why"] == f"linked directly to this node; replaced by fact {new['id']}"
-    assert (await every(client, node_id=story["id"], status="active"))[0] == [new]
+    assert (await every(client, node=story["ref"], status="active"))[0] == [new]
 
     events = await history(client, old)
     assert [event["action"] for event in events][-1] == "fact_superseded"
@@ -305,24 +309,24 @@ async def test_a_fact_is_never_edited_a_replaced_one_points_at_its_replacement(
             text="The limit is 30.",
             source="The owner",
             keep_links=False,
-            node_ids=[story["parent_id"]],
+            nodes=[story["parent"]],
         )
     )["replacement"]
-    assert (third["node_ids"], third["rule_ids"], third["decision_ids"]) == (
-        [story["parent_id"]],
+    assert (third["nodes"], third["rule_ids"], third["decision_ids"]) == (
+        [story["parent"]],
         [],
         [],
     )
     # With the links kept, the ids it is given are added to them.
-    fourth = (await replace(client, third, node_ids=[story["id"]]))["replacement"]
-    assert fourth["node_ids"] == sorted([story["id"], story["parent_id"]])
+    fourth = (await replace(client, third, nodes=[story["ref"]]))["replacement"]
+    assert fourth["nodes"] == sorted([story["ref"], story["parent"]], key=ref_order)
 
 
 async def test_a_confirmation_stays_with_the_replaced_fact_and_the_new_one_starts_unconfirmed(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    old = await make_fact(client, "Confirmed and then replaced", node_ids=[story["id"]])
+    old = await make_fact(client, "Confirmed and then replaced", nodes=[story["ref"]])
     reviewed = await confirm(client, "fact", old, "Marie", quote="I checked it")
 
     change = await replace(
@@ -355,7 +359,7 @@ async def test_a_confirmation_stays_with_the_replaced_fact_and_the_new_one_start
     assert old["id"] not in ids((await every(client, status="active", confirmation="confirmed"))[0])
     assert new["id"] in ids((await every(client, status="active", confirmation="unconfirmed"))[0])
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     (current,), (past,) = facts_in(result["facts"]), facts_in(result["past_facts"])
     assert (current["id"], current["confirmation"]) == (new["id"], "unconfirmed")
     assert (past["id"], past["confirmation"], past["status"]) == (
@@ -380,7 +384,7 @@ async def test_a_confirmation_stays_with_the_replaced_fact_and_the_new_one_start
 async def test_one_fact_replaces_several_in_one_step(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     one, two, three = [
-        await make_fact(client, f"Fact {number}", node_ids=[story["id"]]) for number in range(3)
+        await make_fact(client, f"Fact {number}", nodes=[story["ref"]]) for number in range(3)
     ]
 
     change = await replace(
@@ -393,14 +397,14 @@ async def test_one_fact_replaces_several_in_one_step(client: Client) -> None:
 
     new = change["replacement"]
     assert change["superseded_ids"] == [one["id"], two["id"]]
-    assert new["supersedes_ids"] == [one["id"], two["id"]] and new["node_ids"] == [story["id"]]
+    assert new["supersedes_ids"] == [one["id"], two["id"]] and new["nodes"] == [story["ref"]]
     for old in (one, two):
         replaced = await get(client, old)
         assert (replaced["status"], replaced["superseded_by_id"]) == ("superseded", new["id"])
         assert replaced["status_reason"] == "Marie says it is the other way round"
         assert (await history(client, old))[-1]["action"] == "fact_superseded"
     assert (await get(client, three))["status"] == "active"
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     assert ids(facts_in(result["facts"])) == [three["id"], new["id"]]
     assert ids(facts_in(result["past_facts"])) == [one["id"], two["id"]]
 
@@ -426,15 +430,15 @@ async def test_one_fact_replaces_several_in_one_step(client: Client) -> None:
 async def test_a_call_can_replace_thirty_facts_at_once(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     facts = [
-        await make_fact(client, f"Fact {number}", node_ids=[story["id"]]) for number in range(30)
+        await make_fact(client, f"Fact {number}", nodes=[story["ref"]]) for number in range(30)
     ]
 
     change = await replace(client, *facts, reason="All of them were about the old design")
 
     assert change["superseded_ids"] == ids(facts)
-    listed, total = await every(client, node_id=story["id"], status="superseded")
+    listed, total = await every(client, node=story["ref"], status="superseded")
     assert ids(listed) == ids(facts) and total == 30
-    listed, total = await every(client, node_id=story["id"], status="active")
+    listed, total = await every(client, node=story["ref"], status="active")
     assert ids(listed) == [change["replacement"]["id"]] and total == 1
 
 
@@ -459,7 +463,7 @@ async def test_a_replacement_that_is_incomplete_or_wrong_changes_nothing(client:
         ({"said_by": "Marie"}, "Give both said_by"),
         ({"quote": "She said so"}, "Give both said_by"),
         ({"decision_ids": [987654321]}, "There is no decision with id 987654321"),
-        ({"node_ids": [987654321]}, "There is no node with id 987654321"),
+        ({"nodes": ["story:987654321"]}, "There is no story 987654321 in this project"),
         ({"rule_ids": [987654321]}, "There is no rule with id 987654321"),
         ({"actor": " "}, "Say who is making this change"),
         ({"replaces": [fact["id"], other["id"]], "reason": " "}, "A replacement needs a reason"),
@@ -475,9 +479,9 @@ async def test_withdrawing_needs_a_reason_covers_several_and_keeps_the_record(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    one = await make_fact(client, "Wrong one", node_ids=[story["id"]])
-    two = await make_fact(client, "Wrong two", node_ids=[story["id"]])
-    kept = await make_fact(client, "Right", node_ids=[story["id"]])
+    one = await make_fact(client, "Wrong one", nodes=[story["ref"]])
+    two = await make_fact(client, "Wrong two", nodes=[story["ref"]])
+    kept = await make_fact(client, "Right", nodes=[story["ref"]])
 
     change = await withdraw(
         client, one, two, actor="agent-3", reason="The benchmark was run on the wrong branch"
@@ -493,10 +497,10 @@ async def test_withdrawing_needs_a_reason_covers_several_and_keeps_the_record(
             None,
         )
         # Nothing is deleted or rewritten.
-        assert (gone["text"], gone["source"], gone["node_ids"]) == (
+        assert (gone["text"], gone["source"], gone["nodes"]) == (
             wrong["text"],
             wrong["source"],
-            [story["id"]],
+            [story["ref"]],
         )
         assert gone["label"].startswith("Withdrawn fact, not confirmed by a person")
         events = await history(client, wrong)
@@ -508,7 +512,7 @@ async def test_withdrawing_needs_a_reason_covers_several_and_keeps_the_record(
         }
     assert (await get(client, kept))["status"] == "active"
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     assert ids(facts_in(result["facts"])) == [kept["id"]]
     why = {entry["fact"]["id"]: entry["why"] for entry in result["past_facts"]["items"]}
     assert why == {
@@ -517,7 +521,7 @@ async def test_withdrawing_needs_a_reason_covers_several_and_keeps_the_record(
         two["id"]: "linked directly to this node; withdrawn: The benchmark was run on the wrong "
         "branch",
     }
-    assert ids((await every(client, node_id=story["id"], status="withdrawn"))[0]) == ids([one, two])
+    assert ids((await every(client, node=story["ref"], status="withdrawn"))[0]) == ids([one, two])
 
 
 async def test_withdrawing_refuses_blank_reasons_and_anything_not_active_and_changes_nothing(
@@ -779,8 +783,8 @@ async def test_an_ended_fact_keeps_the_confirmation_it_had_and_cannot_be_confirm
 
 async def test_a_confirmed_fact_can_only_be_changed_with_that_persons_word(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    fact = await make_fact(client, "Confirmed statement", node_ids=[story["id"]])
-    other = await make_fact(client, "Unconfirmed statement", node_ids=[story["id"]])
+    fact = await make_fact(client, "Confirmed statement", nodes=[story["ref"]])
+    other = await make_fact(client, "Unconfirmed statement", nodes=[story["ref"]])
     reviewed = await confirm(client, "fact", fact, "Marie")
     before = await tally(client)
 
@@ -851,28 +855,28 @@ async def test_a_confirmed_fact_can_only_be_changed_with_that_persons_word(clien
 
 async def test_what_a_fact_concerns_can_be_changed_while_it_is_active(client: Client) -> None:
     first, second = await make_stories(client, 2)
-    rule = await make_rule(client, story_id=first["id"])
+    rule = await make_rule(client, story=first["ref"])
     decision = await make_decision(client, "A decision")
-    fact = await make_fact(client, "A fact", node_ids=[first["id"]])
+    fact = await make_fact(client, "A fact", nodes=[first["ref"]])
 
     linked = await ok(
         client,
         "link_fact",
         actor="agent-1",
         fact_id=fact["id"],
-        node_ids=[second["id"]],
+        nodes=[second["ref"]],
         rule_ids=[rule["id"]],
         decision_ids=[decision["id"]],
     )
-    assert linked["node_ids"] == sorted([first["id"], second["id"]])
+    assert linked["nodes"] == sorted([first["ref"], second["ref"]], key=ref_order)
     assert linked["rule_ids"] == [rule["id"]] and linked["decision_ids"] == [decision["id"]]
-    assert fact["id"] in ids((await every(client, node_id=second["id"]))[0])
-    assert fact["id"] in ids(facts_in((await recall(client, node_id=second["id"]))["facts"]))
+    assert fact["id"] in ids((await every(client, node=second["ref"]))[0])
+    assert fact["id"] in ids(facts_in((await recall(client, node=second["ref"]))["facts"]))
     unlinked = await ok(
-        client, "unlink_fact", actor="bob", fact_id=fact["id"], node_ids=[first["id"]]
+        client, "unlink_fact", actor="bob", fact_id=fact["id"], nodes=[first["ref"]]
     )
-    assert unlinked["node_ids"] == [second["id"]]
-    assert fact["id"] not in ids(facts_in((await recall(client, node_id=first["id"]))["facts"]))
+    assert unlinked["nodes"] == [second["ref"]]
+    assert fact["id"] not in ids(facts_in((await recall(client, node=first["ref"]))["facts"]))
     assert [(e["action"], e["actor"]) for e in await history(client, fact)] == [
         ("fact_recorded", "agent-1"),
         ("fact_linked", "agent-1"),
@@ -881,7 +885,7 @@ async def test_what_a_fact_concerns_can_be_changed_while_it_is_active(client: Cl
         ("fact_linked", "agent-1"),
         ("fact_unlinked", "bob"),
     ]
-    node_events = (await ok(client, "node_history", node_id=first["id"]))["items"]
+    node_events = (await ok(client, "node_history", node=first["ref"]))["items"]
     assert [e["action"] for e in node_events if e["fact_id"] == fact["id"]] == [
         "fact_linked",
         "fact_unlinked",
@@ -892,30 +896,34 @@ async def test_what_a_fact_concerns_can_be_changed_while_it_is_active(client: Cl
     # Changing what a confirmed fact concerns is not changing the fact: it needs no one's word, and
     # it keeps its confirmation.
     await confirm(client, "fact", fact, "Marie")
-    relinked = await ok(client, "link_fact", actor="a", fact_id=fact["id"], node_ids=[first["id"]])
-    assert (relinked["confirmed_by"], relinked["node_ids"]) == (
+    relinked = await ok(client, "link_fact", actor="a", fact_id=fact["id"], nodes=[first["ref"]])
+    assert (relinked["confirmed_by"], relinked["nodes"]) == (
         "Marie",
-        sorted([first["id"], second["id"]]),
+        sorted([first["ref"], second["ref"]], key=ref_order),
     )
 
     arguments: dict[str, Any] = {"actor": "a", "fact_id": fact["id"]}
     before = await tally(client)
     for tool, extra, expected in (
-        ("link_fact", {"node_ids": [first["id"]]}, "already linked to node"),
+        ("link_fact", {"nodes": [first["ref"]]}, f"already linked to {first['ref']}"),
         ("link_fact", {"rule_ids": [rule["id"]]}, "already linked to rule"),
         ("link_fact", {"decision_ids": [decision["id"]]}, "already linked to decision"),
-        ("unlink_fact", {"node_ids": [987654321]}, "is not linked to node"),
+        ("unlink_fact", {"nodes": ["story:987654321"]}, "is not linked to story:987654321"),
         ("unlink_fact", {"rule_ids": [987654321]}, "is not linked to rule"),
-        ("link_fact", {"node_ids": [987654321]}, "There is no node with id 987654321"),
+        (
+            "link_fact",
+            {"nodes": ["story:987654321"]},
+            "There is no story 987654321 in this project",
+        ),
         ("link_fact", {"rule_ids": [987654321]}, "There is no rule with id 987654321"),
         ("link_fact", {"decision_ids": [987654321]}, "There is no decision with id 987654321"),
         ("link_fact", {}, "Nothing to link"),
         ("unlink_fact", {}, "Nothing to link"),
-        ("link_fact", {"node_ids": [first["id"]], "actor": " "}, "Say who is making this change"),
+        ("link_fact", {"nodes": [first["ref"]], "actor": " "}, "Say who is making this change"),
     ):
         assert expected in await refused(client, tool, **{**arguments, **extra})
     assert "There is no fact with id 987654321" in await refused(
-        client, "link_fact", actor="a", fact_id=987654321, node_ids=[first["id"]]
+        client, "link_fact", actor="a", fact_id=987654321, nodes=[first["ref"]]
     )
     # A call that is half right changes nothing.
     await refused(
@@ -923,30 +931,30 @@ async def test_what_a_fact_concerns_can_be_changed_while_it_is_active(client: Cl
         "link_fact",
         actor="a",
         fact_id=fact["id"],
-        node_ids=[first["id"]],
+        nodes=[first["ref"]],
         rule_ids=[987654321],
     )
     assert await tally(client) == before
 
     # A fact that has ended keeps the links it had, as a record, and its replacement is the one to
     # change.
-    ended = await make_fact(client, "Will end", node_ids=[first["id"]])
+    ended = await make_fact(client, "Will end", nodes=[first["ref"]])
     await withdraw(client, ended)
     for tool in ("link_fact", "unlink_fact"):
         message = await refused(
-            client, tool, actor="a", fact_id=ended["id"], node_ids=[second["id"], first["id"]]
+            client, tool, actor="a", fact_id=ended["id"], nodes=[second["ref"], first["ref"]]
         )
         assert (
             "keeps the links it had" in message and f"Fact {ended['id']} was withdrawn" in message
         )
-    assert (await get(client, ended))["node_ids"] == [first["id"]]
+    assert (await get(client, ended))["nodes"] == [first["ref"]]
 
 
 async def test_a_facts_history_lists_everything_in_order_with_who_said_what(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    fact = await make_fact(client, "A long life", node_ids=[story["id"]])
+    fact = await make_fact(client, "A long life", nodes=[story["ref"]])
     await confirm(client, "fact", fact, "Marie", quote="Looks right", actor="agent-2")
     await ok(
         client,
@@ -1010,33 +1018,31 @@ async def test_a_facts_history_lists_everything_in_order_with_who_said_what(
 
 async def test_listing_walks_every_page_once_and_the_count_matches(client: Client) -> None:
     epic, story, task = await make_tree(client)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     other_epic, other_story, _ = await make_tree(client)
     decision = await make_decision(client, "A linked decision")
-    on_task = [await make_fact(client, f"On a task {n}", node_ids=[task["id"]]) for n in range(20)]
-    on_story = [
-        await make_fact(client, f"On a story {n}", node_ids=[story["id"]]) for n in range(20)
-    ]
+    on_task = [await make_fact(client, f"On a task {n}", nodes=[task["ref"]]) for n in range(20)]
+    on_story = [await make_fact(client, f"On a story {n}", nodes=[story["ref"]]) for n in range(20)]
     on_rule = [await make_fact(client, f"On a rule {n}", rule_ids=[rule["id"]]) for n in range(20)]
     on_decision = [
         await make_fact(
-            client, f"On a decision {n}", decision_ids=[decision["id"]], node_ids=[story["id"]]
+            client, f"On a decision {n}", decision_ids=[decision["id"]], nodes=[story["ref"]]
         )
         for n in range(2)
     ]
     elsewhere = [
-        await make_fact(client, f"Elsewhere {n}", node_ids=[other_story["id"]]) for n in range(5)
+        await make_fact(client, f"Elsewhere {n}", nodes=[other_story["ref"]]) for n in range(5)
     ]
     everything = [*on_task, *on_story, *on_rule, *on_decision]
 
     # A walk in pages of 25 gives each fact once and the count the first page promised.
-    found, total = await every(client, within_node_id=epic["id"])
+    found, total = await every(client, within_node=epic["ref"])
     assert ids(found) == ids(everything) and total == 62
     assert len(set(ids(found))) == len(found)
-    page = await ok(client, "list_facts", within_node_id=epic["id"], limit=25)
+    page = await ok(client, "list_facts", within_node=epic["ref"], limit=25)
     assert len(page["items"]) == 25 and page["next_after_id"] == page["items"][-1]["id"]
     assert page["total"] == 62
-    assert (await ok(client, "list_facts", within_node_id=epic["id"], limit=200))[
+    assert (await ok(client, "list_facts", within_node=epic["ref"], limit=200))[
         "next_after_id"
     ] is None
 
@@ -1046,13 +1052,13 @@ async def test_listing_walks_every_page_once_and_the_count_matches(client: Clien
         (task, on_task),
         (other_epic, elsewhere),
     ):
-        found, total = await every(client, within_node_id=node["id"])
+        found, total = await every(client, within_node=node["ref"])
         assert ids(found) == ids(expected) and total == len(expected)
     # Exact filters stay exact.
-    assert ids((await every(client, node_id=story["id"]))[0]) == ids([*on_story, *on_decision])
+    assert ids((await every(client, node=story["ref"]))[0]) == ids([*on_story, *on_decision])
     assert ids((await every(client, rule_id=rule["id"]))[0]) == ids(on_rule)
     assert ids((await every(client, decision_id=decision["id"]))[0]) == ids(on_decision)
-    assert (await every(client, node_id=epic["id"]))[1] == 0
+    assert (await every(client, node=epic["ref"]))[1] == 0
 
     # Status and confirmation, alone and together with the others.
     await withdraw(client, on_task[0], reason="Wrong")
@@ -1060,7 +1066,7 @@ async def test_listing_walks_every_page_once_and_the_count_matches(client: Clien
     for fact in (on_task[2], on_task[3], on_task[4]):
         await confirm(client, "fact", fact, "Marie")
     await replace(client, on_task[3], said_by="Marie", quote="Changed", reason="Changed again")
-    in_task = {"node_id": task["id"]}
+    in_task = {"node": task["ref"]}
     assert ids((await every(client, status="withdrawn", **in_task))[0]) == [on_task[0]["id"]]
     superseded, count = await every(client, status="superseded", **in_task)
     assert ids(superseded) == [on_task[1]["id"], on_task[3]["id"]] and count == 2
@@ -1082,10 +1088,10 @@ async def test_listing_walks_every_page_once_and_the_count_matches(client: Clien
     for arguments, wanted in (
         ({"status": "gone"}, "status must be one of active, superseded, withdrawn"),
         ({"confirmation": "maybe"}, "confirmation must be one of confirmed, unconfirmed"),
-        ({"node_id": 987654321}, "There is no node with id 987654321"),
+        ({"node": "story:987654321"}, "There is no story 987654321 in this project"),
         ({"rule_id": 987654321}, "There is no rule with id 987654321"),
         ({"decision_id": 987654321}, "There is no decision with id 987654321"),
-        ({"within_node_id": 987654321}, "There is no node with id 987654321"),
+        ({"within_node": "epic:987654321"}, "There is no epic 987654321 in this project"),
         ({"limit": 0}, "limit must be a whole number from 1 to 200"),
         ({"limit": 201}, "limit must be a whole number from 1 to 200"),
     ):
@@ -1097,20 +1103,20 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_fact_is_
 ) -> None:
     epic, story, task = await make_tree(client)
     other_story = (await make_stories(client, 1))[0]
-    rule = await make_rule(client, story_id=story["id"])
-    fact = await make_fact(client, "Linked fact", node_ids=[story["id"]])
-    confirmed = await make_fact(client, "Linked and confirmed", node_ids=[story["id"]])
+    rule = await make_rule(client, story=story["ref"])
+    fact = await make_fact(client, "Linked fact", nodes=[story["ref"]])
+    confirmed = await make_fact(client, "Linked and confirmed", nodes=[story["ref"]])
     await confirm(client, "fact", confirmed, "Marie")
-    elsewhere = await make_fact(client, "Linked elsewhere", node_ids=[other_story["id"]])
-    parent_fact = await make_fact(client, "Linked to the epic", node_ids=[epic["id"]])
-    child_fact = await make_fact(client, "Linked to the task", node_ids=[task["id"]])
+    elsewhere = await make_fact(client, "Linked elsewhere", nodes=[other_story["ref"]])
+    parent_fact = await make_fact(client, "Linked to the epic", nodes=[epic["ref"]])
+    child_fact = await make_fact(client, "Linked to the task", nodes=[task["ref"]])
     rule_fact = await make_fact(client, "Linked to the rule", rule_ids=[rule["id"]])
-    replaced = await make_fact(client, "Old fact", node_ids=[story["id"]])
+    replaced = await make_fact(client, "Old fact", nodes=[story["ref"]])
     new = (await replace(client, replaced, reason="Changed", keep_links=False))["replacement"]
-    withdrawn = await make_fact(client, "Wrong fact", node_ids=[story["id"]])
+    withdrawn = await make_fact(client, "Wrong fact", nodes=[story["ref"]])
     await withdraw(client, withdrawn, reason="It was wrong")
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
 
     assert ids(facts_in(result["facts"])) == [fact["id"], confirmed["id"]]
     assert [entry["why"] for entry in result["facts"]["items"]] == [
@@ -1137,10 +1143,10 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_fact_is_
     assert ids(facts_in(for_rule["facts"])) == [rule_fact["id"]]
     assert for_rule["active_decisions"]["count"] == 0 and for_rule["past_facts"]["count"] == 0
 
-    for_task = await recall(client, node_id=task["id"])
+    for_task = await recall(client, node=task["ref"])
     assert ids(facts_in(for_task["facts"])) == [child_fact["id"]]
     empty_story = (await make_stories(client, 1))[0]
-    empty = await recall(client, node_id=empty_story["id"])
+    empty = await recall(client, node=empty_story["ref"])
     assert all(
         empty[name]["items"] == [] and empty[name]["count"] == 0
         for name in ("active_decisions", "facts", "past_decisions", "past_facts")
@@ -1151,17 +1157,17 @@ async def test_each_recall_section_pages_on_its_own_and_bad_asks_are_refused(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    facts = [await make_fact(client, f"Fact {n}", node_ids=[story["id"]]) for n in range(3)]
+    facts = [await make_fact(client, f"Fact {n}", nodes=[story["ref"]]) for n in range(3)]
     for number in range(3):
-        old = await make_fact(client, f"Old {number}", node_ids=[story["id"]])
+        old = await make_fact(client, f"Old {number}", nodes=[story["ref"]])
         await withdraw(client, old)
 
-    both = await recall(client, node_id=story["id"], limit=2)
+    both = await recall(client, node=story["ref"], limit=2)
     assert ids(facts_in(both["facts"])) == ids(facts[:2])
     assert both["facts"]["count"] == 3 and both["facts"]["next_after_id"] == facts[1]["id"]
     rest = await recall(
         client,
-        node_id=story["id"],
+        node=story["ref"],
         limit=2,
         show="facts",
         after_id=both["facts"]["next_after_id"],
@@ -1170,22 +1176,22 @@ async def test_each_recall_section_pages_on_its_own_and_bad_asks_are_refused(
     assert rest["facts"]["next_after_id"] is None
     assert rest["past_facts"]["items"] == [] and rest["past_facts"]["count"] == 3
 
-    past = await recall(client, node_id=story["id"], show="past_facts", limit=2)
+    past = await recall(client, node=story["ref"], show="past_facts", limit=2)
     assert len(past["past_facts"]["items"]) == 2 and past["past_facts"]["next_after_id"] is not None
     assert past["facts"]["items"] == []
 
     assert "after_id only works for one section at a time" in await refused(
-        client, "recall", node_id=story["id"], after_id=1
+        client, "recall", node=story["ref"], after_id=1
     )
     assert "show must be one of all, active_decisions, project_wide_decisions, facts" in (
-        await refused(client, "recall", node_id=story["id"], show="beliefs")
+        await refused(client, "recall", node=story["ref"], show="beliefs")
     )
-    assert "Give exactly one of node_id or rule_id" in await refused(client, "recall")
-    assert "Give exactly one of node_id or rule_id" in await refused(
-        client, "recall", node_id=story["id"], rule_id=1
+    assert "Give exactly one of node (an epic, story or task" in await refused(client, "recall")
+    assert "Give exactly one of node (an epic, story or task" in await refused(
+        client, "recall", node=story["ref"], rule_id=1
     )
-    assert "There is no node with id 987654321" in await refused(
-        client, "recall", node_id=987654321
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "recall", node="story:987654321"
     )
     assert "There is no rule with id 987654321" in await refused(
         client, "recall", rule_id=987654321

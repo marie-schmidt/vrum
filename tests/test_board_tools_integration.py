@@ -16,7 +16,15 @@ from playwright.async_api import Page, expect
 from tests.board_helpers import SLOW, api_path, board_url, browser_page, made, plain
 from tests.board_m14 import spoken
 from tests.board_search import drawer, open_settings
-from tests.helpers import make_decision, make_fact, ok, refused, the_token, unique_word
+from tests.helpers import (
+    make_decision,
+    make_fact,
+    number_of,
+    ok,
+    refused,
+    the_token,
+    unique_word,
+)
 from tests.world import SESSION_COOKIE, api, project_at, register
 from vrum.board.tools import TOOL_PLACES, AgentsOnly
 
@@ -235,18 +243,20 @@ async def test_try_it_returns_what_mcp_returns_and_a_refusal_in_the_same_words(
     word = unique_word()
     epic = await made(client, "epic", f"Tried {word}")
     story = await made(client, "story", f"Try story {word}", epic)
-    decision = await make_decision(client, f"Try decision {word}", node_ids=[story])
-    fact = await make_fact(client, f"Try fact {word}", node_ids=[story])
+    decision = await make_decision(client, f"Try decision {word}", nodes=[story])
+    fact = await make_fact(client, f"Try fact {word}", nodes=[story])
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/tools")
         await listed(page)
-        # A list with filters of several kinds: a word, a whole number and a list of ids.
-        shown = await try_it(page, "list_nodes", kind="story", limit="3", query=f"id:{story}")
-        assert shown == await ok(client, "list_nodes", kind="story", limit=3, query=f"id:{story}")
-        assert [n["id"] for n in shown["items"]] == [story]
-        shown = await try_it(page, "get_node", node_id=str(epic))
-        assert shown == await ok(client, "get_node", node_id=epic)
+        # A list with filters of several kinds: a word, a whole number and a number in a query.
+        asking = f"number:{number_of(story)}"
+        shown = await try_it(page, "list_nodes", kind="story", limit="3", query=asking)
+        assert shown == await ok(client, "list_nodes", kind="story", limit=3, query=asking)
+        assert [n["ref"] for n in shown["items"]] == [story]
+        # A node is named by its reference, as in every tool.
+        shown = await try_it(page, "get_node", node=epic)
+        assert shown == await ok(client, "get_node", node=epic)
         # A tool with no fields, and one with a list as a field.
         shown = await try_it(page, "who_is_working")
         assert {a["actor"] for a in shown["agents"]} == {
@@ -254,7 +264,7 @@ async def test_try_it_returns_what_mcp_returns_and_a_refusal_in_the_same_words(
         }
         shown = await try_it(page, "search", query=word, types="epic, story", limit="5")
         assert shown == await ok(client, "search", query=word, types=["epic", "story"], limit=5)
-        assert {(i["item_type"], i["id"]) for i in shown["items"]} == {
+        assert {(i["item_type"], i["ref"]) for i in shown["items"]} == {
             ("epic", epic),
             ("story", story),
         }
@@ -262,15 +272,17 @@ async def test_try_it_returns_what_mcp_returns_and_a_refusal_in_the_same_words(
         shown = await try_it(page, "get_decision", decision_id=str(decision["id"]))
         assert shown == await ok(client, "get_decision", decision_id=decision["id"])
         assert shown["title"] == f"Try decision {word}" and shown["confirmation"] == "unconfirmed"
-        shown = await try_it(page, "list_facts", node_id=str(story))
-        assert shown == await ok(client, "list_facts", node_id=story)
+        shown = await try_it(page, "list_facts", node=story)
+        assert shown == await ok(client, "list_facts", node=story)
         assert [f["id"] for f in shown["items"]] == [fact["id"]]
-        shown = await try_it(page, "recall", node_id=str(story))
-        assert shown == await ok(client, "recall", node_id=story)
+        shown = await try_it(page, "recall", node=story)
+        assert shown == await ok(client, "recall", node=story)
         assert [i["decision"]["id"] for i in shown["active_decisions"]["items"]] == [decision["id"]]
-        # A refusal is the server's own words.
-        refusal = await try_it(page, "get_node", node_id="999999999")
-        plain(refusal["refused"], await refused(client, "get_node", node_id=999999999))
+        # A refusal is the server's own words: for a reference that names nothing, for text that
+        # is not a reference at all, and for a fact that is not there.
+        for nowhere in ("story:999999999", "999999999"):
+            refusal = await try_it(page, "get_node", node=nowhere)
+            plain(refusal["refused"], await refused(client, "get_node", node=nowhere))
         refusal = await try_it(page, "get_fact", fact_id="999999999")
         plain(refusal["refused"], await refused(client, "get_fact", fact_id=999999999))
         assert w.problems == []

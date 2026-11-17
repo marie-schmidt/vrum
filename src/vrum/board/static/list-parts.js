@@ -3,7 +3,7 @@
 
 import { h } from './dom.js';
 import { neighboursOf, relationWords } from './graph-data.js';
-import { KIND, kindIcon } from './labels.js';
+import { KIND, isNodeKind, itemCode, kindIcon } from './labels.js';
 import { openRecord } from './records.js';
 
 // One part of the context list: a heading with a count and its buttons, a row of filters that act
@@ -56,11 +56,14 @@ export function matchesText(typed, ...pieces) {
 
 // What a record is joined to, as words and buttons that show the other record: the same joins the
 // map draws as lines, so the list says what the map shows. `skip` leaves out kinds of line the row
-// already says another way.
+// already says another way. The other end is opened by its real kind and number: a node's record
+// has a `number`, a requirement's, decision's and fact's an `id`.
 export function connectionsDetails(dot, ctx, { skip = [] } = {}) {
   const near = neighboursOf(dot.key, ctx.all.edges, ctx.all.dots).filter((entry) => !skip.includes(entry.edge.type));
   if (!near.length) return null;
   const chosen = ctx.cfg.sel?.key === dot.key;
+  const numberOf = (other) => other.record?.number ?? other.record?.id ?? other.id;
+  const nameOf = (other) => (isNodeKind(other.type) ? `${itemCode(other.type, numberOf(other))} ${other.title}` : `${KIND[other.type].label} #${numberOf(other)} ${other.title}`);
   return h(
     'details',
     { class: 'gv-connections', open: chosen, dataset: { for: dot.key } },
@@ -75,9 +78,9 @@ export function connectionsDetails(dot, ctx, { skip = [] } = {}) {
           h('strong', {}, relationWords(entry)),
           h(
             'button',
-            { type: 'button', class: 'link gv-link', onclick: () => openRecord(entry.dot.kind, entry.dot.id) },
+            { type: 'button', class: 'link gv-link', onclick: () => openRecord(entry.dot.type, numberOf(entry.dot)) },
             kindIcon(entry.dot.type, 14),
-            `${KIND[entry.dot.type].label} #${entry.dot.id} ${entry.dot.title}`,
+            nameOf(entry.dot),
           ),
         ),
       ),

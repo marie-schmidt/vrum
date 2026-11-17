@@ -73,10 +73,10 @@ def test_every_field_the_language_names_can_be_used() -> None:
         "status": "status:ready",
         "priority": "priority:high",
         "claimed": "claimed:ann",
-        "parent": "parent:3",
-        "epic": "epic:#3",
+        "parent": "parent:epic:3",
+        "epic": "epic:3",
         "story": "story:3",
-        "id": "id:3,4",
+        "number": "number:3,4",
         "start": "start:2026-11-01",
         "target": "target:none",
         "is": "is:overdue",
@@ -89,6 +89,26 @@ def test_every_field_the_language_names_can_be_used() -> None:
         compile_query(f"is:{flag}")
     for empty in NO_FIELDS:
         compile_query(f"no:{empty}")
+
+
+def test_an_epic_or_a_story_is_found_by_its_number_and_a_parent_by_its_reference() -> None:
+    # `epic:3` is epic 3 and what is under it: the database knows it as the reference epic:3.
+    epic, params = sql_of("epic:3,4")
+    assert "= ANY(%(q0)s)" in epic and params == {"q0": ["epic:3", "epic:4"]}
+    story, params = sql_of("story:12")
+    assert "WHEN 'story' THEN ref" in story and params == {"q0": ["story:12"]}
+    # The value of `parent:` is a reference, so the colon inside it belongs to the value.
+    (group,) = _scan("parent:epic:3,Story:7 -parent:task:1")
+    assert [(t.field, t.values, t.negated) for t in group] == [
+        ("parent", ("epic:3", "Story:7"), False),
+        ("parent", ("task:1",), True),
+    ]
+    parent, params = sql_of("parent:epic:3,Story:7")
+    assert "COALESCE(parent = ANY(%(q0)s), false)" in parent
+    assert params == {"q0": ["epic:3", "story:7"]}
+    number, params = sql_of("kind:task number:5")
+    assert "number = ANY(%(q1)s)" in number and params == {"q0": ["task"], "q1": [5]}
+    assert "parent IS NULL" in sql_of("no:parent")[0]
 
 
 def test_nothing_that_was_typed_becomes_part_of_the_sql() -> None:
@@ -114,7 +134,14 @@ def test_nothing_that_was_typed_becomes_part_of_the_sql() -> None:
         ("kind:tsak", "kind must be one of epic, story, task"),
         ("status:finished", "status must be one of new, ready, in_progress"),
         ("priority:", "priority: needs a value"),
-        ("parent:abc", "parent needs a whole number"),
+        ("parent:3", "parent needs the reference of an epic or a story"),
+        ("parent:abc", "parent needs the reference of an epic or a story"),
+        ("parent:sprint:3", "such as parent:epic:3"),
+        ("epic:#3", "epic needs a whole number such as epic:12"),
+        ("story:abc", "story needs a whole number such as story:12"),
+        ("number:1.5", "number needs a whole number such as number:12"),
+        ("epic:1234567890123456789", "epic needs a whole number"),
+        ("id:3", "there is no field called 'id'"),
         ("target:next-week", "is not a day"),
         ("target:2026-02-30", "is not a day"),
         ("target:2026-12-31..2026-11-01", "starts after it ends"),

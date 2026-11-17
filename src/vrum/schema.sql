@@ -87,14 +87,16 @@ CREATE FUNCTION current_project() RETURNS bigint LANGUAGE sql STABLE AS $$
     SELECT nullif(current_setting('vrum.project_id', true), '')::bigint
 $$;
 
--- Each project numbers its own nodes, links, rules, facts, decisions and events from 1,
--- so a project's export loads into another project with the same ids. The numbers come from
--- sequences made when the project is made. The function is the one thing that may use them.
+-- Each project numbers its own epics, stories, tasks, links, rules, facts, decisions and events
+-- from 1, each kind on its own, so a project's export loads into another project with the same
+-- numbers. The numbers come from sequences made when the project is made. The function is the one
+-- thing that may use them.
 CREATE FUNCTION projects_make_sequences() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     kind text;
 BEGIN
-    FOREACH kind IN ARRAY ARRAY['nodes', 'links', 'rules', 'facts', 'decisions', 'events'] LOOP
+    FOREACH kind IN ARRAY ARRAY['epic', 'story', 'task', 'links', 'rules', 'facts', 'decisions',
+                                'events'] LOOP
         EXECUTE format('CREATE SEQUENCE %I', kind || '_ids_' || NEW.id);
     END LOOP;
     RETURN NEW;
@@ -129,13 +131,24 @@ $$;
 
 -- Epics, stories and tasks ------------------------------------------------------------------
 
+-- An epic, story or task is named by its kind and its number within that kind: `epic:3`,
+-- `story:12`, `task:40`. That text is its `ref`, and it is the only identity these three kinds have:
+-- every other table that points at one holds its ref, with a foreign key to it. The number comes
+-- from next_id(kind) in the INSERT (an import gives its own), so each kind counts from 1 on its own.
 CREATE TABLE nodes (
     project_id  bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
-    id          bigint NOT NULL DEFAULT next_id('nodes'),
     kind        text NOT NULL,
-    parent_id   bigint,
+    number      bigint NOT NULL,
+    ref         text GENERATED ALWAYS AS (kind || ':' || number::text) STORED,
+    -- Epics first, then stories, then tasks, so that `ORDER BY kind_rank, number` is the order
+    -- everything is listed in, and a page can continue after (kind_rank, number).
+    kind_rank   smallint GENERATED ALWAYS AS (
+        CASE kind WHEN 'epic' THEN 1 WHEN 'story' THEN 2 WHEN 'task' THEN 3 END
+    ) STORED,
+    -- The ref of the epic a story belongs to, or of the story a task belongs to. Empty for an epic.
+    parent      text,
     -- The kind the parent must have: a story sits under an epic, a task under a story.
-    -- Worked out from `kind`, and checked against the parent by the foreign key below.
+    -- Worked out from `kind`, and checked against the parent's ref below.
     parent_kind text GENERATED ALWAYS AS (
         CASE kind WHEN 'story' THEN 'epic' WHEN 'task' THEN 'story' END
     ) STORED,
@@ -155,8 +168,10 @@ CREATE TABLE nodes (
     search      tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B')
     ) STORED,
-    PRIMARY KEY (project_id, id),
+    PRIMARY KEY (project_id, kind, number),
+    CONSTRAINT node_ref_is_unique UNIQUE (project_id, ref),
     CONSTRAINT node_kind_is_known CHECK (kind IN ('epic', 'story', 'task')),
+    CONSTRAINT node_number_starts_at_one CHECK (number >= 1),
     CONSTRAINT node_title_is_not_blank CHECK (btrim(title) <> ''),
     CONSTRAINT node_status_is_known
         CHECK (status IN ('new', 'in_progress', 'blocked', 'done', 'dropped')),
@@ -164,14 +179,16 @@ CREATE TABLE nodes (
     CONSTRAINT node_start_is_not_after_target
         CHECK (start_on IS NULL OR target_on IS NULL OR start_on <= target_on),
     CONSTRAINT node_version_starts_at_one CHECK (version >= 1),
-    CONSTRAINT node_has_a_parent_unless_epic CHECK ((kind = 'epic') = (parent_id IS NULL)),
-    CONSTRAINT node_id_and_kind_are_unique UNIQUE (project_id, id, kind),
-    -- The parent is in the same project, because the project is part of the key.
+    CONSTRAINT node_has_a_parent_unless_epic CHECK ((kind = 'epic') = (parent IS NULL)),
     CONSTRAINT node_parent_has_the_right_kind
-        FOREIGN KEY (project_id, parent_id, parent_kind) REFERENCES nodes (project_id, id, kind)
+        CHECK (parent IS NULL OR starts_with(parent, parent_kind || ':')),
+    -- The parent is in the same project, because the project is part of the key.
+    CONSTRAINT node_parent_exists FOREIGN KEY (project_id, parent)
+        REFERENCES nodes (project_id, ref)
 );
 
-CREATE INDEX nodes_parent_idx ON nodes (project_id, parent_id);
+CREATE INDEX nodes_parent_idx ON nodes (project_id, parent);
+CREATE INDEX nodes_order_idx ON nodes (project_id, kind_rank, number);
 CREATE INDEX nodes_search_idx ON nodes USING gin (search);
 
 CREATE FUNCTION nodes_guard_update() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -179,8 +196,9 @@ BEGIN
     IF NEW.project_id <> OLD.project_id THEN
         RAISE EXCEPTION 'A node cannot move to another project.';
     END IF;
-    IF NEW.kind <> OLD.kind THEN
-        RAISE EXCEPTION 'A node cannot change its kind (it is % and stays that way).', OLD.kind;
+    IF NEW.kind <> OLD.kind OR NEW.number <> OLD.number THEN
+        RAISE EXCEPTION 'A node cannot change its kind or its number (it is % and stays that way).',
+            OLD.ref;
     END IF;
     IF NEW.version <> OLD.version + 1 THEN
         RAISE EXCEPTION 'Every change to a node must raise its version by exactly one (was %, got %).',
@@ -199,53 +217,53 @@ CREATE TRIGGER nodes_guard_update BEFORE UPDATE ON nodes
 CREATE TABLE links (
     project_id bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
     id         bigint NOT NULL DEFAULT next_id('links'),
-    source_id  bigint NOT NULL,
-    target_id  bigint NOT NULL,
+    source     text NOT NULL,
+    target     text NOT NULL,
     link_type  text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (project_id, id),
     CONSTRAINT link_type_is_known
         CHECK (link_type IN ('needs_first', 'supersedes', 'duplicates', 'relates_to')),
-    CONSTRAINT link_is_not_to_the_same_node CHECK (source_id <> target_id),
-    CONSTRAINT link_is_not_repeated UNIQUE (project_id, source_id, target_id, link_type),
+    CONSTRAINT link_is_not_to_the_same_node CHECK (source <> target),
+    CONSTRAINT link_is_not_repeated UNIQUE (project_id, source, target, link_type),
     -- Both ends are in the link's own project.
-    CONSTRAINT link_starts_at_a_node FOREIGN KEY (project_id, source_id) REFERENCES nodes (project_id, id),
-    CONSTRAINT link_ends_at_a_node FOREIGN KEY (project_id, target_id) REFERENCES nodes (project_id, id)
+    CONSTRAINT link_starts_at_a_node FOREIGN KEY (project_id, source) REFERENCES nodes (project_id, ref),
+    CONSTRAINT link_ends_at_a_node FOREIGN KEY (project_id, target) REFERENCES nodes (project_id, ref)
 );
 
 -- `duplicates` and `relates_to` work both ways, so A to B and B to A are the same link.
 CREATE UNIQUE INDEX link_two_way_is_not_repeated
-    ON links (project_id, link_type, LEAST(source_id, target_id), GREATEST(source_id, target_id))
+    ON links (project_id, link_type, LEAST(source, target), GREATEST(source, target))
     WHERE link_type IN ('duplicates', 'relates_to');
 
-CREATE INDEX links_target_idx ON links (project_id, target_id);
+CREATE INDEX links_target_idx ON links (project_id, target);
 
 -- A node cannot wait, directly or through others, for itself. Adding source -> target makes a
 -- circle exactly when target already waits for source.
 CREATE FUNCTION links_refuse_a_circle_of_waiting() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    circle bigint[];
+    circle text[];
 BEGIN
     -- A link to the same node is refused by its own rule, which says so more plainly.
-    IF NEW.link_type <> 'needs_first' OR NEW.source_id = NEW.target_id THEN
+    IF NEW.link_type <> 'needs_first' OR NEW.source = NEW.target THEN
         RETURN NEW;
     END IF;
     -- One at a time in a project, so two links added together cannot each look fine and together
     -- make a circle.
     PERFORM pg_advisory_xact_lock(1, NEW.project_id::integer);
-    WITH RECURSIVE reach (id, path) AS (
-        SELECT NEW.target_id, ARRAY[NEW.target_id]
+    WITH RECURSIVE reach (ref, path) AS (
+        SELECT NEW.target, ARRAY[NEW.target]
         UNION ALL
-        SELECT l.target_id, r.path || l.target_id
-        FROM links l JOIN reach r ON l.source_id = r.id
+        SELECT l.target, r.path || l.target
+        FROM links l JOIN reach r ON l.source = r.ref
         WHERE l.project_id = NEW.project_id
-          AND l.link_type = 'needs_first' AND NOT l.target_id = ANY (r.path)
+          AND l.link_type = 'needs_first' AND NOT l.target = ANY (r.path)
     )
-    SELECT path INTO circle FROM reach WHERE id = NEW.source_id LIMIT 1;
+    SELECT path INTO circle FROM reach WHERE ref = NEW.source LIMIT 1;
     IF circle IS NOT NULL THEN
         RAISE EXCEPTION '%',
-            'That link would make a circle of waiting: node ' || NEW.source_id
-            || ' would need node ' || array_to_string(circle, ', which needs node ')
+            'That link would make a circle of waiting: ' || NEW.source
+            || ' would need ' || array_to_string(circle, ', which needs ')
             || '. None of them could ever start. Remove one of the needs_first links in the circle '
             || 'first.';
     END IF;
@@ -259,20 +277,20 @@ CREATE TRIGGER links_refuse_a_circle_of_waiting BEFORE INSERT OR UPDATE ON links
 -- Claims with leases ------------------------------------------------------------------------
 
 -- At most one holder per node, because the node is the key. An expired claim stays in its row
--- until it is taken over or released.
+-- until it is taken over or released. Only a story or a task can be claimed.
 CREATE TABLE claims (
     project_id bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
-    node_id    bigint NOT NULL,
-    node_kind  text NOT NULL,
+    node       text NOT NULL,
     actor      text NOT NULL,
     claimed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at timestamptz NOT NULL,
-    PRIMARY KEY (project_id, node_id),
-    CONSTRAINT claim_is_for_a_story_or_task CHECK (node_kind IN ('story', 'task')),
+    PRIMARY KEY (project_id, node),
+    CONSTRAINT claim_is_for_a_story_or_task
+        CHECK (starts_with(node, 'story:') OR starts_with(node, 'task:')),
     CONSTRAINT claim_actor_is_not_blank CHECK (btrim(actor) <> ''),
     CONSTRAINT claim_lease_is_in_the_future CHECK (expires_at > claimed_at),
     CONSTRAINT claim_is_on_a_real_node
-        FOREIGN KEY (project_id, node_id, node_kind) REFERENCES nodes (project_id, id, kind)
+        FOREIGN KEY (project_id, node) REFERENCES nodes (project_id, ref)
 );
 
 -- A node as it is read: its status with `ready` worked out, what it still waits for, who holds a
@@ -280,7 +298,8 @@ CREATE TABLE claims (
 -- `ready`, overdue, a span and a schedule conflict mean. Every join stays inside the node's own
 -- project, and the view is read with the rights of whoever reads it, so a project's role sees only
 -- its own rows.
---   waiting_on:         the nodes it needs first that are not done.
+--   waiting_on:         the refs of the nodes it needs first that are not done (epics, then stories,
+--                       then tasks, each by number).
 --   schedule_conflicts: those of them that are due after this node's own start date. A warning only.
 --   overdue:            its own target date has passed and it is not done or dropped.
 --   span_start/end:     the dates the roadmap draws. Its own when it has any. Otherwise, for an epic
@@ -295,11 +314,12 @@ CREATE TABLE claims (
 --                       not dropped (an epic's are the tasks of its stories that are not dropped).
 --                       Empty for a task.
 CREATE VIEW node_state WITH (security_invoker = true) AS
-SELECT n.project_id, n.id, n.kind, n.parent_id, n.title, n.body, length(n.body) AS body_chars,
-       CASE WHEN n.status = 'new' AND cardinality(w.ids) = 0 THEN 'ready' ELSE n.status END
+SELECT n.project_id, n.ref, n.kind, n.number, n.kind_rank, n.parent, n.title, n.body,
+       length(n.body) AS body_chars,
+       CASE WHEN n.status = 'new' AND cardinality(w.refs) = 0 THEN 'ready' ELSE n.status END
            AS status,
        n.priority, n.start_on, n.target_on, n.version, n.created_at, n.updated_at,
-       w.ids AS waiting_on,
+       w.refs AS waiting_on,
        w.conflicts AS schedule_conflicts,
        coalesce(n.target_on < current_date AND n.status NOT IN ('done', 'dropped'), false)
            AS overdue,
@@ -320,60 +340,60 @@ CROSS JOIN LATERAL (
     WHERE n.kind <> 'task' AND t.project_id = n.project_id
       AND t.kind = 'task' AND t.status <> 'dropped'
       AND CASE n.kind
-              WHEN 'story' THEN t.parent_id = n.id
-              ELSE t.parent_id IN (SELECT s.id FROM nodes s
-                                   WHERE s.project_id = n.project_id
-                                     AND s.parent_id = n.id AND s.status <> 'dropped')
+              WHEN 'story' THEN t.parent = n.ref
+              ELSE t.parent IN (SELECT s.ref FROM nodes s
+                                WHERE s.project_id = n.project_id
+                                  AND s.parent = n.ref AND s.status <> 'dropped')
           END
 ) pr
 CROSS JOIN LATERAL (
-    SELECT coalesce(array_agg(t.id ORDER BY t.id), ARRAY[]::bigint[]) AS ids,
-           coalesce(array_agg(t.id ORDER BY t.id)
+    SELECT coalesce(array_agg(t.ref ORDER BY t.kind_rank, t.number), ARRAY[]::text[]) AS refs,
+           coalesce(array_agg(t.ref ORDER BY t.kind_rank, t.number)
                     FILTER (WHERE n.start_on IS NOT NULL AND t.target_on > n.start_on),
-                    ARRAY[]::bigint[]) AS conflicts
-    FROM links l JOIN nodes t ON t.project_id = l.project_id AND t.id = l.target_id
+                    ARRAY[]::text[]) AS conflicts
+    FROM links l JOIN nodes t ON t.project_id = l.project_id AND t.ref = l.target
     WHERE l.project_id = n.project_id
-      AND l.source_id = n.id AND l.link_type = 'needs_first' AND t.status <> 'done'
+      AND l.source = n.ref AND l.link_type = 'needs_first' AND t.status <> 'done'
 ) w
 CROSS JOIN LATERAL (
     SELECT CASE
                WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.start_on
                WHEN n.kind = 'story' THEN (
                    SELECT min(t.start_on) FROM nodes t
-                   WHERE t.project_id = n.project_id AND t.parent_id = n.id
+                   WHERE t.project_id = n.project_id AND t.parent = n.ref
                      AND t.status <> 'dropped')
                WHEN n.kind = 'epic' THEN (
                    SELECT min(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
                                    THEN s.start_on
                                    ELSE (SELECT min(t.start_on) FROM nodes t
-                                         WHERE t.project_id = n.project_id AND t.parent_id = s.id
+                                         WHERE t.project_id = n.project_id AND t.parent = s.ref
                                            AND t.status <> 'dropped')
                               END)
                    FROM nodes s
-                   WHERE s.project_id = n.project_id AND s.parent_id = n.id
+                   WHERE s.project_id = n.project_id AND s.parent = n.ref
                      AND s.status <> 'dropped')
            END AS span_start,
            CASE
                WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.target_on
                WHEN n.kind = 'story' THEN (
                    SELECT max(t.target_on) FROM nodes t
-                   WHERE t.project_id = n.project_id AND t.parent_id = n.id
+                   WHERE t.project_id = n.project_id AND t.parent = n.ref
                      AND t.status <> 'dropped')
                WHEN n.kind = 'epic' THEN (
                    SELECT max(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
                                    THEN s.target_on
                                    ELSE (SELECT max(t.target_on) FROM nodes t
-                                         WHERE t.project_id = n.project_id AND t.parent_id = s.id
+                                         WHERE t.project_id = n.project_id AND t.parent = s.ref
                                            AND t.status <> 'dropped')
                               END)
                    FROM nodes s
-                   WHERE s.project_id = n.project_id AND s.parent_id = n.id
+                   WHERE s.project_id = n.project_id AND s.parent = n.ref
                      AND s.status <> 'dropped')
            END AS span_end
 ) sp
-LEFT JOIN claims c ON c.project_id = n.project_id AND c.node_id = n.id
+LEFT JOIN claims c ON c.project_id = n.project_id AND c.node = n.ref
     AND c.expires_at > clock_timestamp()
-LEFT JOIN claims lc ON lc.project_id = n.project_id AND lc.node_id = n.id
+LEFT JOIN claims lc ON lc.project_id = n.project_id AND lc.node = n.ref
     AND lc.expires_at <= clock_timestamp();
 
 -- Rules (requirements) ----------------------------------------------------------------------
@@ -382,10 +402,9 @@ LEFT JOIN claims lc ON lc.project_id = n.project_id AND lc.node_id = n.id
 CREATE TABLE rules (
     project_id bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
     id         bigint NOT NULL DEFAULT next_id('rules'),
-    story_id   bigint,
-    -- Present only when the rule is placed, so that the foreign key below accepts nothing but a
-    -- story: not an epic, not a task.
-    story_kind text GENERATED ALWAYS AS (CASE WHEN story_id IS NOT NULL THEN 'story' END) STORED,
+    -- The ref of the story that owns the rule, such as 'story:12'. Only a story: not an epic and
+    -- not a task.
+    story      text,
     title      text NOT NULL,
     body       text NOT NULL DEFAULT '',
     status     text NOT NULL DEFAULT 'held',
@@ -399,11 +418,12 @@ CREATE TABLE rules (
     CONSTRAINT rule_title_is_not_blank CHECK (btrim(title) <> ''),
     CONSTRAINT rule_status_is_known CHECK (status IN ('held', 'settled', 'dropped')),
     CONSTRAINT rule_version_starts_at_one CHECK (version >= 1),
+    CONSTRAINT rule_is_in_a_story CHECK (story IS NULL OR starts_with(story, 'story:')),
     CONSTRAINT rule_belongs_to_a_story
-        FOREIGN KEY (project_id, story_id, story_kind) REFERENCES nodes (project_id, id, kind)
+        FOREIGN KEY (project_id, story) REFERENCES nodes (project_id, ref)
 );
 
-CREATE INDEX rules_story_idx ON rules (project_id, story_id);
+CREATE INDEX rules_story_idx ON rules (project_id, story);
 CREATE INDEX rules_search_idx ON rules USING gin (search);
 
 CREATE FUNCTION rules_guard_update() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -586,10 +606,10 @@ CREATE TRIGGER decisions_are_a_record BEFORE UPDATE OR DELETE ON decisions
 CREATE TABLE decision_nodes (
     project_id  bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
     decision_id bigint NOT NULL,
-    node_id     bigint NOT NULL,
-    PRIMARY KEY (project_id, decision_id, node_id),
+    node        text NOT NULL,
+    PRIMARY KEY (project_id, decision_id, node),
     FOREIGN KEY (project_id, decision_id) REFERENCES decisions (project_id, id),
-    FOREIGN KEY (project_id, node_id) REFERENCES nodes (project_id, id)
+    FOREIGN KEY (project_id, node) REFERENCES nodes (project_id, ref)
 );
 
 CREATE TABLE decision_rules (
@@ -601,7 +621,7 @@ CREATE TABLE decision_rules (
     FOREIGN KEY (project_id, rule_id) REFERENCES rules (project_id, id)
 );
 
-CREATE INDEX decision_nodes_node_idx ON decision_nodes (project_id, node_id);
+CREATE INDEX decision_nodes_node_idx ON decision_nodes (project_id, node);
 CREATE INDEX decision_rules_rule_idx ON decision_rules (project_id, rule_id);
 
 -- A superseded or withdrawn decision keeps the links it had, as a record of what it once applied to.
@@ -644,9 +664,11 @@ SELECT d.project_id, d.id, d.title, d.text, d.reason, d.decided_by, d.decided_on
        coalesce((SELECT array_agg(s.id ORDER BY s.id) FROM decisions s
                  WHERE s.project_id = d.project_id AND s.superseded_by_id = d.id),
                 ARRAY[]::bigint[]) AS supersedes_ids,
-       coalesce((SELECT array_agg(l.node_id ORDER BY l.node_id) FROM decision_nodes l
+       coalesce((SELECT array_agg(l.node ORDER BY n.kind_rank, n.number)
+                 FROM decision_nodes l
+                 JOIN nodes n ON n.project_id = l.project_id AND n.ref = l.node
                  WHERE l.project_id = d.project_id AND l.decision_id = d.id),
-                ARRAY[]::bigint[]) AS node_ids,
+                ARRAY[]::text[]) AS nodes,
        coalesce((SELECT array_agg(l.rule_id ORDER BY l.rule_id) FROM decision_rules l
                  WHERE l.project_id = d.project_id AND l.decision_id = d.id),
                 ARRAY[]::bigint[]) AS rule_ids
@@ -658,10 +680,10 @@ FROM decisions d;
 CREATE TABLE fact_nodes (
     project_id bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
     fact_id    bigint NOT NULL,
-    node_id    bigint NOT NULL,
-    PRIMARY KEY (project_id, fact_id, node_id),
+    node       text NOT NULL,
+    PRIMARY KEY (project_id, fact_id, node),
     FOREIGN KEY (project_id, fact_id) REFERENCES facts (project_id, id),
-    FOREIGN KEY (project_id, node_id) REFERENCES nodes (project_id, id)
+    FOREIGN KEY (project_id, node) REFERENCES nodes (project_id, ref)
 );
 
 CREATE TABLE fact_rules (
@@ -682,7 +704,7 @@ CREATE TABLE fact_decisions (
     FOREIGN KEY (project_id, decision_id) REFERENCES decisions (project_id, id)
 );
 
-CREATE INDEX fact_nodes_node_idx ON fact_nodes (project_id, node_id);
+CREATE INDEX fact_nodes_node_idx ON fact_nodes (project_id, node);
 CREATE INDEX fact_rules_rule_idx ON fact_rules (project_id, rule_id);
 CREATE INDEX fact_decisions_decision_idx ON fact_decisions (project_id, decision_id);
 
@@ -727,9 +749,10 @@ SELECT f.project_id, f.id, f.text, f.source, f.recorded_by, f.recorded_at, f.sta
        coalesce((SELECT array_agg(s.id ORDER BY s.id) FROM facts s
                  WHERE s.project_id = f.project_id AND s.superseded_by_id = f.id),
                 ARRAY[]::bigint[]) AS supersedes_ids,
-       coalesce((SELECT array_agg(l.node_id ORDER BY l.node_id) FROM fact_nodes l
+       coalesce((SELECT array_agg(l.node ORDER BY n.kind_rank, n.number) FROM fact_nodes l
+                 JOIN nodes n ON n.project_id = l.project_id AND n.ref = l.node
                  WHERE l.project_id = f.project_id AND l.fact_id = f.id),
-                ARRAY[]::bigint[]) AS node_ids,
+                ARRAY[]::text[]) AS nodes,
        coalesce((SELECT array_agg(l.rule_id ORDER BY l.rule_id) FROM fact_rules l
                  WHERE l.project_id = f.project_id AND l.fact_id = f.id),
                 ARRAY[]::bigint[]) AS rule_ids,
@@ -740,16 +763,18 @@ FROM facts f;
 
 -- Exact-words search and the semantic index ---------------------------------------------------
 
--- Every thing a person can search for: the id and its search column. The type is the one a person
--- sees: epic, story, task, rule (shown as a requirement), decision or fact.
+-- Every thing a person can search for: its type, its id and its ref, and its search column. The type
+-- is the one a person sees: epic, story, task, rule (shown as a requirement), decision or fact. For
+-- an epic, story or task the id is its number, which is unique within its type, so (item_type, id)
+-- names one thing.
 CREATE VIEW search_documents WITH (security_invoker = true) AS
-SELECT n.project_id, n.kind AS item_type, n.id, n.search FROM nodes n
+SELECT n.project_id, n.kind AS item_type, n.number AS id, n.ref, n.search FROM nodes n
 UNION ALL
-SELECT r.project_id, 'rule', r.id, r.search FROM rules r
+SELECT r.project_id, 'rule', r.id, 'rule:' || r.id::text, r.search FROM rules r
 UNION ALL
-SELECT d.project_id, 'decision', d.id, d.search FROM decisions d
+SELECT d.project_id, 'decision', d.id, 'decision:' || d.id::text, d.search FROM decisions d
 UNION ALL
-SELECT f.project_id, 'fact', f.id, f.search FROM facts f;
+SELECT f.project_id, 'fact', f.id, 'fact:' || f.id::text, f.search FROM facts f;
 
 -- What the semantic index embeds, and a hash of it, so that an item whose text changed is known
 -- to be waiting to be indexed. Epics, stories, rules, decisions and facts are embedded. Tasks are
@@ -757,32 +782,35 @@ SELECT f.project_id, 'fact', f.id, f.search FROM facts f;
 -- themselves are not in this file: they are derived, and the reindex job builds them (see
 -- vrum/indexing.py).
 CREATE VIEW index_source WITH (security_invoker = true) AS
-SELECT s.project_id, s.item_type, s.id, s.content, md5(s.content) AS content_hash
+SELECT s.project_id, s.item_type, s.id, s.ref, s.content, md5(s.content) AS content_hash
 FROM (
-    SELECT n.project_id, n.kind AS item_type, n.id, btrim(n.title || E'\n' || n.body) AS content
+    SELECT n.project_id, n.kind AS item_type, n.number AS id, n.ref,
+           btrim(n.title || E'\n' || n.body) AS content
     FROM nodes n WHERE n.kind <> 'task'
     UNION ALL
-    SELECT r.project_id, 'rule', r.id, btrim(r.title || E'\n' || r.body) FROM rules r
+    SELECT r.project_id, 'rule', r.id, 'rule:' || r.id::text, btrim(r.title || E'\n' || r.body)
+    FROM rules r
     UNION ALL
-    SELECT d.project_id, 'decision', d.id, btrim(d.title || E'\n' || d.text || E'\n' || d.reason)
+    SELECT d.project_id, 'decision', d.id, 'decision:' || d.id::text,
+           btrim(d.title || E'\n' || d.text || E'\n' || d.reason)
     FROM decisions d
     UNION ALL
-    SELECT f.project_id, 'fact', f.id, btrim(f.text) FROM facts f
+    SELECT f.project_id, 'fact', f.id, 'fact:' || f.id::text, btrim(f.text) FROM facts f
 ) s;
 
 -- The event log ----------------------------------------------------------------------------
 
--- An event shows in the history of every node and rule it names. For a link, node_id is where it
--- starts and other_node_id where it ends. For a rule, node_id is the story the rule is in after the
--- event and other_node_id the story it was in before, when that was a different one. A decision
+-- An event shows in the history of every node and rule it names. For a link, node is where it
+-- starts and other_node where it ends. For a rule, node is the story the rule is in after the
+-- event and other_node the story it was in before, when that was a different one. A decision
 -- event names the decision, and also the node or rule when the event is about a link to it. A fact
 -- event names the fact, and also the node, rule or decision it concerns when the event is about a
 -- link to it, so it shows in the history of each of them.
 CREATE TABLE events (
     project_id    bigint NOT NULL DEFAULT current_project() REFERENCES projects (id),
     id            bigint NOT NULL DEFAULT next_id('events'),
-    node_id       bigint,
-    other_node_id bigint,
+    node          text,
+    other_node    text,
     rule_id       bigint,
     decision_id   bigint,
     fact_id       bigint,
@@ -797,8 +825,8 @@ CREATE TABLE events (
     -- earlier) is never skipped by someone following the feed.
     xid           xid8 NOT NULL DEFAULT pg_current_xact_id(),
     PRIMARY KEY (project_id, id),
-    FOREIGN KEY (project_id, node_id) REFERENCES nodes (project_id, id),
-    FOREIGN KEY (project_id, other_node_id) REFERENCES nodes (project_id, id),
+    FOREIGN KEY (project_id, node) REFERENCES nodes (project_id, ref),
+    FOREIGN KEY (project_id, other_node) REFERENCES nodes (project_id, ref),
     FOREIGN KEY (project_id, rule_id) REFERENCES rules (project_id, id),
     FOREIGN KEY (project_id, decision_id) REFERENCES decisions (project_id, id),
     FOREIGN KEY (project_id, fact_id) REFERENCES facts (project_id, id),
@@ -827,15 +855,15 @@ CREATE TABLE events (
                 THEN rule_id IS NOT NULL AND decision_id IS NULL AND fact_id IS NULL
             WHEN starts_with(action, 'decision_') THEN decision_id IS NOT NULL AND fact_id IS NULL
             WHEN starts_with(action, 'fact_') THEN fact_id IS NOT NULL
-            ELSE node_id IS NOT NULL AND rule_id IS NULL AND decision_id IS NULL
+            ELSE node IS NOT NULL AND rule_id IS NULL AND decision_id IS NULL
                 AND fact_id IS NULL
         END
     )
 );
 
-CREATE INDEX events_node_idx ON events (project_id, node_id, id);
-CREATE INDEX events_other_node_idx ON events (project_id, other_node_id, id)
-    WHERE other_node_id IS NOT NULL;
+CREATE INDEX events_node_idx ON events (project_id, node, id);
+CREATE INDEX events_other_node_idx ON events (project_id, other_node, id)
+    WHERE other_node IS NOT NULL;
 CREATE INDEX events_rule_idx ON events (project_id, rule_id, id) WHERE rule_id IS NOT NULL;
 CREATE INDEX events_decision_idx ON events (project_id, decision_id, id)
     WHERE decision_id IS NOT NULL;

@@ -6,9 +6,9 @@
 import { day, h, moment } from './dom.js';
 import { clip, uid } from './forms.js';
 import { icon } from './icons.js';
-import { kindIcon } from './labels.js';
+import { kindIcon, parseNodeRef } from './labels.js';
 import { renderMarkdown } from './markdown.js';
-import { itemLink, kindWords, openLink } from './references.js';
+import { kindWords, nodeLink, openLink } from './references.js';
 import { store } from './store.js';
 
 export const LIFECYCLE = { active: 'In force', superseded: 'Replaced', withdrawn: 'Withdrawn' };
@@ -80,7 +80,7 @@ function decisionLink(id) {
 // What it concerns, as links: the epics, stories and tasks, the requirements, and for a fact the
 // decisions. Each with the icon of its kind, for the lines of the detail panel.
 const concernedItems = (record) => [
-  ...(record.node_ids || []).map((id) => [store.nodes.get(id)?.kind || 'story', itemLink(id)]),
+  ...(record.nodes || []).map((ref) => [parseNodeRef(ref)?.kind || 'story', nodeLink(ref)]),
   ...(record.rule_ids || []).map((id) => ['rule', ruleLink(id)]),
   ...(record.decision_ids || []).map((id) => ['decision', decisionLink(id)]),
 ];

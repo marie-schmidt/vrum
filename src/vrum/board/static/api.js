@@ -117,14 +117,19 @@ export function get(path) {
   return send(path, { method: 'GET' });
 }
 
+// The lists whose pages are cut by the reference of the last item (epics, stories and tasks);
+// every other list is cut by the id of its last item.
+const BY_REFERENCE = new Set(['list_nodes', 'ready_work']);
+
 // Every item of a list that a tool gives a page at a time.
 export async function callAll(tool, args) {
+  const [cursor, next] = BY_REFERENCE.has(tool) ? ['after', 'next_after'] : ['after_id', 'next_after_id'];
   const items = [];
   let after = null;
   do {
-    const page = await call(tool, { ...args, limit: 200, after_id: after });
+    const page = await call(tool, { ...args, limit: 200, [cursor]: after });
     items.push(...page.items);
-    after = page.next_after_id;
+    after = page[next];
   } while (after !== null && after !== undefined);
   return items;
 }

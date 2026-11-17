@@ -1,84 +1,83 @@
 """References between items, and who mentions whom.
 
-Any text can name another item by writing `[[node:12]]`, `[[rule:3]]`, `[[decision:7]]` or
-`[[fact:5]]` in what it says: an epic's, story's or task's details, a requirement's details, a
-decision's text or reason, or a fact's text or source. (A title is a name, and is not read.) A
-reference is only text: it creates no link, changes no readiness and no order, and nothing is
-stored for it. `find_mentions` works out, when asked, which items refer to one item, or every
-reference in the graph, by reading the text of everything. This module owns what a reference is;
-the board's renderer has the same pattern (`board/static/references.js`), and a test keeps the two
-equal."""
+Any text can name another item by writing `[[story:12]]` (or `[[epic:3]]`, `[[task:40]]`,
+`[[rule:3]]`, `[[decision:7]]`, `[[fact:5]]`) in what it says: an epic's, story's or task's details,
+a requirement's details, a decision's text or reason, or a fact's text or source. (A title is a
+name, and is not read.) The number is the item's number within its kind, so `[[epic:1]]`,
+`[[story:1]]` and `[[task:1]]` are three different items. A reference is only text: it creates no
+link, changes no readiness and no order, and nothing is stored for it. `find_mentions` works out,
+when asked, which items refer to one item, or every reference in the graph, by reading the text of
+everything. This module owns what a reference is; the board's renderer has the same pattern
+(`board/static/references.js`), and a test keeps the two equal."""
 
 from typing import Any
 
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
-from vrum.common import Refusal, fetch_all, fetch_one, page_size
+from vrum.common import Refusal, fetch_all, fetch_one, page_size, parse_node_ref, split_node_ref
 from vrum.db import Database
 from vrum.decisions import require_decision
 from vrum.facts import require_fact
 from vrum.graph import require_node
+from vrum.items import NamedItem, named
 from vrum.rules import require_rule
 
-REFERENCE_KINDS = ("node", "rule", "decision", "fact")
-# `[[kind:id]]`, with no spaces and no leading zero in the id (an id is a whole number). Up to 18
+REFERENCE_KINDS = ("epic", "story", "task", "rule", "decision", "fact")
+# `[[kind:number]]`, with no spaces and no leading zero in the number (a whole number). Up to 18
 # digits, so that it always fits the database's number.
-REFERENCE_PATTERN = r"\[\[(node|rule|decision|fact):([1-9][0-9]{0,17})\]\]"
+REFERENCE_PATTERN = r"\[\[(epic|story|task|rule|decision|fact):([1-9][0-9]{0,17})\]\]"
 _SNIPPET_BEFORE = 60
 _SNIPPET_AFTER = 60
 
-# Every text that can hold a reference, as rows of (what it is, its fields). `ref_kind` is how a
-# reference to the item is written; `item_type` is the kind it shows as (epic, story, task, rule,
-# decision or fact). Fixed here, never from a caller.
+# Every text that can hold a reference, as rows of (what it is, its fields). `item_type` is the kind
+# of the item (epic, story, task, rule, decision or fact), the same word a reference to it starts
+# with; `id` is the number of an epic, story or task within its kind, or the id of anything else.
+# Fixed here, never from a caller.
 _TEXTS = """
-    SELECT 'node' AS ref_kind, kind AS item_type, id, title AS item_title, status AS item_status,
+    SELECT kind AS item_type, number AS id, title AS item_title, status AS item_status,
            1 AS ord, 'details' AS field, body AS content
     FROM node_state
     UNION ALL
-    SELECT 'rule', 'rule', id, title, status, 1, 'details', body FROM rules
+    SELECT 'rule', id, title, status, 1, 'details', body FROM rules
     UNION ALL
-    SELECT 'decision', 'decision', id, title, status, f.ord, f.field, f.content
+    SELECT 'decision', id, title, status, f.ord, f.field, f.content
     FROM decisions,
          LATERAL (VALUES (1, 'text', text), (2, 'reason', reason)) AS f(ord, field, content)
     UNION ALL
-    SELECT 'fact', 'fact', id, left(text, 80), status, f.ord, f.field, f.content
+    SELECT 'fact', id, left(text, 80), status, f.ord, f.field, f.content
     FROM facts,
          LATERAL (VALUES (1, 'text', text), (2, 'source', source)) AS f(ord, field, content)
 """
 
 # What a reference can point at, so that one to something that is not there is told apart.
 _TARGETS = """
-    SELECT 'node' AS target_kind, id AS target_id, kind AS target_type, title AS target_title
-    FROM nodes
-    UNION ALL SELECT 'rule', id, 'rule', title FROM rules
-    UNION ALL SELECT 'decision', id, 'decision', title FROM decisions
-    UNION ALL SELECT 'fact', id, 'fact', left(text, 80) FROM facts
+    SELECT kind AS target_type, number AS target_id, title AS target_title FROM nodes
+    UNION ALL SELECT 'rule', id, title FROM rules
+    UNION ALL SELECT 'decision', id, title FROM decisions
+    UNION ALL SELECT 'fact', id, left(text, 80) FROM facts
 """
 
-_ORDER = (
-    "CASE item_type WHEN 'epic' THEN 1 WHEN 'story' THEN 2 WHEN 'task' THEN 3 WHEN 'rule' THEN 4 "
-    "WHEN 'decision' THEN 5 WHEN 'fact' THEN 6 ELSE 7 END, id, target_kind, target_id"
-)
+
+def _rank(column: str) -> str:
+    return (
+        f"CASE {column} WHEN 'epic' THEN 1 WHEN 'story' THEN 2 WHEN 'task' THEN 3 "
+        "WHEN 'rule' THEN 4 WHEN 'decision' THEN 5 WHEN 'fact' THEN 6 ELSE 7 END"
+    )
 
 
-class MentionItem(BaseModel):
-    item_type: str = Field(description="epic, story, task, rule, decision or fact.")
-    id: int = Field(description="Its id, in the id space of its kind (rules have their own).")
+_ORDER = f"{_rank('item_type')}, id, {_rank('target_type')}, target_id"
+
+
+class MentionItem(NamedItem):
     title: str = Field(description="Its title now. For a fact, the start of its text.")
     status: str = Field(description="Its status now.")
 
 
-class MentionTarget(BaseModel):
-    kind: str = Field(description="node, rule, decision or fact: how the reference writes it.")
-    id: int
+class MentionTarget(NamedItem):
     exists: bool = Field(
-        description="False when nothing of that kind has that id. The reference is then plainly "
-        "missing."
-    )
-    item_type: str | None = Field(
-        description="What it is: epic, story, task, rule, decision or fact. Empty when it is "
-        "missing."
+        description="False when nothing of that kind has that number. The reference is then "
+        "plainly missing."
     )
     title: str | None = Field(description="Its title now. Empty when it is missing.")
 
@@ -102,17 +101,17 @@ class MentionPage(BaseModel):
 
 async def _target_of(
     conn: AsyncConnection,
-    node_id: int | None,
+    node: str | None,
     rule_id: int | None,
     decision_id: int | None,
     fact_id: int | None,
 ) -> tuple[str, int] | None:
-    """The one item to find mentions of, as (how a reference writes it, its id), after checking it
+    """The one item to find mentions of, as (its type, its number or id), after checking it
     exists. None when none was given: every reference."""
     given = [
         name
         for name, value in (
-            ("node_id", node_id),
+            ("node", node),
             ("rule_id", rule_id),
             ("decision_id", decision_id),
             ("fact_id", fact_id),
@@ -121,12 +120,13 @@ async def _target_of(
     ]
     if len(given) > 1:
         raise Refusal(
-            "Give at most one of node_id, rule_id, decision_id or fact_id: the one item to find "
+            "Give at most one of node, rule_id, decision_id or fact_id: the one item to find "
             "mentions of. Leave them all out to list every reference written anywhere."
         )
-    if node_id is not None:
-        await require_node(conn, node_id)
-        return "node", node_id
+    if node is not None:
+        node = parse_node_ref(node, "node")
+        await require_node(conn, node)
+        return split_node_ref(node)
     if rule_id is not None:
         await require_rule(conn, rule_id)
         return "rule", rule_id
@@ -146,7 +146,7 @@ class References:
     async def find_mentions(
         self,
         *,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         decision_id: int | None,
         fact_id: int | None,
@@ -157,7 +157,7 @@ class References:
         if offset < 0:
             raise Refusal(f"offset must be 0 or more, but it is {offset}.")
         async with self._database.transaction() as conn:
-            target = await _target_of(conn, node_id, rule_id, decision_id, fact_id)
+            target = await _target_of(conn, node, rule_id, decision_id, fact_id)
             params: dict[str, Any] = {
                 "pattern": REFERENCE_PATTERN,
                 "kind": target[0] if target else None,
@@ -171,8 +171,8 @@ class References:
                 WITH texts AS ({_TEXTS}),
                 targets AS ({_TARGETS}),
                 found AS (
-                    SELECT t.ref_kind, t.item_type, t.id, t.item_title, t.item_status, t.ord,
-                           t.field, m.parts[2] AS target_kind, m.parts[3]::bigint AS target_id,
+                    SELECT t.item_type, t.id, t.item_title, t.item_status, t.ord,
+                           t.field, m.parts[2] AS target_type, m.parts[3]::bigint AS target_id,
                            m.n,
                            substr(
                                t.content,
@@ -188,24 +188,24 @@ class References:
                     WHERE (%(needle)s::text IS NULL OR strpos(t.content, %(needle)s::text) > 0)
                 ),
                 per_field AS (
-                    SELECT ref_kind, item_type, id, item_title, item_status, ord, field,
-                           target_kind, target_id, (array_agg(snippet ORDER BY n))[1] AS snippet
+                    SELECT item_type, id, item_title, item_status, ord, field,
+                           target_type, target_id, (array_agg(snippet ORDER BY n))[1] AS snippet
                     FROM found
-                    WHERE NOT (target_kind = ref_kind AND target_id = id)
+                    WHERE NOT (target_type = item_type AND target_id = id)
                       AND (%(kind)s::text IS NULL
-                           OR (target_kind = %(kind)s::text AND target_id = %(id)s::bigint))
-                    GROUP BY ref_kind, item_type, id, item_title, item_status, ord, field,
-                             target_kind, target_id
+                           OR (target_type = %(kind)s::text AND target_id = %(id)s::bigint))
+                    GROUP BY item_type, id, item_title, item_status, ord, field,
+                             target_type, target_id
                 )
-                SELECT f.item_type, f.id, f.item_title, f.item_status, f.target_kind, f.target_id,
+                SELECT f.item_type, f.id, f.item_title, f.item_status, f.target_type, f.target_id,
                        array_agg(f.field ORDER BY f.ord) AS fields,
                        (array_agg(f.snippet ORDER BY f.ord))[1] AS snippet,
-                       g.target_type, g.target_title, (g.target_id IS NOT NULL) AS target_exists
+                       g.target_title, (g.target_id IS NOT NULL) AS target_exists
                 FROM per_field f
                 LEFT JOIN targets g
-                       ON g.target_kind = f.target_kind AND g.target_id = f.target_id
-                GROUP BY f.item_type, f.id, f.item_title, f.item_status, f.target_kind,
-                         f.target_id, g.target_type, g.target_title, g.target_id
+                       ON g.target_type = f.target_type AND g.target_id = f.target_id
+                GROUP BY f.item_type, f.id, f.item_title, f.item_status, f.target_type,
+                         f.target_id, g.target_title, g.target_id
             """
             total = await fetch_one(conn, f"SELECT count(*) AS total FROM ({grouped}) AS g", params)
             rows = await fetch_all(
@@ -226,16 +226,13 @@ class References:
 def _mention(row: dict[str, Any]) -> Mention:
     return Mention(
         source=MentionItem(
-            item_type=row["item_type"],
-            id=row["id"],
+            **named(row["item_type"], row["id"]),
             title=row["item_title"],
             status=row["item_status"],
         ),
         target=MentionTarget(
-            kind=row["target_kind"],
-            id=row["target_id"],
+            **named(row["target_type"], row["target_id"]),
             exists=row["target_exists"],
-            item_type=row["target_type"],
             title=row["target_title"],
         ),
         fields=list(row["fields"]),

@@ -4,7 +4,7 @@
 // Above it is a row of what needs attention (each number is the answer of the same filter or
 // report an agent can ask for, and a link to the cards it counts), and a filter box (`q`, the same
 // filter language as list_nodes) that keeps only the cards it asks for. A card opens in the
-// detail panel (`sel=node:<id>`). The columns scroll sideways inside the board's own region when
+// detail panel (`sel=<ref>`, such as `sel=story:12`). The columns scroll sideways inside the board's own region when
 // the window is too narrow for them, so the page itself never does.
 
 import { Refusal, call } from './api.js';
@@ -13,7 +13,7 @@ import { day, h, moment, plural, put } from './dom.js';
 import { openCreate } from './create.js';
 import { filterBar, loadRows } from './filterbar.js';
 import { icon } from './icons.js';
-import { KIND, SETTABLE, STATUS, STATUSES, columnNote, kindIcon, priorityChip, statusChip, statusIcon } from './labels.js';
+import { KIND, SETTABLE, STATUS, STATUSES, byRef, codeOf, columnNote, kindIcon, nodeCode, priorityChip, statusChip, statusIcon } from './labels.js';
 import { epicOf, epics, store, sync, titleOf } from './store.js';
 
 // What "ready work nobody holds" means: the filter that gives exactly the tool's answer.
@@ -26,7 +26,7 @@ let body = null; // the region with the columns, which scrolls sideways
 let strip = null; // where the numbers that need attention are
 let bar = null; // the filter box
 let parts = {}; // the count and the epic choice
-let found = null; // the ids the filter asks for, or null when there is no filter
+let found = null; // the refs the filter asks for, or null when there is no filter
 let reading = false; // the filter is being read for the first time
 let params = new URLSearchParams();
 let dragging = false;
@@ -34,10 +34,13 @@ let looking = 0; // the filter being read
 let counting = 0; // the numbers being read
 let clock = null;
 let watch = null;
-const collapsed = new Set(); // the epics whose lanes are folded away
+const collapsed = new Set(); // the refs of the epics whose lanes are folded away
 
 const PRIORITY_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
-const byPriority = (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.id - b.id;
+const byPriority = (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || byRef(a.ref, b.ref);
+
+// An id for an element built from a ref: the colon becomes a dash.
+const dashed = (ref) => ref.replace(':', '-');
 
 export function mount(element, initial) {
   root = element;
@@ -115,7 +118,7 @@ function fillEpicChoices(select) {
   const chosen = params.get('epic') || '';
   select.replaceChildren(
     h('option', { value: '' }, 'All epics'),
-    ...epics().map((epic) => h('option', { value: epic.id }, `#${epic.id} ${epic.title}`)),
+    ...epics().map((epic) => h('option', { value: epic.number }, `${nodeCode(epic.kind, epic.number)} ${epic.title}`)),
   );
   select.value = chosen;
 }
@@ -236,7 +239,7 @@ async function look() {
   }
   const rows = await loadRows(text, bar);
   if (mine !== looking || !root) return;
-  if (rows !== null) found = new Set(rows.map((node) => node.id));
+  if (rows !== null) found = new Set(rows.map((node) => node.ref));
   reading = false;
   draw();
 }
@@ -247,16 +250,16 @@ function draw() {
   if (!body) return;
   const focused = document.activeElement?.dataset?.focusKey;
   const only = params.get('epic');
-  const kept = (node) => found === null || found.has(node.id);
+  const kept = (node) => found === null || found.has(node.ref);
   const inEpic = new Map();
   for (const node of store.nodes.values()) {
     if (node.kind === 'epic') continue;
     const epic = epicOf(node);
-    if (epic) inEpic.set(epic.id, [...(inEpic.get(epic.id) || []), node]);
+    if (epic) inEpic.set(epic.ref, [...(inEpic.get(epic.ref) || []), node]);
   }
   const lanes = epics()
-    .filter((epic) => (!only || String(epic.id) === only) && (found === null || kept(epic) || (inEpic.get(epic.id) || []).some(kept)))
-    .map((epic) => [epic, (inEpic.get(epic.id) || []).filter(kept)]);
+    .filter((epic) => (!only || String(epic.number) === only) && (found === null || kept(epic) || (inEpic.get(epic.ref) || []).some(kept)))
+    .map((epic) => [epic, (inEpic.get(epic.ref) || []).filter(kept)]);
   const counts = Object.fromEntries(STATUSES.map((status) => [status, 0]));
   let total = 0;
   for (const [, items] of lanes) {
@@ -312,16 +315,17 @@ function meter(done, total, label) {
 const tasksDone = (done, total) => `${done} of ${total} ${total === 1 ? 'task' : 'tasks'} done`;
 
 function toggleLane(epic) {
-  if (collapsed.has(epic.id)) collapsed.delete(epic.id);
-  else collapsed.add(epic.id);
+  if (collapsed.has(epic.ref)) collapsed.delete(epic.ref);
+  else collapsed.add(epic.ref);
   draw();
 }
 
 function lane(epic, items) {
   const total = epic.progress_total ?? 0;
   const done = epic.progress_done ?? 0;
-  const open = !collapsed.has(epic.id);
-  const cellsId = `lane-cells-${epic.id}`;
+  const open = !collapsed.has(epic.ref);
+  const cellsId = `lane-cells-${dashed(epic.ref)}`;
+  const code = nodeCode(epic.kind, epic.number);
   const head = h(
     'header',
     { class: 'lane-head' },
@@ -333,14 +337,14 @@ function lane(epic, items) {
         'aria-expanded': String(open),
         'aria-controls': cellsId,
         'aria-label': `${open ? 'Fold away' : 'Show'} epic ${epic.title}`,
-        'data-focus-key': `fold-${epic.id}`,
+        'data-focus-key': `fold-${epic.ref}`,
         onclick: () => toggleLane(epic),
       },
       icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }),
     ),
     h('span', { class: 'lane-icon' }, icon('epic', { size: 18 })),
-    h('button', { type: 'button', class: 'lane-title', 'data-focus-key': epic.id, onclick: () => ui.navigate({ sel: `node:${epic.id}`, panel: null }) }, epic.title),
-    h('span', { class: 'id mono' }, `#${epic.id}`),
+    h('button', { type: 'button', class: 'lane-title', 'data-focus-key': epic.ref, onclick: () => ui.navigate({ sel: epic.ref, panel: null }) }, epic.title),
+    h('span', { class: 'id mono' }, code),
     h(
       'span',
       { class: 'lane-meta' },
@@ -350,23 +354,23 @@ function lane(epic, items) {
       epic.overdue ? h('span', { class: 'chip danger overdue' }, icon('alert', { size: 13 }), 'Overdue') : null,
     ),
     h('span', { class: 'lane-progress' }, h('span', { class: 'progress-text' }, tasksDone(done, total)), meter(done, total, `Tasks done in ${epic.title}`)),
-    h('button', { type: 'button', class: 'add-story ghost small', onclick: () => openCreate({ kind: 'story', parent: epic.id }) }, icon('plus', { size: 14 }), 'Add story'),
+    h('button', { type: 'button', class: 'add-story ghost small', onclick: () => openCreate({ kind: 'story', parent: epic.ref }) }, icon('plus', { size: 14 }), 'Add story'),
   );
   const cells = items.length
     ? h('div', { class: 'cells', id: cellsId, hidden: !open }, STATUSES.map((status) => cell(epic, status, items.filter((node) => node.status === status).sort(byPriority))))
     : h('p', { class: 'lane-empty', id: cellsId, hidden: !open }, found === null ? 'No stories or tasks yet.' : 'No story or task in this epic matches the filter.');
-  return h('section', { class: 'lane', 'aria-label': `Epic ${epic.title}`, 'data-epic': epic.id }, head, cells);
+  return h('section', { class: 'lane', 'aria-label': `Epic ${epic.title}`, 'data-epic': epic.ref, 'data-ref': epic.ref }, head, cells);
 }
 
 function cell(epic, status, cards) {
   const place = h(
     'div',
-    { class: `cell status-${status}`, role: 'group', 'aria-label': `${STATUS[status].label} in ${epic.title}`, 'data-status': status, 'data-epic': epic.id },
+    { class: `cell status-${status}`, role: 'group', 'aria-label': `${STATUS[status].label} in ${epic.title}`, 'data-status': status, 'data-epic': epic.ref },
     cards.length ? h('ul', { class: 'cards' }, cards.map((node) => h('li', {}, card(node)))) : h('p', { class: 'cell-empty' }, 'No items'),
   );
   place.addEventListener('dragover', (event) => {
-    const id = Number(event.dataTransfer?.types.includes('application/x-vrum-node') ? dragged : 0);
-    if (id && epicOf(store.nodes.get(id))?.id === epic.id) {
+    const ref = event.dataTransfer?.types.includes('application/x-vrum-node') ? dragged : '';
+    if (ref && epicOf(store.nodes.get(ref))?.ref === epic.ref) {
       event.preventDefault();
       place.classList.add('over');
     }
@@ -385,14 +389,14 @@ function cell(epic, status, cards) {
 
 // -- a card ---------------------------------------------------------------------------------------
 
-let dragged = 0;
+let dragged = ''; // the ref of the card being dragged
 
 const note = (kind, glyph, ...words) => h('p', { class: `card-note ${kind}` }, icon(glyph, { size: 14 }), h('span', {}, ...words));
 
 function firstBlocker(node) {
   if (!node.waiting_on.length) return null;
   const [first, ...rest] = node.waiting_on;
-  return note('waiting', 'blocked', `Waiting for #${first} ${titleOf(first)}${rest.length ? ` and ${rest.length} more` : ''}`);
+  return note('waiting', 'blocked', `Waiting for ${codeOf(first)} ${titleOf(first)}${rest.length ? ` and ${rest.length} more` : ''}`);
 }
 
 function claimNote(node) {
@@ -402,12 +406,13 @@ function claimNote(node) {
 }
 
 function card(node) {
-  const parent = store.nodes.get(node.parent_id);
+  const parent = store.nodes.get(node.parent);
+  const code = nodeCode(node.kind, node.number);
   const context =
     node.progress_total !== null
       ? h('div', { class: 'card-context progress-line' }, h('span', {}, tasksDone(node.progress_done, node.progress_total)), meter(node.progress_done, node.progress_total, 'Tasks done'))
       : parent
-        ? h('p', { class: 'card-context' }, 'Under: ', h('span', { class: 'id mono' }, `#${parent.id}`), ` ${parent.title}`)
+        ? h('p', { class: 'card-context' }, 'Under: ', h('span', { class: 'id mono' }, nodeCode(parent.kind, parent.number)), ` ${parent.title}`)
         : h('p', { class: 'card-context' });
   const element = h(
     'article',
@@ -415,22 +420,22 @@ function card(node) {
       class: `card kind-${node.kind} status-${node.status}`,
       tabindex: 0,
       draggable: 'true',
-      dataset: { id: node.id, kind: node.kind, status: node.status, focusKey: node.id },
-      'aria-label': `${KIND[node.kind].label} ${node.id}: ${node.title}. ${STATUS[node.status].label}.`,
+      dataset: { ref: node.ref, kind: node.kind, number: node.number, status: node.status, focusKey: node.ref },
+      'aria-label': `${KIND[node.kind].label} ${node.number}: ${node.title}. ${STATUS[node.status].label}.`,
       onclick: (event) => {
-        if (!event.target.closest('button')) ui.navigate({ sel: `node:${node.id}`, panel: null });
+        if (!event.target.closest('button')) ui.navigate({ sel: node.ref, panel: null });
       },
       onkeydown: (event) => {
         if (event.target === element && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          ui.navigate({ sel: `node:${node.id}`, panel: null });
+          ui.navigate({ sel: node.ref, panel: null });
         }
       },
       ondragstart: (event) => {
-        dragged = node.id;
+        dragged = node.ref;
         dragging = true;
-        event.dataTransfer.setData('application/x-vrum-node', String(node.id));
-        event.dataTransfer.setData('text/plain', `#${node.id}`);
+        event.dataTransfer.setData('application/x-vrum-node', node.ref);
+        event.dataTransfer.setData('text/plain', code);
         event.dataTransfer.effectAllowed = 'move';
         element.classList.add('dragging');
       },
@@ -442,11 +447,11 @@ function card(node) {
     h(
       'div',
       { class: 'card-top' },
-      h('span', { class: 'id mono' }, `#${node.id}`),
+      h('span', { class: 'id mono' }, code),
       h('span', { class: 'card-kind' }, kindIcon(node.kind, 13), KIND[node.kind].label),
       h(
         'button',
-        { type: 'button', class: 'move small icon-only ghost', title: 'Move to another column', 'aria-haspopup': 'menu', 'aria-label': `Move #${node.id} to another column`, 'data-focus-key': `move-${node.id}`, onclick: (event) => openMenu(node, event.currentTarget) },
+        { type: 'button', class: 'move small icon-only ghost', title: 'Move to another column', 'aria-haspopup': 'menu', 'aria-label': `Move ${code} to another column`, 'data-focus-key': `move-${node.ref}`, onclick: (event) => openMenu(node, event.currentTarget) },
         icon('chevron_down', { size: 16 }),
       ),
     ),
@@ -458,7 +463,7 @@ function card(node) {
       node.target_on ? h('span', { class: 'chip due' }, icon('calendar', { size: 13 }), `Due ${day(node.target_on)}`) : null,
       node.overdue ? h('span', { class: 'chip danger overdue' }, icon('alert', { size: 13 }), 'Overdue') : null,
       node.schedule_conflicts.length
-        ? h('span', { class: 'chip warn conflict', title: `Planned to start before ${node.schedule_conflicts.map((id) => `#${id}`).join(', ')} is due` }, icon('alert', { size: 13 }), 'Schedule conflict')
+        ? h('span', { class: 'chip warn conflict', title: `Planned to start before ${node.schedule_conflicts.map(codeOf).join(', ')} is due` }, icon('alert', { size: 13 }), 'Schedule conflict')
         : null,
       node.status === 'done' || node.status === 'dropped' ? statusChip(node.status) : null,
     ),
@@ -473,17 +478,17 @@ function markSelected() {
   if (!body) return;
   const chosen = parseSel(params.get('sel'));
   body.querySelectorAll('.card.selected, .lane.selected').forEach((el) => el.classList.remove('selected'));
-  if (!chosen || chosen.kind !== 'node') return;
-  body.querySelector(`.card[data-id="${chosen.id}"]`)?.classList.add('selected');
-  body.querySelector(`.lane[data-epic="${chosen.id}"]`)?.classList.add('selected');
+  if (!chosen) return;
+  body.querySelector(`.card[data-ref="${chosen.ref}"]`)?.classList.add('selected');
+  body.querySelector(`.lane[data-ref="${chosen.ref}"]`)?.classList.add('selected');
 }
 
 // -- changing a status ------------------------------------------------------------------------------
 
 async function setStatus(node, status) {
   try {
-    await call('update_node', { actor: actor(), node_id: node.id, expected_version: node.version, status });
-    notify(`#${node.id} is now ${STATUS[status].label.toLowerCase()}.`);
+    await call('update_node', { actor: actor(), node: node.ref, expected_version: node.version, status });
+    notify(`${nodeCode(node.kind, node.number)} is now ${STATUS[status].label.toLowerCase()}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });
@@ -529,7 +534,7 @@ function openMenu(node, opener) {
   const choices = SETTABLE.filter((status) => status !== node.status && !(node.status === 'ready' && status === 'new'));
   const element = h(
     'div',
-    { class: 'menu move-menu', role: 'menu', 'aria-label': `Move #${node.id}` },
+    { class: 'menu move-menu', role: 'menu', 'aria-label': `Move ${nodeCode(node.kind, node.number)}` },
     choices.map((status) =>
       h(
         'button',

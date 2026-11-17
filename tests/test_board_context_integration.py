@@ -3,7 +3,9 @@ confirmed, replaced and withdrawn on the Graph's context list and in the shared 
 real headless browser, and compared with what a real MCP client reads (`get_fact`, `get_decision`,
 `list_*`, `recall`, the histories). Every refusal is compared word for word with what the same
 attempt gets through MCP, and a refused change is checked to have written nothing. Titles carry a
-unique word, and each test looks only at what it made, since all tests share one database."""
+unique word, and each test looks only at what it made, since all tests share one database. Work is
+named by its reference (`story:12`, `S-12` on the page); the Graph's address names an epic by its
+number (`epic=3`)."""
 
 import re
 
@@ -27,6 +29,7 @@ from tests.board_context import (
     tally,
 )
 from tests.board_helpers import SLOW, board_url, browser_page, made, plain
+from tests.helpers import code_of as code
 from tests.helpers import (
     confirm,
     connect,
@@ -37,6 +40,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
+from tests.helpers import number_of as number
 from tests.world import make_project, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -47,6 +51,12 @@ MARIE = "Marie Curie"
 @pytest.fixture
 def board(server_url: str) -> str:
     return board_url(server_url)
+
+
+def context_list(epic: str, more: str = "") -> str:
+    """The Graph's context list, scoped to one epic (named in the address by its number), and
+    anything more that the address is to say, such as '&sel=story:12'."""
+    return f"#/graph?view=context&as=list&epic={number(epic)}{more}"
 
 
 async def chosen_picker(page: Page, *refs: str) -> None:
@@ -67,19 +77,19 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
     epic = await made(client, "epic", f"Context {word}")
     story = await made(client, "story", f"Concerned story {word}", epic)
     rule = (
-        await ok(client, "create_rule", actor="agent-1", title=f"Concerned {word}", story_id=story)
+        await ok(client, "create_rule", actor="agent-1", title=f"Concerned {word}", story=story)
     )["id"]
 
     async with browser_page(board, token=the_token(), name=ADA) as w:
         page = w.page
-        await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+        await graph_open(w, context_list(epic))
 
-        # A fact, with where it came from, about a story and a requirement.
+        # A fact, with where it came from, about a story (typed as its code) and a requirement.
         await page.locator("#record-fact").click()
         box = dialog(page)
         await box.locator("#record-fact-text").fill(f"Fact about {word}")
         await box.locator("#record-fact-source").fill(f"The call with Marie {word}")
-        await chosen_picker(page, f"#{story}", f"requirement {rule}")
+        await chosen_picker(page, code(story), f"requirement {rule}")
         await box.get_by_role("button", name="Record the fact").click()
         await expect(box).to_have_count(0, timeout=SLOW)
         # A decision, with its reason and the person who decided it, about the story.
@@ -89,15 +99,15 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
         await box.locator("#record-decision-text").fill(f"What was decided {word}")
         await box.locator("#record-decision-reason").fill(f"Because of {word}")
         await box.locator("#record-decision-by").fill(MARIE)
-        await chosen_picker(page, f"#{story}")
+        await chosen_picker(page, code(story))
         await box.get_by_role("button", name="Record the decision").click()
         await expect(box).to_have_count(0, timeout=SLOW)
 
-        facts = (await ok(client, "list_facts", node_id=story))["items"]
+        facts = (await ok(client, "list_facts", node=story))["items"]
         decisions = [
             one
             for one in (await ok(client, "list_decisions", limit=200))["items"]
-            if story in one["node_ids"]
+            if story in one["nodes"]
         ]
         assert len(facts) == 1 and len(decisions) == 1, (facts, decisions)
         fact = await ok(client, "get_fact", fact_id=facts[0]["id"])
@@ -112,7 +122,7 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
             "unconfirmed",
             None,
         )
-        assert (fact["node_ids"], fact["rule_ids"], fact["decision_ids"]) == ([story], [rule], [])
+        assert (fact["nodes"], fact["rule_ids"], fact["decision_ids"]) == ([story], [rule], [])
         assert (decision["title"], decision["text"], decision["reason"]) == (
             f"Decision {word}",
             f"What was decided {word}",
@@ -123,7 +133,7 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
             False,
             "active",
         )
-        assert (decision["confirmation"], decision["node_ids"]) == ("unconfirmed", [story])
+        assert (decision["confirmation"], decision["nodes"]) == ("unconfirmed", [story])
         fact_key, decision_key = f"fact:{fact['id']}", f"decision:{decision['id']}"
         events = (await ok(client, "decision_history", decision_id=decision["id"]))["items"]
         assert [(e["action"], e["actor"]) for e in events] == [
@@ -151,7 +161,7 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
         await expect(connections).to_have_count(2)
         assert sorted(
             await connections.evaluate_all("els => els.map(e => e.dataset.other)")
-        ) == sorted([f"node:{story}", f"rule:{rule}"])
+        ) == sorted([story, f"rule:{rule}"])
 
         # The map: a dot for each, with the same ids and states, and a line to what it concerns.
         await show(page, presentation="map")
@@ -162,9 +172,9 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
             assert await found.get_attribute("data-id") == str(record["id"])
             assert await found.get_attribute("data-status") == "active"
             assert await found.get_attribute("data-confirmation") == "unconfirmed"
-        await expect(edge(page, "concerns", fact_key, f"node:{story}")).to_have_count(1)
+        await expect(edge(page, "concerns", fact_key, story)).to_have_count(1)
         await expect(edge(page, "concerns", fact_key, f"rule:{rule}")).to_have_count(1)
-        await expect(edge(page, "concerns", decision_key, f"node:{story}")).to_have_count(1)
+        await expect(edge(page, "concerns", decision_key, story)).to_have_count(1)
 
         # Choosing the fact's dot opens it in the shared detail panel, with every field.
         await dot(page, fact_key).click()
@@ -186,15 +196,15 @@ async def test_a_fact_and_a_decision_recorded_on_the_board_are_the_same_records_
         await expect(detail).to_contain_text(f"Decided by {MARIE}")
 
         # Exact recall, section by section, for the story and for the requirement.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+        await w.go(context_list(epic, f"&sel={story}"))
         await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-        await recall_matches(client, page, node_id=story)
-        recalled = await ok(client, "recall", node_id=story)
+        await recall_matches(client, page, node=story)
+        recalled = await ok(client, "recall", node=story)
         assert [i["fact"]["id"] for i in recalled["facts"]["items"]] == [fact["id"]]
         assert [i["decision"]["id"] for i in recalled["active_decisions"]["items"]] == [
             decision["id"]
         ]
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=rule:{rule}")
+        await w.go(context_list(epic, f"&sel=rule:{rule}"))
         await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
         await recall_matches(client, page, rule_id=rule)
         assert [
@@ -212,15 +222,15 @@ async def test_confirming_asks_for_the_person_and_shows_who_and_when_and_unconfi
     word = unique_word()
     epic = await made(client, "epic", f"Confirming {word}")
     story = await made(client, "story", f"Reviewed story {word}", epic)
-    fact = await make_fact(client, f"Reviewed fact {word}", node_ids=[story])
-    decision = await make_decision(client, f"Reviewed decision {word}", node_ids=[story])
+    fact = await make_fact(client, f"Reviewed fact {word}", nodes=[story])
+    decision = await make_decision(client, f"Reviewed decision {word}", nodes=[story])
     fact_key, decision_key = f"fact:{fact['id']}", f"decision:{decision['id']}"
     # An agent recording a statement is not a person's review.
     assert (fact["confirmation"], decision["confirmation"]) == ("unconfirmed", "unconfirmed")
 
     async with browser_page(board, token=the_token(), name=ADA) as w:
         page = w.page
-        await graph_open(w, f"#/graph?view=context&as=list&epic={epic}&sel={fact_key}")
+        await graph_open(w, context_list(epic, f"&sel={fact_key}"))
         detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
         select = detail.locator(".confirmation-select")
         await expect(select).to_have_value("unconfirmed", timeout=SLOW)
@@ -283,9 +293,9 @@ async def test_confirming_asks_for_the_person_and_shows_who_and_when_and_unconfi
         await expect(dot(page, fact_key)).to_have_attribute("data-confirmation", "confirmed")
         await expect(dot(page, fact_key)).to_have_class(re.compile(r"\bconfirmed\b"))
         await expect(dot(page, decision_key)).to_have_attribute("data-confirmation", "unconfirmed")
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+        await w.go(context_list(epic, f"&sel={story}"))
         await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-        await recall_matches(client, page, node_id=story)
+        await recall_matches(client, page, node=story)
         await expect(
             panel(page).locator(f".recall-section li.record[data-record='{fact_key}']")
         ).to_have_attribute("data-confirmation", "confirmed")
@@ -311,7 +321,7 @@ async def test_confirming_asks_for_the_person_and_shows_who_and_when_and_unconfi
 
         # Un-confirming needs the person who says so and their words: both are refused when blank,
         # each time in the words an agent gets, and nothing is changed until both are given.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={fact_key}")
+        await w.go(context_list(epic, f"&sel={fact_key}"))
         await expect(select).to_have_value("confirmed", timeout=SLOW)
         asks = {
             "actor": "x",
@@ -364,16 +374,16 @@ async def test_replacing_and_withdrawing_a_fact_keeps_it_and_its_confirmation_an
     word = unique_word()
     epic = await made(client, "epic", f"Ending {word}")
     story = await made(client, "story", f"Ended story {word}", epic)
-    old = await make_fact(client, f"Old fact {word}", node_ids=[story], source=f"A call {word}")
+    old = await make_fact(client, f"Old fact {word}", nodes=[story], source=f"A call {word}")
     await confirm(client, "fact", old, MARIE)
-    wrong = await make_fact(client, f"Wrong fact {word}", node_ids=[story])
+    wrong = await make_fact(client, f"Wrong fact {word}", nodes=[story])
     await confirm(client, "fact", wrong, MARIE)
-    slip = await make_fact(client, f"Slip {word}", node_ids=[story])
+    slip = await make_fact(client, f"Slip {word}", nodes=[story])
     old_key, wrong_key, slip_key = (f"fact:{f['id']}" for f in (old, wrong, slip))
 
     async with browser_page(board, token=the_token(), name=ADA) as w:
         page = w.page
-        await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+        await graph_open(w, context_list(epic))
         before = await tally(client)
         history_before = await history_actions(client, "fact_history", "fact_id", old["id"])
 
@@ -421,7 +431,7 @@ async def test_replacing_and_withdrawing_a_fact_keeps_it_and_its_confirmation_an
         assert (ended["confirmation"], ended["confirmed_by"]) == ("confirmed", MARIE)
         assert new["supersedes_ids"] == [old["id"]] and new["status"] == "active"
         assert (new["confirmation"], new["confirmed_by"]) == ("unconfirmed", None)
-        assert new["node_ids"] == [story] and new["source"] == f"A measurement {word}"
+        assert new["nodes"] == [story] and new["source"] == f"A measurement {word}"
         events = (await ok(client, "fact_history", fact_id=old["id"]))["items"]
         assert events[-1]["action"] == "fact_superseded" and events[-1]["actor"] == ADA
         assert "Let us use the measurement" in str(events[-1])
@@ -457,7 +467,7 @@ async def test_replacing_and_withdrawing_a_fact_keeps_it_and_its_confirmation_an
         await expect(detail.locator(".confirmation-note")).to_contain_text("keeps the confirmation")
         await expect(detail.locator("button.supersede, button.withdraw")).to_have_count(0)
         # The one that replaced it says so too, and is not confirmed.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={new_key}")
+        await w.go(context_list(epic, f"&sel={new_key}"))
         replacement = panel(page).locator(f".record-detail[data-record='{new_key}']")
         await expect(replacement.locator("[data-part=lifecycle] .replaces")).to_contain_text(
             f"#{old['id']}", timeout=SLOW
@@ -465,10 +475,10 @@ async def test_replacing_and_withdrawing_a_fact_keeps_it_and_its_confirmation_an
         await expect(replacement).to_have_attribute("data-confirmation", "unconfirmed")
 
         # On the map the ended record is left out until asked for, and a line says what replaced it.
-        await w.go(f"#/graph?view=context&as=map&epic={epic}")
+        await w.go(f"#/graph?view=context&as=map&epic={number(epic)}")
         await expect(dot(page, new_key)).to_have_count(1, timeout=SLOW)
         await expect(dot(page, old_key)).to_have_count(0)
-        await w.go(f"#/graph?view=context&as=map&epic={epic}&ended=1")
+        await w.go(f"#/graph?view=context&as=map&epic={number(epic)}&ended=1")
         found = dot(page, old_key)
         await expect(found).to_have_count(1, timeout=SLOW)
         assert await found.get_attribute("data-status") == "superseded"
@@ -477,16 +487,16 @@ async def test_replacing_and_withdrawing_a_fact_keeps_it_and_its_confirmation_an
         await expect(edge(page, "replaces", new_key, old_key)).to_have_count(1)
 
         # Recall: the replaced one is a past fact (with its confirmation), the new one is a fact.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+        await w.go(context_list(epic, f"&sel={story}"))
         await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-        await recall_matches(client, page, node_id=story)
-        past = (await ok(client, "recall", node_id=story))["past_facts"]["items"]
+        await recall_matches(client, page, node=story)
+        past = (await ok(client, "recall", node=story))["past_facts"]["items"]
         assert [(i["fact"]["id"], i["fact"]["confirmation"]) for i in past] == [
             (old["id"], "confirmed")
         ]
 
         # Withdrawing a confirmed fact also needs the person's word; a reason is always needed.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}")
+        await w.go(context_list(epic))
         await lifecycle_filter(page, "facts", "active")
         await listed(page, wrong_key).locator("button.withdraw-record").click()
         box = dialog(page)
@@ -547,14 +557,14 @@ async def test_replacing_and_withdrawing_a_decision_keep_it_and_its_confirmation
     word = unique_word()
     epic = await made(client, "epic", f"Deciding {word}")
     story = await made(client, "story", f"Decided story {word}", epic)
-    old = await make_decision(client, f"Old decision {word}", node_ids=[story])
+    old = await make_decision(client, f"Old decision {word}", nodes=[story])
     await confirm(client, "decision", old, MARIE)
-    drop = await make_decision(client, f"Dropped decision {word}", node_ids=[story])
+    drop = await make_decision(client, f"Dropped decision {word}", nodes=[story])
     old_key, drop_key = f"decision:{old['id']}", f"decision:{drop['id']}"
 
     async with browser_page(board, token=the_token(), name=ADA) as w:
         page = w.page
-        await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+        await graph_open(w, context_list(epic))
         before = await tally(client)
 
         # Replacing a confirmed decision needs the word of the person who confirmed it.
@@ -602,7 +612,7 @@ async def test_replacing_and_withdrawing_a_decision_keep_it_and_its_confirmation
             ADA,
             [old["id"]],
         )
-        assert new["node_ids"] == [story] and new["reason"] == "We learned more"
+        assert new["nodes"] == [story] and new["reason"] == "We learned more"
         new_key = f"decision:{new['id']}"
         events = (await ok(client, "decision_history", decision_id=old["id"]))["items"]
         assert (events[-1]["action"], events[-1]["actor"]) == ("decision_superseded", ADA)
@@ -626,7 +636,7 @@ async def test_replacing_and_withdrawing_a_decision_keep_it_and_its_confirmation
         )
         await expect(detail.locator(".confirmation-select")).to_be_disabled()
         await expect(detail).to_have_attribute("data-confirmation", "confirmed")
-        await w.go(f"#/graph?view=context&as=map&epic={epic}&ended=1")
+        await w.go(f"#/graph?view=context&as=map&epic={number(epic)}&ended=1")
         await expect(dot(page, old_key)).to_have_attribute(
             "data-status", "superseded", timeout=SLOW
         )
@@ -634,7 +644,7 @@ async def test_replacing_and_withdrawing_a_decision_keep_it_and_its_confirmation
         await expect(edge(page, "replaces", new_key, old_key)).to_have_count(1)
 
         # Withdrawing an unconfirmed decision needs only a reason, which is never blank.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}")
+        await w.go(context_list(epic))
         await lifecycle_filter(page, "decisions", "active")
         await listed(page, drop_key).locator("button.withdraw-record").click()
         box = dialog(page)
@@ -661,10 +671,10 @@ async def test_replacing_and_withdrawing_a_decision_keep_it_and_its_confirmation
         ).to_contain_text("Withdrawn: No longer needed", timeout=SLOW)
 
         # Recall tells the past decisions apart from the one in force.
-        await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+        await w.go(context_list(epic, f"&sel={story}"))
         await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-        await recall_matches(client, page, node_id=story)
-        recalled = await ok(client, "recall", node_id=story)
+        await recall_matches(client, page, node=story)
+        recalled = await ok(client, "recall", node=story)
         assert [i["decision"]["id"] for i in recalled["active_decisions"]["items"]] == [new["id"]]
         assert sorted(i["decision"]["id"] for i in recalled["past_decisions"]["items"]) == sorted(
             [old["id"], drop["id"]]
@@ -681,25 +691,25 @@ async def test_a_blank_source_reason_or_person_is_refused_in_the_servers_words_a
     word = unique_word()
     epic = await made(client, "epic", f"Blanks {word}")
     story = await made(client, "story", f"Blank story {word}", epic)
-    fact = await make_fact(client, f"Kept fact {word}", node_ids=[story])
+    fact = await make_fact(client, f"Kept fact {word}", nodes=[story])
     async with browser_page(board, token=the_token(), name=ADA) as w:
         page = w.page
-        await graph_open(w, f"#/graph?view=context&as=list&epic={epic}")
+        await graph_open(w, context_list(epic))
         before = await tally(client)
 
         # A fact with no source.
         said = await refused(
-            client, "retain_fact", actor="x", text=f"No source {word}", source="", node_ids=[story]
+            client, "retain_fact", actor="x", text=f"No source {word}", source="", nodes=[story]
         )
         await page.locator("#record-fact").click()
         box = dialog(page)
         await box.locator("#record-fact-text").fill(f"No source {word}")
-        await chosen_picker(page, f"#{story}")
+        await chosen_picker(page, code(story))
         await box.get_by_role("button", name="Record the fact").click()
         await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
         plain(await refusal_in(page).inner_text(), said)
         assert await box.locator("#record-fact-text").input_value() == f"No source {word}"
-        await expect(box.locator(f".picker li[data-ref='node:{story}']")).to_be_visible()
+        await expect(box.locator(f".picker li[data-ref='{story}']")).to_be_visible()
         assert await tally(client) == before
         await box.get_by_role("button", name="Cancel").click()
 
@@ -779,7 +789,7 @@ async def test_a_project_wide_decision_is_in_its_projects_recall_and_briefing_an
 
         async with browser_page(board_url(server_url, first), token=first.key, name=ADA) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic_a}")
+            await graph_open(w, context_list(epic_a))
             await expect(page.locator("#ctx-decisions-count")).to_have_attribute("data-total", "0")
             await page.locator("#record-decision").click()
             box = dialog(page)
@@ -792,7 +802,7 @@ async def test_a_project_wide_decision_is_in_its_projects_recall_and_briefing_an
             await expect(box).to_have_count(0, timeout=SLOW)
 
             mine = (await ok(a, "list_decisions", project_wide=True))["items"]
-            assert [(d["title"], d["node_ids"], d["rule_ids"]) for d in mine] == [(wide_a, [], [])]
+            assert [(d["title"], d["nodes"], d["rule_ids"]) for d in mine] == [(wide_a, [], [])]
             key = f"decision:{mine[0]['id']}"
             # It is in the list although it is linked to nothing, and says it is project-wide.
             row = listed(page, key)
@@ -802,19 +812,19 @@ async def test_a_project_wide_decision_is_in_its_projects_recall_and_briefing_an
 
             # Recall of any item of the project carries it, flagged as not confirmed; so does the
             # briefing for work, and the detail panel shows what recall says.
-            recalled = await ok(a, "recall", node_id=story_a)
+            recalled = await ok(a, "recall", node=story_a)
             wide_items = recalled["project_wide_decisions"]["items"]
             assert [i["decision"]["title"] for i in wide_items] == [wide_a]
             assert wide_items[0]["decision"]["confirmation"] == "unconfirmed"
             assert recalled["active_decisions"]["items"] == []
-            brief = await ok(a, "next_work", actor="agent-a", within_node_id=epic_a, peek=True)
+            brief = await ok(a, "next_work", actor="agent-a", within_node=epic_a, peek=True)
             wide_brief = brief["context"]["project_wide_decisions"]
             assert [(d["title"], d["confirmation"]) for d in wide_brief] == [
                 (wide_a, "unconfirmed")
             ]
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}&sel=node:{story_a}")
+            await w.go(context_list(epic_a, f"&sel={story_a}"))
             await expect(panel(page).locator(".recall-section")).not_to_have_count(0, timeout=SLOW)
-            await recall_matches(a, page, node_id=story_a)
+            await recall_matches(a, page, node=story_a)
             entry = panel(page).locator(
                 f"[data-section=project_wide_decisions] li.record[data-record='{key}']"
             )
@@ -822,35 +832,35 @@ async def test_a_project_wide_decision_is_in_its_projects_recall_and_briefing_an
             await expect(entry).to_have_attribute("data-confirmation", "unconfirmed")
 
             # Once a person confirms it, recall and the briefing say so, and who confirmed it.
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}")
+            await w.go(context_list(epic_a))
             await listed(page, key).locator(".confirmation-select").select_option("confirmed")
             box = dialog(page)
             await box.locator("#confirm-person").fill(MARIE)
             await box.get_by_role("button", name="Confirm", exact=True).click()
             await expect(box).to_have_count(0, timeout=SLOW)
-            recalled = await ok(a, "recall", node_id=story_a)
+            recalled = await ok(a, "recall", node=story_a)
             confirmed = recalled["project_wide_decisions"]["items"][0]["decision"]
             assert (confirmed["confirmation"], confirmed["confirmed_by"]) == ("confirmed", MARIE)
-            brief = await ok(a, "next_work", actor="agent-a", within_node_id=epic_a, peek=True)
+            brief = await ok(a, "next_work", actor="agent-a", within_node=epic_a, peek=True)
             [wide_brief] = brief["context"]["project_wide_decisions"]
             assert (wide_brief["confirmation"], wide_brief["confirmed_by"]) == ("confirmed", MARIE)
-            await w.go(f"#/graph?view=context&as=list&epic={epic_a}&sel=node:{story_a}")
+            await w.go(context_list(epic_a, f"&sel={story_a}"))
             await expect(entry).to_have_attribute("data-confirmation", "confirmed", timeout=SLOW)
             assert w.problems == [], w.problems
 
         # The other project hears nothing of it: not in recall, the briefing, its list or its page.
-        recalled_b = await ok(b, "recall", node_id=story_b)
+        recalled_b = await ok(b, "recall", node=story_b)
         assert [i["decision"]["title"] for i in recalled_b["project_wide_decisions"]["items"]] == [
             wide_b
         ]
-        brief_b = await ok(b, "next_work", actor="agent-b", within_node_id=epic_b, peek=True)
+        brief_b = await ok(b, "next_work", actor="agent-b", within_node=epic_b, peek=True)
         assert [d["title"] for d in brief_b["context"]["project_wide_decisions"]] == [wide_b]
         assert [d["title"] for d in (await ok(b, "list_decisions"))["items"]] == [wide_b]
         async with browser_page(
             board_url(server_url, second), token=second.key, name=ADA, keep_bodies=True
         ) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=context&as=list&epic={epic_b}")
+            await graph_open(w, context_list(epic_b))
             await expect(page.locator("#ctx-decisions-count")).to_have_attribute(
                 "data-total", "1", timeout=SLOW
             )

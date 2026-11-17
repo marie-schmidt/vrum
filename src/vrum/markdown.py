@@ -3,7 +3,7 @@ rules of the database), decision and fact, with its fields at the top and everyt
 connected to written as `[[file name]]` references, so a person can read it in Obsidian or keep it
 in git. A decision or fact says in plain words what it is, whether it still counts (active,
 superseded by another, or withdrawn and why) and whether a person confirmed it. A reference a
-person wrote in a text (`[[node:12]]`, see references.py) becomes the same kind of link to that
+person wrote in a text (`[[story:12]]`, see references.py) becomes the same kind of link to that
 item's file.
 
 It is made from the export (see exchange.py) and from nothing else, so it can never say anything
@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from vrum.common import split_node_ref
 from vrum.references import REFERENCE_PATTERN
 
 _REFERENCE = re.compile(REFERENCE_PATTERN)
@@ -29,6 +30,7 @@ _LONGEST_SLUG = 50
 # that come from a fixed list (none of them is one YAML would read as something else).
 _BARE = {
     "id",
+    "number",
     "version",
     "type",
     "status",
@@ -43,7 +45,7 @@ _BARE = {
 }
 _NODE_FIELDS = (
     "type",
-    "id",
+    "number",
     "title",
     "status",
     "priority",
@@ -177,14 +179,14 @@ def _text(entry: _Entry) -> str:
 
 
 def _rank(stem: str) -> tuple[str, int]:
-    """Where a file sorts among others: by kind, then by id as a number (a file is called
-    kind-id-title)."""
+    """Where a file sorts among others: by kind, then by number (a file is called
+    kind-number-title)."""
     kind, number, _ = stem.split("-", 2)
     return kind, int(number)
 
 
 def _link_references(text: str, stems: Mapping[tuple[str, int], str]) -> str:
-    """A reference a person wrote in a text (`[[node:12]]`) becomes a link to that item's file, as
+    """A reference a person wrote in a text (`[[story:12]]`) becomes a link to that item's file, as
     Obsidian reads it. One that names nothing, or the wrong kind of thing, is written as plain
     words with no brackets, so that every link in the copy points at a file."""
 
@@ -198,7 +200,9 @@ def _link_references(text: str, stems: Mapping[tuple[str, int], str]) -> str:
 
 def render(document: Mapping[str, Any]) -> dict[str, str]:
     """The files of the copy: path (such as `stories/story-12-login.md`) to what is in it. The
-    reference `[[story-12-login]]` points at that file, whatever folder it is in."""
+    reference `[[story-12-login]]` points at that file, whatever folder it is in. Every item is
+    keyed by its type and its number (an epic, story or task) or id, which is also how a
+    reference written in a text names it."""
     entries: dict[tuple[str, int], _Entry] = {}
 
     def add(key: tuple[str, int], entry: _Entry) -> None:
@@ -208,9 +212,9 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
         kind = node["kind"]
         body = [node["body"]] if node["body"].strip() else []
         add(
-            ("node", node["id"]),
+            (kind, node["number"]),
             _Entry(
-                f"{kind}-{node['id']}-{_slug(node['title'])}",
+                f"{kind}-{node['number']}-{_slug(node['title'])}",
                 {"epic": "epics", "story": "stories", "task": "tasks"}[kind],
                 _NODE_FIELDS,
                 {**node, "type": kind},
@@ -268,8 +272,8 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
         entries[target].links.append((incoming, entries[source].stem))
 
     for node in document["nodes"]:
-        if node["parent_id"] is not None:
-            connect(("node", node["id"]), ("node", node["parent_id"]), "parent")
+        if node["parent"] is not None:
+            connect((node["kind"], node["number"]), split_node_ref(node["parent"]), "parent")
     for link in document["links"]:
         label = {
             "needs_first": "needs first",
@@ -277,22 +281,22 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
             "duplicates": "duplicates",
             "relates_to": "relates to",
         }[link["link_type"]]
-        connect(("node", link["source_id"]), ("node", link["target_id"]), label)
+        connect(split_node_ref(link["source"]), split_node_ref(link["target"]), label)
     for rule in document["rules"]:
-        if rule["story_id"] is not None:
-            connect(("rule", rule["id"]), ("node", rule["story_id"]), "story")
+        if rule["story"] is not None:
+            connect(("rule", rule["id"]), split_node_ref(rule["story"]), "story")
     for decision in document["decisions"]:
         here = ("decision", decision["id"])
-        for node_id in decision["node_ids"]:
-            connect(here, ("node", node_id), "affects")
+        for ref in decision["nodes"]:
+            connect(here, split_node_ref(ref), "affects")
         for rule_id in decision["rule_ids"]:
             connect(here, ("rule", rule_id), "affects")
         if decision["superseded_by_id"] is not None:
             connect(here, ("decision", decision["superseded_by_id"]), "replaced by")
     for fact in document["facts"]:
         here = ("fact", fact["id"])
-        for node_id in fact["node_ids"]:
-            connect(here, ("node", node_id), "concerns")
+        for ref in fact["nodes"]:
+            connect(here, split_node_ref(ref), "concerns")
         for rule_id in fact["rule_ids"]:
             connect(here, ("rule", rule_id), "concerns")
         for decision_id in fact["decision_ids"]:

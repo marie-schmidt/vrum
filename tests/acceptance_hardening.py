@@ -130,7 +130,7 @@ async def hardening() -> None:
             body="Reset the password by email; the API key is shown once; a GitHub token "
             "starts with ghp_.",
         )  # fmt: skip
-        proof("M6", "ordinary text that only talks about secrets is kept", ordinary["id"])
+        proof("M6", "ordinary text that only talks about secrets is kept", ordinary["ref"])
 
         http_request(URL, token=wrong)
         http_request(URL)

@@ -109,7 +109,12 @@ a.side-item:hover, button.side-item:hover { background: var(--surface-3); text-d
 .crumbs { flex: 3 1 10rem; min-width: 0; }
 .crumbs ol { display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; list-style: none; color: var(--text-2); }
 .crumbs li { flex: none; white-space: nowrap; }
-.crumbs .crumb-project { flex: 0 1 auto; min-width: 3rem; overflow: hidden; text-overflow: ellipsis; }
+.crumbs .crumb-project { flex: 0 1 auto; min-width: 4rem; overflow: hidden; text-overflow: ellipsis; }
+/* The items above the one on the item page, and that item: they give way to each other. */
+.crumbs .crumb-item { flex: 0 1 auto; min-width: 5rem; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; }
+@media (min-width: 700px) {
+  .crumbs.has-trail { flex-basis: 32rem; }
+}
 .crumbs li + li::before { content: "/"; content: "/" / ""; margin-right: var(--space-2); color: var(--text-3); }
 .crumbs a { color: var(--text-2); text-decoration: none; }
 .crumbs a:hover { text-decoration: underline; }
@@ -143,6 +148,7 @@ button.jump kbd { font-size: var(--text-xs); }
 @media (max-width: 699.98px) {
   #top { position: static; padding: var(--space-2) var(--space-3); }
   .crumb-project { display: none; }
+  .crumbs .crumb-item:not([aria-current]) { display: none; }
   .crumbs li + li::before { display: none; }
   .crumbs li[aria-current] { font-size: var(--text-lg); }
   .crumbs { order: 1; }

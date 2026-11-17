@@ -6,8 +6,8 @@
 import { call, callAll, callPaged, exported, get, indexState } from './api.js';
 
 export const store = {
-  nodes: new Map(), // id -> node
-  links: [], // { id, source_id, target_id, link_type }
+  nodes: new Map(), // ref (story:12) -> node
+  links: [], // { id, source, target, link_type }
   rules: null, // loaded when a page asks for them
   decisions: null,
   facts: null,
@@ -47,7 +47,7 @@ export const ensureContext = () => Promise.all([ensure('rules'), ensure('decisio
 
 async function reload() {
   const [nodes, links] = await Promise.all([callAll('list_nodes', {}), exported('links')]);
-  store.nodes = new Map(nodes.map((node) => [node.id, node]));
+  store.nodes = new Map(nodes.map((node) => [node.ref, node]));
   store.links = links;
   for (const name of Object.keys(LOADERS)) {
     if (store[name] !== null) store[name] = await LOADERS[name]();
@@ -58,7 +58,7 @@ async function reload() {
 // again when one is due to, instead of waiting for news that never comes.
 export async function refreshWork() {
   const nodes = await callAll('list_nodes', {});
-  store.nodes = new Map(nodes.map((node) => [node.id, node]));
+  store.nodes = new Map(nodes.map((node) => [node.ref, node]));
 }
 
 async function refreshIndex() {
@@ -124,18 +124,26 @@ export function stopSyncing() {
 
 // -- reading the work ---------------------------------------------------------------------------
 
-export const nodeOf = (id) => store.nodes.get(id);
-export const epics = () => [...store.nodes.values()].filter((node) => node.kind === 'epic');
-export const childrenOf = (id) =>
-  [...store.nodes.values()].filter((node) => node.parent_id === id);
+// Everything is named by its reference (story:12). Epics, then stories, then tasks, each by number,
+// is the order the server gives and the order everything here keeps.
+export const nodeOf = (ref) => store.nodes.get(ref);
+export const epics = () => [...store.nodes.values()].filter((node) => node.kind === 'epic').sort((a, b) => a.number - b.number);
+export const childrenOf = (ref) => [...store.nodes.values()].filter((node) => node.parent === ref);
 
 export function epicOf(node) {
   let current = node;
-  while (current && current.kind !== 'epic') current = store.nodes.get(current.parent_id);
+  while (current && current.kind !== 'epic') current = store.nodes.get(current.parent);
   return current || null;
 }
 
-export function titleOf(id) {
-  const node = store.nodes.get(id);
-  return node ? node.title : `item ${id}`;
+// An epic, story or task from the top down: [epic, story, task] as far as `ref` goes.
+export function trailOf(ref) {
+  const trail = [];
+  for (let current = store.nodes.get(ref); current; current = store.nodes.get(current.parent)) trail.unshift(current);
+  return trail;
+}
+
+export function titleOf(ref) {
+  const node = store.nodes.get(ref);
+  return node ? node.title : 'not found';
 }

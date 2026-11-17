@@ -405,7 +405,7 @@ async def test_a_key_is_shown_once_and_revoking_it_stops_a_connection_that_is_al
 
     async with connect(project.mcp_url, secret) as client:
         made = await ok(client, "create_node", actor="agent", kind="epic", title="Made with a key")
-        assert (await ok(client, "list_nodes"))["items"][0]["id"] == made["id"]
+        assert (await ok(client, "list_nodes"))["items"][0]["ref"] == made["ref"]
         used = owner.call("GET", f"{path}/keys").body["keys"]
         assert next(one for one in used if one["id"] == key_id)["last_used_at"] is not None
 

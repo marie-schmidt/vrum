@@ -6,12 +6,12 @@ from typing import Any
 WHEN = "2026-11-15T10:00:00.000000Z"
 
 
-def node(node_id: int, kind: str, parent: int | None, **more: Any) -> dict[str, Any]:
+def node(kind: str, number: int, parent: str | None = None, **more: Any) -> dict[str, Any]:
     return {
-        "id": node_id,
         "kind": kind,
-        "parent_id": parent,
-        "title": f"{kind} {node_id}",
+        "number": number,
+        "parent": parent,
+        "title": f"{kind} {number}",
         "body": "",
         "status": "new",
         "priority": "normal",
@@ -24,20 +24,20 @@ def node(node_id: int, kind: str, parent: int | None, **more: Any) -> dict[str, 
     }
 
 
-def link(link_id: int, source: int, target: int, link_type: str) -> dict[str, Any]:
+def link(link_id: int, source: str, target: str, link_type: str) -> dict[str, Any]:
     return {
         "id": link_id,
-        "source_id": source,
-        "target_id": target,
+        "source": source,
+        "target": target,
         "link_type": link_type,
         "created_at": WHEN,
     }
 
 
-def rule(rule_id: int, story: int | None, **more: Any) -> dict[str, Any]:
+def rule(rule_id: int, story: str | None, **more: Any) -> dict[str, Any]:
     return {
         "id": rule_id,
-        "story_id": story,
+        "story": story,
         "title": f"rule {rule_id}",
         "body": "",
         "status": "held",
@@ -60,7 +60,7 @@ def fact(fact_id: int, **more: Any) -> dict[str, Any]:
         "status_reason": None,
         "confirmed_by": None,
         "confirmed_at": None,
-        "node_ids": [],
+        "nodes": [],
         "rule_ids": [],
         "decision_ids": [],
         **more,
@@ -82,7 +82,7 @@ def decision(decision_id: int, **more: Any) -> dict[str, Any]:
         "confirmed_by": None,
         "confirmed_at": None,
         "recorded_at": WHEN,
-        "node_ids": [],
+        "nodes": [],
         "rule_ids": [],
         **more,
     }
@@ -91,8 +91,8 @@ def decision(decision_id: int, **more: Any) -> dict[str, Any]:
 def event(event_id: int, **more: Any) -> dict[str, Any]:
     return {
         "id": event_id,
-        "node_id": None,
-        "other_node_id": None,
+        "node": None,
+        "other_node": None,
         "rule_id": None,
         "decision_id": None,
         "fact_id": None,

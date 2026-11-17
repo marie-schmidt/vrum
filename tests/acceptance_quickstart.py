@@ -26,7 +26,7 @@ from playwright.async_api import Page, expect
 from tests.acceptance_scenario import Failed, chapter, clip, proof
 from tests.board_helpers import SLOW, browser_page, create_in_browser
 from tests.board_m14 import events_of, feed_becomes, feed_row, spoken
-from tests.helpers import REPO_ROOT, connect, embeddings_stopped, ok, unique_word
+from tests.helpers import REPO_ROOT, code_of, connect, embeddings_stopped, ok, unique_word
 from tests.second_stack import SecondStack
 from tests.test_board_accounts_integration import register_in_the_browser
 from tests.world import Person, server_base
@@ -132,18 +132,21 @@ def read_the_readme(base: str) -> None:
         "M18",
         "the README's first two sections after its title are the Overview and Getting started, and "
         "Getting started sends a reader who wants to connect an agent to docs/agents.md, which has "
-        "the Python example and the agent guide",
+        "the Python example and the agent guide; the guide names work the way the tools take it, "
+        "by kind and number (`story:12`), and mentions no integer id of an item",
         re.findall(r"^# (.+)$", prose, re.M) == ["Vrum"]
         and titles[:2] == ["Overview", "Getting started"]
         and re.search(r"\]\(docs/agents\.md\)", started) is not None
         and re.search(r"```python\n.*?\n```", guide, re.S) is not None
-        and "agent-guide:start" in guide,
+        and "agent-guide:start" in guide
+        and "`story:12`" in guide
+        and not re.search(r"node_id|node_ids|parent_id|\[\[node:", guide + text),
         f"sections: {', '.join(titles[:3])}",
     )
 
     lines = commands(started)
     gone = [f"{line}: {', '.join(needs)}" for line in lines if (needs := missing(line))]
-    named = sorted(set(re.findall(r"http://127\.0\.0\.1:8000(/[\w/-]*)", started)))
+    named = sorted(set(re.findall(r"http://(?:127\.0\.0\.1|localhost):8000(/[\w/-]*)", started)))
     unanswered = [path for path in named if asked(base, path)[0] != ANSWERS.get(path)]
     health_as_told = "/health" not in named or (
         asked(base, "/health")[1] == '{"status":"ok"}' and '{"status":"ok"}' in started
@@ -251,13 +254,13 @@ async def first_minutes(base: str) -> None:
         await expect(page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
         key = (await page.locator("#key-secret").inner_text()).strip()
         await w.go("#/board")
-        await expect(page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
         await w.go("#/access")
         await expect(page.locator("#key-list")).to_contain_text("my first agent", timeout=SLOW)
         gone_from_page = key not in await page.locator("body").inner_text()
         async with connect(f"{base}/mcp", key) as agent:
             seen = {
-                node["id"]: (node["kind"], node["title"])
+                node["ref"]: (node["kind"], node["title"])
                 for node in (await ok(agent, "list_nodes"))["items"]
             }
         proof(
@@ -265,7 +268,7 @@ async def first_minutes(base: str) -> None:
             "with New item the newcomer makes an epic, a story in it and a task in the story, then "
             "makes an agent key from Settings & tools: the secret is shown once (the page shows "
             "only its label and start afterwards), and an MCP client with it sees the same three "
-            "items with the ids and titles the dialog gave",
+            "items with the references (epic:1, story:1, task:1) and titles the dialog gave",
             key.startswith("vrk_")
             and gone_from_page
             and seen
@@ -273,12 +276,13 @@ async def first_minutes(base: str) -> None:
                 epic: ("epic", f"Accounts {word}"),
                 story: ("story", f"Sign in {word}"),
                 task: ("task", f"Login form {word}"),
-            },
+            }
+            and [epic, story, task] == ["epic:1", "story:1", "task:1"],
             f"items {epic}, {story}, {task}",
         )
 
         await w.go("#/board")
-        await expect(page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
         await the_agent_works(base, key, task, page)
         await the_board_shows_it(base, key, task, page)
 
@@ -299,7 +303,7 @@ async def signed_in_person(page: Page, base: str, email: str, password: str, nam
     )
 
 
-async def the_agent_works(base: str, key: str, task: int, page: Page) -> None:
+async def the_agent_works(base: str, key: str, task: str, page: Page) -> None:
     guide = GUIDE.read_text(encoding="utf-8")
     found = re.search(r"```python\n(.*?)\n```", guide, re.DOTALL)
     assert found, "docs/agents.md has no Python example"
@@ -314,11 +318,9 @@ async def the_agent_works(base: str, key: str, task: int, page: Page) -> None:
     )
     async with connect(f"{base}/mcp", key) as agent:
         taken = await ok(agent, "next_work", actor=AGENT)
-        held = page.locator(f".card[data-id='{task}'] .card-note.claim")
+        held = page.locator(f".card[data-ref='{task}'] .card-note.claim")
         await expect(held).to_contain_text(f"Held by {AGENT}", timeout=NEWS)
-        finished = await ok(
-            agent, "finish_work", actor=AGENT, node_id=task, outcome="done", note=NOTE
-        )
+        finished = await ok(agent, "finish_work", actor=AGENT, node=task, outcome="done", note=NOTE)
     proof(
         "M18",
         "the Python example from docs/agents.md, run as it is written with the key, reaches the "
@@ -327,19 +329,19 @@ async def the_agent_works(base: str, key: str, task: int, page: Page) -> None:
         ran.returncode == 0
         and "postgres_version" in ran.stdout
         and taken["found"]
-        and taken["work"]["id"] == task
+        and taken["work"]["ref"] == task
         and taken["claim"]["actor"] == AGENT
         and finished["node"]["status"] == "done",
-        f"the example printed {len(ran.stdout)} characters; #{task} done by {AGENT}",
+        f"the example printed {len(ran.stdout)} characters; {code_of(task)} done by {AGENT}",
     )
 
 
-async def the_board_shows_it(base: str, key: str, task: int, page: Page) -> None:
-    done = page.locator(f".cell[data-status='done'] .card[data-id='{task}']")
+async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None:
+    done = page.locator(f".cell[data-status='done'] .card[data-ref='{task}']")
     await expect(done).to_be_visible(timeout=NEWS)
     await page.locator("#activity-open").click()
     await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible(timeout=SLOW)
-    finished = feed_row(page, f"finished their work on task #{task}")
+    finished = feed_row(page, f"finished their work on task {code_of(task)}")
     await expect(finished).to_contain_text(AGENT, timeout=NEWS)
     async with connect(f"{base}/mcp", key) as agent:
         events = await events_of(agent)
@@ -347,7 +349,7 @@ async def the_board_shows_it(base: str, key: str, task: int, page: Page) -> None
         handoffs = [event for event in events if event["action"] == "handoff"]
         claims = [event for event in events if event["action"] == "claimed"]
         status = await ok(agent, "server_status")
-    claimed_row = feed_row(page, f"took task #{task}")
+    claimed_row = feed_row(page, f"took task {code_of(task)}")
     said: dict[str, Any] = {
         "note": spoken(await finished.locator(".handoff-note").inner_text()),
         "actor": await finished.locator(".event-actor").inner_text(),

@@ -7,10 +7,20 @@ from typing import Any
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
-from vrum.common import Refusal, check_choice, fetch_all, fetch_one, page_size, split_page
+from vrum.common import (
+    Refusal,
+    check_choice,
+    fetch_all,
+    fetch_one,
+    page_size,
+    parse_node_ref,
+    split_page,
+)
 from vrum.db import Database
 from vrum.decisions import LINK_TABLES, Decision, count_decisions, page_decisions
 from vrum.facts import FACT_COLUMNS, Fact, to_fact
+from vrum.graph import require_node
+from vrum.rules import require_rule
 from vrum.search import IndexNote, Searcher, SearchResult
 
 RECALL_LISTS = (
@@ -23,7 +33,8 @@ RECALL_LISTS = (
 )
 
 _FACT_LINK_TABLES = {"node": "fact_nodes", "rule": "fact_rules"}
-_LINK_COLUMNS = {"node": "node_id", "rule": "rule_id"}
+# The column of each link table that holds the thing recalled: a node's ref or a rule's id.
+_LINK_COLUMNS = {"node": "node", "rule": "rule_id"}
 
 
 class RecalledDecision(BaseModel):
@@ -134,7 +145,7 @@ class Recaller:
     async def recall(
         self,
         *,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         show: str,
         limit: int,
@@ -144,15 +155,23 @@ class Recaller:
         """What is known about one node or rule, by exact links, and, if asked, what is alike."""
         limit = page_size(limit)
         check_choice("show", show, RECALL_LISTS)
-        if (node_id is None) == (rule_id is None):
-            raise Refusal("Give exactly one of node_id or rule_id: the thing to recall for.")
+        if (node is None) == (rule_id is None):
+            raise Refusal(
+                "Give exactly one of node (an epic, story or task, such as story:12) or rule_id: "
+                "the thing to recall for."
+            )
         if after_id is not None and show == "all":
             raise Refusal(
                 "after_id only works for one section at a time: set show to one of "
                 f"{', '.join(RECALL_LISTS[1:])}."
             )
-        what, thing = ("node", node_id) if node_id is not None else ("rule", rule_id)
-        assert thing is not None
+        thing: str | int
+        if node is not None:
+            node = parse_node_ref(node, "node")
+            what, thing = "node", node
+        else:
+            assert rule_id is not None
+            what, thing = "rule", rule_id
         column = _LINK_COLUMNS[what]
         decision_table = LINK_TABLES[what][0]
         fact_table = _FACT_LINK_TABLES[what]
@@ -171,16 +190,10 @@ class Recaller:
             "past_facts": f"status <> 'active' AND {linked_fact}",
         }
         async with self._database.transaction() as conn:
-            found = await fetch_one(
-                conn,
-                f"SELECT 1 AS found FROM {'nodes' if what == 'node' else 'rules'} WHERE id = %s",
-                (thing,),
-            )
-            if found is None:
-                finder = "list_nodes" if what == "node" else "list_rules"
-                raise Refusal(
-                    f"There is no {what} with id {thing}. Use {finder} to find the id you want."
-                )
+            if isinstance(thing, str):
+                await require_node(conn, thing)
+            else:
+                await require_rule(conn, thing)
             decisions: dict[str, DecisionSection] = {}
             for name, where in decision_lists.items():
                 found_decisions, next_decision_id = (
@@ -227,7 +240,7 @@ class Recaller:
         similar: SimilarSection | None = None
         if with_similar:
             similar_items, count, note = await self._searcher.similar(
-                node_id=node_id,
+                node=node,
                 rule_id=rule_id,
                 wanted_types=["decision", "fact"],
                 exclude=exclude,

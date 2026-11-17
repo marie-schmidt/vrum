@@ -1,10 +1,15 @@
 """Moving the whole graph out of one server and into another as data (M7).
 
 `export_page` reads everything a page at a time, in a fixed order, as plain data. `import_document`
-loads such a file into a server that holds nothing yet, keeping every id, date, confirmation and
-event, in one step: either all of it is loaded or none of it. Backing up and restoring the whole
-database is separate (scripts/backup.sh and scripts/restore.sh); this is the portable, readable
-form.
+loads such a file into a server that holds nothing yet, keeping every number, id, date,
+confirmation and event, in one step: either all of it is loaded or none of it. Backing up and
+restoring the whole database is separate (scripts/backup.sh and scripts/restore.sh); this is the
+portable, readable form.
+
+An epic, story or task is in the file by its kind and its number within its kind (`kind` and
+`number`), and everything that points at one holds its ref (`story:12`): a node's `parent`, a
+link's `source` and `target`, a requirement's `story`, a decision's or fact's `nodes`, an event's
+`node` and `other_node`. A requirement, decision, fact, link or event has its own `id`.
 
 Facts and decisions are exported as they stand: their lifecycle (active, superseded or withdrawn,
 what replaced them, why), who confirmed them and when (an ended record keeps the confirmation it
@@ -24,7 +29,17 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
-from vrum.common import Refusal, fetch_all, fetch_one, page_size, refuse_secrets
+from vrum.common import (
+    NODE_KINDS,
+    Refusal,
+    fetch_all,
+    fetch_one,
+    node_ref,
+    page_size,
+    parse_node_ref,
+    refuse_secrets,
+    split_node_ref,
+)
 from vrum.db import Database
 
 FORMAT = "vrum-export"
@@ -38,25 +53,23 @@ _A = {"epic": "an epic", "story": "a story"}
 
 _QUERIES = {
     "nodes": (
-        "SELECT id, kind, parent_id, title, body, status, priority, start_on, target_on, "
+        "SELECT kind, number, parent, title, body, status, priority, start_on, target_on, "
         "version, created_at, updated_at FROM node_state"
     ),
-    "links": "SELECT id, source_id, target_id, link_type, created_at FROM links",
-    "rules": (
-        "SELECT id, story_id, title, body, status, version, created_at, updated_at FROM rules"
-    ),
+    "links": "SELECT id, source, target, link_type, created_at FROM links",
+    "rules": "SELECT id, story, title, body, status, version, created_at, updated_at FROM rules",
     "decisions": (
         "SELECT id, title, text, reason, decided_by, decided_on, project_wide, status, "
-        "superseded_by_id, status_reason, confirmed_by, confirmed_at, recorded_at, node_ids, "
+        "superseded_by_id, status_reason, confirmed_by, confirmed_at, recorded_at, nodes, "
         "rule_ids FROM decision_state"
     ),
     "facts": (
         "SELECT id, text, source, recorded_by, recorded_at, status, superseded_by_id, "
-        "status_reason, confirmed_by, confirmed_at, node_ids, rule_ids, decision_ids "
+        "status_reason, confirmed_by, confirmed_at, nodes, rule_ids, decision_ids "
         "FROM fact_state"
     ),
     "events": (
-        "SELECT id, node_id, other_node_id, rule_id, decision_id, fact_id, action, actor, at, "
+        "SELECT id, node, other_node, rule_id, decision_id, fact_id, action, actor, at, "
         "before, after FROM events"
     ),
 }
@@ -70,7 +83,8 @@ class ExportPage(BaseModel):
         "events. Empty when there is nothing at all to export."
     )
     items: list[dict[str, Any]] = Field(
-        description="The items of that list, in id order. A page never mixes lists."
+        description="The items of that list, in a fixed order: nodes as epics, then stories, then "
+        "tasks, each by number; the others by id. A page never mixes lists."
     )
     next_after: str | None = Field(
         description="Pass this as `after` to get the next page. Empty on the last page."
@@ -103,16 +117,39 @@ def _exported(row: dict[str, Any]) -> dict[str, Any]:
     return {key: _plain(value) for key, value in row.items()}
 
 
-def _cursor(after: str | None) -> tuple[str, int]:
+def _cursor(after: str | None) -> tuple[str, tuple[int, ...]]:
+    """Where a page starts: its list, and the last item of the one before it. A node is placed by
+    its kind (counted from 1: epic, story, task) and number, any other item by its id."""
     if after is None:
-        return SECTIONS[0], 0
+        return SECTIONS[0], (0, 0)
     section, _, last = after.partition(":")
-    if section in SECTIONS and last.isdecimal():
-        return section, int(last)
+    if section == "nodes":
+        try:
+            kind, number = split_node_ref(parse_node_ref(last))
+        except Refusal:
+            pass
+        else:
+            return section, (NODE_KINDS.index(kind) + 1, number)
+    elif section in SECTIONS and last.isdecimal():
+        return section, (int(last),)
     raise Refusal(
         f"after must be left empty for the first page, or be the next_after of the previous "
-        f"page (such as nodes:200), but it is {after[:40]!r}."
+        f"page (such as nodes:story:12 or links:200), but it is {after[:40]!r}."
     )
+
+
+def _after_clause(section: str) -> tuple[str, str]:
+    """The test for items after the last one of the previous page, and the order that makes it
+    work."""
+    if section == "nodes":
+        return "(kind_rank, number) > (%s, %s)", "kind_rank, number"
+    return "id > %s", "id"
+
+
+def _cursor_after(section: str, item: dict[str, Any]) -> str:
+    if section == "nodes":
+        return f"nodes:{node_ref(item['kind'], item['number'])}"
+    return f"{section}:{item['id']}"
 
 
 async def _counts(conn: AsyncConnection) -> dict[str, int]:
@@ -153,14 +190,27 @@ Moment = Annotated[datetime, BeforeValidator(_moment)]
 Id = Annotated[int, Field(strict=True, gt=0)]
 
 
+def _a_node_ref(value: Any) -> str:
+    """A ref in its one written form (`story:12`: lower case, no spaces), or a plain complaint."""
+    try:
+        if parse_node_ref(value) == value:
+            return str(value)
+    except Refusal:
+        pass
+    raise ValueError("must name an epic, story or task by its kind and number, such as story:12")
+
+
+NodeRef = Annotated[str, BeforeValidator(_a_node_ref)]
+
+
 class _Item(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class NodeItem(_Item):
-    id: Id
     kind: Literal["epic", "story", "task"]
-    parent_id: Id | None
+    number: Id
+    parent: NodeRef | None
     title: str
     body: str
     # `ready` is what a node nobody has started shows when nothing it needs first is open. It is
@@ -176,15 +226,15 @@ class NodeItem(_Item):
 
 class LinkItem(_Item):
     id: Id
-    source_id: Id
-    target_id: Id
+    source: NodeRef
+    target: NodeRef
     link_type: Literal["needs_first", "supersedes", "duplicates", "relates_to"]
     created_at: Moment
 
 
 class RuleItem(_Item):
     id: Id
-    story_id: Id | None
+    story: NodeRef | None
     title: str
     body: str
     status: Literal["held", "settled", "dropped"]
@@ -210,7 +260,7 @@ class DecisionItem(_Item):
     confirmed_by: str | None
     confirmed_at: Moment | None
     recorded_at: Moment
-    node_ids: list[Id]
+    nodes: list[NodeRef]
     rule_ids: list[Id]
 
 
@@ -225,15 +275,15 @@ class FactItem(_Item):
     status_reason: str | None
     confirmed_by: str | None
     confirmed_at: Moment | None
-    node_ids: list[Id]
+    nodes: list[NodeRef]
     rule_ids: list[Id]
     decision_ids: list[Id]
 
 
 class EventItem(_Item):
     id: Id
-    node_id: Id | None
-    other_node_id: Id | None
+    node: NodeRef | None
+    other_node: NodeRef | None
     rule_id: Id | None
     decision_id: Id | None
     fact_id: Id | None
@@ -379,72 +429,73 @@ def _event_problems(place: str, event: EventItem) -> list[str]:
         needs = "fact_id"
     else:
         wrong = (
-            event.node_id is None
+            event.node is None
             or event.rule_id is not None
             or event.decision_id is not None
             or event.fact_id is not None
         )
-        needs = "node_id, and no rule_id, decision_id or fact_id"
+        needs = "node, and no rule_id, decision_id or fact_id"
     return [f"{place}: the action '{action}' needs {needs}"] if wrong else []
 
 
 def _check_references(document: Document) -> list[str]:
     """Everything a file points at has to be in the file. Reported all at once, by place."""
     problems: list[str] = []
+    nodes: dict[str, NodeItem] = {}
+    for index, node in enumerate(document.nodes):
+        ref = node_ref(node.kind, node.number)
+        if ref in nodes:
+            problems.append(f"nodes[{index}]: {ref} is used twice")
+        nodes[ref] = node
     ids: dict[str, dict[int, Any]] = {}
-    for section in SECTIONS:
+    for section in SECTIONS[1:]:
         found: dict[int, Any] = {}
         for index, item in enumerate(getattr(document, section)):
             if item.id in found:
                 problems.append(f"{section}[{index}]: id {item.id} is used twice")
             found[item.id] = item
         ids[section] = found
-    nodes, rules, decisions, facts = (
-        ids["nodes"],
-        ids["rules"],
-        ids["decisions"],
-        ids["facts"],
-    )
+    rules, decisions, facts = ids["rules"], ids["decisions"], ids["facts"]
 
-    def need(
-        place: str, label: str, found: dict[int, Any], wanted: int | None, accept: str = ""
-    ) -> Any:
-        if wanted is None:
-            return None
-        item = found.get(wanted)
-        if item is None:
+    def need_node(place: str, label: str, ref: str | None, accept: str = "") -> None:
+        if ref is None:
+            return
+        if accept and not ref.startswith(f"{accept}:"):
+            problems.append(f"{place}: {label}={ref} must be {_A[accept]}")
+        elif ref not in nodes:
+            problems.append(f"{place}: {label}={ref} is not in the file")
+
+    def need(place: str, label: str, found: dict[int, Any], wanted: int | None) -> None:
+        if wanted is not None and wanted not in found:
             problems.append(f"{place}: {label}={wanted} is not in the file")
-        elif accept and item.kind != accept:
-            problems.append(f"{place}: {label}={wanted} must be {_A[accept]}")
-        return item
 
     parent_kind = {"story": "epic", "task": "story"}
     for i, node in enumerate(document.nodes):
-        place = f"nodes[{i}] (id {node.id})"
+        place = f"nodes[{i}] ({node_ref(node.kind, node.number)})"
         if node.kind == "epic":
-            if node.parent_id is not None:
+            if node.parent is not None:
                 problems.append(f"{place}: an epic has no parent")
-        elif node.parent_id is None:
+        elif node.parent is None:
             problems.append(f"{place}: a {node.kind} needs a parent")
         else:
-            need(place, "parent_id", nodes, node.parent_id, parent_kind[node.kind])
+            need_node(place, "parent", node.parent, parent_kind[node.kind])
     for i, link in enumerate(document.links):
         place = f"links[{i}] (id {link.id})"
-        need(place, "source_id", nodes, link.source_id)
-        need(place, "target_id", nodes, link.target_id)
+        need_node(place, "source", link.source)
+        need_node(place, "target", link.target)
     for i, rule in enumerate(document.rules):
-        need(f"rules[{i}] (id {rule.id})", "story_id", nodes, rule.story_id, "story")
+        need_node(f"rules[{i}] (id {rule.id})", "story", rule.story, "story")
     for i, decision in enumerate(document.decisions):
         place = f"decisions[{i}] (id {decision.id})"
-        for node_id in decision.node_ids:
-            need(place, "node_ids", nodes, node_id)
+        for ref in decision.nodes:
+            need_node(place, "nodes", ref)
         for rule_id in decision.rule_ids:
             need(place, "rule_ids", rules, rule_id)
         problems.extend(_lifecycle_problems("decision", place, decision, decisions))
     for i, fact in enumerate(document.facts):
         place = f"facts[{i}] (id {fact.id})"
-        for node_id in fact.node_ids:
-            need(place, "node_ids", nodes, node_id)
+        for ref in fact.nodes:
+            need_node(place, "nodes", ref)
         for rule_id in fact.rule_ids:
             need(place, "rule_ids", rules, rule_id)
         for decision_id in fact.decision_ids:
@@ -452,8 +503,8 @@ def _check_references(document: Document) -> list[str]:
         problems.extend(_lifecycle_problems("fact", place, fact, facts))
     for i, event in enumerate(document.events):
         place = f"events[{i}] (id {event.id})"
-        need(place, "node_id", nodes, event.node_id)
-        need(place, "other_node_id", nodes, event.other_node_id)
+        need_node(place, "node", event.node)
+        need_node(place, "other_node", event.other_node)
         need(place, "rule_id", rules, event.rule_id)
         need(place, "decision_id", decisions, event.decision_id)
         need(place, "fact_id", facts, event.fact_id)
@@ -513,16 +564,17 @@ class Exchange:
             start = SECTIONS.index(section)
             for position in range(start, len(SECTIONS)):
                 name = SECTIONS[position]
+                after_last, order = _after_clause(name)
                 rows = await fetch_all(
                     conn,
-                    f"{_QUERIES[name]} WHERE id > %s ORDER BY id LIMIT %s",
-                    (last if position == start else 0, limit + 1),
+                    f"{_QUERIES[name]} WHERE {after_last} ORDER BY {order} LIMIT %s",
+                    (*(last if position == start else (0,)), limit + 1),
                 )
                 if not rows:
                     continue
                 page = [_exported(row) for row in rows[:limit]]
                 if len(rows) > limit:
-                    following: str | None = f"{name}:{page[-1]['id']}"
+                    following: str | None = _cursor_after(name, page[-1])
                 elif position + 1 < len(SECTIONS):
                     following = f"{SECTIONS[position + 1]}:0"
                 else:
@@ -564,9 +616,9 @@ class Exchange:
         return ImportResult(
             counts=counts,
             message=(
-                f"Imported {total} items with their ids, dates, confirmations and history. If an "
-                "embedding service is set up, the server now indexes them for search by meaning "
-                "in the background."
+                f"Imported {total} items with their numbers and ids, dates, confirmations and "
+                "history. If an embedding service is set up, the server now indexes them for "
+                "search by meaning in the background."
             ),
         )
 
@@ -582,8 +634,8 @@ async def _require_empty(conn: AsyncConnection) -> None:
         what = ", ".join(f"{count} {name}" for name, count in held.items())
         raise Refusal(
             f"This project already holds data ({what}), and an import only goes into an empty "
-            "one, because it keeps the ids in the file and they would clash. Nothing was "
-            "imported. Create a new project and import into that, or use a backup to restore "
+            "one, because it keeps the numbers and ids in the file and they would clash. Nothing "
+            "was imported. Create a new project and import into that, or use a backup to restore "
             "the whole server."
         )
 
@@ -604,17 +656,17 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     confirmed, not replaced), with all their links; then confirmations are applied, then the
     endings last, so that the database's own rules, which stop anything from changing once it has
     ended, are never bypassed."""
-    rank = {"epic": 0, "story": 1, "task": 2}
+    rank = {kind: position for position, kind in enumerate(NODE_KINDS)}
     await _insert(
         conn,
-        "INSERT INTO nodes (id, kind, parent_id, title, body, status, priority, start_on, "
+        "INSERT INTO nodes (kind, number, parent, title, body, status, priority, start_on, "
         "target_on, version, created_at, updated_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
-                n.id,
                 n.kind,
-                n.parent_id,
+                n.number,
+                n.parent,
                 n.title,
                 n.body,
                 _stored_status(n.status),
@@ -625,21 +677,20 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
                 n.created_at,
                 n.updated_at,
             )
-            for n in sorted(doc.nodes, key=lambda n: (rank[n.kind], n.id))
+            for n in sorted(doc.nodes, key=lambda n: (rank[n.kind], n.number))
         ),
     )
     await _insert(
         conn,
-        "INSERT INTO links (id, source_id, target_id, link_type, created_at) "
-        "VALUES (%s, %s, %s, %s, %s)",
-        ((x.id, x.source_id, x.target_id, x.link_type, x.created_at) for x in doc.links),
+        "INSERT INTO links (id, source, target, link_type, created_at) VALUES (%s, %s, %s, %s, %s)",
+        ((x.id, x.source, x.target, x.link_type, x.created_at) for x in doc.links),
     )
     await _insert(
         conn,
-        "INSERT INTO rules (id, story_id, title, body, status, version, created_at, updated_at) "
+        "INSERT INTO rules (id, story, title, body, status, version, created_at, updated_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
-            (r.id, r.story_id, r.title, r.body, r.status, r.version, r.created_at, r.updated_at)
+            (r.id, r.story, r.title, r.body, r.status, r.version, r.created_at, r.updated_at)
             for r in doc.rules
         ),
     )
@@ -671,8 +722,8 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     # links of one that has ended as they were.
     await _insert(
         conn,
-        "INSERT INTO decision_nodes (decision_id, node_id) VALUES (%s, %s)",
-        ((d.id, node_id) for d in doc.decisions for node_id in d.node_ids),
+        "INSERT INTO decision_nodes (decision_id, node) VALUES (%s, %s)",
+        ((d.id, ref) for d in doc.decisions for ref in d.nodes),
     )
     await _insert(
         conn,
@@ -681,8 +732,8 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     )
     await _insert(
         conn,
-        "INSERT INTO fact_nodes (fact_id, node_id) VALUES (%s, %s)",
-        ((f.id, node_id) for f in doc.facts for node_id in f.node_ids),
+        "INSERT INTO fact_nodes (fact_id, node) VALUES (%s, %s)",
+        ((f.id, ref) for f in doc.facts for ref in f.nodes),
     )
     await _insert(
         conn,
@@ -726,14 +777,14 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     )
     await _insert(
         conn,
-        "INSERT INTO events (id, node_id, other_node_id, rule_id, decision_id, fact_id, "
+        "INSERT INTO events (id, node, other_node, rule_id, decision_id, fact_id, "
         "action, actor, at, before, after) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             (
                 e.id,
-                e.node_id,
-                e.other_node_id,
+                e.node,
+                e.other_node,
                 e.rule_id,
                 e.decision_id,
                 e.fact_id,
@@ -746,6 +797,11 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
             for e in doc.events
         ),
     )
-    # New items continue after the highest id in the file.
-    for table in SECTIONS:
+    # New items continue after the highest number or id in the file, each kind after its own.
+    for kind in NODE_KINDS:
+        await conn.execute(
+            "SELECT continue_ids_after(%s, (SELECT max(number) FROM nodes WHERE kind = %s))",
+            (kind, kind),
+        )
+    for table in SECTIONS[1:]:
         await conn.execute(f"SELECT continue_ids_after('{table}', (SELECT max(id) FROM {table}))")

@@ -8,7 +8,9 @@
 // Three views are the work itself (Board, Graph, Roadmap). Search and Activity are a drawer to the
 // left of the page that is open on every view, and the selected record is the detail panel to its
 // right; the settings pages (agent keys, the tools, the status and the export) are reached from
-// the Settings menu. The address holds all of it: #/board?drawer=search&search=login&sel=node:12.
+// the Settings menu. One more page shows a single epic, story or task in full: #/item?item=story:12,
+// reached from the detail panel and the Graph's list of work, and in no menu. The address holds
+// all of it: #/board?drawer=search&search=login&sel=story:12.
 
 import {
   NotSignedIn,
@@ -25,8 +27,10 @@ import { drawerIndex, drawerName, hideDrawer, refreshDrawer, searchAgain, showDr
 import { clear, h } from './dom.js';
 import { showNoProject, showProjects, showSignIn } from './entry.js';
 import { icon } from './icons.js';
+import { codeOf } from './labels.js';
 import * as access from './access.js';
 import * as graph from './graph.js';
+import * as item from './item.js';
 import * as kanban from './kanban.js';
 import * as panel from './panel.js';
 import { refreshReferences } from './references.js';
@@ -39,7 +43,8 @@ import { keepSwitcher } from './switcher.js';
 import { setConnection, setIndexText, showEntryTop, showTop, updateTop } from './topbar.js';
 import * as tools from './tools.js';
 
-// Every page there is. Anything else in the address is the Board.
+// Every page there is. Anything else in the address is the Board. The item page is in no menu and
+// no list of views: the address names the item (#/item?item=story:12).
 const PAGES = {
   board: { title: 'Board', view: kanban },
   graph: { title: 'Graph', view: graph },
@@ -47,6 +52,7 @@ const PAGES = {
   access: { title: 'Agent access', view: access },
   tools: { title: 'Tools', view: tools },
   status: { title: 'Status and export', view: status },
+  item: { title: 'Item', view: item },
 };
 const TITLES = Object.fromEntries(Object.entries(PAGES).map(([name, page]) => [name, page.title]));
 const app = document.getElementById('app');
@@ -89,6 +95,15 @@ ui.navigate = (changes, { replace = false, page = ui.page } = {}) => {
   else location.hash = hash;
 };
 
+// What the top bar and the browser's tab say about where the person is. On the item page both name
+// the item, so they follow a rename.
+function drawTop() {
+  const ref = ui.page === 'item' ? ui.params.get('item') : null;
+  const node = ref ? store.nodes.get(ref) : null;
+  updateTop(PAGES[ui.page].title, ref);
+  document.title = `${node ? `${codeOf(ref)} ${node.title}` : PAGES[ui.page].title} · ${project.name} · Vrum`;
+}
+
 function route() {
   const { page, known, params } = readAddress();
   // A page that is not there (an old address, a mistake) is the Board, and the address says so.
@@ -97,9 +112,8 @@ function route() {
   ui.page = page;
   ui.params = params;
   if (!running) return;
-  updateTop(PAGES[page].title);
+  drawTop();
   updateSidebar();
-  document.title = `${PAGES[page].title} · ${project.name} · Vrum`;
   if (changedPage) {
     if (mounted) mounted.unmount();
     clear(main);
@@ -164,6 +178,7 @@ onChange((change) => {
     drawerIndex();
   }
   if (change.events && mounted) {
+    drawTop();
     updateSidebar();
     mounted.refresh(change.events);
     panel.refresh(change.events);

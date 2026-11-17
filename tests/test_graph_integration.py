@@ -14,34 +14,40 @@ async def test_a_valid_epic_story_and_task_are_created_and_their_history_is_read
 ) -> None:
     epic, story, task = await make_tree(client)
 
-    assert (epic["kind"], epic["parent_id"], epic["status"], epic["version"]) == (
+    assert (epic["kind"], epic["parent"], epic["status"], epic["version"]) == (
         "epic",
         None,
         "ready",
         1,
     )
-    assert (story["kind"], story["parent_id"]) == ("story", epic["id"])
-    assert (task["kind"], task["parent_id"], task["priority"]) == ("task", story["id"], "normal")
-    assert node_core(await ok(client, "get_node", node_id=task["id"])) == node_core(task)
+    assert (story["kind"], story["parent"]) == ("story", epic["ref"])
+    assert (task["kind"], task["parent"], task["priority"]) == ("task", story["ref"], "normal")
+    # A node is named by its kind and its number within that kind, and by nothing else.
+    for node in (epic, story, task):
+        assert node["ref"] == f"{node['kind']}:{node['number']}"
+        assert node["number"] >= 1
+        assert not {"id", "parent_id"} & set(node)
+    assert node_core(await ok(client, "get_node", node=task["ref"])) == node_core(task)
 
     changed = await ok(
         client,
         "update_node",
         actor="agent-1",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         status="in_progress",
         title="A better task title",
     )
     assert (changed["version"], changed["status"]) == (2, "in_progress")
 
-    history = (await ok(client, "node_history", node_id=task["id"]))["items"]
+    history = (await ok(client, "node_history", node=task["ref"]))["items"]
     assert [(event["action"], event["actor"]) for event in history] == [
         ("create", "agent-1"),
         ("update", "agent-1"),
     ]
+    assert all(event["node"] == task["ref"] for event in history)
     assert history[0]["before"] is None
-    assert history[0]["after"]["parent_id"] == story["id"]
+    assert history[0]["after"]["parent"] == story["ref"]
     assert history[0]["after"]["version"] == 1
     assert history[1]["before"] == {"status": "new", "title": "A task", "version": 1}
     assert history[1]["after"] == {
@@ -56,7 +62,7 @@ async def test_a_story_without_an_epic_is_refused(client: Client) -> None:
     before = await all_nodes(client)
     message = await refused(client, "create_node", actor="marie", kind="story", title="Orphan")
     assert "A story needs a parent epic" in message
-    assert "parent_id" in message
+    assert "parent" in message
     assert await all_nodes(client) == before
 
 
@@ -64,26 +70,26 @@ async def test_a_task_under_an_epic_is_refused(client: Client) -> None:
     epic, story, _ = await make_tree(client)
     before = await all_nodes(client)
     message = await refused(
-        client, "create_node", actor="marie", kind="task", title="Misplaced", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="task", title="Misplaced", parent=epic["ref"]
     )
-    assert f"A task belongs under a story, but node {epic['id']} is an epic" in message
+    assert f"A task belongs under a story, but {epic['ref']} is an epic" in message
     message = await refused(
-        client, "create_node", actor="marie", kind="story", title="Misplaced", parent_id=story["id"]
+        client, "create_node", actor="marie", kind="story", title="Misplaced", parent=story["ref"]
     )
-    assert f"A story belongs under an epic, but node {story['id']} is a story" in message
+    assert f"A story belongs under an epic, but {story['ref']} is a story" in message
     assert await all_nodes(client) == before
 
 
 async def test_an_epic_cannot_have_a_parent_and_a_parent_must_exist(client: Client) -> None:
     epic, _, _ = await make_tree(client)
     message = await refused(
-        client, "create_node", actor="marie", kind="epic", title="Nested", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="epic", title="Nested", parent=epic["ref"]
     )
     assert "An epic has no parent" in message
     message = await refused(
-        client, "create_node", actor="marie", kind="story", title="Lost", parent_id=987654321
+        client, "create_node", actor="marie", kind="story", title="Lost", parent="epic:987654321"
     )
-    assert "There is no node with id 987654321" in message
+    assert "There is no epic 987654321 in this project" in message
 
 
 async def test_a_node_cannot_be_given_a_second_parent(client: Client) -> None:
@@ -94,14 +100,14 @@ async def test_a_node_cannot_be_given_a_second_parent(client: Client) -> None:
         client,
         "update_node",
         actor="marie",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=1,
-        parent_id=other_epic["id"],
+        parent=other_epic["ref"],
     )
     assert "exactly one parent" in message
     assert "move_node" in message
-    after = await ok(client, "get_node", node_id=story["id"])
-    assert (after["parent_id"], after["version"]) == (epic["id"], 1)
+    after = await ok(client, "get_node", node=story["ref"])
+    assert (after["parent"], after["version"]) == (epic["ref"], 1)
 
 
 async def test_a_stale_version_is_refused_and_nothing_is_overwritten(client: Client) -> None:
@@ -110,7 +116,7 @@ async def test_a_stale_version_is_refused_and_nothing_is_overwritten(client: Cli
         client,
         "update_node",
         actor="ann",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=1,
         title="Ann's title",
     )
@@ -119,18 +125,17 @@ async def test_a_stale_version_is_refused_and_nothing_is_overwritten(client: Cli
         client,
         "update_node",
         actor="bob",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=1,
         title="Bob's title",
     )
-    assert f"Node {story['id']} is at version 2, but you sent version 1" in message
+    assert f"{story['ref']} is at version 2, but you sent version 1" in message
     assert "get_node" in message
 
-    current = await ok(client, "get_node", node_id=story["id"])
+    current = await ok(client, "get_node", node=story["ref"])
     assert (current["title"], current["version"]) == ("Ann's title", 2)
     actions = [
-        event["action"]
-        for event in (await ok(client, "node_history", node_id=story["id"]))["items"]
+        event["action"] for event in (await ok(client, "node_history", node=story["ref"]))["items"]
     ]
     assert actions == ["create", "update"]
 
@@ -138,7 +143,7 @@ async def test_a_stale_version_is_refused_and_nothing_is_overwritten(client: Cli
         client,
         "update_node",
         actor="bob",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=2,
         title="Bob's title",
     )
@@ -154,7 +159,7 @@ async def test_parallel_edits_from_the_same_version_have_exactly_one_winner(clie
             "update_node",
             {
                 "actor": f"agent-{number}",
-                "node_id": story["id"],
+                "node": story["ref"],
                 "expected_version": 1,
                 "title": f"Title from agent {number}",
             },
@@ -166,8 +171,8 @@ async def test_parallel_edits_from_the_same_version_have_exactly_one_winner(clie
             group.start_soon(edit, number)
 
     assert outcomes.count(True) == 1
-    assert (await ok(client, "get_node", node_id=story["id"]))["version"] == 2
-    history = (await ok(client, "node_history", node_id=story["id"]))["items"]
+    assert (await ok(client, "get_node", node=story["ref"]))["version"] == 2
+    history = (await ok(client, "node_history", node=story["ref"]))["items"]
     assert [event["action"] for event in history] == ["create", "update"]
 
 
@@ -180,34 +185,34 @@ async def test_moving_a_node_replaces_its_parent_in_one_logged_step(client: Clie
         actor="marie",
         kind="story",
         title="Another story",
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
 
     moved = await ok(
         client,
         "move_node",
         actor="ann",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=1,
-        new_parent_id=other_epic["id"],
+        new_parent=other_epic["ref"],
     )
-    assert (moved["parent_id"], moved["version"]) == (other_epic["id"], 2)
-    assert (await ok(client, "get_node", node_id=task["id"]))["parent_id"] == story["id"]
-    assert [n["id"] for n in await all_nodes(client, parent_id=epic["id"])] == [other_story["id"]]
+    assert (moved["parent"], moved["version"]) == (other_epic["ref"], 2)
+    assert (await ok(client, "get_node", node=task["ref"]))["parent"] == story["ref"]
+    assert [n["ref"] for n in await all_nodes(client, parent=epic["ref"])] == [other_story["ref"]]
 
     await ok(
         client,
         "move_node",
         actor="bob",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
-        new_parent_id=other_story["id"],
+        new_parent=other_story["ref"],
     )
 
-    history = (await ok(client, "node_history", node_id=story["id"]))["items"]
+    history = (await ok(client, "node_history", node=story["ref"]))["items"]
     assert (history[1]["action"], history[1]["actor"]) == ("move", "ann")
-    assert history[1]["before"] == {"parent_id": epic["id"], "version": 1}
-    assert history[1]["after"] == {"parent_id": other_epic["id"], "version": 2}
+    assert history[1]["before"] == {"parent": epic["ref"], "version": 1}
+    assert history[1]["after"] == {"parent": other_epic["ref"], "version": 2}
 
 
 async def test_moves_that_break_the_hierarchy_or_use_an_old_version_are_refused(
@@ -220,46 +225,46 @@ async def test_moves_that_break_the_hierarchy_or_use_an_old_version_are_refused(
         client,
         "move_node",
         actor="a",
-        node_id=epic["id"],
+        node=epic["ref"],
         expected_version=1,
-        new_parent_id=story["id"],
+        new_parent=story["ref"],
     )
     assert "An epic has no parent, so it cannot be moved" in message
     message = await refused(
         client,
         "move_node",
         actor="a",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
-        new_parent_id=epic["id"],
+        new_parent=epic["ref"],
     )
     assert "A task belongs under a story" in message
     message = await refused(
         client,
         "move_node",
         actor="a",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=1,
-        new_parent_id=epic["id"],
+        new_parent=epic["ref"],
     )
-    assert "already under node" in message
+    assert f"already under {epic['ref']}" in message
     message = await refused(
         client,
         "move_node",
         actor="a",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=7,
-        new_parent_id=other_epic["id"],
+        new_parent=other_epic["ref"],
     )
     assert "at version 1, but you sent version 7" in message
 
-    unchanged = await ok(client, "get_node", node_id=story["id"])
-    assert (unchanged["parent_id"], unchanged["version"]) == (epic["id"], 1)
+    unchanged = await ok(client, "get_node", node=story["ref"])
+    assert (unchanged["parent"], unchanged["version"]) == (epic["ref"], 1)
 
 
 async def test_changes_that_make_no_sense_are_refused_in_plain_words(client: Client) -> None:
     _, story, _ = await make_tree(client)
-    edit = {"node_id": story["id"], "expected_version": 1}
+    edit = {"node": story["ref"], "expected_version": 1}
 
     message = await refused(client, "update_node", actor="a", status="ready", **edit)
     assert "ready is worked out by the server" in message
@@ -272,18 +277,18 @@ async def test_changes_that_make_no_sense_are_refused_in_plain_words(client: Cli
     message = await refused(client, "update_node", actor="a", title="A story", **edit)
     assert "Nothing to change" in message
     message = await refused(
-        client, "update_node", actor="a", node_id=987654321, expected_version=1, title="x"
+        client, "update_node", actor="a", node="story:987654321", expected_version=1, title="x"
     )
-    assert "There is no node with id 987654321" in message
+    assert "There is no story 987654321 in this project" in message
     message = await refused(client, "create_node", actor="a", kind="saga", title="x")
     assert "kind must be one of epic, story, task" in message
 
-    assert (await ok(client, "get_node", node_id=story["id"]))["version"] == 1
+    assert (await ok(client, "get_node", node=story["ref"]))["version"] == 1
 
 
 async def test_lists_are_paged_and_can_be_filtered(client: Client) -> None:
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="A busy epic")
-    story_ids = [
+    story_refs = [
         (
             await ok(
                 client,
@@ -291,36 +296,36 @@ async def test_lists_are_paged_and_can_be_filtered(client: Client) -> None:
                 actor="marie",
                 kind="story",
                 title=f"Story {number}",
-                parent_id=epic["id"],
+                parent=epic["ref"],
             )
-        )["id"]
+        )["ref"]
         for number in range(5)
     ]
     await ok(
         client,
         "update_node",
         actor="marie",
-        node_id=story_ids[3],
+        node=story_refs[3],
         expected_version=1,
         status="done",
     )
 
-    seen: list[int] = []
-    after_id = None
+    seen: list[str] = []
+    after = None
     page_sizes = []
     while True:
-        page = await ok(client, "list_nodes", parent_id=epic["id"], limit=2, after_id=after_id)
+        page = await ok(client, "list_nodes", parent=epic["ref"], limit=2, after=after)
         page_sizes.append(len(page["items"]))
-        seen.extend(item["id"] for item in page["items"])
-        after_id = page["next_after_id"]
-        if after_id is None:
+        seen.extend(item["ref"] for item in page["items"])
+        after = page["next_after"]
+        if after is None:
             break
     assert page_sizes == [2, 2, 1]
-    assert seen == story_ids
+    assert seen == story_refs
 
-    done = await all_nodes(client, parent_id=epic["id"], status="done")
-    assert [node["id"] for node in done] == [story_ids[3]]
-    assert await all_nodes(client, parent_id=epic["id"], kind="task") == []
+    done = await all_nodes(client, parent=epic["ref"], status="done")
+    assert [node["ref"] for node in done] == [story_refs[3]]
+    assert await all_nodes(client, parent=epic["ref"], kind="task") == []
 
     assert "limit must be a whole number from 1 to 200" in await refused(
         client, "list_nodes", limit=0
@@ -329,9 +334,41 @@ async def test_lists_are_paged_and_can_be_filtered(client: Client) -> None:
         client, "list_nodes", limit=201
     )
     assert "kind must be one of" in await refused(client, "list_nodes", kind="saga")
-    assert "There is no node with id 987654321" in await refused(
-        client, "list_nodes", parent_id=987654321
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "list_nodes", parent="story:987654321"
     )
+
+
+async def test_nodes_are_listed_epics_then_stories_then_tasks_each_by_number(
+    client: Client,
+) -> None:
+    epic, story, task = await make_tree(client)
+    later_epic = await ok(client, "create_node", actor="marie", kind="epic", title="Later epic")
+
+    nodes = await all_nodes(client, query=f"epic:{epic['number']} OR epic:{later_epic['number']}")
+
+    assert [node["ref"] for node in nodes] == [
+        epic["ref"],
+        later_epic["ref"],
+        story["ref"],
+        task["ref"],
+    ]
+    # Read in pages of one, it is the same order and nothing is skipped or repeated.
+    seen: list[str] = []
+    after = None
+    while True:
+        page = await ok(
+            client,
+            "list_nodes",
+            query=f"epic:{epic['number']} OR epic:{later_epic['number']}",
+            limit=1,
+            after=after,
+        )
+        seen.extend(item["ref"] for item in page["items"])
+        after = page["next_after"]
+        if after is None:
+            break
+    assert seen == [node["ref"] for node in nodes]
 
 
 async def test_history_is_paged_oldest_first(client: Client) -> None:
@@ -341,19 +378,19 @@ async def test_history_is_paged_oldest_first(client: Client) -> None:
             client,
             "update_node",
             actor="marie",
-            node_id=story["id"],
+            node=story["ref"],
             expected_version=version,
             body=f"Draft {version}",
         )
 
-    first = await ok(client, "node_history", node_id=story["id"], limit=3)
+    first = await ok(client, "node_history", node=story["ref"], limit=3)
     assert [event["action"] for event in first["items"]] == ["create", "update", "update"]
     assert first["next_after_id"] == first["items"][-1]["id"]
     second = await ok(
-        client, "node_history", node_id=story["id"], limit=3, after_id=first["next_after_id"]
+        client, "node_history", node=story["ref"], limit=3, after_id=first["next_after_id"]
     )
     assert [event["after"]["version"] for event in second["items"]] == [4]
     assert second["next_after_id"] is None
-    assert "There is no node with id 987654321" in await refused(
-        client, "node_history", node_id=987654321
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "node_history", node="story:987654321"
     )

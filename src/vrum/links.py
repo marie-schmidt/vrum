@@ -24,18 +24,19 @@ from vrum.graph import require_node
 LINK_TYPES = ("needs_first", "supersedes", "duplicates", "relates_to")
 # These two mean the same thing in either direction, so A to B is the same link as B to A.
 _TWO_WAY = ("duplicates", "relates_to")
-_LINK_COLUMNS = "id, source_id, target_id, link_type, created_at"
-_LINK_FIELDS = ("source_id", "target_id", "link_type")
+_LINK_COLUMNS = "id, source, target, link_type, created_at"
+_LINK_FIELDS = ("source", "target", "link_type")
 
 
 class Link(BaseModel):
     id: int
-    source_id: int = Field(
-        description="The node the link starts from. For needs_first, the node that has to wait."
+    source: str = Field(
+        description="The reference of the node the link starts from, such as story:12. For "
+        "needs_first, the node that has to wait."
     )
-    target_id: int = Field(
-        description="The node the link points to. For needs_first, the node that must be done "
-        "first."
+    target: str = Field(
+        description="The reference of the node the link points to. For needs_first, the node that "
+        "must be done first."
     )
     link_type: str = Field(description="needs_first, supersedes, duplicates or relates_to.")
     created_at: datetime
@@ -50,21 +51,21 @@ class LinkPage(BaseModel):
 
 
 async def insert_link(
-    conn: AsyncConnection, *, actor: str, source_id: int, target_id: int, link_type: str
+    conn: AsyncConnection, *, actor: str, source: str, target: str, link_type: str
 ) -> dict[str, Any]:
     """Insert a link that has been checked, and record it in the history of both nodes. The
     database refuses a circle of waiting and a repeat. Returns the stored row."""
     row = await fetch_one(
         conn,
-        "INSERT INTO links (source_id, target_id, link_type) VALUES (%s, %s, %s) "
+        "INSERT INTO links (source, target, link_type) VALUES (%s, %s, %s) "
         f"RETURNING {_LINK_COLUMNS}",
-        (source_id, target_id, link_type),
+        (source, target, link_type),
     )
     assert row is not None
     await record_event(
         conn,
-        node_id=source_id,
-        other_node_id=target_id,
+        node=source,
+        other_node=target,
         action="link_added",
         actor=actor,
         before=None,
@@ -77,76 +78,73 @@ class Links:
     def __init__(self, database: Database) -> None:
         self._database = database
 
-    async def add_link(self, *, actor: str, source_id: int, target_id: int, link_type: str) -> Link:
+    async def add_link(self, *, actor: str, source: str, target: str, link_type: str) -> Link:
         actor = clean_actor(actor)
         check_choice("link_type", link_type, LINK_TYPES)
-        if source_id == target_id:
+        if source == target:
             raise Refusal(
-                f"A node cannot be linked to itself (both ends are node {source_id}). Give two "
-                "different nodes as source_id and target_id."
+                f"A node cannot be linked to itself (both ends are {source}). Give two "
+                "different nodes as source and target."
             )
         try:
             async with self._database.transaction() as conn:
-                await require_node(conn, source_id)
-                await require_node(conn, target_id)
+                await require_node(conn, source)
+                await require_node(conn, target)
                 existing = await fetch_one(
                     conn,
-                    "SELECT source_id, target_id FROM links WHERE link_type = %(type)s AND "
-                    "((source_id = %(source)s AND target_id = %(target)s) OR "
-                    "(%(two_way)s AND source_id = %(target)s AND target_id = %(source)s))",
+                    "SELECT source, target FROM links WHERE link_type = %(type)s AND "
+                    "((source = %(source)s AND target = %(target)s) OR "
+                    "(%(two_way)s AND source = %(target)s AND target = %(source)s))",
                     {
                         "type": link_type,
-                        "source": source_id,
-                        "target": target_id,
+                        "source": source,
+                        "target": target,
                         "two_way": link_type in _TWO_WAY,
                     },
                 )
                 if existing is not None:
                     raise Refusal(
-                        f"Node {existing['source_id']} is already linked to node "
-                        f"{existing['target_id']} with {link_type}, so nothing was added."
+                        f"{existing['source']} is already linked to {existing['target']} with "
+                        f"{link_type}, so nothing was added."
                     )
                 row = await insert_link(
-                    conn, actor=actor, source_id=source_id, target_id=target_id, link_type=link_type
+                    conn, actor=actor, source=source, target=target, link_type=link_type
                 )
         except psycopg.errors.RaiseException as error:
             # The database's own plain refusal, such as a circle of waiting.
             raise Refusal(error.diag.message_primary or "The database refused that link.") from None
         except psycopg.errors.UniqueViolation:
             raise Refusal(
-                f"Node {source_id} is already linked to node {target_id} with {link_type}, so "
-                "nothing was added."
+                f"{source} is already linked to {target} with {link_type}, so nothing was added."
             ) from None
         return Link.model_validate(row)
 
-    async def remove_link(
-        self, *, actor: str, source_id: int, target_id: int, link_type: str
-    ) -> Link:
+    async def remove_link(self, *, actor: str, source: str, target: str, link_type: str) -> Link:
         actor = clean_actor(actor)
         check_choice("link_type", link_type, LINK_TYPES)
         async with self._database.transaction() as conn:
             row = await fetch_one(
                 conn,
                 "DELETE FROM links WHERE link_type = %(type)s AND "
-                "((source_id = %(source)s AND target_id = %(target)s) OR "
-                "(%(two_way)s AND source_id = %(target)s AND target_id = %(source)s)) "
+                "((source = %(source)s AND target = %(target)s) OR "
+                "(%(two_way)s AND source = %(target)s AND target = %(source)s)) "
                 f"RETURNING {_LINK_COLUMNS}",
                 {
                     "type": link_type,
-                    "source": source_id,
-                    "target": target_id,
+                    "source": source,
+                    "target": target,
                     "two_way": link_type in _TWO_WAY,
                 },
             )
             if row is None:
                 raise Refusal(
-                    f"There is no {link_type} link from node {source_id} to node {target_id}. "
+                    f"There is no {link_type} link from {source} to {target}. "
                     "Use list_links to see the links a node has."
                 )
             await record_event(
                 conn,
-                node_id=row["source_id"],
-                other_node_id=row["target_id"],
+                node=row["source"],
+                other_node=row["target"],
                 action="link_removed",
                 actor=actor,
                 before=snapshot(row, _LINK_FIELDS),
@@ -155,28 +153,28 @@ class Links:
         return Link.model_validate(row)
 
     async def list_links(
-        self, *, node_id: int, link_type: str | None, limit: int, after_id: int | None
+        self, *, node: str, link_type: str | None, limit: int, after_id: int | None
     ) -> LinkPage:
         limit = page_size(limit)
         if link_type is not None:
             check_choice("link_type", link_type, LINK_TYPES)
         async with self._database.transaction() as conn:
-            await require_node(conn, node_id)
+            await require_node(conn, node)
             where = (
-                "(source_id = %(node)s OR target_id = %(node)s) "
+                "(source = %(node)s OR target = %(node)s) "
                 "AND (%(type)s::text IS NULL OR link_type = %(type)s)"
             )
             counted = await fetch_one(
                 conn,
                 f"SELECT count(*) AS total FROM links WHERE {where}",
-                {"node": node_id, "type": link_type},
+                {"node": node, "type": link_type},
             )
             assert counted is not None
             rows = await fetch_all(
                 conn,
                 f"SELECT {_LINK_COLUMNS} FROM links WHERE {where} "
                 "AND id > %(after)s ORDER BY id LIMIT %(fetch)s",
-                {"node": node_id, "type": link_type, "after": after_id or 0, "fetch": limit + 1},
+                {"node": node, "type": link_type, "after": after_id or 0, "fetch": limit + 1},
             )
         page, next_after_id = split_page(rows, limit)
         return LinkPage(

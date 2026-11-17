@@ -36,10 +36,13 @@ from tests.board_theme import (
     transitions_done,
 )
 from tests.helpers import (
+    code_of,
     connect,
     embeddings_stopped,
     make_fact,
+    number_of,
     ok,
+    ref_from_code,
     refused,
     reindexed,
     unique_word,
@@ -145,15 +148,17 @@ async def test_while_the_project_loads_the_page_says_so_and_is_never_blank(
 
         # The detail panel says so while it reads one item, and the search drawer while it searches.
         panel = await hold_answers(page, project, "get_node")
-        await w.go(f"#/board?sel=node:{story}")
+        await w.go(f"#/board?sel={story}")
         await panel.arrived()
         await expect(page.locator("#panel .loading")).to_have_text("Loading…")
         await expect(page.locator("#panel")).to_be_visible()
         await themed(page, scheme)
         panel.release.set()
-        await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await expect(page.locator("#card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         asking = await hold_answers(page, project, "search")
-        await w.go(f"#/board?sel=node:{story}&drawer=search&search={word}")
+        await w.go(f"#/board?sel={story}&drawer=search&search={word}")
         await asking.arrived()
         await expect(page.locator("#search-results .loading")).to_have_text("Searching…")
         await themed(page, scheme)
@@ -345,9 +350,9 @@ async def test_a_blank_title_and_bad_dates_are_refused_in_the_servers_words_and_
             await dialog.get_by_role("button", name="Create").click()
             heading = page.locator("#card-title")
             await expect(heading).to_contain_text(f"Dated {word}", timeout=SLOW)
-            found = re.match(r"#(\d+) ", await heading.inner_text())
+            found = re.match(r"([EST]-\d+) ", await heading.inner_text())
             assert found is not None
-            node = await ok(client, "get_node", node_id=int(found.group(1)))
+            node = await ok(client, "get_node", node=ref_from_code(found.group(1)))
             assert node["body"] == "The details are kept" and node["priority"] == "high"
             assert str(node["start_on"])[:10] == "2027-05-10"
 
@@ -356,7 +361,7 @@ async def test_a_blank_title_and_bad_dates_are_refused_in_the_servers_words_and_
                 client,
                 "update_node",
                 actor="Tester",
-                node_id=node["id"],
+                node=node["ref"],
                 expected_version=node["version"],
                 start_on="2027-09-10",
                 target_on="2027-09-01",
@@ -376,7 +381,7 @@ async def test_a_blank_title_and_bad_dates_are_refused_in_the_servers_words_and_
             assert (
                 await page.locator("#edit-body").input_value() == "A new body that is only a draft"
             )
-            assert (await ok(client, "get_node", node_id=node["id"]))["version"] == node["version"]
+            assert (await ok(client, "get_node", node=node["ref"]))["version"] == node["version"]
         assert w.problems == [], w.problems
         assert await policy_violations(page) == []
 
@@ -496,21 +501,22 @@ async def test_bad_dates_in_the_roadmap_tray_are_refused_in_the_servers_words_an
     async with connect(project.mcp_url, project.key) as client:
         epic = await made(client, "epic", f"Roadmap epic {word}")
         story = await made(client, "story", f"Undated story {word}", epic)
-        node = await ok(client, "get_node", node_id=story)
+        node = await ok(client, "get_node", node=story)
         mcp = await refused(
             client,
             "update_node",
             actor="Tester",
-            node_id=story,
+            node=story,
             expected_version=node["version"],
             start_on="2027-02-10",
             target_on="2027-02-01",
         )
+        code = code_of(story)
         async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
             page = w.page
             await in_project(page, f"{project.address}#/roadmap")
-            await expect(page.locator(f".tray-item[data-id='{story}']")).to_have_count(1)
-            item = page.locator(f".tray-item[data-id='{story}']")
+            await expect(page.locator(f".tray-item[data-ref='{story}']")).to_have_count(1)
+            item = page.locator(f".tray-item[data-ref='{story}']")
             await expect(item).to_be_visible(timeout=SLOW)
 
             # Nothing typed: the board's own words, as a refusal in the notices.
@@ -520,8 +526,8 @@ async def test_bad_dates_in_the_roadmap_tray_are_refused_in_the_servers_words_an
             await notice.get_by_role("button", name="Dismiss").click()
 
             # A start after the target: the server says no, in its words, and the dates stay.
-            await item.get_by_label(f"Start date of #{story}").fill("2027-02-10")
-            await item.get_by_label(f"Target date of #{story}").fill("2027-02-01")
+            await item.get_by_label(f"Start date of {code}").fill("2027-02-10")
+            await item.get_by_label(f"Target date of {code}").fill("2027-02-01")
             await item.get_by_role("button", name="Set dates").click()
             notice = page.locator("#notices .notice.refusal").first
             await expect(notice.locator(".notice-text")).to_have_text(words_of(mcp), timeout=SLOW)
@@ -535,16 +541,16 @@ async def test_bad_dates_in_the_roadmap_tray_are_refused_in_the_servers_words_an
             assert rgb_of(found["notice"]["border"]) == token(scheme, "--danger")
             await themed(page, scheme)
             # The tray was drawn again after the refusal, and still holds what was typed.
-            item = page.locator(f".tray-item[data-id='{story}']")
-            await expect(item.get_by_label(f"Start date of #{story}")).to_have_value("2027-02-10")
-            await expect(item.get_by_label(f"Target date of #{story}")).to_have_value("2027-02-01")
-            assert (await ok(client, "get_node", node_id=story))["version"] == node["version"]
+            item = page.locator(f".tray-item[data-ref='{story}']")
+            await expect(item.get_by_label(f"Start date of {code}")).to_have_value("2027-02-10")
+            await expect(item.get_by_label(f"Target date of {code}")).to_have_value("2027-02-01")
+            assert (await ok(client, "get_node", node=story))["version"] == node["version"]
 
             # Corrected, the same two fields make the dates.
-            await item.get_by_label(f"Target date of #{story}").fill("2027-02-20")
+            await item.get_by_label(f"Target date of {code}").fill("2027-02-20")
             await item.get_by_role("button", name="Set dates").click()
-            await expect(page.locator(f".rm-bar[data-id='{story}']")).to_be_visible(timeout=SLOW)
-            saved = await ok(client, "get_node", node_id=story)
+            await expect(page.locator(f".rm-bar[data-ref='{story}']")).to_be_visible(timeout=SLOW)
+            saved = await ok(client, "get_node", node=story)
             assert str(saved["start_on"])[:10] == "2027-02-10"
             assert str(saved["target_on"])[:10] == "2027-02-20"
 
@@ -562,8 +568,10 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
         story = await made(client, "story", f"Original title {word}", epic, body="Original words")
         async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
             page = w.page
-            await in_project(page, f"{project.address}#/board?sel=node:{story}")
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+            await in_project(page, f"{project.address}#/board?sel={story}")
+            await expect(page.locator("#card-title")).to_contain_text(
+                f"{code_of(story)} ", timeout=SLOW
+            )
             # The board has not heard of what the agent does next, as in the seconds before it does.
             await hold_back_news(page)
             await page.locator("#edit-title").fill("My own title")
@@ -572,7 +580,7 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
                 client,
                 "update_node",
                 actor="agent-1",
-                node_id=story,
+                node=story,
                 expected_version=1,
                 title=f"Agent title {word}",
                 body="The agent's words",
@@ -587,7 +595,7 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
                     client,
                     "update_node",
                     actor="Tester",
-                    node_id=story,
+                    node=story,
                     expected_version=1,
                     title="My own title",
                     body="My own words, not saved yet",
@@ -599,7 +607,7 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
             # What was typed is still there, and nothing was saved over the agent's change.
             assert await page.locator("#edit-title").input_value() == "My own title"
             assert await page.locator("#edit-body").input_value() == "My own words, not saved yet"
-            saved = await ok(client, "get_node", node_id=story)
+            saved = await ok(client, "get_node", node=story)
             assert saved["version"] == 2 and saved["title"] == f"Agent title {word}"
 
             # The refusal offers the current version; choosing it shows the fresh data.
@@ -616,9 +624,9 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
             await page.locator("#edit-title").fill(f"Both agreed {word}")
             await page.get_by_role("button", name="Save changes").click()
             await expect(page.locator("#notices .notice.done")).to_contain_text(
-                f"Saved story #{story}", timeout=SLOW
+                f"Saved story {number_of(story)}", timeout=SLOW
             )
-            saved = await ok(client, "get_node", node_id=story)
+            saved = await ok(client, "get_node", node=story)
             assert saved["version"] == 3 and saved["title"] == f"Both agreed {word}"
             assert w.problems == [], w.problems
 
@@ -633,14 +641,16 @@ async def test_an_agents_change_while_typing_is_offered_not_forced_and_loading_i
         story = await made(client, "story", f"Typing title {word}", epic)
         async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
             page = w.page
-            await in_project(page, f"{project.address}#/board?sel=node:{story}")
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+            await in_project(page, f"{project.address}#/board?sel={story}")
+            await expect(page.locator("#card-title")).to_contain_text(
+                f"{code_of(story)} ", timeout=SLOW
+            )
             await page.locator("#edit-title").fill("What I am typing")
             await ok(
                 client,
                 "update_node",
                 actor="agent-7",
-                node_id=story,
+                node=story,
                 expected_version=1,
                 title=f"Changed by the agent {word}",
             )
@@ -679,7 +689,7 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
         await reindexed(client)
         async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
             page = w.page
-            await in_project(page, f"{project.address}#/board?sel=node:{story}&drawer=search")
+            await in_project(page, f"{project.address}#/board?sel={story}&drawer=search")
 
             async def search(text: str, mode: str = "both") -> None:
                 await page.locator("#search-box").fill(text)
@@ -689,7 +699,7 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
             # With the service, a paraphrase is found by meaning, and the note says it was used.
             await search(paraphrase)
             await expect(
-                page.locator(f"#search-results li.result[data-id='{story}'][data-matched=meaning]")
+                page.locator(f"#search-results li.result[data-ref='{story}'][data-matched=meaning]")
             ).to_have_count(1, timeout=SLOW)
             await expect(page.locator("#search-note")).to_contain_text("Meaning was used")
             await expect(page.locator("#search-note")).to_have_class(re.compile(r"\binfo\b"))
@@ -700,7 +710,7 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
                 await search(later)
                 rows = page.locator("#search-results li.result")
                 await expect(rows).to_have_count(1, timeout=SLOW)
-                assert await rows.first.get_attribute("data-id") == str(late)
+                assert await rows.first.get_attribute("data-ref") == late
                 assert await rows.first.get_attribute("data-matched") == "words"
                 # The drawer says plainly, in the server's words, that meaning was not used.
                 note = page.locator("#search-note")
@@ -730,9 +740,9 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
                 # The panel of the story that is not indexed yet says it too, in the server's words
                 # (this story's meaning cannot be worked out until the service is back).
                 similar = await refused(
-                    client, "similar_items", node_id=late, types=["story"], limit=5
+                    client, "similar_items", node=late, types=["story"], limit=5
                 )
-                await w.go(f"#/board?sel=node:{late}&drawer=search&search={later}")
+                await w.go(f"#/board?sel={late}&drawer=search&search={later}")
                 suggestion = page.locator("#panel [data-part=overlaps]")
                 await expect(suggestion).to_contain_text("Might be the same as", timeout=SLOW)
                 await expect(suggestion).to_contain_text(words_of(similar), timeout=SLOW)
@@ -755,7 +765,7 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
             )
             await expect(page.locator("#search-note")).to_have_class(re.compile(r"\binfo\b"))
             await expect(
-                page.locator(f"#search-results li.result[data-id='{story}'][data-matched=meaning]")
+                page.locator(f"#search-results li.result[data-ref='{story}'][data-matched=meaning]")
             ).to_have_count(1, timeout=SLOW)
             await expect(page.locator("#search-problem")).to_have_text("")
             await search(paraphrase, "meaning")
@@ -784,8 +794,10 @@ async def test_losing_the_server_says_so_in_the_current_view_keeps_the_draft_and
         story = await made(client, "story", f"Before the loss {word}", epic)
         async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
             page = w.page
-            await in_project(page, f"{project.address}#/board?sel=node:{story}")
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+            await in_project(page, f"{project.address}#/board?sel={story}")
+            await expect(page.locator("#card-title")).to_contain_text(
+                f"{code_of(story)} ", timeout=SLOW
+            )
             await page.locator("#edit-title").fill("Typed while the server was away")
             note, chip = page.locator("#connection-note"), page.locator("#connection")
             await expect(note).to_be_hidden()
@@ -806,7 +818,7 @@ async def test_losing_the_server_says_so_in_the_current_view_keeps_the_draft_and
             assert await chip.locator("svg").count() == 1
             await themed(page, scheme)
             for view in ("graph", "roadmap", "board"):
-                await w.go(f"#/{view}?sel=node:{story}")
+                await w.go(f"#/{view}?sel={story}")
                 await expect(page.locator("main#page h1").first).to_be_visible()
                 await expect(note).to_be_visible()
                 await expect(chip).to_be_visible()
@@ -833,7 +845,7 @@ async def test_losing_the_server_says_so_in_the_current_view_keeps_the_draft_and
                 client,
                 "update_node",
                 actor="agent-9",
-                node_id=story,
+                node=story,
                 expected_version=1,
                 title=f"Renamed during the loss {word}",
             )
@@ -846,7 +858,7 @@ async def test_losing_the_server_says_so_in_the_current_view_keeps_the_draft_and
             await expect(
                 page.get_by_role("region", name=f"Epic Made while the board was cut off {word}")
             ).to_be_visible(timeout=SLOW)
-            await expect(page.locator(f"#epic-list a[data-epic='{news}']")).to_be_visible()
+            await expect(page.locator(f"#epic-list a[data-ref='{news}']")).to_be_visible()
             assert (
                 await page.locator("#edit-title").input_value() == "Typed while the server was away"
             )
@@ -944,8 +956,10 @@ async def test_no_request_leaves_the_server_and_what_people_write_is_only_ever_t
         await in_project(page, f"{project.address}#/board")
         for address in (
             "#/board",
-            f"#/board?sel=node:{epic}",
-            f"#/board?sel=node:{story}&drawer=search&search={word}",
+            f"#/board?sel={epic}",
+            f"#/board?sel={story}&drawer=search&search={word}",
+            f"#/item?item={epic}",
+            f"#/item?item={story}",
             "#/board?drawer=activity",
             "#/board?drawer=search&dups=1",
             "#/graph",
@@ -961,7 +975,7 @@ async def test_no_request_leaves_the_server_and_what_people_write_is_only_ever_t
             for theme in THEMES:
                 await switch(page, theme)
         # What was written is shown as the words it is, never as the markup it spells.
-        await w.go(f"#/board?sel=node:{epic}")
+        await w.go(f"#/board?sel={epic}")
         await expect(page.locator("#card-title")).to_contain_text("<img src=", timeout=SLOW)
         await expect(page.locator("#panel .body-text")).to_contain_text("<script>window.__pwned=3")
         assert await page.locator("img, #panel b, script:not([src]), style").count() == 0
@@ -1016,7 +1030,7 @@ async def test_the_page_files_ask_for_no_font_script_image_or_style_from_anywher
 
 
 @SCHEMES
-async def test_late_answers_of_the_project_left_never_reach_the_one_entered_even_with_the_same_ids(
+async def test_late_answers_of_the_project_left_never_reach_the_one_entered_with_same_references(
     base: str, scheme: str
 ) -> None:
     word = unique_word()
@@ -1027,17 +1041,17 @@ async def test_late_answers_of_the_project_left_never_reach_the_one_entered_even
         connect(first.mcp_url, first.key) as one,
         connect(second.mcp_url, second.key) as two,
     ):
-        # Both projects number their items from 1: the same ids hold different things.
+        # Both projects number their items from 1: the same reference holds different things.
         epic_one = await made(one, "epic", f"Only in the first {word}")
-        assert epic_one == await made(two, "epic", f"Only in the second {word}")
-        fact_one = await make_fact(one, f"A first fact {word}", node_ids=[epic_one])
-        fact_two = await make_fact(two, f"A second fact {word}", node_ids=[epic_one])
+        assert epic_one == await made(two, "epic", f"Only in the second {word}") == "epic:1"
+        fact_one = await make_fact(one, f"A first fact {word}", nodes=[epic_one])
+        fact_two = await make_fact(two, f"A second fact {word}", nodes=[epic_one])
         assert fact_one["id"] == fact_two["id"]
         async with themed_page(first.address, signed_in=True, scheme=scheme, keep_bodies=True) as w:
             page = w.page
             await in_project(
                 page,
-                f"{first.address}#/board?sel=node:{epic_one}&drawer=search&search=first+{word}",
+                f"{first.address}#/board?sel={epic_one}&drawer=search&search=first+{word}",
             )
             await expect(page.locator("#card-title")).to_contain_text(f"Only in the first {word}")
             # From now on the first project's answers are held back: the panel's, the search's
@@ -1052,7 +1066,7 @@ async def test_late_answers_of_the_project_left_never_reach_the_one_entered_even
             await page.locator("#project-switcher").select_option(label=f"Second {word}")
             await page.wait_for_url(re.compile(rf"/board/p/{second.id}(#.*)?$"), timeout=SLOW)
             await page.wait_for_selector("#app[data-shell=project]", timeout=SLOW)
-            await w.go(f"#/board?sel=node:{epic_one}&drawer=search&search={word}")
+            await w.go(f"#/board?sel={epic_one}&drawer=search&search={word}")
             await expect(page.locator("#card-title")).to_contain_text(
                 f"Only in the second {word}", timeout=SLOW
             )
@@ -1088,7 +1102,7 @@ async def test_late_answers_of_the_project_left_never_reach_the_one_entered_even
             await expect(
                 page.get_by_role("region", name=f"Epic Made as the session ended {word}")
             ).to_be_visible(timeout=SLOW)
-            await w.go(f"#/board?sel=node:{epic_two}&drawer=search&search=second+{word}")
+            await w.go(f"#/board?sel={epic_two}&drawer=search&search=second+{word}")
             await late[0].arrived()
             await late[2].arrived()
             csrf = (await page.evaluate("fetch('/board/api/session').then((r) => r.json())"))[

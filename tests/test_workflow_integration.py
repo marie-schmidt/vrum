@@ -44,7 +44,7 @@ async def project(
         actor="marie",
         kind="story",
         title="A story",
-        parent_id=epic["id"],
+        parent=epic["ref"],
         **story_fields,
     )
     made = [
@@ -54,7 +54,7 @@ async def project(
             actor="marie",
             kind="task",
             title=f"Task {number}",
-            parent_id=story["id"],
+            parent=story["ref"],
         )
         for number in range(tasks)
     ]
@@ -66,15 +66,21 @@ async def take(client: Client, actor: str, **arguments: Any) -> dict[str, Any]:
 
 
 async def get(client: Client, node: dict[str, Any]) -> dict[str, Any]:
-    return await ok(client, "get_node", node_id=node["id"])
+    return await ok(client, "get_node", node=node["ref"])
 
 
 async def history(client: Client, node: dict[str, Any]) -> list[dict[str, Any]]:
-    return list((await ok(client, "node_history", node_id=node["id"], limit=200))["items"])
+    return list((await ok(client, "node_history", node=node["ref"], limit=200))["items"])
 
 
 def ids(items: list[dict[str, Any]]) -> list[int]:
+    """The ids of rules, decisions, facts and events."""
     return [item["id"] for item in items]
+
+
+def refs(items: list[dict[str, Any]]) -> list[str]:
+    """The references of epics, stories and tasks."""
+    return [item["ref"] for item in items]
 
 
 def count_rows(table: str) -> int:
@@ -99,7 +105,7 @@ async def test_ten_agents_asking_at_once_for_five_ready_tasks_get_five_different
     results = await race_results(
         client,
         "next_work",
-        [{"actor": f"agent-{number}", "within_node_id": epic["id"]} for number in range(10)],
+        [{"actor": f"agent-{number}", "within_node": epic["ref"]} for number in range(10)],
     )
 
     assert all(accepted for accepted, _ in results)
@@ -108,7 +114,7 @@ async def test_ten_agents_asking_at_once_for_five_ready_tasks_get_five_different
     told_nothing = [answer for answer in answers if not answer["found"]]
     assert len(found) == 5 and len(told_nothing) == 5
     # Five different tasks, every one of them handed out, none of them twice.
-    assert sorted(answer["work"]["id"] for answer in found) == sorted(ids(tasks))
+    assert sorted(answer["work"]["ref"] for answer in found) == sorted(refs(tasks))
     assert len({answer["claim"]["actor"] for answer in found}) == 5
     assert all(answer["claim"]["actor"] == answer["work"]["claimed_by"] for answer in found)
     # The others are told plainly, not refused.
@@ -130,7 +136,7 @@ async def test_ten_agents_asking_at_once_for_five_ready_tasks_get_five_different
     again = await race_results(
         client,
         "next_work",
-        [{"actor": f"agent-{number}", "within_node_id": epic["id"]} for number in range(10)],
+        [{"actor": f"agent-{number}", "within_node": epic["ref"]} for number in range(10)],
     )
     assert not any(json.loads(text)["found"] for _, text in again)
     assert all("5 being worked on by someone" in json.loads(text)["message"] for _, text in again)
@@ -148,46 +154,46 @@ async def test_the_most_urgent_work_comes_first_and_a_story_with_open_tasks_does
             actor="marie",
             kind="task",
             title=f"{priority} task",
-            parent_id=story["id"],
+            parent=story["ref"],
             priority=priority,
         )
-        priorities[task["id"]] = priority
+        priorities[task["ref"]] = priority
     lone = await ok(
         client,
         "create_node",
         actor="marie",
         kind="story",
         title="A story with no tasks",
-        parent_id=epic["id"],
+        parent=epic["ref"],
         priority="low",
     )
 
     order = []
     for number in range(5):
-        answer = await take(client, f"agent-{number}", within_node_id=epic["id"])
+        answer = await take(client, f"agent-{number}", within_node=epic["ref"])
         assert answer["found"]
-        order.append(priorities.get(answer["work"]["id"], "lone story"))
+        order.append(priorities.get(answer["work"]["ref"], "lone story"))
     # Urgent first, then high, normal and low. The lone story is low too but newer than the low
     # task. The story that has tasks is never handed out: it is worked through its tasks.
     assert order == ["urgent", "high", "normal", "low", "lone story"]
     assert (await get(client, lone))["claimed_by"] == "agent-4"
     assert (await get(client, story))["claimed_by"] is None
-    assert (await take(client, "agent-5", within_node_id=epic["id"]))["found"] is False
+    assert (await take(client, "agent-5", within_node=epic["ref"]))["found"] is False
 
 
 async def test_peeking_shows_the_work_without_taking_it(client: Client) -> None:
     epic, _, (task,) = await project(client, 1)
 
-    peeked = await take(client, "ann", within_node_id=epic["id"], peek=True)
+    peeked = await take(client, "ann", within_node=epic["ref"], peek=True)
 
     assert peeked["found"] and peeked["peeked"] and peeked["claim"] is None
-    assert peeked["work"]["id"] == task["id"] and "without claiming" in peeked["message"]
+    assert peeked["work"]["ref"] == task["ref"] and "without claiming" in peeked["message"]
     assert (await get(client, task))["claimed_by"] is None
     assert [e["action"] for e in await history(client, task)] == ["create"]
-    taken = await take(client, "bob", within_node_id=epic["id"])
-    assert taken["work"]["id"] == task["id"] and taken["claim"]["actor"] == "bob"
+    taken = await take(client, "bob", within_node=epic["ref"])
+    assert taken["work"]["ref"] == task["ref"] and taken["claim"]["actor"] == "bob"
     # Looking when nothing is free says so too, and does not refuse.
-    nothing = await take(client, "ann", within_node_id=epic["id"], peek=True)
+    nothing = await take(client, "ann", within_node=epic["ref"], peek=True)
     assert nothing["found"] is False and "1 being worked on by someone" in nothing["message"]
 
 
@@ -201,22 +207,24 @@ async def test_next_work_refuses_bad_asks_and_says_what_is_waiting_when_nothing_
         client,
         "update_node",
         actor="marie",
-        node_id=third["id"],
+        node=third["ref"],
         expected_version=blocked["version"],
         status="blocked",
     )
-    await take(client, "ann", within_node_id=epic["id"])
+    await take(client, "ann", within_node=epic["ref"])
 
-    nothing = await take(client, "bob", within_node_id=epic["id"])
+    nothing = await take(client, "bob", within_node=epic["ref"])
 
     assert nothing["found"] is False
     assert "1 being worked on by someone" in nothing["message"]
     assert "1 waiting for other work to be done" in nothing["message"]
     assert "1 marked blocked" in nothing["message"]
     assert "context_chars" in await refused(
-        client, "next_work", actor="ann", within_node_id=epic["id"], context_chars=999
+        client, "next_work", actor="ann", within_node=epic["ref"], context_chars=999
     )
-    assert "no node with id" in await refused(client, "next_work", actor="ann", within_node_id=-5)
+    assert "There is no epic 999999999 in this project" in await refused(
+        client, "next_work", actor="ann", within_node="epic:999999999"
+    )
     assert "Say who is making this change" in await refused(client, "next_work", actor=" ")
 
 
@@ -225,15 +233,15 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
     other_epic, other_story, _ = await project(client, 1)
     await needs_first(client, second, first)
     kept = await make_rule(
-        client, "Invoices carry a number", body="Each has its own number.", story_id=story["id"]
+        client, "Invoices carry a number", body="Each has its own number.", story=story["ref"]
     )
-    await make_rule(client, "A dropped rule", story_id=story["id"], status="dropped")
-    await make_rule(client, "A rule of another story", story_id=other_story["id"])
-    on_epic = await make_decision(client, "Decided on the epic", node_ids=[epic["id"]])
+    await make_rule(client, "A dropped rule", story=story["ref"], status="dropped")
+    await make_rule(client, "A rule of another story", story=other_story["ref"])
+    on_epic = await make_decision(client, "Decided on the epic", nodes=[epic["ref"]])
     await confirm(client, "decision", on_epic, "Marie")
-    await make_decision(client, "Decided on the second task", node_ids=[second["id"]])
-    await make_decision(client, "Decided elsewhere", node_ids=[other_story["id"]])
-    old = await make_decision(client, "The old way", node_ids=[story["id"]])
+    await make_decision(client, "Decided on the second task", nodes=[second["ref"]])
+    await make_decision(client, "Decided elsewhere", nodes=[other_story["ref"]])
+    old = await make_decision(client, "The old way", nodes=[story["ref"]])
     new = await ok(
         client,
         "supersede_decision",
@@ -244,20 +252,20 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         reason="It changed",
         decided_by="Marie",
     )
-    given_up = await make_decision(client, "Given up", node_ids=[first["id"]])
+    given_up = await make_decision(client, "Given up", nodes=[first["ref"]])
     await ok(
         client, "withdraw_decision", actor="agent-1", decision_id=given_up["id"], reason="No need"
     )
     free_wide = await make_decision(client, "Applies everywhere", project_wide=True)
     linked_wide = await make_decision(
-        client, "Applies everywhere, and to this story", project_wide=True, node_ids=[story["id"]]
+        client, "Applies everywhere, and to this story", project_wide=True, nodes=[story["ref"]]
     )
-    fact = await make_fact(client, "Invoices are sent as PDFs", node_ids=[story["id"]])
-    parent_fact = await make_fact(client, "Customers are in Europe", node_ids=[epic["id"]])
+    fact = await make_fact(client, "Invoices are sent as PDFs", nodes=[story["ref"]])
+    parent_fact = await make_fact(client, "Customers are in Europe", nodes=[epic["ref"]])
     await confirm(client, "fact", parent_fact, "Ann")
-    gone = await make_fact(client, "Invoices are sent as faxes", node_ids=[story["id"]])
+    gone = await make_fact(client, "Invoices are sent as faxes", nodes=[story["ref"]])
     await ok(client, "withdraw_fact", actor="a", fact_ids=[gone["id"]], reason="They are not")
-    outdated = await make_fact(client, "Invoices are sent by post", node_ids=[story["id"]])
+    outdated = await make_fact(client, "Invoices are sent by post", nodes=[story["ref"]])
     await ok(
         client,
         "supersede_fact",
@@ -268,11 +276,11 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         source="The owner",
         keep_links=False,
     )
-    await make_fact(client, "A fact about somewhere else", node_ids=[other_story["id"]])
+    await make_fact(client, "A fact about somewhere else", nodes=[other_story["ref"]])
 
-    answer = await take(client, "ann", within_node_id=epic["id"], context_chars=1_000_000)
+    answer = await take(client, "ann", within_node=epic["ref"], context_chars=1_000_000)
 
-    assert answer["work"]["id"] == first["id"]
+    assert answer["work"]["ref"] == first["ref"]
     context = answer["context"]
     assert set(context) == {
         "parents",
@@ -291,9 +299,9 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         "left_out",
         "cut_note",
     }
-    assert [(p["kind"], p["id"]) for p in context["parents"]] == [
-        ("epic", epic["id"]),
-        ("story", story["id"]),
+    assert [(p["kind"], p["ref"]) for p in context["parents"]] == [
+        ("epic", epic["ref"]),
+        ("story", story["ref"]),
     ]
     assert context["parents"][1]["body_preview"] == "The story in more words."
     assert ids(context["rules"]) == [kept["id"]]
@@ -309,13 +317,13 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         "confirmed",
         "Marie",
     )
-    assert by_id[on_epic["id"]]["linked_to"] == [epic["id"]]
+    assert by_id[on_epic["id"]]["linked_to"] == [epic["ref"]]
     assert by_id[on_epic["id"]]["label"].startswith("Decision, confirmed by Marie on ")
     assert (by_id[new["id"]]["confirmation"], by_id[new["id"]]["confirmed_by"]) == (
         "unconfirmed",
         None,
     )
-    assert by_id[new["id"]]["linked_to"] == [story["id"]]
+    assert by_id[new["id"]]["linked_to"] == [story["ref"]]
     assert by_id[new["id"]]["label"] == "Decision, not confirmed by a person"
     for field in ("title", "text", "reason", "decided_by", "decided_on"):
         assert by_id[new["id"]][field] == new[field]
@@ -340,7 +348,7 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
     wide = {d["id"]: d for d in context["project_wide_decisions"]}
     assert {free_wide["id"], linked_wide["id"]} <= set(wide)
     assert wide[free_wide["id"]]["linked_to"] == []
-    assert wide[linked_wide["id"]]["linked_to"] == [story["id"]]
+    assert wide[linked_wide["id"]]["linked_to"] == [story["ref"]]
     assert all(d["project_wide"] and d["status"] == "active" for d in wide.values())
     assert wide[free_wide["id"]]["label"] == "Project-wide decision, not confirmed by a person"
     assert not set(wide) & set(by_id) and not set(wide) & set(past)
@@ -356,26 +364,26 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         "unconfirmed",
         None,
     )
-    assert facts[fact["id"]]["linked_to"] == [story["id"]]
+    assert facts[fact["id"]]["linked_to"] == [story["ref"]]
     assert facts[fact["id"]]["source"] == "The team call"
     assert facts[fact["id"]]["label"] == ("Fact, not confirmed by a person. Source: The team call")
     assert (facts[parent_fact["id"]]["confirmation"], facts[parent_fact["id"]]["confirmed_by"]) == (
         "confirmed",
         "Ann",
     )
-    assert facts[parent_fact["id"]]["linked_to"] == [epic["id"]]
+    assert facts[parent_fact["id"]]["linked_to"] == [epic["ref"]]
     assert facts[parent_fact["id"]]["label"].startswith("Fact, confirmed by Ann on ")
     # A withdrawn fact and a superseded one are not in the briefing at all.
     for ended in (gone, outdated):
         assert ended["id"] not in ids(context["facts"])
 
-    assert [(d["node"]["id"], d["becomes_ready_when_done"]) for d in context["unblocks"]] == [
-        (second["id"], True)
+    assert [(d["node"]["ref"], d["becomes_ready_when_done"]) for d in context["unblocks"]] == [
+        (second["ref"], True)
     ]
     assert context["prerequisites"] == [] and context["handoffs"] == []
     assert context["left_out"] == {} and context["cut_note"] is None
     assert context["characters"] <= context["max_characters"]
-    assert other_epic["id"] not in [p["id"] for p in context["parents"]]
+    assert other_epic["ref"] not in [p["ref"] for p in context["parents"]]
 
 
 async def test_a_project_wide_decision_is_in_every_briefing_until_it_ends(client: Client) -> None:
@@ -384,7 +392,7 @@ async def test_a_project_wide_decision_is_in_every_briefing_until_it_ends(client
     wide = await make_decision(client, "Applies to all the work", project_wide=True)
 
     async def briefing(epic: dict[str, Any]) -> dict[str, Any]:
-        answer = await take(client, "ann", within_node_id=epic["id"], peek=True)
+        answer = await take(client, "ann", within_node=epic["ref"], peek=True)
         assert answer["found"] and answer["peeked"] and answer["claim"] is None
         return dict(answer["context"])
 
@@ -423,7 +431,7 @@ async def test_a_project_wide_decision_is_in_every_briefing_until_it_ends(client
     # One that is linked to this very story and then withdrawn is a past decision there, and in
     # force nowhere.
     linked = await make_decision(
-        client, "Applies everywhere and here", project_wide=True, node_ids=[story_a["id"]]
+        client, "Applies everywhere and here", project_wide=True, nodes=[story_a["ref"]]
     )
     await ok(
         client,
@@ -444,12 +452,12 @@ async def test_a_project_wide_decision_is_in_every_briefing_until_it_ends(client
 async def test_the_context_keeps_to_its_size_and_says_what_it_left_out(client: Client) -> None:
     epic, _, (first, second) = await project(client, 2)
     await needs_first(client, second, first)
-    story_id = first["parent_id"]
+    story_ref = first["parent"]
     for number in range(30):
-        await make_rule(client, f"Rule {number}", body="Detail. " * 90, story_id=story_id)
+        await make_rule(client, f"Rule {number}", body="Detail. " * 90, story=story_ref)
 
-    small = await take(client, "ann", within_node_id=epic["id"], peek=True, context_chars=3000)
-    large = await take(client, "ann", within_node_id=epic["id"], peek=True, context_chars=1_000_000)
+    small = await take(client, "ann", within_node=epic["ref"], peek=True, context_chars=3000)
+    large = await take(client, "ann", within_node=epic["ref"], peek=True, context_chars=1_000_000)
 
     context = small["context"]
     assert small["work"]["title"] == "Task 0"
@@ -461,7 +469,7 @@ async def test_the_context_keeps_to_its_size_and_says_what_it_left_out(client: C
     # cut as well, and counted.
     assert context["unblocks"] == [] and context["left_out"]["unblocks"] == 1
     assert len(large["context"]["rules"]) == 30 and large["context"]["left_out"] == {}
-    assert ids([d["node"] for d in large["context"]["unblocks"]]) == [second["id"]]
+    assert refs([d["node"] for d in large["context"]["unblocks"]]) == [second["ref"]]
 
 
 # -- finish_work and the handoff note ------------------------------------------------------------
@@ -470,20 +478,20 @@ async def test_the_context_keeps_to_its_size_and_says_what_it_left_out(client: C
 async def test_finishing_needs_a_note_and_hands_it_to_the_next_agent(client: Client) -> None:
     epic, _, (first, second) = await project(client, 2)
     await needs_first(client, second, first)
-    assert (await take(client, "ann", within_node_id=epic["id"]))["work"]["id"] == first["id"]
+    assert (await take(client, "ann", within_node=epic["ref"]))["work"]["ref"] == first["ref"]
     before = await get(client, first)
     events_before = await history(client, first)
 
     for blank in ("", "   ", "\n\t "):
         message = await refused(
-            client, "finish_work", actor="ann", node_id=first["id"], outcome="done", note=blank
+            client, "finish_work", actor="ann", node=first["ref"], outcome="done", note=blank
         )
         assert "A handoff note is needed" in message
     assert "outcome must be one of" in await refused(
-        client, "finish_work", actor="ann", node_id=first["id"], outcome="finished", note="x"
+        client, "finish_work", actor="ann", node=first["ref"], outcome="finished", note="x"
     )
     assert "claimed by ann, not by you" in await refused(
-        client, "finish_work", actor="bob", node_id=first["id"], outcome="done", note="Mine now"
+        client, "finish_work", actor="bob", node=first["ref"], outcome="done", note="Mine now"
     )
     # None of that changed anything.
     assert await get(client, first) == before
@@ -494,14 +502,14 @@ async def test_finishing_needs_a_note_and_hands_it_to_the_next_agent(client: Cli
         client,
         "finish_work",
         actor="ann",
-        node_id=first["id"],
+        node=first["ref"],
         outcome="done",
         note="Used the invoice library; the numbering is in numbering.py.",
     )
 
     assert finished["node"]["status"] == "done" and finished["node"]["claimed_by"] is None
     assert finished["handoff"]["actor"] == "ann" and finished["handoff"]["outcome"] == "done"
-    assert [(n["id"], n["status"]) for n in finished["unblocked"]] == [(second["id"], "ready")]
+    assert [(n["ref"], n["status"]) for n in finished["unblocked"]] == [(second["ref"], "ready")]
     done = await get(client, first)
     assert done["handoff_count"] == 1
     assert done["last_handoff"]["note"].startswith("Used the invoice library")
@@ -511,10 +519,10 @@ async def test_finishing_needs_a_note_and_hands_it_to_the_next_agent(client: Cli
         "update",
     ]
 
-    nxt = await take(client, "bob", within_node_id=epic["id"])
-    assert nxt["work"]["id"] == second["id"]
+    nxt = await take(client, "bob", within_node=epic["ref"])
+    assert nxt["work"]["ref"] == second["ref"]
     (prerequisite,) = nxt["context"]["prerequisites"]
-    assert prerequisite["node"]["id"] == first["id"]
+    assert prerequisite["node"]["ref"] == first["ref"]
     assert prerequisite["handoffs"][0]["note"].startswith("Used the invoice library")
     assert prerequisite["handoffs"][0]["actor"] == "ann"
 
@@ -528,37 +536,37 @@ async def test_every_way_of_leaving_work_leaves_a_note_and_a_status(client: Clie
         ("released", "ready"),
     ]
     for task, (outcome, status) in zip(tasks, outcomes, strict=True):
-        taken = await take(client, "ann", within_node_id=story["id"])
-        assert taken["work"]["id"] == task["id"]
+        taken = await take(client, "ann", within_node=story["ref"])
+        assert taken["work"]["ref"] == task["ref"]
         finished = await ok(
             client,
             "finish_work",
             actor="ann",
-            node_id=task["id"],
+            node=task["ref"],
             outcome=outcome,
             note=f"Left it {outcome}.",
         )
         assert finished["node"]["status"] == status, outcome
         assert finished["handoff"]["outcome"] == outcome
     # Released work is free again and carries its note to the next agent.
-    again = await take(client, "bob", within_node_id=epic["id"])
-    assert again["work"]["id"] == tasks[3]["id"]
+    again = await take(client, "bob", within_node=epic["ref"])
+    assert again["work"]["ref"] == tasks[3]["ref"]
     assert [h["note"] for h in again["context"]["handoffs"]] == ["Left it released."]
 
 
 async def test_releasing_a_claim_needs_a_note_too_and_keeps_it(client: Client) -> None:
     epic, _, (task,) = await project(client, 1)
-    await take(client, "ann", within_node_id=epic["id"])
+    await take(client, "ann", within_node=epic["ref"])
 
     assert "A handoff note is needed" in await refused(
-        client, "release_claim", actor="ann", node_id=task["id"], note="  "
+        client, "release_claim", actor="ann", node=task["ref"], note="  "
     )
     assert (await get(client, task))["claimed_by"] == "ann"
     await ok(
         client,
         "release_claim",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         note="Stopped halfway: the form is built, the sending is not.",
     )
 
@@ -566,8 +574,8 @@ async def test_releasing_a_claim_needs_a_note_too_and_keeps_it(client: Client) -
     assert node["claimed_by"] is None and node["handoff_count"] == 1
     assert node["last_handoff"]["outcome"] == "released"
     assert node["status"] == "ready"
-    answer = await take(client, "bob", within_node_id=epic["id"])
-    assert answer["work"]["id"] == task["id"]
+    answer = await take(client, "bob", within_node=epic["ref"])
+    assert answer["work"]["ref"] == task["ref"]
     assert answer["context"]["handoffs"][0]["note"].startswith("Stopped halfway")
 
 
@@ -575,7 +583,7 @@ async def test_work_left_to_lapse_shows_as_lapsed_with_no_handoff_and_can_be_tak
     client: Client,
 ) -> None:
     epic, _, (task,) = await project(client, 1)
-    await take(client, "ann", within_node_id=epic["id"], lease_seconds=2)
+    await take(client, "ann", within_node=epic["ref"], lease_seconds=2)
     await anyio.sleep(2.6)
 
     lapsed = await get(client, task)
@@ -584,13 +592,13 @@ async def test_work_left_to_lapse_shows_as_lapsed_with_no_handoff_and_can_be_tak
     assert lapsed["status"] == "in_progress"
     assert lapsed["handoff_count"] == 0 and lapsed["last_handoff"] is None
 
-    taken = await take(client, "bob", within_node_id=epic["id"])
-    assert taken["work"]["id"] == task["id"] and taken["claim"]["actor"] == "bob"
+    taken = await take(client, "bob", within_node=epic["ref"])
+    assert taken["work"]["ref"] == task["ref"] and taken["claim"]["actor"] == "bob"
     assert taken["taken_over_from"] == "ann" and "ann claimed it earlier" in taken["message"]
     held = await get(client, task)
     assert held["claimed_by"] == "bob" and held["lapsed_claim_by"] is None
     assert "claimed by bob, not by you" in await refused(
-        client, "finish_work", actor="ann", node_id=task["id"], outcome="done", note="Done"
+        client, "finish_work", actor="ann", node=task["ref"], outcome="done", note="Done"
     )
 
 
@@ -598,14 +606,14 @@ async def test_the_one_who_let_a_claim_lapse_can_still_finish_until_someone_take
     client: Client,
 ) -> None:
     epic, _, (task,) = await project(client, 1)
-    await take(client, "ann", within_node_id=epic["id"], lease_seconds=2)
+    await take(client, "ann", within_node=epic["ref"], lease_seconds=2)
     await anyio.sleep(2.6)
 
     finished = await ok(
         client,
         "finish_work",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         outcome="done",
         note="Finished it after the lease ran out.",
     )
@@ -620,8 +628,8 @@ async def test_the_database_refuses_a_handoff_without_a_note_on_its_own(client: 
 
     for after in ('{"outcome": "done", "note": "  "}', '{"outcome": "done"}', '{"note": "x"}'):
         result = run_sql(
-            "INSERT INTO events (node_id, action, actor, after) "
-            f"VALUES ({task['id']}, 'handoff', 'someone', '{after}')"
+            "INSERT INTO events (node, action, actor, after) "
+            f"VALUES ('{task['ref']}', 'handoff', 'someone', '{after}')"
         )
         assert result.returncode != 0
         assert "handoff_has_an_outcome_and_a_note" in result.stderr
@@ -675,28 +683,37 @@ async def test_a_plan_creates_everything_in_one_call(client: Client) -> None:
     assert [item["key"] for item in result["created"]] == [i["key"] for i in plan["items"]]
     new = {item["key"]: item for item in result["created"]}
     assert len(result["link_ids"]) == 5 and len(result["rule_ids"]) == 4
-    epic_id = new["epic"]["id"]
-    stories = await all_nodes(client, parent_id=epic_id)
-    assert ids(stories) == [new[f"s{n}"]["id"] for n in range(3)]
+    # Each new item is named by its kind and its own number, and the stories and the tasks of
+    # the plan are numbered in the order the plan gave them.
+    assert all(item["ref"].startswith(f"{item['kind']}:") for item in result["created"])
+    numbers: dict[str, list[int]] = {kind: [] for kind in ("epic", "story", "task")}
+    for item in result["created"]:
+        numbers[item["kind"]].append(int(item["ref"].partition(":")[2]))
+    assert all(
+        found == sorted(found) and len(set(found)) == len(found) for found in numbers.values()
+    )
+    epic_ref = new["epic"]["ref"]
+    stories = await all_nodes(client, parent=epic_ref)
+    assert refs(stories) == [new[f"s{n}"]["ref"] for n in range(3)]
     # Each task is in the story the plan named, and the order and dates were kept.
     for number in range(8):
-        task = await ok(client, "get_node", node_id=new[f"t{number}"]["id"])
-        assert task["parent_id"] == new[f"s{number % 3}"]["id"]
+        task = await ok(client, "get_node", node=new[f"t{number}"]["ref"])
+        assert task["parent"] == new[f"s{number % 3}"]["ref"]
         assert task["priority"] == ("high" if number == 0 else "normal")
         assert task["target_on"] == day(30)
     # The links are real: t3 waits for t0, t6 for t3, and so t6 is not ready.
-    t3 = await ok(client, "get_node", node_id=new["t3"]["id"])
-    assert t3["waiting_on"] == [new["t0"]["id"]]
-    t6 = await ok(client, "get_node", node_id=new["t6"]["id"])
-    assert t6["waiting_on"] == [new["t3"]["id"]]
-    relates = await ok(client, "list_links", node_id=new["s1"]["id"], link_type="relates_to")
+    t3 = await ok(client, "get_node", node=new["t3"]["ref"])
+    assert t3["waiting_on"] == [new["t0"]["ref"]]
+    t6 = await ok(client, "get_node", node=new["t6"]["ref"])
+    assert t6["waiting_on"] == [new["t3"]["ref"]]
+    relates = await ok(client, "list_links", node=new["s1"]["ref"], link_type="relates_to")
     assert relates["total"] == 1
     # The rules are in their stories, and the last one is unplaced.
-    first_story_rules = await ok(client, "list_rules", story_id=new["s0"]["id"])
+    first_story_rules = await ok(client, "list_rules", story=new["s0"]["ref"])
     assert [r["status"] for r in first_story_rules["items"]] == ["settled", "held"]
     assert [r["id"] for r in first_story_rules["items"]] == result["rule_ids"][:2]
     loose = await ok(client, "get_rule", rule_id=result["rule_ids"][3])
-    assert loose["story_id"] is None
+    assert loose["story"] is None
     # Everything is in the history with its actor.
     for item in result["created"]:
         created = [e for e in await history(client, item) if e["action"] == "create"]
@@ -711,17 +728,17 @@ async def test_a_plan_can_hang_from_what_already_exists(client: Client) -> None:
         "create_plan",
         actor="ann",
         items=[
-            {"key": "extra", "kind": "task", "title": "Extra task", "parent": story["id"]},
-            {"key": "later", "kind": "story", "title": "Later story", "parent": epic["id"]},
+            {"key": "extra", "kind": "task", "title": "Extra task", "parent": story["ref"]},
+            {"key": "later", "kind": "story", "title": "Later story", "parent": epic["ref"]},
         ],
-        links=[{"source": "extra", "target": task["id"], "link_type": "needs_first"}],
-        rules=[{"title": "A rule for the old story", "story": story["id"]}],
+        links=[{"source": "extra", "target": task["ref"], "link_type": "needs_first"}],
+        rules=[{"title": "A rule for the old story", "story": story["ref"]}],
     )
 
     extra = result["created"][0]
-    node = await ok(client, "get_node", node_id=extra["id"])
-    assert node["parent_id"] == story["id"] and node["waiting_on"] == [task["id"]]
-    assert (await ok(client, "get_rule", rule_id=result["rule_ids"][0]))["story_id"] == story["id"]
+    node = await ok(client, "get_node", node=extra["ref"])
+    assert node["parent"] == story["ref"] and node["waiting_on"] == [task["ref"]]
+    assert (await ok(client, "get_rule", rule_id=result["rule_ids"][0]))["story"] == story["ref"]
 
 
 async def test_a_plan_with_any_problem_creates_nothing_and_names_every_problem(
@@ -747,28 +764,40 @@ async def test_a_plan_with_any_problem_creates_nothing_and_names_every_problem(
                 "key": "g",
                 "kind": "task",
                 "title": "Bad priority",
-                "parent": story["id"],
+                "parent": story["ref"],
                 "priority": "now",
             },
             {
                 "key": "h",
                 "kind": "task",
                 "title": "Dates the wrong way",
-                "parent": story["id"],
+                "parent": story["ref"],
                 "start_on": day(9),
                 "target_on": day(1),
             },
-            {"key": "i", "kind": "task", "title": "Parent that is not there", "parent": 999999999},
-            {"key": "j", "kind": "epic", "title": "An epic with a parent", "parent": epic["id"]},
+            {
+                "key": "i",
+                "kind": "task",
+                "title": "Parent that is not there",
+                "parent": "story:999999999",
+            },
+            {"key": "j", "kind": "epic", "title": "An epic with a parent", "parent": epic["ref"]},
+            {"key": "story:12", "kind": "story", "title": "A key like a ref", "parent": "a"},
+            {"key": "k", "kind": "task", "title": "Under an old epic", "parent": epic["ref"]},
         ],
         links=[
             {"source": "a", "target": "nowhere", "link_type": "needs_first"},
             {"source": "a", "target": "a", "link_type": "relates_to"},
-            {"source": "a", "target": task["id"], "link_type": "friends_with"},
+            {"source": "a", "target": task["ref"], "link_type": "friends_with"},
+            {"source": "task:999999999", "target": task["ref"], "link_type": "relates_to"},
             # The plan makes this a circle with a link that exists already.
-            {"source": task["id"], "target": other["id"], "link_type": "needs_first"},
+            {"source": task["ref"], "target": other["ref"], "link_type": "needs_first"},
         ],
-        rules=[{"title": "Rule for nowhere", "story": "missing"}, {"title": " "}],
+        rules=[
+            {"title": "Rule for nowhere", "story": "missing"},
+            {"title": " "},
+            {"title": "Rule for an epic", "story": epic["ref"]},
+        ],
     )
 
     problems = [line for line in message.splitlines() if re.match(r"\d+\. ", line)]
@@ -776,15 +805,19 @@ async def test_a_plan_with_any_problem_creates_nothing_and_names_every_problem(
     assert "Nothing was created" in message
     for expected in (
         "is used by more than one item",
+        "the key looks like the reference of an existing item",
         "kind must be one of",
         "title cannot be empty",
         "needs a parent story",
         "belongs under a story",
+        f"{epic['ref']} is an epic, but a task belongs under a story",
+        "there is no task 999999999 in this project for the source",
+        f"{epic['ref']} is not a story, and a rule belongs to a story",
         "is not the key of any item in this plan",
         "Item 8 (key 'g'",
         "priority must be one of",
         "Item 9 (key 'h'",
-        "no node with id 999999999",
+        "there is no story 999999999 in this project",
         "an epic has no parent",
         "nowhere",
         "link_type must be one of",
@@ -792,9 +825,10 @@ async def test_a_plan_with_any_problem_creates_nothing_and_names_every_problem(
         "circle of waiting",
         "Rule 1",
         "Rule 2",
+        "Rule 3",
     ):
         assert any(expected in problem for problem in problems), (expected, message)
-    assert len(problems) >= 14
+    assert len(problems) >= 18
     assert counts() == before
 
 
@@ -861,8 +895,8 @@ async def test_a_plan_of_five_hundred_items_is_created_in_one_call(client: Clien
 
     assert result["counts"] == {"epic": 1, "story": 49, "task": 450, "links": 392, "rules": 0}
     assert len(result["created"]) == 500
-    epic_id = result["created"][0]["id"]
-    page = await ok(client, "list_nodes", parent_id=epic_id, limit=200)
+    epic_ref = result["created"][0]["ref"]
+    page = await ok(client, "list_nodes", parent=epic_ref, limit=200)
     assert page["total"] == 49
     assert seconds < 60, f"a plan of 500 items took {seconds:.1f} seconds"
     print(f"\nA plan of 500 items and {len(links)} links took {seconds:.1f} seconds.")
@@ -887,14 +921,14 @@ async def test_a_big_plan_with_one_bad_item_at_the_end_creates_nothing(client: C
 
 async def test_five_changes_with_one_stale_apply_four_and_refuse_one(client: Client) -> None:
     _, story, tasks = await project(client, 5)
-    versions = {task["id"]: task["version"] for task in tasks}
+    versions = {task["ref"]: task["version"] for task in tasks}
     # Someone else changes the third task after it was read.
     third = tasks[2]
     await ok(
         client,
         "update_node",
         actor="bob",
-        node_id=third["id"],
+        node=third["ref"],
         expected_version=1,
         title="Changed under you",
     )
@@ -904,13 +938,13 @@ async def test_five_changes_with_one_stale_apply_four_and_refuse_one(client: Cli
         "update_nodes",
         actor="ann",
         changes=[
-            {"node_id": task["id"], "expected_version": versions[task["id"]], "priority": "high"}
+            {"node": task["ref"], "expected_version": versions[task["ref"]], "priority": "high"}
             for task in tasks
         ],
     )
 
     assert (result["applied"], result["refused"]) == (4, 1)
-    assert [r["node_id"] for r in result["results"]] == ids(tasks)
+    assert [r["node"] for r in result["results"]] == refs(tasks)
     assert [r["applied"] for r in result["results"]] == [True, True, False, True, True]
     stale = result["results"][2]
     assert (
@@ -928,7 +962,7 @@ async def test_five_changes_with_one_stale_apply_four_and_refuse_one(client: Cli
         else:
             assert mine == [] and node["priority"] == "normal"
             assert node["title"] == "Changed under you"
-    assert story["id"]
+    assert story["ref"]
 
 
 async def test_a_hundred_and_twenty_changes_report_each_one(client: Client) -> None:
@@ -936,25 +970,25 @@ async def test_a_hundred_and_twenty_changes_report_each_one(client: Client) -> N
     changes: list[dict[str, Any]] = []
     for number, task in enumerate(tasks):
         change: dict[str, Any] = {
-            "node_id": task["id"],
+            "node": task["ref"],
             "expected_version": 1,
             "title": f"Renamed {number}",
         }
         if number % 10 == 0:
             change["status"] = "finished"  # not a status: refused
         changes.append(change)
-    changes.append({"node_id": 999999999, "expected_version": 1, "title": "Nobody"})
+    changes.append({"node": "task:999999999", "expected_version": 1, "title": "Nobody"})
 
     result = await ok(client, "update_nodes", actor="ann", changes=changes)
 
     assert len(result["results"]) == 121
     assert (result["applied"], result["refused"]) == (108, 13)
     for number, report in enumerate(result["results"][:120]):
-        assert report["node_id"] == tasks[number]["id"]
+        assert report["node"] == tasks[number]["ref"]
         assert report["applied"] is (number % 10 != 0)
         assert (report["refusal"] is None) is report["applied"]
     assert "status must be one of" in result["results"][0]["refusal"]
-    assert "no node with id 999999999" in result["results"][120]["refusal"]
+    assert "There is no task 999999999 in this project" in result["results"][120]["refusal"]
     assert (await get(client, tasks[1]))["title"] == "Renamed 1"
     assert (await get(client, tasks[0]))["title"] == "Task 0"
     assert "nothing to change" in await refused(client, "update_nodes", actor="ann", changes=[])
@@ -999,9 +1033,9 @@ async def test_changes_since_returns_exactly_the_events_after_the_one_given(clie
     epic, story, tasks = await project(client, 3)
     await needs_first(client, tasks[1], tasks[0])
     await set_status(client, tasks[0], "blocked")
-    await make_rule(client, "A rule", story_id=story["id"])
-    await make_decision(client, "A decision", node_ids=[epic["id"]])
-    await make_fact(client, "A fact", node_ids=[story["id"]])
+    await make_rule(client, "A rule", story=story["ref"])
+    await make_decision(client, "A decision", nodes=[epic["ref"]])
+    await make_fact(client, "A fact", nodes=[story["ref"]])
     expected = await event_ids_after(start)
     assert len(expected) >= 10
     await caught_up(client, expected[-1])
@@ -1014,7 +1048,7 @@ async def test_changes_since_returns_exactly_the_events_after_the_one_given(clie
     assert (await feed(client, expected[-1], 5))[0] == []
     assert (await feed(client, expected[4], 100))[0] == expected[5:]
     # Following the feed from where it ended shows only what happens next.
-    await ok(client, "claim_node", actor="cy", node_id=tasks[2]["id"])
+    await ok(client, "claim_node", actor="cy", node=tasks[2]["ref"])
     after_that = await event_ids_after(expected[-1])
     assert len(after_that) == 1
     await caught_up(client, after_that[0])
@@ -1024,12 +1058,10 @@ async def test_changes_since_returns_exactly_the_events_after_the_one_given(clie
 async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client) -> None:
     start = (await ok(client, "changes_since", after_event_id=0, limit=1))["latest_event_id"]
     _, story, (task,) = await project(client, 1)
-    rule = await make_rule(client, "A rule", story_id=story["id"])
-    decision = await make_decision(client, "A decision", node_ids=[task["id"]])
-    fact = await make_fact(client, "A fact", node_ids=[task["id"]])
-    await ok(
-        client, "update_node", actor="zed", node_id=task["id"], expected_version=1, title="New"
-    )
+    rule = await make_rule(client, "A rule", story=story["ref"])
+    decision = await make_decision(client, "A decision", nodes=[task["ref"]])
+    fact = await make_fact(client, "A fact", nodes=[task["ref"]])
+    await ok(client, "update_node", actor="zed", node=task["ref"], expected_version=1, title="New")
     await caught_up(client, (await event_ids_after(start))[-1])
 
     by_zed = await ok(client, "changes_since", after_event_id=start, actor="zed")
@@ -1045,7 +1077,7 @@ async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client)
         assert all(e["actor"] != "zed" for e in page["items"])
     # One fact's feed holds everything done to that fact and nothing done to another.
     await confirm(client, "fact", fact, "Marie", actor="yan")
-    other_fact = await make_fact(client, "Another fact", node_ids=[task["id"]])
+    other_fact = await make_fact(client, "Another fact", nodes=[task["ref"]])
     await ok(
         client,
         "withdraw_fact",
@@ -1070,11 +1102,11 @@ async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client)
     )
     assert all(e["decision_id"] == decision["id"] for e in of_decision["items"])
     # The fact's link to the task is in the task's feed.
-    on_task = await ok(client, "changes_since", after_event_id=start, node_id=task["id"])
+    on_task = await ok(client, "changes_since", after_event_id=start, node=task["ref"])
     assert {"create", "update", "fact_linked"} <= {e["action"] for e in on_task["items"]}
-    assert all(task["id"] in (e["node_id"], e["other_node_id"]) for e in on_task["items"])
+    assert all(task["ref"] in (e["node"], e["other_node"]) for e in on_task["items"])
     assert "at most one of" in await refused(
-        client, "changes_since", node_id=task["id"], rule_id=rule["id"]
+        client, "changes_since", node=task["ref"], rule_id=rule["id"]
     )
     assert "at most one of" in await refused(
         client, "changes_since", decision_id=decision["id"], fact_id=fact["id"]
@@ -1088,7 +1120,9 @@ async def test_the_feed_can_be_narrowed_to_one_item_or_one_actor(client: Client)
     assert "no event with id 999999999" in await refused(
         client, "changes_since", after_event_id=999999999
     )
-    assert "no node with id" in await refused(client, "changes_since", node_id=-1)
+    assert "There is no task 999999999 in this project" in await refused(
+        client, "changes_since", node="task:999999999"
+    )
     assert "0 or more" in await refused(client, "changes_since", after_event_id=-1)
 
 
@@ -1098,7 +1132,7 @@ async def test_the_newest_changes_can_be_read_and_walked_back_without_reading_th
     start = (await ok(client, "changes_since", after_event_id=0, limit=1))["latest_event_id"]
     _, story, tasks = await project(client, 4)
     await set_status(client, tasks[0], "blocked")
-    await make_rule(client, "A rule", story_id=story["id"])
+    await make_rule(client, "A rule", story=story["ref"])
     await caught_up(client, (await event_ids_after(start))[-1])
     # The feed's own order (a change that began earlier comes first), which is what walking
     # backwards must give exactly reversed.
@@ -1132,10 +1166,10 @@ async def test_the_newest_changes_can_be_read_and_walked_back_without_reading_th
     assert ids(older["items"]) == expected[3:5] and older["next_before_id"] == expected[3]
     # The filters narrow it, and a short answer has nothing before it.
     for_task = await ok(
-        client, "changes_since", node_id=tasks[0]["id"], newest=True, limit=50, after_event_id=start
+        client, "changes_since", node=tasks[0]["ref"], newest=True, limit=50, after_event_id=start
     )
     assert for_task["next_before_id"] is None
-    assert all(tasks[0]["id"] in (e["node_id"], e["other_node_id"]) for e in for_task["items"])
+    assert all(tasks[0]["ref"] in (e["node"], e["other_node"]) for e in for_task["items"])
     assert "1 or more" in await refused(client, "changes_since", before_event_id=0)
     assert "no event with id 999999999" in await refused(
         client, "changes_since", before_event_id=999999999
@@ -1159,8 +1193,8 @@ async def test_an_event_that_finishes_late_is_never_skipped_by_someone_following
 
     def insert(actor: str) -> str:
         return (
-            "INSERT INTO events (node_id, action, actor, after) "
-            f"VALUES ({task['id']}, 'update', '{actor}', '{{\"title\": \"{actor}\"}}')"
+            "INSERT INTO events (node, action, actor, after) "
+            f"VALUES ('{task['ref']}', 'update', '{actor}', '{{\"title\": \"{actor}\"}}')"
         )
 
     def write(sql: str) -> None:
@@ -1250,10 +1284,10 @@ async def test_a_list_of_fifty_long_items_is_at_least_five_times_smaller_by_defa
         ],
         rules=[{"title": f"Rule {n}", "body": body, "story": "s0"} for n in range(50)],
     )
-    epic_id = result["created"][0]["id"]
+    epic_ref = result["created"][0]["ref"]
 
-    compact = await ok(client, "list_nodes", parent_id=epic_id, limit=50)
-    full = await ok(client, "list_nodes", parent_id=epic_id, limit=50, detail=True)
+    compact = await ok(client, "list_nodes", parent=epic_ref, limit=50)
+    full = await ok(client, "list_nodes", parent=epic_ref, limit=50, detail=True)
 
     assert len(compact["items"]) == len(full["items"]) == 50
     assert compact["total"] == full["total"] == 50
@@ -1266,9 +1300,9 @@ async def test_a_list_of_fifty_long_items_is_at_least_five_times_smaller_by_defa
     assert full_size >= 5 * compact_size, (compact_size, full_size)
     print(f"\nlist_nodes of 50: {compact_size:,} characters by default, {full_size:,} with detail.")
 
-    story_id = result["created"][1]["id"]
-    rules = await ok(client, "list_rules", story_id=story_id, limit=50)
-    rules_full = await ok(client, "list_rules", story_id=story_id, limit=50, detail=True)
+    story_ref = result["created"][1]["ref"]
+    rules = await ok(client, "list_rules", story=story_ref, limit=50)
+    rules_full = await ok(client, "list_rules", story=story_ref, limit=50, detail=True)
     assert rules["total"] == 50
     assert all(r["body"] is None and r["body_chars"] == len(body) for r in rules["items"])
     assert all(r["body"] == body for r in rules_full["items"])
@@ -1309,23 +1343,23 @@ async def test_creating_a_story_that_repeats_an_existing_one_says_so_and_still_c
         actor="marie",
         kind="story",
         title=title,
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
     assert existing["similar"] == [] and existing["similar_checked"] is True
     await reindexed(client)
 
     again = await ok(
-        client, "create_node", actor="ann", kind="story", title=title, parent_id=epic["id"]
+        client, "create_node", actor="ann", kind="story", title=title, parent=epic["ref"]
     )
 
-    assert again["id"] != existing["id"] and again["version"] == 1
+    assert again["ref"] != existing["ref"] and again["version"] == 1
     assert again["similar_checked"] is True and again["similar_note"] is None
     (match,) = again["similar"]
-    assert (match["item_type"], match["id"]) == ("story", existing["id"])
+    assert (match["item_type"], match["ref"]) == ("story", existing["ref"])
     assert match["suggestion"] is True and match["similarity"] >= 0.55
     # It was created, and nothing was linked or merged.
-    assert (await get(client, again))["id"] == again["id"]
-    assert (await ok(client, "list_links", node_id=again["id"]))["total"] == 0
+    assert (await get(client, again))["ref"] == again["ref"]
+    assert (await ok(client, "list_links", node=again["ref"]))["total"] == 0
     # Something unrelated is not flagged, and neither is a task (tasks are not checked).
     other = await ok(
         client,
@@ -1333,11 +1367,11 @@ async def test_creating_a_story_that_repeats_an_existing_one_says_so_and_still_c
         actor="ann",
         kind="story",
         title=distinct(),
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
     assert other["similar"] == [] and other["similar_checked"] is True
     task = await ok(
-        client, "create_node", actor="ann", kind="task", title=title, parent_id=other["id"]
+        client, "create_node", actor="ann", kind="task", title=title, parent=other["ref"]
     )
     assert task["similar"] == [] and task["similar_checked"] is False
 
@@ -1349,7 +1383,7 @@ async def test_an_epic_that_repeats_an_existing_epic_is_flagged_too(client: Clie
 
     second = await ok(client, "create_node", actor="marie", kind="epic", title=title)
 
-    assert [(m["item_type"], m["id"]) for m in second["similar"]] == [("epic", first["id"])]
+    assert [(m["item_type"], m["ref"]) for m in second["similar"]] == [("epic", first["ref"])]
 
 
 async def test_with_the_embedding_service_stopped_creating_still_works_and_says_it_did_not_check(
@@ -1357,18 +1391,18 @@ async def test_with_the_embedding_service_stopped_creating_still_works_and_says_
 ) -> None:
     title = distinct()
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="Invoicing")
-    await ok(client, "create_node", actor="marie", kind="story", title=title, parent_id=epic["id"])
+    await ok(client, "create_node", actor="marie", kind="story", title=title, parent=epic["ref"])
     await reindexed(client)
 
     with embeddings_stopped():
         story = await ok(
-            client, "create_node", actor="ann", kind="story", title=title, parent_id=epic["id"]
+            client, "create_node", actor="ann", kind="story", title=title, parent=epic["ref"]
         )
         planned = await ok(
             client,
             "create_plan",
             actor="ann",
-            items=[{"key": "s", "kind": "story", "title": title, "parent": epic["id"]}],
+            items=[{"key": "s", "kind": "story", "title": title, "parent": epic["ref"]}],
         )
 
     assert story["similar"] == [] and story["similar_checked"] is False
@@ -1382,7 +1416,7 @@ async def test_a_plan_says_which_of_its_stories_look_like_ones_that_exist(client
     title = distinct()
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="Invoicing")
     existing = await ok(
-        client, "create_node", actor="marie", kind="story", title=title, parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="story", title=title, parent=epic["ref"]
     )
     await reindexed(client)
 
@@ -1391,12 +1425,12 @@ async def test_a_plan_says_which_of_its_stories_look_like_ones_that_exist(client
         "create_plan",
         actor="ann",
         items=[
-            {"key": "s", "kind": "story", "title": title, "parent": epic["id"]},
+            {"key": "s", "kind": "story", "title": title, "parent": epic["ref"]},
             {
                 "key": "u",
                 "kind": "story",
                 "title": distinct(),
-                "parent": epic["id"],
+                "parent": epic["ref"],
             },
             {"key": "t", "kind": "task", "title": title, "parent": "s"},
         ],
@@ -1404,9 +1438,9 @@ async def test_a_plan_says_which_of_its_stories_look_like_ones_that_exist(client
 
     assert result["similar_note"] is None
     (flagged,) = result["similar"]
-    created = {item["key"]: item["id"] for item in result["created"]}
-    assert flagged["key"] == "s" and flagged["id"] == created["s"]
-    assert [(m["item_type"], m["id"]) for m in flagged["similar"]] == [("story", existing["id"])]
+    created = {item["key"]: item["ref"] for item in result["created"]}
+    assert flagged["key"] == "s" and flagged["ref"] == created["s"]
+    assert [(m["item_type"], m["ref"]) for m in flagged["similar"]] == [("story", existing["ref"])]
 
 
 # -- what the server tells an agent when it connects ----------------------------------------------
@@ -1430,4 +1464,6 @@ async def test_the_server_instructions_name_only_tools_that_exist(client: Client
         "finish_work",
     } <= named
     # The working loop in a few lines: it has to stay short enough that an agent reads all of it.
-    assert len(instructions.split()) < 350
+    # (It was 321 words before epics, stories and tasks were named by refs; the paragraph that
+    # teaches the refs is what raised the ceiling, and it names no more tools than before.)
+    assert len(instructions.split()) < 420

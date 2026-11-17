@@ -34,6 +34,7 @@ from tests.board_search import (
 )
 from tests.helpers import (
     REPO_ROOT,
+    code_of,
     confirm,
     connect,
     day,
@@ -41,6 +42,7 @@ from tests.helpers import (
     export_everything,
     make_decision,
     make_fact,
+    number_of,
     ok,
     refused,
     reindexed,
@@ -109,7 +111,7 @@ async def activity(client: Client, page_url: str) -> None:
     epic = await made(client, "epic", f"Epic {word}")
     story = await made(client, "story", f"Story {word}", epic)
     task = await made(client, "task", f"Work {word}", story)
-    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story_id=story)
+    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story=story)
     note = f"Built the whole thing for {word}. Nothing is left, but check the logs."
     async with browser_page(page_url, token=the_token(), name=ADA) as w:
         page = w.page
@@ -120,7 +122,7 @@ async def activity(client: Client, page_url: str) -> None:
             "Nothing has happened yet.", timeout=SLOW
         )
         await page.evaluate("window.__same = 'same page'")
-        taken = await ok(client, "next_work", actor=agent, within_node_id=epic)
+        taken = await ok(client, "next_work", actor=agent, within_node=epic)
         claim = page.locator(f"#claims-live li.claim[data-node='{task}']")
         await expect(claim).to_contain_text(f"held by {agent}", timeout=NEWS)
         agent_row = page.locator(f"#agents li.agent[data-actor='{agent}']")
@@ -130,12 +132,12 @@ async def activity(client: Client, page_url: str) -> None:
             client, "update_rule", actor=agent, rule_id=rule["id"], expected_version=1,
             title=f"Renamed {word}",
         )  # fmt: skip
-        decided = await make_decision(client, f"Decided {word}", actor=agent, node_ids=[story])
-        await ok(client, "finish_work", actor=agent, node_id=task, outcome="done", note=note)
-        done = feed_row(page, f"finished their work on task #{task}")
+        decided = await make_decision(client, f"Decided {word}", actor=agent, nodes=[story])
+        await ok(client, "finish_work", actor=agent, node=task, outcome="done", note=note)
+        done = feed_row(page, f"finished their work on task {code_of(task)}")
         await expect(done).to_contain_text(agent, timeout=NEWS)
         rows = {
-            "took": await feed_row(page, f"took task #{task}").inner_text(),
+            "took": await feed_row(page, f"took task {code_of(task)}").inner_text(),
             "rule": await feed_row(page, f"changed requirement {rule['id']}").inner_text(),
             "decision": await feed_row(page, f"recorded decision {decided['id']}").inner_text(),
         }
@@ -167,10 +169,10 @@ async def activity(client: Client, page_url: str) -> None:
     second_agent = f"agent2-{word}"
     other = await made(client, "story", f"Other {word}", epic)
     wide = await make_decision(
-        client, f"Use email {word}", actor=second_agent, node_ids=[story], project_wide=True
+        client, f"Use email {word}", actor=second_agent, nodes=[story], project_wide=True
     )
     fact = await make_fact(
-        client, f"People log in on phones {word}", actor=second_agent, node_ids=[story]
+        client, f"People log in on phones {word}", actor=second_agent, nodes=[story]
     )
     await confirm(client, "decision", wide, person, actor=second_agent)
     await confirm(client, "fact", fact, person, actor=second_agent)
@@ -184,7 +186,7 @@ async def activity(client: Client, page_url: str) -> None:
         decided_by="Marie", said_by=person, quote="Let us have both.",
     )  # fmt: skip
     extra = await make_fact(client, f"Codes arrive quickly {word}", actor=second_agent)
-    await ok(client, "link_fact", actor=second_agent, fact_id=extra["id"], node_ids=[other])
+    await ok(client, "link_fact", actor=second_agent, fact_id=extra["id"], nodes=[other])
     await ok(
         client, "withdraw_fact", actor=second_agent, fact_ids=[extra["id"]],
         reason="It was a guess", said_by=person, quote="No, we never measured it.",
@@ -246,27 +248,29 @@ async def claims(client: Client, page_url: str) -> None:
     mine, short, theirs = [
         await made(client, "task", f"{n} {word}", story) for n in ("Mine", "Short", "Theirs")
     ]
-    await ok(client, "claim_node", actor=f"agent-{word}", node_id=theirs, lease_seconds=900)
+    await ok(client, "claim_node", actor=f"agent-{word}", node=theirs, lease_seconds=900)
     async with browser_page(page_url, token=the_token(), name=name) as w:
         page = w.page
         await w.open("#/board?drawer=activity")
         await expect(page.locator("#acting-as")).to_contain_text(f"act as {name}", timeout=SLOW)
         await page.locator("#lease").fill("60")
-        await page.locator("#claim-id").fill(f"#{mine}")
+        await page.locator("#claim-id").fill(code_of(mine))
         await page.locator("#claim-by-id-go").click()
         held = page.locator(f"#claims-live li.claim[data-node='{mine}']")
         await expect(held).to_contain_text(f"held by {name}", timeout=NEWS)
-        claimed_by = (await ok(client, "get_node", node_id=mine))["claimed_by"]
-        before = (await ok(client, "get_node", node_id=mine))["claim_expires_at"]
+        claimed_by = (await ok(client, "get_node", node=mine))["claimed_by"]
+        before = (await ok(client, "get_node", node=mine))["claim_expires_at"]
         await held.locator("button.renew").click()
-        await expect(feed_row(page, f"{name} kept task #{mine}")).to_be_visible(timeout=NEWS)
-        after = (await ok(client, "get_node", node_id=mine))["claim_expires_at"]
+        await expect(feed_row(page, f"{name} kept task {code_of(mine)}")).to_be_visible(
+            timeout=NEWS
+        )
+        after = (await ok(client, "get_node", node=mine))["claim_expires_at"]
         await held.locator("button.release").click()
         dialog = page.locator("dialog.modal")
         await dialog.locator("#release-note").fill(f"Stopped here for {word}.")
         await dialog.get_by_role("button", name="Release it").click()
         await expect(dialog).to_have_count(0, timeout=SLOW)
-        released = await ok(client, "get_node", node_id=mine)
+        released = await ok(client, "get_node", node=mine)
         # Somebody else's claim cannot be released by this name: the dialog says what the server
         # says.
         theirs_row = page.locator(f"#claims-live li.claim[data-node='{theirs}']")
@@ -278,7 +282,7 @@ async def claims(client: Client, page_url: str) -> None:
         problem = dialog.locator("form > .problem")
         await expect(problem).not_to_have_text("", timeout=SLOW)
         refusal_words = await problem.inner_text()
-        said = await refused(client, "release_claim", actor=name, node_id=theirs, note="Not mine.")
+        said = await refused(client, "release_claim", actor=name, node=theirs, note="Not mine.")
         await dialog.get_by_role("button", name="Cancel").click()
         proof(
             "M14",
@@ -291,11 +295,12 @@ async def claims(client: Client, page_url: str) -> None:
             and released["last_handoff"]["actor"] == name
             and released["last_handoff"]["note"] == f"Stopped here for {word}."
             and same_words(refusal_words, said)
-            and (await ok(client, "get_node", node_id=theirs))["claimed_by"] == f"agent-{word}",
-            f"#{mine} as {name}",
+            and (await ok(client, "get_node", node=theirs))["claimed_by"] == f"agent-{word}",
+            f"{code_of(mine)} as {name}",
         )
         await page.locator("#lease").fill("3")
-        await page.locator("#claim-id").fill(str(short))
+        # The words a person writes for the kind and the number work as well as the code.
+        await page.locator("#claim-id").fill(f"task {number_of(short)}")
         await page.locator("#claim-by-id-go").click()
         live = page.locator(f"#claims-live li.claim[data-node='{short}']")
         await expect(live).to_be_visible(timeout=NEWS)
@@ -304,7 +309,7 @@ async def claims(client: Client, page_url: str) -> None:
         state = await page.locator(f"#agents li.agent[data-actor='{name}']").get_attribute(
             "data-state"
         )
-        node = await ok(client, "get_node", node_id=short)
+        node = await ok(client, "get_node", node=short)
         who = {a["actor"]: a for a in (await ok(client, "who_is_working"))["agents"]}
         proof(
             "M14",
@@ -314,7 +319,7 @@ async def claims(client: Client, page_url: str) -> None:
             and node["claimed_by"] is None
             and node["lapsed_claim_by"] == name
             and who[name]["state"] == "lapsed",
-            f"#{short}",
+            f"{code_of(short)}",
         )
         assert w.problems == []
 
@@ -324,15 +329,15 @@ async def filters(client: Client, page_url: str) -> None:
     ann, bob = f"ann-{word}", f"bob-{word}"
     epic = await ok(client, "create_node", actor=ann, kind="epic", title=f"Epic {word}")
     one = await ok(
-        client, "create_node", actor=ann, kind="story", title=f"One {word}", parent_id=epic["id"]
+        client, "create_node", actor=ann, kind="story", title=f"One {word}", parent=epic["ref"]
     )
     two = await ok(
-        client, "create_node", actor=bob, kind="story", title=f"Two {word}", parent_id=epic["id"]
+        client, "create_node", actor=bob, kind="story", title=f"Two {word}", parent=epic["ref"]
     )
-    rule = await ok(client, "create_rule", actor=ann, title=f"Rule {word}", story_id=one["id"])
+    rule = await ok(client, "create_rule", actor=ann, title=f"Rule {word}", story=one["ref"])
     await ok(
         client, "move_rule", actor=ann, rule_id=rule["id"], expected_version=1,
-        new_story_id=two["id"],
+        new_story=two["ref"],
     )  # fmt: skip
     async with browser_page(page_url, token=the_token(), name=ADA) as w:
         page = w.page
@@ -341,14 +346,16 @@ async def filters(client: Client, page_url: str) -> None:
         for choices, wanted in (
             (f"act_actor={ann}", await events_of(client, actor=ann)),
             (f"act_item=rule:{rule['id']}", await events_of(client, rule_id=rule["id"])),
-            (f"act_item=%23{one['id']}", await events_of(client, node_id=one["id"])),
+            (f"act_item={code_of(one['ref'])}", await events_of(client, node=one["ref"])),
+            (f"act_item={one['ref']}", await events_of(client, node=one["ref"])),
         ):
             await w.go(f"#/board?drawer=activity&{choices}")
             ids = [e["id"] for e in reversed(wanted)]
             held.append(await feed_becomes(page, ids) == ids)
         await w.go(f"#/board?drawer=activity&act_actor={ann}&act_kind=requirements")
         await expect(feed_row(page, f"{ann} moved requirement {rule['id']}")).to_contain_text(
-            f"from story #{one['id']} “One {word}” to story #{two['id']} “Two {word}”",
+            f"from story {code_of(one['ref'])} “One {word}” "
+            f"to story {code_of(two['ref'])} “Two {word}”",
             timeout=SLOW,
         )
         rules_only = [
@@ -442,9 +449,10 @@ async def tools(client: Client, page_url: str) -> None:
         )
         word = unique_word()
         epic = await made(client, "epic", f"Tried {word}")
-        shown = await try_it(page, "list_nodes", kind="epic", limit="3", query=f"epic:{epic}")
-        mcp = await ok(client, "list_nodes", kind="epic", limit=3, query=f"epic:{epic}")
-        recalled = await try_it(page, "recall", node_id=str(epic))
+        epic_n = number_of(epic)
+        shown = await try_it(page, "list_nodes", kind="epic", limit="3", query=f"epic:{epic_n}")
+        mcp = await ok(client, "list_nodes", kind="epic", limit=3, query=f"epic:{epic_n}")
+        recalled = await try_it(page, "recall", node=epic)
         refusal = await try_it(page, "get_fact", fact_id="999999999")
         said = await refused(client, "get_fact", fact_id=999999999)
         changing = page.locator("#tool-list article.tool[data-changes='1']")
@@ -460,7 +468,7 @@ async def tools(client: Client, page_url: str) -> None:
             "refusal; no tool that changes anything has a Try it, and the server turns a try of "
             "one away",
             shown == mcp
-            and recalled == await ok(client, "recall", node_id=epic)
+            and recalled == await ok(client, "recall", node=epic)
             and same_words(refusal["refused"], said)
             and await changing.count() > 20
             and await changing.locator("details.try").count() == 0
@@ -600,11 +608,11 @@ async def status(client: Client, page_url: str) -> None:
 # -- M16 proof 6: from the keyboard, an address reopens the state, a draft is kept ------------
 
 
-async def claims_on_page(page: Page, section: str) -> set[tuple[int, str]]:
+async def claims_on_page(page: Page, section: str) -> set[tuple[str, str]]:
     rows: list[list[str]] = await page.locator(f"#{section} li.claim").evaluate_all(
         "els => els.map(e => [e.dataset.node, e.dataset.actor])"
     )
-    return {(int(node), who) for node, who in rows}
+    return {(node, who) for node, who in rows}
 
 
 async def keyboard_and_addresses(client: Client, page_url: str) -> None:
@@ -617,12 +625,12 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         for name in ("Held", "Finished", "Loose")
     ]
     note = f"Done for {word}.\nNothing is left."
-    await ok(client, "claim_node", actor=agent, node_id=held, lease_seconds=600)
-    await ok(client, "claim_node", actor=finisher, node_id=finished)
-    await ok(client, "finish_work", actor=finisher, node_id=finished, outcome="done", note=note)
-    await ok(client, "claim_node", actor=ann, node_id=loose, lease_seconds=900)
-    decision = await make_decision(client, f"Decided {word}", node_ids=[story])
-    fact = await make_fact(client, f"Known {word}", node_ids=[story])
+    await ok(client, "claim_node", actor=agent, node=held, lease_seconds=600)
+    await ok(client, "claim_node", actor=finisher, node=finished)
+    await ok(client, "finish_work", actor=finisher, node=finished, outcome="done", note=note)
+    await ok(client, "claim_node", actor=ann, node=loose, lease_seconds=900)
+    decision = await make_decision(client, f"Decided {word}", nodes=[story])
+    fact = await make_fact(client, f"Known {word}", nodes=[story])
     await reindexed(client)
     async with browser_page(page_url, token=the_token()) as w:
         page = w.page
@@ -642,7 +650,7 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         handoff = page.locator("#feed li.event[data-action=handoff]", has_text=finisher)
         note_in_full = spoken(await handoff.locator(".handoff-note").inner_text()) == spoken(note)
         who = (await ok(client, "who_is_working"))["agents"]
-        live = {(m["node_id"], a["actor"]) for a in who for m in a["holding"]}
+        live = {(m["node"], a["actor"]) for a in who for m in a["holding"]}
         claims_equal = {(held, agent), (loose, ann)} <= live and await claims_on_page(
             page, "claims-live"
         ) == live
@@ -687,6 +695,7 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
     # the same state, search and records included.
     wanted_facts = await asked(client, word, "both", types=["fact"])
     key = f"fact:{fact['id']}"
+    scope = str(number_of(epic))
     async with browser_page(page_url, token=the_token()) as first:
         page = first.page
         await first.open("#/graph")
@@ -700,8 +709,8 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         await expect(page.locator("#graph-as-list")).to_have_attribute(
             "aria-pressed", "true", timeout=SLOW
         )
-        await page.locator("#graph-epic").select_option(str(epic))
-        await expect(page.locator("#graph-epic")).to_have_value(str(epic))
+        await page.locator("#graph-epic").select_option(scope)
+        await expect(page.locator("#graph-epic")).to_have_value(scope)
         await page.locator("#global-search").fill(word)
         await page.keyboard.press("Enter")
         await result_rows(page, 7)
@@ -716,7 +725,7 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         exact = name == "graph" and choices == {
             "view": "context",
             "as": "list",
-            "epic": str(epic),
+            "epic": scope,
             "drawer": "search",
             "search": word,
             "search_type": "fact",
@@ -740,7 +749,7 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         await expect(page.locator("#graph-as-list")).to_have_attribute(
             "aria-pressed", "true", timeout=SLOW
         )
-        await expect(page.locator("#graph-epic")).to_have_value(str(epic), timeout=SLOW)
+        await expect(page.locator("#graph-epic")).to_have_value(scope, timeout=SLOW)
         await expect(page.locator(f"#panel .record-detail[data-record='{key}']")).to_be_visible(
             timeout=SLOW
         )
@@ -754,31 +763,31 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         await expect(page.locator(f".dot[data-key='{key}']")).to_have_class(
             re.compile(r"\bchosen\b")
         )
-        scope_kept = await page.locator("#graph-epic").input_value() == str(epic)
+        scope_kept = await page.locator("#graph-epic").input_value() == scope
         assert second.problems == []
     # The Board and the Roadmap hold their scope, filter, selection and drawers in the address too.
     board_address = (
-        f"#/board?epic={epic}&q=kind:story&sel=node:{story}&drawer=activity&act_actor=agent-1"
+        f"#/board?epic={scope}&q=kind:story&sel={story}&drawer=activity&act_actor=agent-1"
         "&act_kind=decisions"
     )
     roadmap_address = (
-        f"#/roadmap?q=epic:{epic}&zoom=quarter&sel=decision:{decision['id']}&drawer=search"
-        f"&dups=1&dup_min=0.95&dup_epics={epic}"
+        f"#/roadmap?q=epic:{scope}&zoom=quarter&sel=decision:{decision['id']}&drawer=search"
+        f"&dups=1&dup_min=0.95&dup_epics={scope}"
     )
     async with browser_page(page_url, token=the_token()) as third:
         page = third.page
         await third.open(board_address)
-        await expect(page.locator("#epic-filter")).to_have_value(str(epic), timeout=SLOW)
-        cards: list[int] = await page.locator(".card").evaluate_all(
-            "els => els.map(e => Number(e.dataset.id))"
+        await expect(page.locator("#epic-filter")).to_have_value(scope, timeout=SLOW)
+        cards: list[str] = await page.locator(".card").evaluate_all(
+            "els => els.map(e => e.dataset.ref)"
         )
         board_state = (
-            cards == await ids_of(client, f"kind:story epic:{epic}")
+            cards == await ids_of(client, f"kind:story epic:{scope}")
             and await page.locator("#filter").input_value() == "kind:story"
             and await page.locator("#a-actor").input_value() == "agent-1"
             and await page.locator("#a-kind").input_value() == "decisions"
         )
-        await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ")
+        await expect(page.locator("#panel #card-title")).to_contain_text(f"{code_of(story)} ")
         await third.go(roadmap_address)
         await on_view(page, "roadmap")
         await expect(page.locator(".rm-track")).to_have_attribute(
@@ -790,8 +799,8 @@ async def keyboard_and_addresses(client: Client, page_url: str) -> None:
         await expect(page.locator("#search-tab-dups")).to_have_attribute("aria-pressed", "true")
         roadmap_state = (
             await page.locator("#dup-min").input_value() == "0.95"
-            and await page.locator("#dup-epics").input_value() == str(epic)
-            and await page.locator("#filter").input_value() == f"epic:{epic}"
+            and await page.locator("#dup-epics").input_value() == scope
+            and await page.locator("#filter").input_value() == f"epic:{scope}"
         )
         assert third.problems == []
     proof(
@@ -812,8 +821,10 @@ async def drafts(client: Client, page_url: str) -> None:
     draft, unasked = f"Typed in the panel and not saved {word}", f"typed in the search box {word}"
     async with browser_page(page_url, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/graph?sel=node:{story}")
-        await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ", timeout=SLOW)
+        await w.open(f"#/graph?sel={story}")
+        await expect(page.locator("#panel #card-title")).to_contain_text(
+            f"{code_of(story)} ", timeout=SLOW
+        )
         await page.locator("#edit-body").fill(draft)
         await page.evaluate("window.__body = document.querySelector('#edit-body')")
         steps = 0
@@ -852,18 +863,18 @@ async def drafts(client: Client, page_url: str) -> None:
             )
             await kept(button)
             assert await page.locator("#search-box").input_value() == unasked, button
-            assert (await address(page))[1]["sel"] == f"node:{story}"
+            assert (await address(page))[1]["sel"] == story
         for view in ("roadmap", "board", "graph"):
             await page.locator(f"#main-nav a[data-page={view}]").click()
             await on_view(page, view)
             await kept(f"the {view} view")
-            assert (await address(page))[1]["sel"] == f"node:{story}"
+            assert (await address(page))[1]["sel"] == story
         await page.locator("#drawer-close").click()
         await kept("closed drawer")
-        before = (await ok(client, "get_node", node_id=story))["body"]
+        before = (await ok(client, "get_node", node=story))["body"]
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text(draft, timeout=SLOW)
-        saved = (await ok(client, "get_node", node_id=story))["body"]
+        saved = (await ok(client, "get_node", node=story))["body"]
         assert w.problems == []
     proof(
         "M16",
@@ -891,7 +902,7 @@ async def connection_failure(client: Client, page_url: str) -> None:
         page = w.page
         note, chip = page.locator("#connection-note"), page.locator("#connection")
         await w.open("#/board")
-        await expect(page.locator(f".lane[data-epic='{epic}']")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(f".lane[data-ref='{epic}']")).to_be_visible(timeout=SLOW)
         quiet = await note.is_hidden() and await chip.is_hidden()
         await page.route(changes, unreachable)
         await expect(note).to_be_visible(timeout=wait)
@@ -899,7 +910,7 @@ async def connection_failure(client: Client, page_url: str) -> None:
         await expect(chip).to_have_text("Cannot reach the server: trying again")
         above, main = await note.bounding_box(), await page.locator("#page").bounding_box()
         in_view = bool(above and main and above["y"] + above["height"] <= main["y"] + 1)
-        lane_kept = await page.locator(f".lane[data-epic='{epic}']").is_visible()
+        lane_kept = await page.locator(f".lane[data-ref='{epic}']").is_visible()
         stays = []
         for view, marker in (("graph", "#graph-page"), ("roadmap", ".rm-track")):
             await page.locator(f"#main-nav a[data-page={view}]").click()

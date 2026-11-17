@@ -47,6 +47,55 @@ export const LINK = {
 
 // The icon of a kind of thing, a status or a priority, 16 pixels unless told otherwise.
 export const kindIcon = (kind, size = 16) => icon((KIND[kind] || {}).icon || 'info', { size });
+
+// An epic, story or task is named by its kind and its number within that kind: epic:3, story:12,
+// task:40 (the `ref` the server sends). A person sees it as E-3, S-12 or T-40. Requirements,
+// decisions and facts keep their own numbers and are written "#7" beside their kind.
+const LETTER = { epic: 'E', story: 'S', task: 'T' };
+export const nodeCode = (kind, number) => `${LETTER[kind]}-${number}`;
+export const nodeRef = (kind, number) => `${kind}:${number}`;
+export function parseNodeRef(ref) {
+  const found = /^(epic|story|task):([1-9][0-9]{0,17})$/.exec(String(ref));
+  return found ? { kind: found[1], number: Number(found[2]) } : null;
+}
+// The code a person reads for a reference ("S-12"), or the text itself when it is not one.
+export function codeOf(ref) {
+  const parsed = parseNodeRef(ref);
+  return parsed ? nodeCode(parsed.kind, parsed.number) : String(ref);
+}
+// Where a reference sorts: epics, then stories, then tasks, each by number.
+export const KIND_ORDER = { epic: 0, story: 1, task: 2 };
+export function byRef(a, b) {
+  const x = parseNodeRef(a);
+  const y = parseNodeRef(b);
+  return KIND_ORDER[x.kind] - KIND_ORDER[y.kind] || x.number - y.number;
+}
+export const NODE_KINDS = ['epic', 'story', 'task'];
+export const isNodeKind = (kind) => NODE_KINDS.includes(kind);
+// What a person reads for any of the six kinds: S-12 for an epic, story or task, #7 for the rest.
+export const itemCode = (kind, number) => (isNodeKind(kind) ? nodeCode(kind, number) : `#${number}`);
+// An epic, story or task in a sentence, in words: "story 12".
+export function nodeWords(ref) {
+  const parsed = parseNodeRef(ref);
+  return parsed ? `${KIND[parsed.kind].label.toLowerCase()} ${parsed.number}` : String(ref);
+}
+// An element id made from a reference: story:12 becomes story-12.
+export const refSlug = (ref) => String(ref).replace(':', '-');
+// Any of the six kinds as the address and the text name it (story:12, rule:3): { kind, number, id, ref }
+// (`id` is the number again, for the kinds that are still called by an id), or null.
+export function parseItemRef(text) {
+  const found = /^(epic|story|task|rule|decision|fact):([1-9][0-9]{0,17})$/.exec(String(text ?? ''));
+  return found ? { kind: found[1], number: Number(found[2]), id: Number(found[2]), ref: found[0] } : null;
+}
+const NODE_LETTERS = { e: 'epic', s: 'story', t: 'task' };
+// What a person types for an epic, story or task: S-12, s12, story 12, story:12 (a title may follow,
+// as in the pick-lists). Returns its reference, or null.
+export function readNodeRef(text) {
+  const found = /^(epic|story|task|e|s|t)\s*[:#-]?\s*0*([1-9][0-9]{0,17})(?=\s|$)/i.exec(String(text ?? '').trim());
+  if (!found) return null;
+  const word = found[1].toLowerCase();
+  return nodeRef(NODE_LETTERS[word] || word, found[2]);
+}
 export const statusIcon = (status, size = 16) => icon((STATUS[status] || {}).icon || 'info', { size });
 export const priorityIcon = (priority, size = 16) => icon((PRIORITY[priority] || {}).icon || 'normal', { size });
 

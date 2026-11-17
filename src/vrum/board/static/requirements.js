@@ -8,7 +8,7 @@ import { Refusal, call } from './api.js';
 import { actor, hrefTo, notify, ui } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { kindIcon } from './labels.js';
+import { codeOf, kindIcon, nodeWords, parseNodeRef } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { mentionedInDetails } from './references.js';
 import { requirementDialog, openRecord, placeRequirementDialog, requirementKindChip, ruleStatusChip } from './records.js';
@@ -27,16 +27,18 @@ const PLACEMENT_FILTER = [
   ['unplaced', 'In no story'],
 ];
 
-const byId = (a, b) => a.id - b.id;
+// Stories in the order of their numbers.
+const numberOf = (ref) => parseNodeRef(ref)?.number ?? 0;
+const byStory = (a, b) => numberOf(a.ref) - numberOf(b.ref);
 
 // How the requirements stand against the stories: what the coverage report says, worked out from
 // the board's copy so that it is always the same as the lists.
 function coverage() {
   const live = (store.rules || []).filter((rule) => rule.status !== 'dropped');
-  const covered = new Set(live.filter((rule) => rule.story_id !== null).map((rule) => rule.story_id));
+  const covered = new Set(live.filter((rule) => rule.story !== null).map((rule) => rule.story));
   return {
-    unplaced: live.filter((rule) => rule.story_id === null).length,
-    stories: [...store.nodes.values()].filter((node) => node.kind === 'story' && node.status !== 'dropped' && !covered.has(node.id)).sort(byId),
+    unplaced: live.filter((rule) => rule.story === null).length,
+    stories: [...store.nodes.values()].filter((node) => node.kind === 'story' && node.status !== 'dropped' && !covered.has(node.ref)).sort(byStory),
   };
 }
 
@@ -81,7 +83,7 @@ export function createRequirements() {
         class: `gv-record ctx-row requirement status-${rule.status}${chosen ? ' selected' : ''}`,
         draggable: 'true',
         'aria-current': chosen ? 'true' : null,
-        dataset: { key: dot.key, kind: 'rule', type: 'rule', id: rule.id, status: rule.status, story: rule.story_id ?? '' },
+        dataset: { key: dot.key, kind: 'rule', type: 'rule', id: rule.id, status: rule.status, story: rule.story ?? '' },
         onclick: (event) => {
           if (!event.target.closest('button, a, summary, details, select, input')) openRecord('rule', rule.id);
         },
@@ -103,7 +105,7 @@ export function createRequirements() {
         'div',
         { class: 'row-actions' },
         h('button', { type: 'button', class: 'edit-requirement small', onclick: () => requirementDialog({ rule }) }, 'Edit'),
-        h('button', { type: 'button', class: 'put-requirement small', onclick: () => placeRequirementDialog(rule) }, rule.story_id === null ? 'Put in a story…' : 'Move to another story…'),
+        h('button', { type: 'button', class: 'put-requirement small', onclick: () => placeRequirementDialog(rule) }, rule.story === null ? 'Put in a story…' : 'Move to another story…'),
       ),
       mentionedInDetails('rule', rule.id),
       connectionsDetails(dot, ctx),
@@ -113,7 +115,7 @@ export function createRequirements() {
   function keeps(rule) {
     if (state.status === 'live' && rule.status === 'dropped') return false;
     if (!['live', 'all'].includes(state.status) && rule.status !== state.status) return false;
-    if (state.placement === 'unplaced' && rule.story_id !== null) return false;
+    if (state.placement === 'unplaced' && rule.story !== null) return false;
     return matchesText(state.text, rule.id, rule.title, rule.body ?? rule.body_preview, rule.status);
   }
 
@@ -139,14 +141,14 @@ export function createRequirements() {
     summary.dataset.unplaced = String(cover.unplaced);
     summary.dataset.storiesWithout = String(cover.stories.length);
 
-    const loose = kept.filter((dot) => dot.record.story_id === null).sort((a, b) => b.id - a.id); // the newest on top
+    const loose = kept.filter((dot) => dot.record.story === null).sort((a, b) => b.record.id - a.record.id); // the newest on top
     const inStory = new Map();
-    for (const dot of kept.filter((item) => item.record.story_id !== null).sort((a, b) => a.id - b.id)) {
-      if (!inStory.has(dot.record.story_id)) inStory.set(dot.record.story_id, []);
-      inStory.get(dot.record.story_id).push(dot);
+    for (const dot of kept.filter((item) => item.record.story !== null).sort((a, b) => a.record.id - b.record.id)) {
+      if (!inStory.has(dot.record.story)) inStory.set(dot.record.story, []);
+      inStory.get(dot.record.story).push(dot);
     }
-    const order = (id) => [epicOf(store.nodes.get(id) || { parent_id: null })?.id ?? 0, id];
-    const stories = [...inStory.keys()].sort((a, b) => order(a)[0] - order(b)[0] || a - b);
+    const order = (ref) => [store.nodes.has(ref) ? epicOf(store.nodes.get(ref))?.number ?? 0 : 0, numberOf(ref)];
+    const stories = [...inStory.keys()].sort((a, b) => order(a)[0] - order(b)[0] || order(a)[1] - order(b)[1]);
 
     unplaced.replaceChildren(
       ...(inScope.length || cover.unplaced
@@ -162,21 +164,22 @@ export function createRequirements() {
     );
     put(
       groups,
-      stories.map((id) => {
-        const story = store.nodes.get(id);
+      stories.map((ref) => {
+        const story = store.nodes.get(ref);
         const epic = story ? epicOf(story) : null;
+        const { number } = parseNodeRef(ref);
         return h(
           'section',
-          { class: 'gv-group', dataset: { group: id } },
+          { class: 'gv-group', dataset: { group: ref } },
           h(
             'h3',
-            { class: 'gv-group-head', dataset: { dropStory: id } },
+            { class: 'gv-group-head', dataset: { dropStory: ref } },
             kindIcon('story', 16),
-            h('button', { type: 'button', class: 'link', onclick: () => openRecord('node', id) }, story ? `#${id} ${story.title}` : `Story #${id}`),
-            epic && epic.id !== id ? h('span', { class: 'quiet' }, `in epic #${epic.id} ${epic.title}`) : null,
-            h('span', { class: 'quiet' }, `(${plural(inStory.get(id).length, 'requirement')})`),
+            h('button', { type: 'button', class: 'link', onclick: () => openRecord('story', number) }, story ? `${codeOf(ref)} ${story.title}` : `Story ${codeOf(ref)}`),
+            epic ? h('span', { class: 'quiet' }, `in epic ${codeOf(epic.ref)} ${epic.title}`) : null,
+            h('span', { class: 'quiet' }, `(${plural(inStory.get(ref).length, 'requirement')})`),
           ),
-          h('ul', { class: 'plain ctx-rows' }, inStory.get(id).map((dot) => row(dot, ctx))),
+          h('ul', { class: 'plain ctx-rows' }, inStory.get(ref).map((dot) => row(dot, ctx))),
         );
       }),
       !stories.length && !loose.length ? h('p', { class: `${inScope.length ? 'quiet' : 'empty'} ctx-none` }, inScope.length ? 'No requirement matches the filters.' : 'There are no requirements here yet. Write one with New requirement.') : null,
@@ -193,10 +196,10 @@ export function createRequirements() {
             cover.stories.slice(0, 100).map((story) =>
               h(
                 'li',
-                { class: 'gv-bare-story', dataset: { story: story.id, dropStory: story.id } },
+                { class: 'gv-bare-story', dataset: { story: story.ref, dropStory: story.ref } },
                 kindIcon('story', 14),
-                h('button', { type: 'button', class: 'link', onclick: () => openRecord('node', story.id) }, `#${story.id} ${story.title}`),
-                h('button', { type: 'button', class: 'add-requirement small', onclick: () => requirementDialog({ story: story.id }) }, icon('plus', { size: 14 }), 'Add a requirement'),
+                h('button', { type: 'button', class: 'link', onclick: () => openRecord('story', story.number) }, `${codeOf(story.ref)} ${story.title}`),
+                h('button', { type: 'button', class: 'add-requirement small', onclick: () => requirementDialog({ story: story.ref }) }, icon('plus', { size: 14 }), 'Add a requirement'),
               ),
             ),
           )
@@ -237,7 +240,7 @@ export function createRequirements() {
     target.classList.remove('over');
     const rule = (store.rules || []).find((item) => item.id === dragging);
     dragging = null;
-    if (rule) await dropIn(rule, Number(target.dataset.dropStory));
+    if (rule) await dropIn(rule, target.dataset.dropStory);
   };
   document.addEventListener('dragover', over);
   document.addEventListener('dragleave', leave);
@@ -259,18 +262,18 @@ export function createRequirements() {
 // -- placing by dragging ----------------------------------------------------------------------------
 
 // A requirement in no story is placed; one that is in a story is moved, in one step. The same two
-// operations the dialog (placeRequirementDialog) and an agent use.
+// operations the dialog (placeRequirementDialog) and an agent use. `story` is the story's reference.
 async function dropIn(rule, story) {
-  if (rule.story_id === story) return;
-  const placing = rule.story_id === null;
+  if (rule.story === story) return;
+  const placing = rule.story === null;
   try {
     await call(placing ? 'place_rule' : 'move_rule', {
       actor: actor(),
       rule_id: rule.id,
       expected_version: rule.version,
-      ...(placing ? { story_id: story } : { new_story_id: story }),
+      ...(placing ? { story } : { new_story: story }),
     });
-    notify(`${placing ? 'Put' : 'Moved'} requirement #${rule.id} ${placing ? 'in' : 'to'} story #${story}.`);
+    notify(`${placing ? 'Put' : 'Moved'} requirement #${rule.id} ${placing ? 'in' : 'to'} ${nodeWords(story)}.`);
     await sync();
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;

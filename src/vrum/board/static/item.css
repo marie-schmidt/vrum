@@ -1,0 +1,83 @@
+/* The page of one epic, story or task: its details, and a table of what is under it. Colours,
+   sizes and spacing are the tokens (tokens.css), the shared controls are base.css, and the table
+   box is the shell's (board.css: .table-scroll). Everything here is scoped to the page. */
+
+.item-page { display: grid; gap: var(--space-5); min-width: 0; }
+.item-page > * { min-width: 0; }
+.item-head { margin-bottom: 0; }
+.item-head .page-sub { overflow-wrap: anywhere; }
+.item-head h1:focus { outline: none; }
+.item-code { font-family: var(--font-mono); font-size: 0.8em; font-weight: 600; letter-spacing: 0.02em; color: var(--text-2); white-space: nowrap; }
+.item-head h1 .item-code { font-size: 0.62em; margin-right: var(--space-1); vertical-align: 0.12em; }
+.item-head .page-sub a { color: var(--text); text-decoration-color: var(--border-strong); }
+.item-head .page-sub a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+
+/* The details are the card's, which lays itself out for a page (with no heading: the page's own is
+   above); this is only the sheet they sit on. */
+.item-details { padding: var(--space-5); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); overflow-wrap: anywhere; }
+.item-details > .notice { margin: 0 0 var(--space-4); box-shadow: none; }
+.item-details > .notice > span { flex: 1 1 12rem; min-width: 0; }
+
+/* What is under it. */
+.item-children-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
+.item-children-head h2 { font-size: var(--text-lg); overflow-wrap: anywhere; }
+.item-count { color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.item-add { margin-left: auto; }
+
+/* Relative, so that the visually hidden words inside the table (its caption, the Quick look header)
+   are placed inside the box that scrolls and not out in the page, where they would widen it. */
+.item-region { position: relative; }
+.item-region:focus-visible { outline-offset: 0; }
+.item-table { min-width: 52rem; }
+.item-table th, .item-table td { vertical-align: middle; }
+.item-table thead th { padding: 0; white-space: nowrap; border-bottom: var(--border-w) solid var(--border-strong); background: var(--surface-2); }
+.item-table thead th.col-look { width: 3.5rem; }
+.item-table button.sort {
+  width: 100%; justify-content: flex-start; min-height: var(--control-h); padding: 0 var(--space-3);
+  border: 0; border-radius: 0; background: transparent; color: var(--text-2);
+  font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.item-table button.sort:hover { background: var(--surface-3); color: var(--text); }
+.item-table button.sort:focus-visible, .item-table .quick-look:focus-visible { outline-offset: -2px; }
+.item-table th[aria-sort] button.sort { color: var(--text); }
+.item-table .sort-mark { transition: transform var(--ease); }
+.item-table th[aria-sort="ascending"] .sort-mark { transform: rotate(180deg); }
+
+.item-table tbody th { font-size: inherit; font-weight: inherit; letter-spacing: 0; text-transform: none; color: var(--text); white-space: nowrap; }
+.item-table tbody tr:hover > * { background: var(--surface-2); }
+.item-table tbody tr.selected > * { background: var(--accent-soft); }
+.item-table tbody tr.selected > :first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.item-table a { color: var(--text); text-decoration-color: var(--border-strong); }
+.item-table a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.item-table a:focus-visible { outline-offset: 1px; }
+.item-code-link { display: inline-flex; align-items: center; gap: var(--space-1); }
+.item-code-link .item-code { color: inherit; font-size: var(--text-sm); }
+.item-table .cell-title { min-width: 12rem; overflow-wrap: anywhere; }
+.item-table .cell-status, .item-table .cell-priority, .item-table .cell-held, .item-table .cell-waiting { white-space: nowrap; }
+.item-due { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.item-date { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.item-progress { display: grid; gap: var(--space-1); min-width: 5.5rem; white-space: nowrap; }
+.item-progress .meter { width: 100%; }
+.item-progress-text { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+
+/* Nothing under it yet. */
+.item-empty { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); }
+.item-empty p { margin: 0; }
+
+/* A task is part of a story. */
+.item-part h2 { font-size: var(--text-lg); overflow-wrap: anywhere; }
+.item-part h2 a { color: var(--text); text-decoration-color: var(--border-strong); }
+.item-part h2 a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.item-part-note { margin: var(--space-1) 0 0; }
+.item-part-note a { color: var(--text); text-decoration-color: var(--border-strong); }
+
+/* The address names nothing, or the item is gone: the same plain message as the panel, with the way
+   back as a link, so the panel's own close button is left out. */
+.item-state { max-width: 40rem; }
+.item-state .detail-state > .detail-head { display: none; }
+
+@media (max-width: 699.98px) {
+  .item-page { gap: var(--space-4); }
+  .item-details { padding: var(--space-4); border-radius: var(--radius-md); }
+  .item-table button.quick-look { width: 2.75rem; min-height: 2.75rem; }
+}

@@ -17,23 +17,27 @@ from vrum.common import (
     record_event,
     save_changes,
     snapshot,
+    split_node_ref,
     split_page,
     stale_version,
 )
 from vrum.db import Database
 from vrum.graph import (
+    AFTER_NODE,
     BODY_PREVIEW_CHARS,
     EVENT_COLUMNS,
+    NODE_ORDER,
     Event,
     EventPage,
     Node,
+    after_position,
     bodies_left_out,
     list_columns,
 )
 
 RULE_STATUSES = ("held", "settled", "dropped")
 _RULE_COLUMNS = (
-    "id, story_id, title, body, length(body) AS body_chars, status, version, created_at, updated_at"
+    "id, story, title, body, length(body) AS body_chars, status, version, created_at, updated_at"
 )
 
 
@@ -50,14 +54,15 @@ def _rule_list_columns(detail: bool) -> str:
 COVERAGE_LISTS = ("both", "unplaced_rules", "stories_without_rules")
 _STORY_WITHOUT_RULES = (
     "kind = 'story' AND status <> 'dropped' AND NOT EXISTS ("
-    "SELECT 1 FROM rules WHERE rules.story_id = node_state.id AND rules.status <> 'dropped')"
+    "SELECT 1 FROM rules WHERE rules.story = node_state.ref AND rules.status <> 'dropped')"
 )
 
 
 class Rule(BaseModel):
     id: int = Field(description="The rule's id. Rules have their own ids, separate from nodes.")
-    story_id: int | None = Field(
-        description="The one story that owns this rule. Empty while the rule is unplaced."
+    story: str | None = Field(
+        description="The reference of the one story that owns this rule, such as story:12. Empty "
+        "while the rule is unplaced."
     )
     title: str = Field(description="The rule, stated briefly.")
     body: str | None = Field(
@@ -102,9 +107,10 @@ class CoverageReport(BaseModel):
         description="How many stories have no rule that is held or settled. Dropped stories are "
         "not counted."
     )
-    stories_without_rules: list[Node] = Field(description="One page of them, oldest first.")
-    next_stories_after_id: int | None = Field(
-        description="Pass this as stories_after_id for the next page of stories."
+    stories_without_rules: list[Node] = Field(description="One page of them, by story number.")
+    next_stories_after: str | None = Field(
+        description="Pass this as stories_after for the next page of stories: the reference of "
+        "the last story of this page."
     )
     left_out: str | None = Field(
         description="Says what the lists left out: bodies, unless you asked for detail. Empty "
@@ -127,17 +133,17 @@ async def require_rule(
     return row
 
 
-async def _require_story(conn: AsyncConnection, story_id: int) -> None:
-    node = await fetch_one(conn, "SELECT kind FROM nodes WHERE id = %s", (story_id,))
-    if node is None:
+async def _require_story(conn: AsyncConnection, story: str) -> None:
+    kind, number = split_node_ref(story)
+    if kind != "story":
         raise Refusal(
-            f"There is no node with id {story_id}, so a rule cannot be placed there. "
+            f"A rule belongs to a story, but {story} is {'an' if kind == 'epic' else 'a'} {kind}. "
             "Use list_nodes with kind=story to find the story you want."
         )
-    if node["kind"] != "story":
-        article = "an" if node["kind"] == "epic" else "a"
+    found = await fetch_one(conn, "SELECT 1 FROM nodes WHERE ref = %s", (story,))
+    if found is None:
         raise Refusal(
-            f"A rule belongs to a story, but node {story_id} is {article} {node['kind']}. "
+            f"There is no story {number} in this project, so a rule cannot be placed there. "
             "Use list_nodes with kind=story to find the story you want."
         )
 
@@ -149,9 +155,9 @@ def _clean_title(title: str) -> str:
     return cleaned
 
 
-def _event_nodes(story_id: int | None, left: int | None = None) -> dict[str, Any]:
+def _event_nodes(story: str | None, left: str | None = None) -> dict[str, Any]:
     """The stories an event shows in the history of: the one the rule is in, and the one it left."""
-    return {"node_id": story_id, "other_node_id": left if left != story_id else None}
+    return {"node": story, "other_node": left if left != story else None}
 
 
 async def insert_rule(
@@ -161,14 +167,14 @@ async def insert_rule(
     title: str,
     body: str,
     status: str,
-    story_id: int | None,
+    story: str | None,
 ) -> dict[str, Any]:
     """Insert a rule that has been checked, and record it. Returns the stored row."""
     row = await fetch_one(
         conn,
-        "INSERT INTO rules (story_id, title, body, status) VALUES (%s, %s, %s, %s) "
+        "INSERT INTO rules (story, title, body, status) VALUES (%s, %s, %s, %s) "
         f"RETURNING {_RULE_COLUMNS}",
-        (story_id, title, body, status),
+        (story, title, body, status),
     )
     assert row is not None
     await record_event(
@@ -177,8 +183,8 @@ async def insert_rule(
         action="rule_created",
         actor=actor,
         before=None,
-        after=snapshot(row, ("story_id", "title", "body", "status", "version")),
-        **_event_nodes(story_id),
+        after=snapshot(row, ("story", "title", "body", "status", "version")),
+        **_event_nodes(story),
     )
     return row
 
@@ -188,16 +194,16 @@ class Rules:
         self._database = database
 
     async def create_rule(
-        self, *, actor: str, title: str, body: str, status: str, story_id: int | None
+        self, *, actor: str, title: str, body: str, status: str, story: str | None
     ) -> Rule:
         actor = clean_actor(actor)
         title = _clean_title(title)
         check_choice("status", status, RULE_STATUSES)
         async with self._database.transaction() as conn:
-            if story_id is not None:
-                await _require_story(conn, story_id)
+            if story is not None:
+                await _require_story(conn, story)
             row = await insert_rule(
-                conn, actor=actor, title=title, body=body, status=status, story_id=story_id
+                conn, actor=actor, title=title, body=body, status=status, story=story
             )
         return Rule.model_validate(row)
 
@@ -208,7 +214,7 @@ class Rules:
     async def list_rules(
         self,
         *,
-        story_id: int | None,
+        story: str | None,
         unplaced: bool,
         status: str | None,
         detail: bool,
@@ -218,19 +224,19 @@ class Rules:
         limit = page_size(limit)
         if status is not None:
             check_choice("status", status, RULE_STATUSES)
-        if unplaced and story_id is not None:
+        if unplaced and story is not None:
             raise Refusal(
-                "Give story_id or unplaced, not both: a rule that is in a story is not unplaced."
+                "Give story or unplaced, not both: a rule that is in a story is not unplaced."
             )
         where = (
-            "(%(story)s::bigint IS NULL OR story_id = %(story)s) "
-            "AND (NOT %(unplaced)s OR story_id IS NULL) "
+            "(%(story)s::text IS NULL OR story = %(story)s) "
+            "AND (NOT %(unplaced)s OR story IS NULL) "
             "AND (%(status)s::text IS NULL OR status = %(status)s)"
         )
-        params = {"story": story_id, "unplaced": unplaced, "status": status}
+        params = {"story": story, "unplaced": unplaced, "status": status}
         async with self._database.transaction() as conn:
-            if story_id is not None:
-                await _require_story(conn, story_id)
+            if story is not None:
+                await _require_story(conn, story)
             counted = await fetch_one(
                 conn, f"SELECT count(*) AS total FROM rules WHERE {where}", params
             )
@@ -290,12 +296,12 @@ class Rules:
                 actor=actor,
                 before={**snapshot(current, tuple(changes)), "version": current["version"]},
                 after={**changes, "version": row["version"]},
-                **_event_nodes(current["story_id"]),
+                **_event_nodes(current["story"]),
             )
         return Rule.model_validate(row)
 
     async def place_rule(
-        self, *, actor: str, rule_id: int, expected_version: int, story_id: int
+        self, *, actor: str, rule_id: int, expected_version: int, story: str
     ) -> Rule:
         actor = clean_actor(actor)
         async with self._database.transaction() as conn:
@@ -304,27 +310,27 @@ class Rules:
                 raise stale_version(
                     "Rule", "get_rule", rule_id, current["version"], expected_version
                 )
-            if current["story_id"] is not None:
+            if current["story"] is not None:
                 raise Refusal(
-                    f"Rule {rule_id} is already placed in story {current['story_id']}, and a rule "
-                    f"belongs to at most one story. To put it in story {story_id} instead, use "
+                    f"Rule {rule_id} is already placed in {current['story']}, and a rule "
+                    f"belongs to at most one story. To put it in {story} instead, use "
                     "move_rule."
                 )
-            await _require_story(conn, story_id)
-            row = await save_changes(conn, "rules", rule_id, {"story_id": story_id}, _RULE_COLUMNS)
+            await _require_story(conn, story)
+            row = await save_changes(conn, "rules", rule_id, {"story": story}, _RULE_COLUMNS)
             await record_event(
                 conn,
                 rule_id=rule_id,
                 action="rule_placed",
                 actor=actor,
-                before={"story_id": None, "version": current["version"]},
-                after={"story_id": story_id, "version": row["version"]},
-                **_event_nodes(story_id),
+                before={"story": None, "version": current["version"]},
+                after={"story": story, "version": row["version"]},
+                **_event_nodes(story),
             )
         return Rule.model_validate(row)
 
     async def move_rule(
-        self, *, actor: str, rule_id: int, expected_version: int, new_story_id: int
+        self, *, actor: str, rule_id: int, expected_version: int, new_story: str
     ) -> Rule:
         """Take a rule out of its story and put it in another, as one step: it is never in two
         stories, and never in none, along the way."""
@@ -335,27 +341,23 @@ class Rules:
                 raise stale_version(
                     "Rule", "get_rule", rule_id, current["version"], expected_version
                 )
-            if current["story_id"] is None:
+            if current["story"] is None:
                 raise Refusal(
                     f"Rule {rule_id} is not in any story yet, so there is nothing to move. Use "
                     "place_rule to put it in a story."
                 )
-            await _require_story(conn, new_story_id)
-            if new_story_id == current["story_id"]:
-                raise Refusal(
-                    f"Rule {rule_id} is already in story {new_story_id}, so nothing moved."
-                )
-            row = await save_changes(
-                conn, "rules", rule_id, {"story_id": new_story_id}, _RULE_COLUMNS
-            )
+            await _require_story(conn, new_story)
+            if new_story == current["story"]:
+                raise Refusal(f"Rule {rule_id} is already in {new_story}, so nothing moved.")
+            row = await save_changes(conn, "rules", rule_id, {"story": new_story}, _RULE_COLUMNS)
             await record_event(
                 conn,
                 rule_id=rule_id,
                 action="rule_moved",
                 actor=actor,
-                before={"story_id": current["story_id"], "version": current["version"]},
-                after={"story_id": new_story_id, "version": row["version"]},
-                **_event_nodes(new_story_id, current["story_id"]),
+                before={"story": current["story"], "version": current["version"]},
+                after={"story": new_story, "version": row["version"]},
+                **_event_nodes(new_story, current["story"]),
             )
         return Rule.model_validate(row)
 
@@ -381,7 +383,7 @@ class Rules:
         detail: bool,
         limit: int,
         unplaced_after_id: int | None,
-        stories_after_id: int | None,
+        stories_after: str | None,
     ) -> CoverageReport:
         """Which rules are in no story, and which stories have no rule. A dropped rule is no
         longer a requirement, so it is not unplaced and does not cover a story; a dropped story
@@ -396,7 +398,7 @@ class Rules:
                 rows = await fetch_all(
                     conn,
                     f"SELECT {_rule_list_columns(detail)} FROM rules "
-                    "WHERE story_id IS NULL AND status <> 'dropped' AND id > %s "
+                    "WHERE story IS NULL AND status <> 'dropped' AND id > %s "
                     "ORDER BY id LIMIT %s",
                     (unplaced_after_id or 0, limit + 1),
                 )
@@ -405,14 +407,14 @@ class Rules:
                 rows = await fetch_all(
                     conn,
                     f"SELECT {list_columns(detail)} FROM node_state "
-                    f"WHERE {_STORY_WITHOUT_RULES} AND id > %s ORDER BY id LIMIT %s",
-                    (stories_after_id or 0, limit + 1),
+                    f"WHERE {_STORY_WITHOUT_RULES} AND {AFTER_NODE} "
+                    f"ORDER BY {NODE_ORDER} LIMIT %(fetch)s",
+                    {**after_position(stories_after), "fetch": limit + 1},
                 )
-                stories_page, next_stories = split_page(rows, limit)
+                stories_page, next_stories = split_page(rows, limit, key="ref")
             unplaced_total = await fetch_one(
                 conn,
-                "SELECT count(*) AS total FROM rules "
-                "WHERE story_id IS NULL AND status <> 'dropped'",
+                "SELECT count(*) AS total FROM rules WHERE story IS NULL AND status <> 'dropped'",
             )
             stories_total = await fetch_one(
                 conn, f"SELECT count(*) AS total FROM node_state WHERE {_STORY_WITHOUT_RULES}"
@@ -426,6 +428,6 @@ class Rules:
             next_unplaced_after_id=next_unplaced,
             story_without_rules_count=stories_total["total"],
             stories_without_rules=stories,
-            next_stories_after_id=next_stories,
+            next_stories_after=next_stories,
             left_out=None if detail else bodies_left_out([*unplaced_rules, *stories]),
         )

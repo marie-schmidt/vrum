@@ -18,6 +18,7 @@ from vrum.common import (
     fetch_all,
     fetch_one,
     page_size,
+    parse_node_refs,
     record_event,
     require_link_targets,
     required_text,
@@ -40,13 +41,13 @@ DECISION_STATUSES = ("active", "superseded", "withdrawn")
 
 _COLUMNS = (
     "id, title, text, reason, decided_by, decided_on, project_wide, status, superseded_by_id, "
-    "supersedes_ids, status_reason, confirmed_by, confirmed_at, confirmation, node_ids, "
+    "supersedes_ids, status_reason, confirmed_by, confirmed_at, confirmation, nodes, "
     "rule_ids, recorded_at"
 )
 _RECORDED_FIELDS = ("title", "text", "reason", "decided_by", "decided_on", "project_wide")
 
 # Where a decision's links to each kind of thing are kept. Fixed here, never from a caller.
-LINK_TABLES = {"node": ("decision_nodes", "node_id"), "rule": ("decision_rules", "rule_id")}
+LINK_TABLES = {"node": ("decision_nodes", "node"), "rule": ("decision_rules", "rule_id")}
 
 
 class Decision(BaseModel):
@@ -79,7 +80,9 @@ class Decision(BaseModel):
     )
     confirmed_by: str | None = Field(description="The person who confirmed it.")
     confirmed_at: datetime | None
-    node_ids: list[int] = Field(description="The epics, stories and tasks it affects.")
+    nodes: list[str] = Field(
+        description="The epics, stories and tasks it affects, as refs such as story:12."
+    )
     rule_ids: list[int] = Field(description="The requirements it affects.")
     recorded_at: datetime
 
@@ -129,16 +132,21 @@ async def require_decision(
     return row
 
 
+def _ends(nodes: list[str], rule_ids: list[int]) -> list[tuple[str, list[Any]]]:
+    """What a decision is linked to, by kind: nodes by their refs, rules by their ids."""
+    return [("node", nodes), ("rule", rule_ids)]
+
+
 async def add_links(
     conn: AsyncConnection,
     decision_id: int,
     actor: str,
-    node_ids: list[int],
+    nodes: list[str],
     rule_ids: list[int],
 ) -> None:
-    for what, ids in (("node", node_ids), ("rule", rule_ids)):
+    for what, ends in _ends(nodes, rule_ids):
         table, column = LINK_TABLES[what]
-        for item in ids:
+        for item in ends:
             await conn.execute(
                 f"INSERT INTO {table} (decision_id, {column}) VALUES (%s, %s)", (decision_id, item)
             )
@@ -199,14 +207,14 @@ class Decisions:
         decided_by: str,
         decided_on: date | None,
         project_wide: bool,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
     ) -> Decision:
         actor = clean_actor(actor)
         fields = clean_fields(title, text, reason, decided_by)
-        nodes, rules = unique_ids(node_ids), unique_ids(rule_ids)
+        affected, rules = parse_node_refs(nodes), unique_ids(rule_ids)
         async with self._database.transaction() as conn:
-            await require_link_targets(conn, nodes, rules, "the decision")
+            await require_link_targets(conn, affected, rules, "the decision")
             decision_id = await insert_decision(
                 conn,
                 actor=actor,
@@ -214,7 +222,7 @@ class Decisions:
                 decided_on=decided_on,
                 project_wide=project_wide,
             )
-            await add_links(conn, decision_id, actor, nodes, rules)
+            await add_links(conn, decision_id, actor, affected, rules)
             return to_decision(await require_decision(conn, decision_id))
 
     async def supersede_decision(
@@ -229,7 +237,7 @@ class Decisions:
         decided_on: date | None,
         project_wide: bool | None,
         keep_links: bool,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         said_by: str | None,
         quote: str | None,
@@ -239,7 +247,7 @@ class Decisions:
         actor = clean_actor(actor)
         fields = clean_fields(title, text, reason, decided_by)
         said_words = said(said_by, quote)
-        extra_nodes, extra_rules = unique_ids(node_ids), unique_ids(rule_ids)
+        extra_nodes, extra_rules = parse_node_refs(nodes), unique_ids(rule_ids)
         async with self._database.transaction() as conn:
             old = await require_decision(conn, decision_id, lock=True)
             if old["status"] != "active":
@@ -251,7 +259,9 @@ class Decisions:
                 )
             require_a_person_for_confirmed("decision", [old], said_words)
             await require_link_targets(conn, extra_nodes, extra_rules, "the decision")
-            nodes = unique_ids(old["node_ids"] + extra_nodes) if keep_links else extra_nodes
+            affected = (
+                list(dict.fromkeys(old["nodes"] + extra_nodes)) if keep_links else extra_nodes
+            )
             rules = unique_ids(old["rule_ids"] + extra_rules) if keep_links else extra_rules
             new_id = await insert_decision(
                 conn,
@@ -261,7 +271,7 @@ class Decisions:
                 project_wide=old["project_wide"] if project_wide is None else project_wide,
                 replaces=decision_id,
             )
-            await add_links(conn, new_id, actor, nodes, rules)
+            await add_links(conn, new_id, actor, affected, rules)
             await conn.execute(
                 "UPDATE decisions SET status = 'superseded', superseded_by_id = %s WHERE id = %s",
                 (new_id, decision_id),
@@ -368,11 +378,11 @@ class Decisions:
         *,
         actor: str,
         decision_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
     ) -> Decision:
         return await self._change_links(
-            actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids, add=True
+            actor=actor, decision_id=decision_id, nodes=nodes, rule_ids=rule_ids, add=True
         )
 
     async def unlink_decision(
@@ -380,11 +390,11 @@ class Decisions:
         *,
         actor: str,
         decision_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
     ) -> Decision:
         return await self._change_links(
-            actor=actor, decision_id=decision_id, node_ids=node_ids, rule_ids=rule_ids, add=False
+            actor=actor, decision_id=decision_id, nodes=nodes, rule_ids=rule_ids, add=False
         )
 
     async def _change_links(
@@ -392,14 +402,17 @@ class Decisions:
         *,
         actor: str,
         decision_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         add: bool,
     ) -> Decision:
         actor = clean_actor(actor)
-        nodes, rules = unique_ids(node_ids), unique_ids(rule_ids)
-        if not nodes and not rules:
-            raise Refusal("Nothing to link: give at least one id in node_ids or rule_ids.")
+        affected, rules = parse_node_refs(nodes), unique_ids(rule_ids)
+        if not affected and not rules:
+            raise Refusal(
+                "Nothing to link: give at least one ref in nodes (such as story:12) or one id in "
+                "rule_ids."
+            )
         async with self._database.transaction() as conn:
             decision = await require_decision(conn, decision_id, lock=True)
             if decision["status"] != "active":
@@ -413,22 +426,27 @@ class Decisions:
                     f"it had. {where}"
                 )
             if add:
-                await require_link_targets(conn, nodes, rules, "the decision")
-            for what, ids, current in (
-                ("node", nodes, decision["node_ids"]),
+                await require_link_targets(conn, affected, rules, "the decision")
+            for what, ends, current in (
+                ("node", affected, decision["nodes"]),
                 ("rule", rules, decision["rule_ids"]),
             ):
-                wrong = [str(item) for item in ids if (item in current) == add]
+                # A node's ref already says what it is; a rule is named by its id.
+                wrong = [
+                    str(item) if what == "node" else f"rule {item}"
+                    for item in ends
+                    if (item in current) == add
+                ]
                 if wrong:
                     raise Refusal(
                         f"Decision {decision_id} is "
-                        f"{'already' if add else 'not'} linked to {what} {', '.join(wrong)}, so "
+                        f"{'already' if add else 'not'} linked to {', '.join(wrong)}, so "
                         "nothing was changed."
                     )
             if add:
-                await add_links(conn, decision_id, actor, nodes, rules)
+                await add_links(conn, decision_id, actor, affected, rules)
             else:
-                await _remove_links(conn, decision_id, actor, nodes, rules)
+                await _remove_links(conn, decision_id, actor, affected, rules)
             return to_decision(await require_decision(conn, decision_id))
 
     async def decision_history(
@@ -450,11 +468,11 @@ class Decisions:
 
 
 async def _remove_links(
-    conn: AsyncConnection, decision_id: int, actor: str, node_ids: list[int], rule_ids: list[int]
+    conn: AsyncConnection, decision_id: int, actor: str, nodes: list[str], rule_ids: list[int]
 ) -> None:
-    for what, ids in (("node", node_ids), ("rule", rule_ids)):
+    for what, ends in _ends(nodes, rule_ids):
         table, column = LINK_TABLES[what]
-        for item in ids:
+        for item in ends:
             await conn.execute(
                 f"DELETE FROM {table} WHERE decision_id = %s AND {column} = %s",
                 (decision_id, item),

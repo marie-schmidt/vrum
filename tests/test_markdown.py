@@ -16,24 +16,27 @@ def stems(files: dict[str, str]) -> dict[str, str]:
 
 
 def a_graph() -> dict[str, Any]:
+    # Epic 1, story 1 and task 1 are three different items, and so are their files.
     return a_file(
         nodes=[
-            node(1, "epic", None, title='Log in: the "safe" way # 1', body="First line\nSecond"),
-            node(2, "story", 1, title="Email", start_on="2026-12-01", target_on="2026-12-31"),
-            node(3, "task", 2, title="Form"),
-            node(4, "task", 2, title="Café ünïcode — 日本語"),
+            node("epic", 1, title='Log in: the "safe" way # 1', body="First line\nSecond"),
+            node(
+                "story", 1, "epic:1", title="Email", start_on="2026-12-01", target_on="2026-12-31"
+            ),
+            node("task", 1, "story:1", title="Form"),
+            node("task", 2, "story:1", title="Café ünïcode — 日本語"),
         ],
         links=[
-            link(1, 4, 3, "needs_first"),
-            link(2, 3, 4, "duplicates"),
-            link(3, 2, 1, "relates_to"),
-            link(4, 1, 2, "supersedes"),
+            link(1, "task:2", "task:1", "needs_first"),
+            link(2, "task:1", "task:2", "duplicates"),
+            link(3, "story:1", "epic:1", "relates_to"),
+            link(4, "epic:1", "story:1", "supersedes"),
         ],
-        rules=[rule(1, 2, title="Rules"), rule(2, None, body="Not placed.")],
+        rules=[rule(1, "story:1", title="Rules"), rule(2, None, body="Not placed.")],
         decisions=[
             decision(
                 1,
-                node_ids=[2],
+                nodes=["story:1"],
                 rule_ids=[1],
                 status="superseded",
                 superseded_by_id=2,
@@ -44,14 +47,14 @@ def a_graph() -> dict[str, Any]:
                 2,
                 title="Keep it simple",
                 project_wide=True,
-                node_ids=[1],
+                nodes=["epic:1"],
                 confirmed_by="Marie",
                 confirmed_at=WHEN,
             ),
             decision(3, status="withdrawn", status_reason="We dropped\nthe plan"),
         ],
         facts=[
-            fact(1, node_ids=[3], rule_ids=[1], decision_ids=[2]),
+            fact(1, nodes=["task:1"], rule_ids=[1], decision_ids=[2]),
             fact(
                 2,
                 status="superseded",
@@ -66,15 +69,15 @@ def a_graph() -> dict[str, Any]:
     )
 
 
-def test_there_is_one_file_per_item_named_by_its_kind_its_id_and_its_title() -> None:
+def test_there_is_one_file_per_item_named_by_its_kind_its_number_and_its_title() -> None:
     files = render(a_graph())
 
     assert sorted(files) == sorted(
         [
             "epics/epic-1-log-in-the-safe-way-1.md",
-            "stories/story-2-email.md",
-            "tasks/task-3-form.md",
-            "tasks/task-4-café-ünïcode-日本語.md",
+            "stories/story-1-email.md",
+            "tasks/task-1-form.md",
+            "tasks/task-2-café-ünïcode-日本語.md",
             "rules/rule-1-rules.md",
             "rules/rule-2-rule-2.md",
             "decisions/decision-1-a-decision.md",
@@ -96,7 +99,7 @@ def test_the_fields_are_at_the_top_and_odd_text_stays_one_valid_value() -> None:
     assert epic.startswith(
         "---\n"
         "type: epic\n"
-        "id: 1\n"
+        "number: 1\n"
         'title: "Log in: the \\"safe\\" way # 1"\n'
         "status: new\n"
         "priority: normal\n"
@@ -107,7 +110,8 @@ def test_the_fields_are_at_the_top_and_odd_text_stays_one_valid_value() -> None:
         '\n# Log in: the "safe" way # 1\n'
         "\nFirst line\nSecond\n"
     )
-    story = files["story-2-email"]
+    assert "\nid:" not in epic
+    story = files["story-1-email"]
     assert "start_on: 2026-12-01\ntarget_on: 2026-12-31\n" in story
     fact_file = files["fact-1-fact-1"]
     assert fact_file.startswith(
@@ -121,7 +125,7 @@ def test_the_fields_are_at_the_top_and_odd_text_stays_one_valid_value() -> None:
         "\n# Fact 1\n"
     )
     assert "## Source\n\na chat\n" in fact_file
-    unicode_title = files["task-4-café-ünïcode-日本語"]
+    unicode_title = files["task-2-café-ünïcode-日本語"]
     assert 'title: "Café ünïcode — 日本語"' in unicode_title
     superseded = files["fact-2-fact-2"]
     assert 'status_reason: "Newer"' in superseded and "status: superseded" in superseded
@@ -174,30 +178,31 @@ def test_a_fact_or_decision_says_where_it_stands_and_whether_a_person_confirmed_
 
 def test_every_connection_is_a_reference_at_both_ends_under_its_own_name() -> None:
     files = stems(render(a_graph()))
-    story, task3 = files["story-2-email"], files["task-3-form"]
+    story, task1 = files["story-1-email"], files["task-1-form"]
 
     assert "- parent: [[epic-1-log-in-the-safe-way-1]]" in story
-    assert "- children: [[task-3-form]]\n- children: [[task-4-café-ünïcode-日本語]]" in story
+    assert "- children: [[task-1-form]]\n- children: [[task-2-café-ünïcode-日本語]]" in story
     assert "- requirements: [[rule-1-rules]]" in story
     assert "- decisions that affect it: [[decision-1-a-decision]]" in story
-    assert "- needed first by: [[task-4-café-ünïcode-日本語]]" in task3
-    assert "- duplicates: [[task-4-café-ünïcode-日本語]]" in task3
-    assert "- needs first: [[task-3-form]]" in files["task-4-café-ünïcode-日本語"]
-    assert "- duplicates: [[task-3-form]]" in files["task-4-café-ünïcode-日本語"]
+    assert "- needed first by: [[task-2-café-ünïcode-日本語]]" in task1
+    assert "- duplicates: [[task-2-café-ünïcode-日本語]]" in task1
+    assert "- needs first: [[task-1-form]]" in files["task-2-café-ünïcode-日本語"]
+    assert "- duplicates: [[task-1-form]]" in files["task-2-café-ünïcode-日本語"]
     assert "- relates to: [[epic-1-log-in-the-safe-way-1]]" in story
-    assert "- relates to: [[story-2-email]]" in files["epic-1-log-in-the-safe-way-1"]
-    assert "- supersedes: [[story-2-email]]" in files["epic-1-log-in-the-safe-way-1"]
+    assert "- relates to: [[story-1-email]]" in files["epic-1-log-in-the-safe-way-1"]
+    assert "- supersedes: [[story-1-email]]" in files["epic-1-log-in-the-safe-way-1"]
     assert "- superseded by: [[epic-1-log-in-the-safe-way-1]]" in story
-    assert "- story: [[story-2-email]]" in files["rule-1-rules"]
+    assert "- story: [[story-1-email]]" in files["rule-1-rules"]
     assert (
-        "- affects: [[rule-1-rules]]\n- affects: [[story-2-email]]"
+        "- affects: [[rule-1-rules]]\n- affects: [[story-1-email]]"
         in (files["decision-1-a-decision"])
     )
+    assert "- affects: [[epic-1-log-in-the-safe-way-1]]" in files["decision-2-keep-it-simple"]
     assert "- replaced by: [[decision-2-keep-it-simple]]" in files["decision-1-a-decision"]
     assert "- replaces: [[decision-1-a-decision]]" in files["decision-2-keep-it-simple"]
     assert "- concerns: [[decision-2-keep-it-simple]]" in files["fact-1-fact-1"]
-    assert "- concerns: [[rule-1-rules]]\n- concerns: [[task-3-form]]" in files["fact-1-fact-1"]
-    assert "- facts about it: [[fact-1-fact-1]]" in task3
+    assert "- concerns: [[rule-1-rules]]\n- concerns: [[task-1-form]]" in files["fact-1-fact-1"]
+    assert "- facts about it: [[fact-1-fact-1]]" in task1
     assert "- facts about it: [[fact-1-fact-1]]" in files["decision-2-keep-it-simple"]
     assert "- facts about it: [[fact-1-fact-1]]" in files["rule-1-rules"]
     assert "- replaced by: [[fact-4-" in files["fact-2-fact-2"]
@@ -216,11 +221,18 @@ def test_every_connection_is_a_reference_at_both_ends_under_its_own_name() -> No
 def test_references_written_in_a_text_become_links_to_files_and_missing_ones_plain_words() -> None:
     graph = a_file(
         nodes=[
-            node(1, "epic", None, title="Login"),
-            node(2, "story", 1, title="Email", body="See [[node:1]], [[rule:1]] and [[node:99]]."),
+            node("epic", 1, title="Login", body="Made of [[story:1]], not [[epic:2]]."),
+            node(
+                "story",
+                1,
+                "epic:1",
+                title="Email",
+                body="See [[epic:1]], [[task:1]], [[rule:1]] and [[task:99]].",
+            ),
+            node("task", 1, "story:1", title="Form"),
         ],
-        rules=[rule(1, 2, title="Short codes")],
-        decisions=[decision(5, title="Keep it simple", text="As in [[fact:7]]")],
+        rules=[rule(1, "story:1", title="Short codes")],
+        decisions=[decision(5, title="Keep it simple", text="As in [[fact:7]] and [[node:1]]")],
         facts=[
             fact(7, text="Rule [[rule:1]] holds", source="Said in [[decision:5]]"),
             fact(8, text="Not [[fact:8]] but [[belief:8]] and [[fact:9]]"),
@@ -229,11 +241,16 @@ def test_references_written_in_a_text_become_links_to_files_and_missing_ones_pla
 
     by_stem = stems(render(graph))
 
+    # Epic 1, story 1 and task 1 are three different files, and a reference names the right one.
+    assert "Made of [[story-1-email]], not epic:2 (missing)." in by_stem["epic-1-login"]
     assert (
-        "See [[epic-1-login]], [[rule-1-short-codes]] and node:99 (missing)."
-        in by_stem["story-2-email"]
+        "See [[epic-1-login]], [[task-1-form]], [[rule-1-short-codes]] and task:99 (missing)."
+        in by_stem["story-1-email"]
     )
-    assert "As in [[fact-7-rule-rule-1-holds]]" in by_stem["decision-5-keep-it-simple"]
+    # The old way of writing a reference to an epic, story or task is only text now.
+    assert (
+        "As in [[fact-7-rule-rule-1-holds]] and [[node:1]]" in by_stem["decision-5-keep-it-simple"]
+    )
     fact_file = by_stem["fact-7-rule-rule-1-holds"]
     assert "Rule [[rule-1-short-codes]] holds" in fact_file
     assert "## Source\n\nSaid in [[decision-5-keep-it-simple]]" in fact_file
@@ -244,7 +261,7 @@ def test_references_written_in_a_text_become_links_to_files_and_missing_ones_pla
         in other
     )
     for text in by_stem.values():
-        assert not re.search(r"\[\[(node|rule|decision|fact):", text)
+        assert not re.search(r"\[\[(epic|story|task|rule|decision|fact):", text)
 
 
 def test_a_replacement_that_is_not_in_the_file_is_written_as_missing() -> None:
@@ -263,14 +280,14 @@ def test_the_same_graph_gives_the_same_files_every_time() -> None:
     assert all(text.endswith("\n") and "\r" not in text for text in render(a_graph()).values())
 
 
-def test_an_empty_graph_has_no_files_and_odd_names_and_dangling_ids_do_not_break_it() -> None:
+def test_an_empty_graph_has_no_files_and_odd_names_and_dangling_refs_do_not_break_it() -> None:
     assert render(a_file()) == {}
     odd = a_file(
         nodes=[
-            node(1, "epic", None, title="///", body="   "),
-            node(2, "epic", None, title="a\nb\tc"),
+            node("epic", 1, title="///", body="   "),
+            node("epic", 2, title="a\nb\tc"),
         ],
-        links=[link(1, 1, 99, "relates_to")],
+        links=[link(1, "epic:1", "epic:99", "relates_to")],
     )
 
     files = render(odd)

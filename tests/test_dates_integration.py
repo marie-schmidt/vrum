@@ -21,7 +21,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
 async def get(client: Client, node: dict[str, Any]) -> dict[str, Any]:
-    return await ok(client, "get_node", node_id=node["id"])
+    return await ok(client, "get_node", node=node["ref"])
 
 
 async def dated_task(
@@ -33,7 +33,7 @@ async def dated_task(
         actor="marie",
         kind="task",
         title=title,
-        parent_id=story["id"],
+        parent=story["ref"],
         **dates,
     )
 
@@ -62,7 +62,7 @@ async def test_dates_are_set_changed_cleared_and_logged_with_before_and_after(
         client,
         "update_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         target_on=day(20),
     )
@@ -72,13 +72,13 @@ async def test_dates_are_set_changed_cleared_and_logged_with_before_and_after(
         client,
         "update_node",
         actor="bob",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=2,
         clear_start_on=True,
     )
     assert (cleared["start_on"], cleared["target_on"], cleared["version"]) == (None, day(20), 3)
 
-    history = (await ok(client, "node_history", node_id=task["id"]))["items"]
+    history = (await ok(client, "node_history", node=task["ref"]))["items"]
     assert [(e["action"], e["actor"]) for e in history] == [
         ("create", "marie"),
         ("update", "ann"),
@@ -95,7 +95,7 @@ async def test_a_start_date_after_the_target_date_is_refused_and_changes_nothing
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    before = await all_nodes(client, parent_id=story["id"])
+    before = await all_nodes(client, parent=story["ref"])
 
     message = await refused(
         client,
@@ -103,16 +103,16 @@ async def test_a_start_date_after_the_target_date_is_refused_and_changes_nothing
         actor="marie",
         kind="task",
         title="Backwards",
-        parent_id=story["id"],
+        parent=story["ref"],
         start_on=day(9),
         target_on=day(3),
     )
     assert f"The start date {day(9)} is after the target date {day(3)}" in message
     assert "move the start earlier or the target later" in message
-    assert await all_nodes(client, parent_id=story["id"]) == before
+    assert await all_nodes(client, parent=story["ref"]) == before
 
     task = await dated_task(client, story, "Fine", start_on=day(2), target_on=day(10))
-    edit = {"actor": "ann", "node_id": task["id"], "expected_version": 1}
+    edit = {"actor": "ann", "node": task["ref"], "expected_version": 1}
     # Moving just one date past the other is refused too, using the date the node already has.
     assert "is after the target date" in await refused(
         client, "update_node", start_on=day(30), **edit
@@ -130,14 +130,14 @@ async def test_a_start_date_after_the_target_date_is_refused_and_changes_nothing
         day(10),
         1,
     )
-    assert len((await ok(client, "node_history", node_id=task["id"]))["items"]) == 1
+    assert len((await ok(client, "node_history", node=task["ref"]))["items"]) == 1
 
     # The same day is allowed: a one-day job starts and ends on one day.
     same = await ok(
         client,
         "update_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         start_on=day(5),
         target_on=day(5),
@@ -148,7 +148,7 @@ async def test_a_start_date_after_the_target_date_is_refused_and_changes_nothing
 async def test_a_date_can_only_be_removed_by_asking_for_it(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     task = await dated_task(client, story, "Dated", start_on=day(2), target_on=day(10))
-    edit = {"actor": "ann", "node_id": task["id"], "expected_version": 1}
+    edit = {"actor": "ann", "node": task["ref"], "expected_version": 1}
 
     assert "not both" in await refused(
         client, "update_node", start_on=day(3), clear_start_on=True, **edit
@@ -161,7 +161,7 @@ async def test_a_date_can_only_be_removed_by_asking_for_it(client: Client) -> No
         client,
         "update_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=2,
         clear_target_on=True,
     )
@@ -174,7 +174,7 @@ async def test_a_stale_version_is_still_refused_for_a_date_change(client: Client
         client,
         "update_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         target_on=day(12),
     )
@@ -183,11 +183,11 @@ async def test_a_stale_version_is_still_refused_for_a_date_change(client: Client
         client,
         "update_node",
         actor="bob",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         target_on=day(15),
     )
-    assert f"Node {task['id']} is at version 2, but you sent version 1" in message
+    assert f"{task['ref']} is at version 2, but you sent version 1" in message
     assert (await get(client, task))["target_on"] == day(12)
 
 
@@ -208,12 +208,12 @@ async def test_a_date_written_loosely_is_refused_in_plain_words(
         actor="a",
         kind="task",
         title="x",
-        parent_id=story["id"],
+        parent=story["ref"],
         start_on=written,
     )
     assert f"start_on {expected}" in message and repr(written) in message
     assert f"target_on {expected}" in await refused(
-        client, "update_node", actor="a", node_id=task["id"], expected_version=1, target_on=written
+        client, "update_node", actor="a", node=task["ref"], expected_version=1, target_on=written
     )
     assert f"target_from {expected}" in await refused(client, "list_nodes", target_from=written)
     assert "ValidationError" not in message and "pydantic" not in message
@@ -241,15 +241,15 @@ async def test_a_node_is_overdue_when_its_target_has_passed_until_it_is_done_or_
     assert (await set_status(client, dropped, "dropped"))["overdue"] is False
     assert (await set_status(client, late, "in_progress"))["overdue"] is True
 
-    listed = await all_nodes(client, parent_id=story["id"], overdue=True)
-    assert [n["id"] for n in listed] == [late["id"]]
-    not_overdue = await all_nodes(client, parent_id=story["id"], overdue=False)
-    assert [n["id"] for n in not_overdue] == [
-        today["id"],
-        future["id"],
-        undated["id"],
-        finished["id"],
-        dropped["id"],
+    listed = await all_nodes(client, parent=story["ref"], overdue=True)
+    assert [n["ref"] for n in listed] == [late["ref"]]
+    not_overdue = await all_nodes(client, parent=story["ref"], overdue=False)
+    assert [n["ref"] for n in not_overdue] == [
+        today["ref"],
+        future["ref"],
+        undated["ref"],
+        finished["ref"],
+        dropped["ref"],
     ]
 
 
@@ -263,7 +263,7 @@ async def test_a_story_and_an_epic_without_dates_report_the_span_of_what_is_unde
         actor="marie",
         kind="story",
         title="Dated story",
-        parent_id=epic["id"],
+        parent=epic["ref"],
         start_on=day(40),
         target_on=day(60),
     )
@@ -273,7 +273,7 @@ async def test_a_story_and_an_epic_without_dates_report_the_span_of_what_is_unde
         actor="marie",
         kind="story",
         title="Plain story",
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
     await dated_task(client, plain_story, "Early", start_on=day(5), target_on=day(8))
     await dated_task(client, plain_story, "Late", start_on=day(7), target_on=day(30))
@@ -301,7 +301,7 @@ async def test_a_story_and_an_epic_without_dates_report_the_span_of_what_is_unde
         client,
         "update_node",
         actor="ann",
-        node_id=plain_story["id"],
+        node=plain_story["ref"],
         expected_version=story["version"],
         start_on=day(1),
         target_on=day(2),
@@ -312,11 +312,11 @@ async def test_a_story_and_an_epic_without_dates_report_the_span_of_what_is_unde
     # A task never works a span out, and a dropped child does not count.
     assert (await get(client, dated_story))["span_worked_out"] is False
     lone = await ok(
-        client, "create_node", actor="marie", kind="task", title="Lone", parent_id=dated_story["id"]
+        client, "create_node", actor="marie", kind="task", title="Lone", parent=dated_story["ref"]
     )
     assert (lone["span_start"], lone["span_end"], lone["span_worked_out"]) == (None, None, False)
     spare = await ok(
-        client, "create_node", actor="marie", kind="story", title="Spare", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="story", title="Spare", parent=epic["ref"]
     )
     far = await dated_task(client, spare, "Far away", start_on=day(300), target_on=day(400))
     assert (await get(client, epic))["span_end"] == day(400)
@@ -326,7 +326,7 @@ async def test_a_story_and_an_epic_without_dates_report_the_span_of_what_is_unde
     # With nothing dated underneath, there is no span to report.
     empty = await ok(client, "create_node", actor="marie", kind="epic", title="Empty")
     await ok(
-        client, "create_node", actor="marie", kind="story", title="Nothing", parent_id=empty["id"]
+        client, "create_node", actor="marie", kind="story", title="Nothing", parent=empty["ref"]
     )
     assert (await get(client, empty))["span_worked_out"] is False
 
@@ -344,8 +344,8 @@ async def test_a_node_that_starts_before_what_it_needs_is_due_shows_a_schedule_c
     # Warning only: both links were accepted, and both nodes still wait for the first.
     clash = await get(client, second)
     assert (clash["schedule_conflicts"], clash["waiting_on"], clash["status"]) == (
-        [first["id"]],
-        [first["id"]],
+        [first["ref"]],
+        [first["ref"]],
         "new",
     )
     assert (await get(client, third))["schedule_conflicts"] == []
@@ -356,7 +356,7 @@ async def test_a_node_that_starts_before_what_it_needs_is_due_shows_a_schedule_c
         client,
         "update_node",
         actor="ann",
-        node_id=second["id"],
+        node=second["ref"],
         expected_version=clash["version"],
         start_on=day(20),
     )
@@ -366,16 +366,16 @@ async def test_a_node_that_starts_before_what_it_needs_is_due_shows_a_schedule_c
         client,
         "update_node",
         actor="ann",
-        node_id=second["id"],
+        node=second["ref"],
         expected_version=later["version"],
         start_on=day(12),
     )
-    assert (await get(client, second))["schedule_conflicts"] == [first["id"]]
+    assert (await get(client, second))["schedule_conflicts"] == [first["ref"]]
     await ok(
         client,
         "update_node",
         actor="ann",
-        node_id=first["id"],
+        node=first["ref"],
         expected_version=1,
         target_on=day(12),
     )
@@ -385,12 +385,12 @@ async def test_a_node_that_starts_before_what_it_needs_is_due_shows_a_schedule_c
         client,
         "update_node",
         actor="ann",
-        node_id=first["id"],
+        node=first["ref"],
         expected_version=2,
         target_on=day(40),
     )
-    assert (await get(client, second))["schedule_conflicts"] == [first["id"]]
-    assert (await get(client, third))["schedule_conflicts"] == [first["id"]]
+    assert (await get(client, second))["schedule_conflicts"] == [first["ref"]]
+    assert (await get(client, third))["schedule_conflicts"] == [first["ref"]]
     await set_status(client, first, "done")
     assert (await get(client, second))["schedule_conflicts"] == []
     assert (await get(client, third))["schedule_conflicts"] == []
@@ -413,17 +413,17 @@ async def test_nodes_can_be_listed_by_their_own_dates(client: Client) -> None:
     middle = await dated_task(client, story, "Middle", start_on=day(10), target_on=day(15))
     late = await dated_task(client, story, "Late", start_on=day(20), target_on=day(25))
     await dated_task(client, story, "Undated")
-    parent = {"parent_id": story["id"]}
+    parent = {"parent": story["ref"]}
 
-    async def ids(**filters: Any) -> list[int]:
-        return [n["id"] for n in await all_nodes(client, **parent, **filters)]
+    async def refs(**filters: Any) -> list[str]:
+        return [n["ref"] for n in await all_nodes(client, **parent, **filters)]
 
-    assert await ids(start_from=day(10)) == [middle["id"], late["id"]]
-    assert await ids(start_to=day(10)) == [early["id"], middle["id"]]
-    assert await ids(target_from=day(15), target_to=day(25)) == [middle["id"], late["id"]]
-    assert await ids(start_from=day(2), target_to=day(20)) == [middle["id"]]
-    assert await ids(start_from=day(5), start_to=day(9)) == []
-    assert len(await ids()) == 4
+    assert await refs(start_from=day(10)) == [middle["ref"], late["ref"]]
+    assert await refs(start_to=day(10)) == [early["ref"], middle["ref"]]
+    assert await refs(target_from=day(15), target_to=day(25)) == [middle["ref"], late["ref"]]
+    assert await refs(start_from=day(2), target_to=day(20)) == [middle["ref"]]
+    assert await refs(start_from=day(5), start_to=day(9)) == []
+    assert len(await refs()) == 4
     assert "start_from must be a day" in await refused(client, "list_nodes", start_from="soon")
 
 
@@ -434,20 +434,20 @@ async def test_dates_do_not_get_in_the_way_of_readiness_claims_or_moves(client: 
         client,
         "update_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=1,
         start_on=day(100),
         target_on=day(200),
     )
     assert dated["status"] == "ready"
-    assert (await ok(client, "claim_node", actor="ann", node_id=task["id"]))["actor"] == "ann"
+    assert (await ok(client, "claim_node", actor="ann", node=task["ref"]))["actor"] == "ann"
     moved = await ok(
         client,
         "move_node",
         actor="ann",
-        node_id=task["id"],
+        node=task["ref"],
         expected_version=2,
-        new_parent_id=other_story["id"],
+        new_parent=other_story["ref"],
     )
     assert (moved["start_on"], moved["target_on"]) == (day(100), day(200))
     # What the old story reports follows the task out, and the new story takes it in.

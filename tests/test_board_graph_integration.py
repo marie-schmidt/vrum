@@ -38,6 +38,8 @@ from tests.board_context import (
 )
 from tests.board_helpers import SLOW, Watched, board_url, browser_page, made
 from tests.helpers import all_nodes, make_decision, make_fact, ok, reindexed, unique_word
+from tests.helpers import code_of as code
+from tests.helpers import number_of as number
 from tests.second_stack import SecondStack
 from tests.world import Project
 
@@ -48,17 +50,24 @@ def _browser(board: str, project: Project) -> Any:
     return browser_page(board, token=project.key, name=ADA)
 
 
-def keys(ids: dict[str, int], kind: str, *names: str) -> set[str]:
+def refs(ids: dict[str, Any], *names: str) -> set[str]:
+    """The refs (epic:3, story:12, task:40) of the work items with these short names."""
+    return {ids[name] for name in names}
+
+
+def keys(ids: dict[str, Any], kind: str, *names: str) -> set[str]:
+    """The Graph's keys of the requirements, decisions or facts with these short names."""
     return {f"{kind}:{ids[name]}" for name in names}
 
 
-def lines(ids: dict[str, int], kind: str, *pairs: tuple[str, str]) -> set[tuple[str, str, str]]:
+def lines(ids: dict[str, Any], kind: str, *pairs: tuple[str, str]) -> set[tuple[str, str, str]]:
     """Lines of one kind between records named by their short names such as ('s1', 'r1') for the
-    record kinds the world's names tell apart (r rules, d decisions, f facts, the rest work)."""
+    record kinds the world's names tell apart (r rules, d decisions, f facts, the rest work). Work
+    is keyed by its ref, the others by kind and id."""
 
     def key(name: str) -> str:
-        what = {"r": "rule", "d": "decision", "f": "fact"}.get(name[0], "node")
-        return f"{what}:{ids[name]}"
+        what = {"r": "rule", "d": "decision", "f": "fact"}.get(name[0])
+        return ids[name] if what is None else f"{what}:{ids[name]}"
 
     return {(kind, key(a), key(b)) for a, b in pairs}
 
@@ -103,14 +112,14 @@ class Expect:
     """What the Graph shows for the world of context_world, scoped to epic E: the dots of each
     kind, the work that context is joined to, and the lines."""
 
-    def __init__(self, ids: dict[str, int]) -> None:
-        self.work = keys(ids, "node", "E", "s1", "s2", "t1", "t2", "t3")
+    def __init__(self, ids: dict[str, Any]) -> None:
+        self.work = refs(ids, "E", "s1", "s2", "t1", "t2", "t3")
         self.records = (
             keys(ids, "rule", "r1", "r2", "ru")
             | keys(ids, "decision", "d1", "dw", "d_new")
             | keys(ids, "fact", "f1", "f2", "f3", "f_new")
         )
-        self.joined = keys(ids, "node", "s1", "s2")
+        self.joined = refs(ids, "s1", "s2")
         self.work_lines = (
             lines(ids, "hierarchy", ("E", "s1"), ("E", "s2"), ("s1", "t1"), ("s1", "t2"))
             | lines(ids, "hierarchy", ("s2", "t3"))
@@ -152,10 +161,15 @@ async def test_each_preset_shows_work_context_or_both_with_the_right_lines_on_th
         async with _browser(board, project) as w:
             page = w.page
             # No choice in the address: Work, as a map.
-            await graph_open(w, f"#/graph?epic={ids['E']}")
+            await graph_open(w, f"#/graph?epic={number(ids['E'])}")
             assert await pressed(page) == ("work", "map")
             await drawn_as(page, work, work_lines)
-            assert await svg(page).locator(".dot:not([data-kind='node'])").count() == 0
+            assert (
+                await svg(page)
+                .locator(".dot:not([data-kind=epic]):not([data-kind=story]):not([data-kind=task])")
+                .count()
+                == 0
+            )
 
             # Context: requirements, decisions and facts that are in force, and the work they are
             # joined to; no hierarchy, no dependency, nothing that has ended, nothing of epic E2.
@@ -172,7 +186,8 @@ async def test_each_preset_shows_work_context_or_both_with_the_right_lines_on_th
             assert await dot(page, f"fact:{ids['f2']}").get_attribute("data-confirmation") == (
                 "unconfirmed"
             )
-            assert await dot(page, f"node:{ids['s1']}").get_attribute("data-kind") == "node"
+            assert await dot(page, ids["s1"]).get_attribute("data-kind") == "story"
+            assert await dot(page, ids["s1"]).get_attribute("data-ref") == ids["s1"]
             assert await dot(page, f"rule:{ids['ru']}").get_attribute("data-kind") == "rule"
             await expect(dot(page, f"decision:{ids['dw']}")).to_have_count(1)
 
@@ -227,7 +242,7 @@ async def test_the_map_and_the_list_hold_the_same_records_and_relationships_in_e
         assert len(links) >= 25  # the world is not trivially small
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?epic={ids['E']}")
+            await graph_open(w, f"#/graph?epic={number(ids['E'])}")
             for view, (dots, map_lines, rows) in want.by_view.items():
                 await show(page, view=view, presentation="map")
                 await drawn_as(page, dots, map_lines)
@@ -235,13 +250,15 @@ async def test_the_map_and_the_list_hold_the_same_records_and_relationships_in_e
                 await check_same_relationships(page, rows)
                 await show(page, presentation="list")
                 await list_as(page, rows)
-                # Each row is what the tools say: its id, and for context its lifecycle and
-                # confirmation.
+                # Each row is what the tools say: its ref (work) or its id (requirements,
+                # decisions, facts), and for context its lifecycle and confirmation.
                 for key in rows:
                     kind, ident = key.split(":")
-                    await expect(listed(page, key)).to_have_attribute("data-id", ident)
-                    if kind == "node":
+                    if kind in {"epic", "story", "task"}:
+                        await expect(listed(page, key)).to_have_attribute("data-ref", key)
+                        await expect(listed(page, key)).to_have_attribute("data-number", ident)
                         continue
+                    await expect(listed(page, key)).to_have_attribute("data-id", ident)
                     tool = {"rule": "get_rule", "decision": "get_decision", "fact": "get_fact"}[
                         kind
                     ]
@@ -284,8 +301,9 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
         ids = await context_world(client, word)
         want = Expect(ids)
         epic, story = ids["E"], ids["s1"]
+        epic_n = str(number(epic))
         # A work filter (stories only) narrows the work; the context that is joined to it stays.
-        stories = keys(ids, "node", "E", "s1", "s2")
+        stories = refs(ids, "E", "s1", "s2")
         filtered = {
             "work": (stories, lines(ids, "hierarchy", ("E", "s1"), ("E", "s2"))
                      | lines(ids, "relates_to", ("s1", "s2")), stories),
@@ -298,11 +316,11 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
                 stories | want.records,
             ),
         }  # fmt: skip
-        address = f"#/graph?view=everything&epic={epic}&q=kind:story&sel=node:{story}"
+        address = f"#/graph?view=everything&epic={number(epic)}&q=kind:story&sel={story}"
         async with _browser(board, project) as w:
             page = w.page
             await graph_open(w, address)
-            await expect(panel(page).locator(f".card-detail[data-id='{story}']")).to_be_visible(
+            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
                 timeout=SLOW
             )
             # Mark the panel's own element: it must be the very same one after every switch.
@@ -320,28 +338,26 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
                 dots, map_lines, rows = filtered[view]
                 if presentation == "map":
                     await drawn_as(page, dots, map_lines)
-                    chosen = dot(page, f"node:{story}")
+                    chosen = dot(page, story)
                     await expect(chosen).to_have_class(re.compile(r"\bchosen\b"))
                     await expect(chosen).to_have_attribute("aria-pressed", "true")
                 else:
                     await list_as(page, rows)
                     if view != "context":
-                        await expect(listed(page, f"node:{story}")).to_have_attribute(
-                            "aria-current", "true"
-                        )
+                        await expect(listed(page, story)).to_have_attribute("aria-current", "true")
                 params = await hash_params(page)
                 assert (params["epic"], params["q"], params["sel"]) == (
-                    str(epic),
+                    epic_n,
                     "kind:story",
-                    f"node:{story}",
+                    story,
                 )
                 assert (params["view"], params.get("as", "map")) == (view, presentation)
                 assert await pressed(page) == (view, presentation)
-                assert await page.locator("#graph-epic").input_value() == str(epic)
+                assert await page.locator("#graph-epic").input_value() == epic_n
                 assert await page.locator("#filter").input_value() == "kind:story"
                 kept = panel(page).locator(".card-detail[data-mark=kept]")
                 await expect(kept).to_have_count(1)
-                await expect(kept).to_have_attribute("data-id", str(story))
+                await expect(kept).to_have_attribute("data-ref", story)
 
             # Choosing another record, from the list, keeps everything but the choice, and the
             # map then marks that record.
@@ -353,14 +369,14 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
             ).to_be_visible(timeout=SLOW)
             params = await hash_params(page)
             assert (params["epic"], params["q"], params["sel"]) == (
-                str(epic),
+                epic_n,
                 "kind:story",
                 fact,
             )
             await expect(listed(page, fact)).to_have_attribute("aria-current", "true")
             await show(page, presentation="map")
             await expect(dot(page, fact)).to_have_class(re.compile(r"\bchosen\b"))
-            await expect(dot(page, f"node:{story}")).not_to_have_class(re.compile(r"\bchosen\b"))
+            await expect(dot(page, story)).not_to_have_class(re.compile(r"\bchosen\b"))
 
             # The address alone brings the whole state back: reloaded, and in a page of its own.
             await show(page, view="context", presentation="list")
@@ -368,7 +384,7 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
             await page.reload()
             await expect(page.locator("#graph-list")).to_be_visible(timeout=SLOW)
             assert await pressed(page) == ("context", "list")
-            assert await page.locator("#graph-epic").input_value() == str(epic)
+            assert await page.locator("#graph-epic").input_value() == epic_n
             assert await page.locator("#filter").input_value() == "kind:story"
             await expect(
                 panel(page).locator(f".record-detail[data-record='{fact}']")
@@ -386,9 +402,9 @@ async def test_the_chosen_record_and_the_scope_survive_switching_and_the_address
             await other.close()
 
             # Around the chosen record, one step, in either presentation: the same records.
-            await w.go(f"#/graph?view=everything&epic={epic}&sel={fact}")
+            await w.go(f"#/graph?view=everything&epic={epic_n}&sel={fact}")
             await page.locator("#graph-reach").select_option("1")
-            around = {fact, f"node:{story}", f"rule:{ids['r1']}"}
+            around = {fact, story, f"rule:{ids['r1']}"}
             await expect(page.locator("#graph-page")).to_have_attribute("data-as", "map")
             await drawn_as(
                 page,
@@ -411,7 +427,7 @@ async def test_the_presets_and_presentations_are_buttons_that_work_from_the_keyb
         ids = await context_world(client, word)
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?epic={ids['E']}")
+            await graph_open(w, f"#/graph?epic={number(ids['E'])}")
             for group in ("#graph-views", "#graph-presentations"):
                 assert await page.locator(group).get_attribute("role") == "group"
                 assert await page.locator(group).get_attribute("aria-label")
@@ -462,7 +478,6 @@ async def test_no_belief_principle_or_memory_taxonomy_appears_in_any_preset_or_p
     server_url: str,
 ) -> None:
     word = unique_word()
-    kinds = {"node", "rule", "decision", "fact"}
     types = {"epic", "story", "task", "rule", "decision", "fact"}
     async with fresh_project(server_url) as (client, board, project):
         ids = await context_world(client, word)
@@ -471,7 +486,7 @@ async def test_no_belief_principle_or_memory_taxonomy_appears_in_any_preset_or_p
         assert not [name for name in names if gone.search(name)], names
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?epic={ids['E']}&ended=1")
+            await graph_open(w, f"#/graph?epic={number(ids['E'])}&ended=1")
             for view in ("work", "context", "everything"):
                 for presentation in ("map", "list"):
                     await show(page, view=view, presentation=presentation)
@@ -485,7 +500,7 @@ async def test_no_belief_principle_or_memory_taxonomy_appears_in_any_preset_or_p
                     found: list[list[str]] = await page.locator(
                         "#graph-page [data-kind]"
                     ).evaluate_all("els => els.map(e => [e.dataset.kind, e.dataset.type || ''])")
-                    assert {k for k, _ in found} <= kinds, found
+                    assert {k for k, _ in found} <= types, found
                     assert {t for _, t in found if t} <= types, found
             switches = await page.locator("[name^=kind-]").evaluate_all(
                 "els => els.map(e => e.name)"
@@ -493,13 +508,13 @@ async def test_no_belief_principle_or_memory_taxonomy_appears_in_any_preset_or_p
             assert sorted(switches) == sorted(f"kind-{kind}" for kind in types)
             # Nor in what opens from it: the detail of each kind of record, and the dialogs.
             for key in (
-                f"node:{ids['s1']}",
+                ids["s1"],
                 f"rule:{ids['r1']}",
                 f"decision:{ids['d1']}",
                 f"fact:{ids['f1']}",
                 f"fact:{ids['f_old']}",
             ):
-                await w.go(f"#/graph?view=context&as=list&epic={ids['E']}&sel={key}")
+                await w.go(f"#/graph?view=context&as=list&epic={number(ids['E'])}&sel={key}")
                 await expect(panel(page).locator("h2").first).to_be_visible(timeout=SLOW)
                 await page.wait_for_load_state("networkidle")
                 shown = await panel(page).text_content() or ""
@@ -524,11 +539,11 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
     async with fresh_project(server_url) as (client, board, project):
         ids = await context_world(client, word)
         story = ids["s1"]
-        before = await ok(client, "get_node", node_id=story)
+        before = await ok(client, "get_node", node=story)
         draft_title, draft_body = f"Draft title {word}", f"Draft details {word}"
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?epic={ids['E']}&sel=node:{story}")
+            await graph_open(w, f"#/graph?epic={number(ids['E'])}&sel={story}")
             card = panel(page).locator(".card-detail")
             await expect(card).to_be_visible(timeout=SLOW)
             await card.evaluate("e => { e.dataset.mark = 'kept'; }")
@@ -539,7 +554,7 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
                 assert await page.locator("#edit-title").input_value() == draft_title, where
                 assert await page.locator("#edit-body").input_value() == draft_body, where
                 await expect(panel(page).locator(".card-detail[data-mark=kept]")).to_have_count(1)
-                now = await ok(client, "get_node", node_id=story)
+                now = await ok(client, "get_node", node=story)
                 assert (now["title"], now["body"], now["version"]) == (
                     before["title"],
                     before["body"],
@@ -584,7 +599,7 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
                 client,
                 "update_node",
                 actor="agent-1",
-                node_id=story,
+                node=story,
                 expected_version=before["version"],
                 priority="high",
             )
@@ -598,7 +613,7 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
             problem = panel(page).locator(".edit .problem")
             await expect(problem).to_contain_text("version", timeout=SLOW)
             assert await page.locator("#edit-title").input_value() == draft_title
-            assert (await ok(client, "get_node", node_id=story))["title"] == before["title"]
+            assert (await ok(client, "get_node", node=story))["title"] == before["title"]
             await panel(page).locator("button.load-current").first.click()
             await expect(page.locator("#edit-title")).to_have_value(before["title"], timeout=SLOW)
             assert w.problems == [], w.problems
@@ -615,22 +630,23 @@ async def test_a_connection_a_backlink_or_a_reference_opens_the_ordinary_detail_
         epic = await made(client, "epic", f"Followed {word}")
         story = await made(client, "story", f"Referred story {word}", epic)
         await made(client, "task", f"A task {word}", story)
-        decision = await make_decision(client, f"Referred decision {word}", node_ids=[story])
+        decision = await make_decision(client, f"Referred decision {word}", nodes=[story])
         fact = await make_fact(
             client,
-            f"Refers to [[node:{story}]] and [[decision:{decision['id']}]] {word}",
-            node_ids=[story],
+            f"Refers to [[{story}]] and [[decision:{decision['id']}]] {word}",
+            nodes=[story],
             decision_ids=[decision["id"]],
         )
         mentions = await ok(client, "find_mentions", decision_id=decision["id"])
-        sources = {(m["source"]["item_type"], m["source"]["id"]) for m in mentions["items"]}
-        assert ("fact", fact["id"]) in sources
+        sources = {m["source"]["ref"] for m in mentions["items"]}
+        assert f"fact:{fact['id']}" in sources
         fact_key, decision_key = f"fact:{fact['id']}", f"decision:{decision['id']}"
         await reindexed(client)
+        epic_n = number(epic)
 
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=everything&as=list&epic={epic}")
+            await graph_open(w, f"#/graph?view=everything&as=list&epic={epic_n}")
 
             # A backlink: the decision's row says what mentions it, as find_mentions does, and a
             # click on one opens that record in the panel, with the Graph left as it was.
@@ -639,8 +655,8 @@ async def test_a_connection_a_backlink_or_a_reference_opens_the_ordinary_detail_
             items = row.locator("details.mentioned-in li.mention")
             await expect(items).to_have_count(len(mentions["items"]), timeout=SLOW)
             shown = await items.evaluate_all("els => els.map(e => e.dataset.source)")
-            assert sorted(shown) == sorted(f"{kind}:{ident}" for kind, ident in sources)
-            await row.locator(f"li.mention[data-source='fact:{fact['id']}'] a.mention-link").click()
+            assert sorted(shown) == sorted(sources)
+            await row.locator(f"li.mention[data-source='{fact_key}'] a.mention-link").click()
             detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
             await expect(detail).to_be_visible(timeout=SLOW)
             params = await hash_params(page)
@@ -648,41 +664,39 @@ async def test_a_connection_a_backlink_or_a_reference_opens_the_ordinary_detail_
                 fact_key,
                 "everything",
                 "list",
-                str(epic),
+                str(epic_n),
             )
             await expect(listed(page, fact_key)).to_have_attribute("aria-current", "true")
             await same_as_the_boards_in(w, fact_key)
 
             # A reference in the record's own words opens the item it names.
-            await w.go(f"#/graph?view=everything&as=list&epic={epic}&sel={fact_key}")
+            await w.go(f"#/graph?view=everything&as=list&epic={epic_n}&sel={fact_key}")
             await expect(detail).to_be_visible(timeout=SLOW)
-            await detail.locator(
-                f".record-text .reference[data-kind=node][data-id='{story}']"
-            ).click()
-            await expect(panel(page).locator(f".card-detail[data-id='{story}']")).to_be_visible(
+            await detail.locator(f".record-text .reference[data-ref='{story}']").click()
+            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
                 timeout=SLOW
             )
-            assert (await hash_params(page))["sel"] == f"node:{story}"
+            assert (await hash_params(page))["sel"] == story
             assert (await hash_params(page))["view"] == "everything"
-            await expect(listed(page, f"node:{story}")).to_have_attribute("aria-current", "true")
-            await same_as_the_boards_in(w, f"node:{story}")
+            await expect(listed(page, story)).to_have_attribute("aria-current", "true")
+            await same_as_the_boards_in(w, story)
 
             # A connection in the list: from the fact's row to the story it concerns.
-            await w.go(f"#/graph?view=everything&as=list&epic={epic}")
+            await w.go(f"#/graph?view=everything&as=list&epic={epic_n}")
             await expect(listed(page, fact_key)).to_be_visible(timeout=SLOW)
             await listed(page, fact_key).locator("details.gv-connections summary").click()
             link = listed(page, fact_key).locator(
-                f"details.gv-connections li[data-other='node:{story}'] button.gv-link"
+                f"details.gv-connections li[data-other='{story}'] button.gv-link"
             )
-            await expect(link).to_have_text(re.compile(rf"#{story} Referred story"))
+            await expect(link).to_have_text(re.compile(rf"{code(story)} Referred story"))
             await link.click()
-            await expect(panel(page).locator(f".card-detail[data-id='{story}']")).to_be_visible(
+            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
                 timeout=SLOW
             )
-            await expect(listed(page, f"node:{story}")).to_have_attribute("aria-current", "true")
+            await expect(listed(page, story)).to_have_attribute("aria-current", "true")
 
             # On the map: a dot, then what it is joined to, then a link in the record's panel.
-            await w.go(f"#/graph?view=everything&epic={epic}&sel={fact_key}")
+            await w.go(f"#/graph?view=everything&epic={epic_n}&sel={fact_key}")
             await expect(dot(page, fact_key)).to_have_class(re.compile(r"\bchosen\b"), timeout=SLOW)
             await expect(
                 panel(page).locator(f".record-detail[data-record='{fact_key}']")
@@ -691,21 +705,19 @@ async def test_a_connection_a_backlink_or_a_reference_opens_the_ordinary_detail_
             joined = await near.evaluate_all(
                 "els => els.map(e => [e.dataset.key, e.dataset.relation])"
             )
-            assert sorted(joined) == sorted(
-                [[f"node:{story}", "concerns"], [decision_key, "concerns"]]
-            )
+            assert sorted(joined) == sorted([[story, "concerns"], [decision_key, "concerns"]])
             await page.locator(f"#graph-neighbours button[data-key='{decision_key}']").click()
             await expect(
                 panel(page).locator(f".record-detail[data-record='{decision_key}']")
             ).to_be_visible(timeout=SLOW)
             await expect(dot(page, decision_key)).to_have_class(re.compile(r"\bchosen\b"))
             await (
-                panel(page).locator(f"[data-part=concerns] a.item-link[data-id='{story}']").click()
+                panel(page).locator(f"[data-part=concerns] a.item-link[data-ref='{story}']").click()
             )
-            await expect(panel(page).locator(f".card-detail[data-id='{story}']")).to_be_visible(
+            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
                 timeout=SLOW
             )
-            await expect(dot(page, f"node:{story}")).to_have_class(re.compile(r"\bchosen\b"))
+            await expect(dot(page, story)).to_have_class(re.compile(r"\bchosen\b"))
             assert w.problems == [], w.problems
 
 
@@ -719,17 +731,15 @@ async def test_a_filter_by_kind_status_and_line_is_kept_in_the_address(server_ur
         story = await made(client, "story", f"Story {word}", epic)
         done = await made(client, "task", f"Done task {word}", story)
         open_ = await made(client, "task", f"Open task {word}", story)
-        await ok(client, "update_node", actor="a", node_id=done, expected_version=1, status="done")
-        await ok(
-            client, "add_link", actor="a", source_id=open_, target_id=done, link_type="relates_to"
-        )
+        await ok(client, "update_node", actor="a", node=done, expected_version=1, status="done")
+        await ok(client, "add_link", actor="a", source=open_, target=done, link_type="relates_to")
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?epic={epic}")
-            await expect(dot(page, f"node:{done}")).to_have_count(1)
+            await graph_open(w, f"#/graph?epic={number(epic)}")
+            await expect(dot(page, done)).to_have_count(1)
             await page.locator("#filters summary").click()
             await page.locator("[name=status-done]").uncheck()
-            await expect(dot(page, f"node:{done}")).to_have_count(0)
+            await expect(dot(page, done)).to_have_count(0)
             assert "hide_status=done" in page.url
             await page.locator("[name=kind-task]").uncheck()
             await expect(svg(page).locator(".dot[data-type='task']")).to_have_count(0)
@@ -742,12 +752,12 @@ async def test_a_filter_by_kind_status_and_line_is_kept_in_the_address(server_ur
             await w.go("#/board")
             await page.goto(address.replace("#", "?x=1#", 1))
             await expect(svg(page)).to_have_attribute("data-ready", "true", timeout=SLOW)
-            await expect(dot(page, f"node:{open_}")).to_have_count(1)
-            await expect(dot(page, f"node:{done}")).to_have_count(0)
+            await expect(dot(page, open_)).to_have_count(1)
+            await expect(dot(page, done)).to_have_count(0)
             await expect(svg(page).locator(".edge[data-type='hierarchy']")).to_have_count(0)
             # The same switches filter the list, whose rows are the same records.
             await show(page, presentation="list")
-            await list_as(page, {f"node:{n}" for n in (epic, story, open_)})
+            await list_as(page, {epic, story, open_})
             assert w.problems == [], w.problems
 
 
@@ -765,62 +775,62 @@ async def test_choosing_a_dot_opens_the_panel_and_the_local_graph_is_the_neighbo
             client,
             "add_link",
             actor="a",
-            source_id=story,
-            target_id=sibling,
+            source=story,
+            target=sibling,
             link_type="relates_to",
         )
-        rule = (await ok(client, "create_rule", actor="a", title=f"A rule {word}", story_id=story))[
+        rule = (await ok(client, "create_rule", actor="a", title=f"A rule {word}", story=story))[
             "id"
         ]
-        decision = await make_decision(client, f"A decision {word}", node_ids=[story])
-        fact = await make_fact(client, f"A fact {word}", node_ids=[story])
+        decision = await make_decision(client, f"A decision {word}", nodes=[story])
+        fact = await make_fact(client, f"A fact {word}", nodes=[story])
         # The index has caught up, so a panel says the same whenever it is opened.
         await reindexed(client)
-        everything = f"view=everything&epic={epic}"
+        everything = f"view=everything&epic={number(epic)}"
         wanted = {
-            f"node:{story}", f"node:{epic}", f"node:{sibling}", f"node:{task}", f"node:{other}",
+            story, epic, sibling, task, other,
             f"rule:{rule}", f"decision:{decision['id']}", f"fact:{fact['id']}",
         }  # fmt: skip
 
         async with _browser(board, project) as w:
             page = w.page
             await graph_open(w, f"#/graph?{everything}")
-            await dot(page, f"node:{story}").click()
+            await dot(page, story).click()
             card = panel(page).locator(".card-detail")
-            await expect(card).to_contain_text(f"#{story} Chosen story", timeout=SLOW)
+            await expect(card).to_contain_text(f"{code(story)} Chosen story", timeout=SLOW)
             await expect(card).to_contain_text("Target 2031-05-06")
             await expect(card.locator("[data-section=facts] li.record")).to_contain_text(
                 f"A fact {word}"
             )
-            await expect(dot(page, f"node:{story}")).to_have_class(re.compile(r"\bchosen\b"))
-            await same_as_the_boards_in(w, f"node:{story}")
+            await expect(dot(page, story)).to_have_class(re.compile(r"\bchosen\b"))
+            await same_as_the_boards_in(w, story)
 
             # The local graph at one step: exactly the record and what it is joined to.
-            await graph_open(w, f"#/graph?scope=local&sel=node:{story}&{everything}")
+            await graph_open(w, f"#/graph?scope=local&sel={story}&{everything}")
             await drawn_as(page, wanted, await _edges_among(client, wanted))
             neighbours = page.locator("#graph-neighbours button.neighbour")
             near: list[str] = await neighbours.evaluate_all("els => els.map(e => e.dataset.key)")
-            assert sorted(near) == sorted(wanted - {f"node:{story}"})
+            assert sorted(near) == sorted(wanted - {story})
             # The same records as a list.
             await show(page, presentation="list")
             await list_as(page, wanted)
             await show(page, presentation="map")
             # Two steps reach one further: the other story of the epic is two steps from the task.
-            await graph_open(w, f"#/graph?scope=local&sel=node:{task}&depth=2&{everything}")
-            await expect(dot(page, f"node:{other}")).to_have_count(1, timeout=SLOW)
-            await expect(dot(page, f"node:{sibling}")).to_have_count(1)
-            await graph_open(w, f"#/graph?scope=local&sel=node:{task}&{everything}")
-            await expect(dot(page, f"node:{story}")).to_have_count(1, timeout=SLOW)
-            assert await dot(page, f"node:{sibling}").count() == 0
+            await graph_open(w, f"#/graph?scope=local&sel={task}&depth=2&{everything}")
+            await expect(dot(page, other)).to_have_count(1, timeout=SLOW)
+            await expect(dot(page, sibling)).to_have_count(1)
+            await graph_open(w, f"#/graph?scope=local&sel={task}&{everything}")
+            await expect(dot(page, story)).to_have_count(1, timeout=SLOW)
+            assert await dot(page, sibling).count() == 0
 
             # The neighbour list offers the same choices as a click on the dot.
-            await graph_open(w, f"#/graph?scope=local&sel=node:{story}&{everything}")
-            await page.locator(f"#graph-neighbours button[data-key='node:{task}']").click()
-            await expect(dot(page, f"node:{task}")).to_have_class(re.compile(r"\bchosen\b"))
-            await expect(page.locator("#card-title")).to_contain_text(f"#{task} Chosen task")
-            await dot(page, f"node:{story}").click()
-            await expect(dot(page, f"node:{story}")).to_have_class(re.compile(r"\bchosen\b"))
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} Chosen story")
+            await graph_open(w, f"#/graph?scope=local&sel={story}&{everything}")
+            await page.locator(f"#graph-neighbours button[data-key='{task}']").click()
+            await expect(dot(page, task)).to_have_class(re.compile(r"\bchosen\b"))
+            await expect(page.locator("#card-title")).to_contain_text(f"{code(task)} Chosen task")
+            await dot(page, story).click()
+            await expect(dot(page, story)).to_have_class(re.compile(r"\bchosen\b"))
+            await expect(page.locator("#card-title")).to_contain_text(f"{code(story)} Chosen story")
             assert w.problems == [], w.problems
 
 
@@ -836,19 +846,19 @@ async def test_the_whole_graph_can_be_reached_and_chosen_from_the_keyboard(
         epic = await made(client, "epic", f"Keys {word}")
         story = await made(client, "story", f"Keyed story {word}", epic)
         task = await made(client, "task", f"Keyed task {word}", story)
-        fact = await make_fact(client, f"Keyed fact {word}", node_ids=[story])
+        fact = await make_fact(client, f"Keyed fact {word}", nodes=[story])
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=everything&epic={epic}")
+            await graph_open(w, f"#/graph?view=everything&epic={number(epic)}")
             # A dot takes the focus, is chosen with Enter, and is pinned with P (and let go again).
-            await dot(page, f"node:{story}").focus()
+            await dot(page, story).focus()
             await page.keyboard.press("p")
-            await expect(dot(page, f"node:{story}")).to_have_class(re.compile(r"\bpinned\b"))
+            await expect(dot(page, story)).to_have_class(re.compile(r"\bpinned\b"))
             await page.keyboard.press("p")
-            await expect(dot(page, f"node:{story}")).not_to_have_class(re.compile(r"\bpinned\b"))
-            await dot(page, f"node:{story}").focus()
+            await expect(dot(page, story)).not_to_have_class(re.compile(r"\bpinned\b"))
+            await dot(page, story).focus()
             await page.keyboard.press("Enter")
-            await expect(page.locator("#card-title")).to_contain_text(f"#{story} Keyed story")
+            await expect(page.locator("#card-title")).to_contain_text(f"{code(story)} Keyed story")
             await dot(page, f"fact:{fact['id']}").focus()
             await page.keyboard.press("Enter")
             await expect(
@@ -858,28 +868,47 @@ async def test_the_whole_graph_can_be_reached_and_chosen_from_the_keyboard(
 
             # The list is as reachable: the tree walks with the arrow keys, and Enter chooses.
             await show(page, presentation="list")
-            await list_as(page, {f"node:{n}" for n in (epic, story, task)} | {f"fact:{fact['id']}"})
+            await list_as(page, {epic, story, task, f"fact:{fact['id']}"})
             first = page.locator("#work-tree li[role=treeitem][tabindex='0']")
             await first.focus()
-            await expect(first).to_have_attribute("data-key", re.compile(r"^node:"))
+            await expect(first).to_have_attribute("data-key", re.compile(r"^(epic|story|task):"))
             await page.keyboard.press("Home")
-            await expect(page.locator(f"#work-tree li[data-key='node:{epic}']")).to_be_focused()
+            await expect(page.locator(f"#work-tree li[data-key='{epic}']")).to_be_focused()
             await page.keyboard.press("ArrowDown")
-            await expect(page.locator(f"#work-tree li[data-key='node:{story}']")).to_be_focused()
+            await expect(page.locator(f"#work-tree li[data-key='{story}']")).to_be_focused()
             await page.keyboard.press("ArrowDown")
-            await expect(page.locator(f"#work-tree li[data-key='node:{task}']")).to_be_focused()
+            await expect(page.locator(f"#work-tree li[data-key='{task}']")).to_be_focused()
             await page.keyboard.press("Enter")
-            await expect(page.locator("#card-title")).to_contain_text(f"#{task} Keyed task")
+            await expect(page.locator("#card-title")).to_contain_text(f"{code(task)} Keyed task")
             # Opening a record moves the keyboard to its details; Shift+Tab-ing back is not needed
             # to carry on in the tree: the row takes the focus again.
             await expect(page.locator("#card-title")).to_be_focused()
-            await page.locator(f"#work-tree li[data-key='node:{task}']").focus()
+            await page.locator(f"#work-tree li[data-key='{task}']").focus()
             await page.keyboard.press("ArrowLeft")
-            await expect(page.locator(f"#work-tree li[data-key='node:{story}']")).to_be_focused()
+            await expect(page.locator(f"#work-tree li[data-key='{story}']")).to_be_focused()
             await page.keyboard.press("ArrowLeft")  # closes the story: its task is out of the tree
-            await expect(page.locator(f"#work-tree li[data-key='node:{task}']")).to_be_hidden()
+            await expect(page.locator(f"#work-tree li[data-key='{task}']")).to_be_hidden()
             await page.keyboard.press("ArrowRight")
-            await expect(page.locator(f"#work-tree li[data-key='node:{task}']")).to_be_visible()
+            await expect(page.locator(f"#work-tree li[data-key='{task}']")).to_be_visible()
+
+            # The title of an epic or a story is a link to its own page, with a Quick look button
+            # beside it that shows it in the panel; a task's title is only text.
+            story_row = page.locator(f"#work-tree li[data-key='{story}'] > .gv-row")
+            href = await story_row.locator("a.gv-title").get_attribute("href") or ""
+            assert href.replace("%3A", ":") == f"#/item?item={story}"
+            epic_row = page.locator(f"#work-tree li[data-key='{epic}'] > .gv-row")
+            task_row = page.locator(f"#work-tree li[data-key='{task}'] > .gv-row")
+            assert await epic_row.locator("a.gv-title").count() == 1
+            assert await task_row.locator("a.gv-title").count() == 0
+            await story_row.locator("button.gv-quick").click()
+            await expect(page.locator("#card-title")).to_contain_text(f"{code(story)} Keyed story")
+            assert (await hash_params(page))["sel"] == story
+            await story_row.locator("a.gv-title").click()
+            await expect(page.locator("#item-title")).to_contain_text(
+                f"{code(story)} Keyed story", timeout=SLOW
+            )
+            await page.go_back()
+            await expect(page.locator("#graph-list")).to_be_visible(timeout=SLOW)
             # The records of context are reached by their titles, with the arrow keys too.
             await listed(page, f"fact:{fact['id']}").locator(".record-title").focus()
             await page.keyboard.press("Enter")
@@ -903,25 +932,21 @@ async def test_what_an_agent_or_the_board_changes_shows_on_the_map_and_the_list_
         s2 = await made(client, "story", f"Second story {word}", epic)
         t1 = await made(client, "task", f"Task one {word}", s1)
         t3 = await made(client, "task", f"Task three {word}", s2)
-        await ok(client, "add_link", actor="a", source_id=s1, target_id=s2, link_type="relates_to")
+        await ok(client, "add_link", actor="a", source=s1, target=s2, link_type="relates_to")
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=everything&epic={epic}")
-            await expect(edge(page, "hierarchy", f"node:{s1}", f"node:{t1}")).to_have_count(1)
+            await graph_open(w, f"#/graph?view=everything&epic={number(epic)}")
+            await expect(edge(page, "hierarchy", s1, t1)).to_have_count(1)
 
             # An agent adds a link, records a fact, and the map shows both.
-            await ok(
-                client, "add_link", actor="a", source_id=t3, target_id=t1, link_type="needs_first"
-            )
-            await expect(edge(page, "needs_first", f"node:{t3}", f"node:{t1}")).to_have_count(
-                1, timeout=SLOW
-            )
-            fact = await make_fact(client, f"Heard {word}", node_ids=[t1])
+            await ok(client, "add_link", actor="a", source=t3, target=t1, link_type="needs_first")
+            await expect(edge(page, "needs_first", t3, t1)).to_have_count(1, timeout=SLOW)
+            fact = await make_fact(client, f"Heard {word}", nodes=[t1])
             fact_key = f"fact:{fact['id']}"
             await expect(dot(page, fact_key)).to_have_attribute(
                 "data-status", "active", timeout=SLOW
             )
-            await expect(edge(page, "concerns", fact_key, f"node:{t1}")).to_have_count(1)
+            await expect(edge(page, "concerns", fact_key, t1)).to_have_count(1)
             # And the list, which is drawn from the same records, shows the fact when asked.
             await show(page, presentation="list")
             await expect(listed(page, fact_key)).to_be_visible(timeout=SLOW)
@@ -931,23 +956,19 @@ async def test_what_an_agent_or_the_board_changes_shows_on_the_map_and_the_list_
             await expect(dot(page, fact_key)).to_have_count(0, timeout=SLOW)
 
             # A story moved on the board changes its hierarchy line in the graph.
-            await w.go(f"#/board?epic={epic}&sel=node:{s2}")
-            await page.locator("#move-parent").select_option(str(other_epic))
+            await w.go(f"#/board?epic={number(epic)}&sel={s2}")
+            await page.locator("#move-parent").select_option(other_epic)
             await page.get_by_role("button", name="Move", exact=True).click()
             await expect(
                 panel(page).locator(".card-detail > p", has_text="In epic")
-            ).to_contain_text(f"#{other_epic} Elsewhere", timeout=SLOW)
-            assert (await ok(client, "get_node", node_id=s2))["parent_id"] == other_epic
-            await w.go(f"#/graph?view=everything&epic={other_epic}")
-            await expect(edge(page, "hierarchy", f"node:{other_epic}", f"node:{s2}")).to_have_count(
-                1, timeout=SLOW
-            )
-            await w.go(f"#/graph?view=everything&epic={epic}")
-            await expect(edge(page, "hierarchy", f"node:{epic}", f"node:{s2}")).to_have_count(
-                0, timeout=SLOW
-            )
+            ).to_contain_text(f"{code(other_epic)} Elsewhere", timeout=SLOW)
+            assert (await ok(client, "get_node", node=s2))["parent"] == other_epic
+            await w.go(f"#/graph?view=everything&epic={number(other_epic)}")
+            await expect(edge(page, "hierarchy", other_epic, s2)).to_have_count(1, timeout=SLOW)
+            await w.go(f"#/graph?view=everything&epic={number(epic)}")
+            await expect(edge(page, "hierarchy", epic, s2)).to_have_count(0, timeout=SLOW)
             # It is still shown, as something outside this epic: it is linked to a story here.
-            await expect(dot(page, f"node:{s2}")).to_have_attribute("data-outside", "true")
+            await expect(dot(page, s2)).to_have_attribute("data-outside", "true")
             assert w.problems == [], w.problems
 
 
@@ -975,10 +996,10 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
             forty.append(
                 {"key": name, "kind": "story", "title": f"Story {name}", "parent": f"e{epic}"}
             )
-    for number in range(28):
-        parent = f"s{number % 3}{(number // 3) % 3}"
+    for index in range(28):
+        parent = f"s{index % 3}{(index // 3) % 3}"
         forty.append(
-            {"key": f"t{number}", "kind": "task", "title": f"Task {number}", "parent": parent}
+            {"key": f"t{index}", "kind": "task", "title": f"Task {index}", "parent": parent}
         )
     assert len(forty) == 40
     links = [
@@ -995,7 +1016,7 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
         nodes = await all_nodes(client)
         known: dict[int, dict[str, Any]] = {}
         for node in nodes:
-            for link in (await ok(client, "list_links", node_id=node["id"]))["items"]:
+            for link in (await ok(client, "list_links", node=node["ref"]))["items"]:
                 known[link["id"]] = link
         assert len(nodes) == 40 and len(known) == len(links)
 
@@ -1003,33 +1024,26 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
             page = w.page
             await graph_open(w, "#/graph?scope=all")
             await expect(svg(page)).to_have_attribute("data-dots", "40")
-            assert await dot_keys(page) == sorted(f"node:{n['id']}" for n in nodes)
+            assert await dot_keys(page) == sorted(n["ref"] for n in nodes)
             for link in known.values():
                 await expect(
-                    edge(
-                        page,
-                        link["link_type"],
-                        f"node:{link['source_id']}",
-                        f"node:{link['target_id']}",
-                    )
+                    edge(page, link["link_type"], link["source"], link["target"])
                 ).to_have_count(1)
             assert await svg(page).locator(".edge[data-type='hierarchy']").count() == 37
             assert await svg(page).locator(".edge").count() == 37 + len(known)
 
             # Everything adds the context: a requirement in a story, a decision, a fact about both.
             first_task = next(n for n in nodes if n["title"] == "Task 0")
-            story = first_task["parent_id"]
-            rule = (await ok(client, "create_rule", actor="a", title="A rule", story_id=story))[
-                "id"
-            ]
-            decision = await make_decision(client, "A decision", node_ids=[first_task["id"]])
+            story = first_task["parent"]
+            rule = (await ok(client, "create_rule", actor="a", title="A rule", story=story))["id"]
+            decision = await make_decision(client, "A decision", nodes=[first_task["ref"]])
             fact = await make_fact(
-                client, "A fact", node_ids=[first_task["id"]], decision_ids=[decision["id"]]
+                client, "A fact", nodes=[first_task["ref"]], decision_ids=[decision["id"]]
             )
             await show(page, view="everything")
             context = {f"rule:{rule}", f"decision:{decision['id']}", f"fact:{fact['id']}"}
             await expect(svg(page)).to_have_attribute("data-dots", "43", timeout=SLOW)
-            assert await dot_keys(page) == sorted({f"node:{n['id']}" for n in nodes} | context)
+            assert await dot_keys(page) == sorted({n["ref"] for n in nodes} | context)
             assert await svg(page).locator(".edge").count() == 37 + len(known) + 4
             await show(page, view="work")
             await expect(svg(page)).to_have_attribute("data-dots", "40", timeout=SLOW)
@@ -1051,19 +1065,19 @@ async def test_everything_shows_every_item_and_link_and_collapses_each_epic_abov
                             }
                         )
             planned = await ok(client, "create_plan", actor="agent-1", items=big)
-            ids = {item["key"]: item["id"] for item in planned["created"]}
+            ids = {item["key"]: item["ref"] for item in planned["created"]}
             collapsed = svg(page)
             await expect(collapsed).to_have_attribute("data-collapsed", "true", timeout=SLOW)
             await expect(collapsed).to_have_attribute("data-dots", "13")
             notice = await page.locator("#graph-notice").inner_text()
             assert "each epic is one dot" in notice and "1,150 dots" in notice, notice
-            first = dot(page, f"node:{ids['E3']}")
+            first = dot(page, ids["E3"])
             await expect(first).to_have_attribute("data-collapsed", "true")
             await first.click()
             # Opening one epic shows its items.
             await expect(collapsed).to_have_attribute("data-collapsed", "false")
             expected = sorted(
-                f"node:{item}" for key, item in ids.items() if key == "E3" or key.startswith("S3-")
+                item for key, item in ids.items() if key == "E3" or key.startswith("S3-")
             )
             assert len(expected) == 111
             assert await dot_keys(page) == expected

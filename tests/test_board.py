@@ -233,6 +233,8 @@ def test_the_board_is_three_views_and_the_settings_pages_and_the_old_pages_have_
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     pages = re.search(r"const PAGES = \{(.*?)\n\};", app, re.S)
     assert pages
+    # The page of one epic, story or task (item) is reached from the panel and from lists, so it
+    # is a page that is in neither VIEWS nor SETTINGS.
     assert re.findall(r"^\s{2}(\w+): \{ title", pages.group(1), re.M) == [
         "board",
         "graph",
@@ -240,6 +242,7 @@ def test_the_board_is_three_views_and_the_settings_pages_and_the_old_pages_have_
         "access",
         "tools",
         "status",
+        "item",
     ]
     # Home, Table, Outline, Rules, Memory, Overlaps and Ask are gone, scripts and all: Search and
     # Activity are drawers, and requirements, facts and decisions live in the panel and the Graph.

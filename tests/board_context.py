@@ -12,7 +12,7 @@ from mcp import Client
 from playwright.async_api import Locator, Page, expect
 
 from tests.board_helpers import SLOW, Watched, board_url, made
-from tests.helpers import confirm, connect, make_decision, make_fact, ok
+from tests.helpers import NODE_PAGES, confirm, connect, make_decision, make_fact, ok
 from tests.world import Project, make_project, register
 
 ADA = "Ada Lovelace"
@@ -171,13 +171,15 @@ async def tally(client: Client) -> dict[str, int]:
 
 
 async def whole(client: Client, tool: str, **arguments: Any) -> list[dict[str, Any]]:
-    """Every item of a list tool, following its pages."""
+    """Every item of a list tool, following its pages (a page of nodes is continued by `after`,
+    a reference; every other list by `after_id`)."""
+    start, more = ("after", "next_after") if tool in NODE_PAGES else ("after_id", "next_after_id")
     found: list[dict[str, Any]] = []
     after = None
     while True:
-        page = await ok(client, tool, limit=200, after_id=after, **arguments)
+        page = await ok(client, tool, limit=200, **{start: after}, **arguments)
         found.extend(page["items"])
-        after = page["next_after_id"]
+        after = page[more]
         if after is None:
             return found
 
@@ -227,8 +229,9 @@ async def recall_in_panel(
     }
 
 
-async def recall_matches(client: Client, page: Page, **target: int) -> None:
-    """The panel's recall is what `recall` returns for the same item, section by section."""
+async def recall_matches(client: Client, page: Page, **target: Any) -> None:
+    """The panel's recall is what `recall` returns for the same item, section by section. The
+    item is `node=<reference>` or `rule_id=<id>`."""
     want = expected_recall(await ok(client, "recall", limit=50, **target))
     shown = await recall_in_panel(page)
     for _ in range(SLOW // 250):
@@ -239,7 +242,10 @@ async def recall_matches(client: Client, page: Page, **target: int) -> None:
     assert shown == want
 
 
-async def history_actions(client: Client, tool: str, key: str, ident: int) -> list[str]:
+async def history_actions(client: Client, tool: str, key: str, ident: int | str) -> list[str]:
+    """The actions in an item's history, in the order the tool gives them: `key` is the argument
+    that names the item (`node` with a reference, `rule_id`, `decision_id` or `fact_id` with a
+    number)."""
     items = (await ok(client, tool, limit=200, **{key: ident}))["items"]
     return [event["action"] for event in items]
 
@@ -265,13 +271,15 @@ async def coverage_numbers(client: Client) -> tuple[int, int]:
     return int(report["unplaced_rule_count"]), int(report["story_without_rules_count"])
 
 
-async def context_world(client: Client, word: str) -> dict[str, int]:
+async def context_world(client: Client, word: str) -> dict[str, Any]:
     """Work and context of every sort, made through MCP in an empty project, to look at on the
     Graph. Two epics (E, with two stories and three tasks, and E2 with one story and one task), two
     links between work, requirements (held, settled, one in no story and one dropped), decisions
     (confirmed, project-wide, replaced, withdrawn, and one about E2) and facts (confirmed, about a
-    decision, about nothing, replaced, withdrawn, and one about E2). Gives the ids by short name."""
-    ids: dict[str, int] = {}
+    decision, about nothing, replaced, withdrawn, and one about E2). Gives them by short name:
+    work by its reference (a string, such as story:12), requirements, decisions and facts by their
+    id (a number)."""
+    ids: dict[str, Any] = {}
 
     async def node(name: str, kind: str, parent: str | None = None) -> None:
         ids[name] = await made(client, kind, f"{name} {word}", ids[parent] if parent else None)
@@ -293,13 +301,13 @@ async def context_world(client: Client, word: str) -> dict[str, int]:
             client,
             "add_link",
             actor="a",
-            source_id=ids[source],
-            target_id=ids[target],
+            source=ids[source],
+            target=ids[target],
             link_type=kind,
         )
 
     async def rule(name: str, story: str | None, **more: Any) -> None:
-        arguments = {"story_id": ids[story]} if story else {}
+        arguments = {"story": ids[story]} if story else {}
         made_rule = await ok(
             client, "create_rule", actor="a", title=f"{name} {word}", **arguments, **more
         )
@@ -315,9 +323,9 @@ async def context_world(client: Client, word: str) -> dict[str, int]:
         ids[name] = record["id"]
         return record
 
-    await decision("d1", node_ids=[ids["s1"]], rule_ids=[ids["r1"]])
+    await decision("d1", nodes=[ids["s1"]], rule_ids=[ids["r1"]])
     await decision("dw", project_wide=True)
-    old = await decision("d_old", node_ids=[ids["s2"]])
+    old = await decision("d_old", nodes=[ids["s2"]])
     newer = await ok(
         client,
         "supersede_decision",
@@ -330,19 +338,19 @@ async def context_world(client: Client, word: str) -> dict[str, int]:
         keep_links=True,
     )
     ids["d_new"] = newer["id"]
-    gone = await decision("d_gone", node_ids=[ids["s1"]])
+    gone = await decision("d_gone", nodes=[ids["s1"]])
     await ok(client, "withdraw_decision", actor="a", decision_id=gone["id"], reason="Not needed")
-    await decision("d9", node_ids=[ids["s9"]])
+    await decision("d9", nodes=[ids["s9"]])
 
     async def fact(name: str, **more: Any) -> dict[str, Any]:
         record = await make_fact(client, f"{name} {word}", **more)
         ids[name] = record["id"]
         return record
 
-    await fact("f1", node_ids=[ids["s1"]], rule_ids=[ids["r1"]])
+    await fact("f1", nodes=[ids["s1"]], rule_ids=[ids["r1"]])
     await fact("f2", decision_ids=[ids["d1"]])
     await fact("f3")
-    old_fact = await fact("f_old", node_ids=[ids["s2"]])
+    old_fact = await fact("f_old", nodes=[ids["s2"]])
     replacement = await ok(
         client,
         "supersede_fact",
@@ -354,9 +362,9 @@ async def context_world(client: Client, word: str) -> dict[str, int]:
         keep_links=True,
     )
     ids["f_new"] = replacement["replacement"]["id"]
-    gone_fact = await fact("f_gone", node_ids=[ids["s1"]])
+    gone_fact = await fact("f_gone", nodes=[ids["s1"]])
     await ok(client, "withdraw_fact", actor="a", fact_ids=[gone_fact["id"]], reason="A slip")
-    await fact("f9", node_ids=[ids["s9"]])
+    await fact("f9", nodes=[ids["s9"]])
     await confirm(client, "decision", {"id": ids["d1"]}, "Marie")
     await confirm(client, "fact", {"id": ids["f1"]}, "Marie")
     return ids
@@ -365,27 +373,25 @@ async def context_world(client: Client, word: str) -> dict[str, int]:
 async def server_edges(client: Client) -> set[tuple[str, str, str]]:
     """Every line the Graph could draw between the records of a project, worked out from what the
     tools say (nodes, links, requirements, decisions and facts), as (kind, source, target) with
-    the keys the board uses: node:12, rule:3, decision:7, fact:5."""
+    the keys the board uses: story:12, rule:3, decision:7, fact:5."""
     found: set[tuple[str, str, str]] = set()
     nodes = await whole(client, "list_nodes")
     for node in nodes:
-        if node["parent_id"] is not None:
-            found.add(("hierarchy", f"node:{node['parent_id']}", f"node:{node['id']}"))
-        for link in await whole(client, "list_links", node_id=node["id"]):
-            found.add((link["link_type"], f"node:{link['source_id']}", f"node:{link['target_id']}"))
+        if node["parent"] is not None:
+            found.add(("hierarchy", node["parent"], node["ref"]))
+        for link in await whole(client, "list_links", node=node["ref"]):
+            found.add((link["link_type"], link["source"], link["target"]))
     for rule in await whole(client, "list_rules"):
-        if rule["story_id"] is not None:
-            found.add(("placed", f"rule:{rule['id']}", f"node:{rule['story_id']}"))
+        if rule["story"] is not None:
+            found.add(("placed", f"rule:{rule['id']}", rule["story"]))
     for kind, tool in (("decision", "list_decisions"), ("fact", "list_facts")):
         for record in await whole(client, tool):
             me = f"{kind}:{record['id']}"
-            for ref, key in (
-                ("node", "node_ids"),
-                ("rule", "rule_ids"),
-                ("decision", "decision_ids"),
-            ):
-                for other in record.get(key, []):
-                    found.add(("concerns", me, f"{ref}:{other}"))
+            for other in record.get("nodes", []):
+                found.add(("concerns", me, other))
+            for other_kind, key in (("rule", "rule_ids"), ("decision", "decision_ids")):
+                for other_id in record.get(key, []):
+                    found.add(("concerns", me, f"{other_kind}:{other_id}"))
             if record["superseded_by_id"] is not None:
                 found.add(("replaces", f"{kind}:{record['superseded_by_id']}", me))
     return found
@@ -412,7 +418,7 @@ async def check_same_relationships(page: Page, list_rows: set[str]) -> None:
             assert nested, (kind, source, target)
         elif kind == "needs_first":
             ties = page.locator(f"#work-tree li[data-key='{source}'] .gv-ties.needs").first
-            assert target.split(":")[1] in (await ties.get_attribute("data-ids") or "").split(",")
+            assert target in (await ties.get_attribute("data-refs") or "").split(",")
         else:
             seen = [
                 ((kind, source, target) in said) if source in rows else None,

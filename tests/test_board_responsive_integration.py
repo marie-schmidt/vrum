@@ -22,7 +22,15 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import SLOW, board_url, made
+from tests.board_helpers import (
+    SLOW,
+    board_url,
+    item_address,
+    item_row,
+    item_rows,
+    made,
+    ref_slug,
+)
 from tests.board_layout import (
     BY_NAME,
     SCREENS,
@@ -41,7 +49,7 @@ from tests.board_layout import (
     tour,
     visit,
 )
-from tests.helpers import connect, ok
+from tests.helpers import code_of, connect, ok
 from tests.world import make_project, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -254,25 +262,25 @@ async def test_the_menu_is_reachable_through_its_button_on_a_narrow_window(
 
 
 RECORDS = [
-    ("epic", "E3", ".lane[data-epic='{id}'] .lane-title", "#/board"),
-    ("story", "S5", ".card[data-id='{id}']", "#/board"),
-    ("task", "D1", ".card[data-id='{id}']", "#/board"),
+    ("epic", "E3", ".lane[data-ref='{ref}'] .lane-title", "#/board"),
+    ("story", "S5", ".card[data-ref='{ref}']", "#/board"),
+    ("task", "D1", ".card[data-ref='{ref}']", "#/board"),
     (
         "requirement",
         "R3",
-        "#graph-list [data-key='rule:{id}'] .gv-open",
+        "#graph-list [data-key='{ref}'] .gv-open",
         "#/graph?view=context&as=list",
     ),
     (
         "decision",
         "X2",
-        "#graph-list [data-key='decision:{id}'] .record-title",
+        "#graph-list [data-key='{ref}'] .record-title",
         "#/graph?view=context&as=list",
     ),
     (
         "fact",
         "Y2",
-        "#graph-list [data-key='fact:{id}'] .record-title",
+        "#graph-list [data-key='{ref}'] .record-title",
         "#/graph?view=context&as=list",
     ),
 ]
@@ -289,8 +297,8 @@ async def test_every_kind_of_record_opens_in_a_panel_that_is_whole_and_can_be_cl
         await open_address(w, "#/board")
         await settle(page)
         for kind, name, opener, address in RECORDS:
-            await goto(w, address, ".card[data-id], #graph-list .gv-record")
-            await page.locator(opener.format(id=world[name])).click()
+            await goto(w, address, ".card[data-ref], #graph-list .gv-record")
+            await page.locator(opener.format(ref=world[name])).click()
             panel = page.locator("#panel")
             await expect(panel.locator(".detail")).to_be_visible(timeout=SLOW)
             await settle(page)
@@ -393,7 +401,7 @@ async def test_the_board_the_map_the_timeline_and_the_panel_scroll_or_pan_in_the
         assert await is_sideways_free(page)
 
         # The map: the keyboard pans and zooms it, and 0 brings it back.
-        await goto(w, f"#/graph?view=work&as=map&epic={world['E1']}", "svg[data-ready=true]")
+        await goto(w, f"#/graph?view=work&as=map&epic={world.number('E1')}", "svg[data-ready=true]")
         canvas = page.locator("#graph-canvas")
         assert await canvas.get_attribute("role") == "region"
         assert await canvas.get_attribute("tabindex") == "0"
@@ -452,7 +460,7 @@ async def test_the_board_the_map_the_timeline_and_the_panel_scroll_or_pan_in_the
         assert await is_sideways_free(page)
 
         # The panel: a long record is read by scrolling the panel, not the page.
-        await goto(w, f"#/board?sel=decision:{world['X2']}", "#panel .detail")
+        await goto(w, f"#/board?sel={world['X2']}", "#panel .detail")
         panel = page.locator("#panel")
         room = await panel.evaluate("(p) => [p.scrollHeight, p.clientHeight]")
         if room[0] > room[1] + 1:
@@ -463,6 +471,49 @@ async def test_the_board_the_map_the_timeline_and_the_panel_scroll_or_pan_in_the
             await page.wait_for_function("() => document.getElementById('panel').scrollTop > 0")
             assert await page.evaluate("() => window.scrollY") == 0 or screen.phone
         assert await is_sideways_free(page)
+
+
+@screens
+async def test_the_item_pages_table_scrolls_in_a_region_of_its_own_and_the_page_never_does(
+    server_url: str, screen: Screen
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, "light") as w:
+        page = w.page
+        await open_address(w, "#/board")
+        # The epic with the long title and a story made of one long word.
+        await goto(w, item_address(world["E3"]), "#item-table tbody tr")
+        region = page.locator("#item-region")
+        assert await region.get_attribute("role") == "region"
+        assert await region.get_attribute("tabindex") == "0"
+        assert (await region.get_attribute("aria-label") or "").strip()
+        title = await page.locator("#item-title").evaluate(
+            "(h) => [h.scrollWidth <= h.clientWidth + 1, h.getBoundingClientRect().right]"
+        )
+        assert title[0] and title[1] <= screen.width + 0.5, title
+        room = await region.evaluate("(e) => [e.scrollWidth, e.clientWidth]")
+        # Its columns need room (about 830 pixels): a window with less scrolls the table in its
+        # region, which the keyboard pans, and a window with more shows all of it.
+        if screen.width <= 768:
+            assert room[0] > room[1] + 1, room
+            await region.focus()
+            await page.keyboard.press("ArrowRight")
+            await page.wait_for_function(
+                "() => document.getElementById('item-region').scrollLeft > 0"
+            )
+            await page.keyboard.press("ArrowLeft")
+            await page.wait_for_function(
+                "() => document.getElementById('item-region').scrollLeft === 0"
+            )
+        else:
+            assert room[0] <= room[1] + 1, room
+        assert await is_sideways_free(page)
+        # The same for a story whose tasks hold the long words, and for a task, which has no table.
+        await goto(w, item_address(world["S5"]), "#item-table tbody tr")
+        assert await is_sideways_free(page)
+        await goto(w, item_address(world["D1"]), "#item-part-title")
+        assert await is_sideways_free(page)
+        await expect(page.locator("#item-table")).to_have_count(0)
 
 
 # -- 9. the work is done with the keyboard alone -----------------------------------------------
@@ -477,11 +528,11 @@ async def own_project(server_url: str) -> AsyncIterator[tuple[Client, str]]:
         yield client, board_url(server_url, project)
 
 
-async def read(client: Client, node: int) -> dict[str, Any]:
-    return await ok(client, "get_node", node_id=node)
+async def read(client: Client, node: str) -> dict[str, Any]:
+    return await ok(client, "get_node", node=node)
 
 
-async def settled_on(client: Client, node: int, **wanted: Any) -> dict[str, Any]:
+async def settled_on(client: Client, node: str, **wanted: Any) -> dict[str, Any]:
     """The node as MCP reads it once it has the wanted fields (a change by key is sent after a
     short while)."""
     for _ in range(60):
@@ -489,7 +540,7 @@ async def settled_on(client: Client, node: int, **wanted: Any) -> dict[str, Any]
         if all(found[name] == value for name, value in wanted.items()):
             return found
         await anyio.sleep(0.25)
-    raise AssertionError(f"#{node} never became {wanted}: {await read(client, node)}")
+    raise AssertionError(f"{node} never became {wanted}: {await read(client, node)}")
 
 
 @screens
@@ -585,9 +636,9 @@ async def test_a_title_is_edited_in_the_panel_and_saved_with_the_keyboard(
         async with layout_page(board, screen, "light") as w:
             page = w.page
             await open_address(w, "#/board")
-            await expect(page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+            await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
             await start_of_page(page)
-            await tab_to(page, f".card[data-id='{task}']")
+            await tab_to(page, f".card[data-ref='{task}']")
             await page.keyboard.press("Enter")
             await expect(page.locator("#card-title")).to_contain_text("Old title", timeout=SLOW)
             await tab_to(page, "#edit-title")
@@ -599,7 +650,7 @@ async def test_a_title_is_edited_in_the_panel_and_saved_with_the_keyboard(
             await expect(page.locator("#card-title")).to_contain_text(
                 "A new title from the keyboard"
             )
-            await expect(page.locator(f".card[data-id='{task}'] .card-title")).to_have_text(
+            await expect(page.locator(f".card[data-ref='{task}'] .card-title")).to_have_text(
                 "A new title from the keyboard"
             )
 
@@ -656,9 +707,9 @@ async def test_a_status_is_changed_through_the_move_menu_with_the_keyboard(
         async with layout_page(board, screen, "light") as w:
             page = w.page
             await open_address(w, "#/board")
-            await expect(page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+            await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
             await start_of_page(page)
-            await tab_to(page, f".card[data-id='{task}'] button.move")
+            await tab_to(page, f".card[data-ref='{task}'] button.move")
             await page.keyboard.press("Enter")
             menu = page.locator(".move-menu")
             await expect(menu).to_be_visible()
@@ -670,17 +721,76 @@ async def test_a_status_is_changed_through_the_move_menu_with_the_keyboard(
             await page.keyboard.press("Enter")
             await settled_on(client, task, status="in_progress")
             await expect(
-                page.locator(f".cell[data-status='in_progress'] .card[data-id='{task}']")
+                page.locator(f".cell[data-status='in_progress'] .card[data-ref='{task}']")
             ).to_be_visible(timeout=SLOW)
             # The focus is still on the Move button after the board is drawn again; a menu opened
             # there and left with Escape changes nothing and gives the focus back.
-            assert (await focused(page)).startswith(f"button Move #{task}"), await focused(page)
+            move = f"button Move {code_of(task)}"
+            assert (await focused(page)).startswith(move), await focused(page)
             await page.keyboard.press("Enter")
             await expect(menu).to_be_visible()
             await page.keyboard.press("Escape")
             await expect(menu).to_be_hidden()
-            assert (await focused(page)).startswith(f"button Move #{task}")
+            assert (await focused(page)).startswith(move)
             assert (await read(client, task))["status"] == "in_progress"
+
+
+@screens
+async def test_an_items_page_is_sorted_looked_into_and_followed_to_the_next_page_with_the_keyboard(
+    server_url: str, screen: Screen
+) -> None:
+    async with own_project(server_url) as (client, board):
+        epic = await made(client, "epic", "Keys")
+        story = await made(client, "story", "Keyed story", epic)
+        zebra = await made(client, "task", "Zebra", story)
+        apple = await made(client, "task", "Apple", story, priority="urgent")
+        async with layout_page(board, screen, "light") as w:
+            page = w.page
+            await open_address(w, item_address(story))
+            await expect(page.locator("#item-table tbody tr")).to_have_count(2, timeout=SLOW)
+            assert await item_rows(page) == [zebra, apple], "by number, to begin with"
+            await expect(page.locator("#item-title")).to_have_text(
+                re.compile(rf"^{code_of(story)}\s+Keyed story$")
+            )
+            # A column header is a button: Enter sorts by it, again reverses it; the focus stays.
+            title = page.locator("th.col-title")
+            await start_of_page(page)
+            await tab_to(page, "#item-table button.sort[data-sort=title]", limit=250)
+            await page.keyboard.press("Enter")
+            await expect(title).to_have_attribute("aria-sort", "ascending")
+            assert await item_rows(page) == [apple, zebra]
+            assert (await focused(page)).startswith("button")
+            assert await page.evaluate("document.activeElement.dataset.sort") == "title"
+            await page.keyboard.press("Enter")
+            await expect(title).to_have_attribute("aria-sort", "descending")
+            assert await item_rows(page) == [zebra, apple]
+            # The priority column puts the urgent task first.
+            await tab_to(page, "#item-table button.sort[data-sort=priority]")
+            await page.keyboard.press("Enter")
+            await expect(page.locator("th.col-priority")).to_have_attribute(
+                "aria-sort", "ascending"
+            )
+            assert await item_rows(page) == [apple, zebra]
+            # A quick look opens the panel beside the page, for that row.
+            look = item_row(page, apple).locator("button.quick-look")
+            await tab_to(page, f"#row-{ref_slug(apple)} button.quick-look")
+            assert (await look.get_attribute("aria-label")) == f"Quick look at {code_of(apple)}"
+            await page.keyboard.press("Enter")
+            await expect(page.locator(f"#panel .card-detail[data-ref='{apple}']")).to_be_visible(
+                timeout=SLOW
+            )
+            await expect(page.locator("#item-page")).to_have_attribute("data-ref", story)
+            await expect(item_row(page, apple)).to_have_class(re.compile("selected"))
+            # Its link goes to the page of that task, which has the focus on its title.
+            await tab_to(page, f"#row-{ref_slug(zebra)} a.item-code-link")
+            await page.keyboard.press("Enter")
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", zebra, timeout=SLOW
+            )
+            await expect(page.locator("#item-title")).to_have_text(
+                re.compile(rf"^{code_of(zebra)}\s+Zebra$")
+            )
+            await expect(page.locator("#item-part-title")).to_contain_text(code_of(story))
 
 
 async def type_date(page: Page, iso: str) -> None:
@@ -714,16 +824,16 @@ async def test_dates_are_scheduled_through_the_tray_the_panel_and_the_bar_withou
             page = w.page
             # The tray of the Roadmap: two dates typed into their fields, then Set dates.
             await open_address(w, "#/roadmap")
-            await expect(page.locator(f".tray-item[data-id='{tray}']")).to_be_visible(timeout=SLOW)
+            await expect(page.locator(f".tray-item[data-ref='{tray}']")).to_be_visible(timeout=SLOW)
             await start_of_page(page)
-            await tab_to(page, f"input[aria-label='Start date of #{tray}']")
+            await tab_to(page, f"input[aria-label='Start date of {code_of(tray)}']")
             await type_date(page, "2027-12-01")
-            await tab_to(page, f"input[aria-label='Target date of #{tray}']")
+            await tab_to(page, f"input[aria-label='Target date of {code_of(tray)}']")
             await type_date(page, "2027-12-15")
-            await tab_to(page, f".tray-item[data-id='{tray}'] button[type=submit]")
+            await tab_to(page, f".tray-item[data-ref='{tray}'] button[type=submit]")
             await page.keyboard.press("Enter")
             await settled_on(client, tray, start_on="2027-12-01", target_on="2027-12-15")
-            bar = f".rm-bar[data-id='{tray}']"
+            bar = f".rm-bar[data-ref='{tray}']"
             await expect(page.locator(bar)).to_be_visible(timeout=SLOW)
             # The bar moves with the arrow keys (a day each; Shift for a week), and is sent once.
             await start_of_page(page)
@@ -735,7 +845,7 @@ async def test_dates_are_scheduled_through_the_tray_the_panel_and_the_bar_withou
             await page.keyboard.press("Alt+ArrowLeft")
             await settled_on(client, tray, start_on="2027-12-09", target_on="2027-12-24")
             # The panel: its date fields.
-            await open_address(w, f"#/board?sel=node:{panel}")
+            await open_address(w, f"#/board?sel={panel}")
             await expect(page.locator("#card-title")).to_contain_text(
                 "Dated in the panel", timeout=SLOW
             )
@@ -764,6 +874,8 @@ async def test_the_focus_is_visible_on_every_control_the_keyboard_reaches(
         "graph-work-map",
         "graph-everything-list",
         "roadmap",
+        "item-story",
+        "item-task",
         "panel-task",
         "panel-decision",
         "search",
@@ -772,6 +884,9 @@ async def test_the_focus_is_visible_on_every_control_the_keyboard_reaches(
         "tools",
         "status",
     ]
+    # The page of an item is long: its details come before its table, so the walk starts at its
+    # title (the top bar and the menu are walked on the other screens) and goes on to the table.
+    presses = {"item-story": 85, "item-task": 45}
     async with layout_page(world.board, screen, theme) as w:
         page = w.page
         await open_address(w)
@@ -790,8 +905,11 @@ async def test_the_focus_is_visible_on_every_control_the_keyboard_reaches(
 
         for stop in [s for s in stops(world) if s.name in names]:
             await visit(w, stop)
-            await start_of_page(page)
-            await walk(stop.name, 45)
+            if stop.name in presses:
+                await page.locator("#item-title").focus()
+            else:
+                await start_of_page(page)
+            await walk(stop.name, presses.get(stop.name, 45))
         # The menu behind its button on a narrow window, and a dialog.
         await visit(w, stops(world)[0])
         await start_of_page(page)
@@ -841,7 +959,17 @@ async def test_on_a_touch_screen_the_controls_that_ask_for_it_are_44_pixels(
                 if box is None or min(box["width"], box["height"]) < 43.5:
                     shown = box and f"{box['width']:.0f}x{box['height']:.0f}"
                     small.append(f"{selector} is {shown}, and a touch target is 44x44")
+        # The page of an item: its rows have a quick look button as big as a finger.
+        await goto(w, item_address(world["S2"]), "#item-table tbody tr")
+        looks = page.locator("#item-table .quick-look")
+        assert await looks.count()
+        for at in range(await looks.count()):
+            box = await looks.nth(at).bounding_box()
+            if box is None or min(box["width"], box["height"]) < 43.5:
+                shown = box and f"{box['width']:.0f}x{box['height']:.0f}"
+                small.append(f".quick-look is {shown}, and a touch target is 44x44")
         assert not small, "\n".join(sorted(set(small)))
+        await goto(w, "#/board", ".card[data-ref]")
         await page.locator("#sidebar-toggle").click()
         await frames(page)
         for selector in ("#sidebar-close", "#main-nav a", "#activity-open", "#settings-menu"):
@@ -861,7 +989,7 @@ async def test_the_nodes_of_the_map_are_24_pixels_or_more_at_100_percent_zoom(
         await open_address(w, "#/board")
         small: list[str] = []
         for address in (
-            f"#/graph?view=everything&as=map&epic={world['E1']}",
+            f"#/graph?view=everything&as=map&epic={world.number('E1')}",
             "#/graph?view=everything&as=map",
         ):
             await goto(w, address, "svg[data-ready=true]")
@@ -925,7 +1053,16 @@ async def test_with_reduced_motion_no_animation_or_transition_runs_and_the_spinn
     server_url: str, theme: str
 ) -> None:
     world = await the_world(server_url)
-    names = ["board", "graph-work-map", "roadmap", "panel-task", "search", "activity", "access"]
+    names = [
+        "board",
+        "graph-work-map",
+        "roadmap",
+        "item-story",
+        "panel-task",
+        "search",
+        "activity",
+        "access",
+    ]
     async with layout_page(world.board, BY_NAME["1280"], theme, reduced_motion=True) as w:
         page = w.page
         await open_address(w)

@@ -23,7 +23,8 @@ from tests.board_search import (
     search_in_drawer,
     twin_epics,
 )
-from tests.helpers import ok, refused, reindexed, the_token, unique_word
+from tests.helpers import code_of, ok, refused, reindexed, the_token, unique_word
+from tests.helpers import number_of as number
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -51,7 +52,7 @@ async def test_the_drawer_lists_mcps_pairs_with_its_scores_threshold_epics_and_p
 ) -> None:
     pairs = [*DUPLICATES, *more_twins(15)]
     epic_a, epic_b, firsts, seconds = await twin_epics(client, pairs)
-    on_server = await every_overlap(client, epic_ids=[epic_a, epic_b])
+    on_server = await every_overlap(client, epics=[epic_a, epic_b])
     expected = pair_triples(on_server)
     assert len(expected) > 20
     default = on_server["threshold"]
@@ -66,9 +67,11 @@ async def test_the_drawer_lists_mcps_pairs_with_its_scores_threshold_epics_and_p
         await expect(page.locator("#drawer")).to_have_attribute("data-mode", "duplicates")
         assert (await address(page))[1]["dups"] == "1"
         await expect(page.locator("#dup-min")).to_have_value(str(default), timeout=SLOW)
-        await page.locator("#dup-epics").fill(f"{epic_a}, {epic_b}")
+        # The address and the box name an epic by its number.
+        typed = f"{number(epic_a)}, {number(epic_b)}"
+        await page.locator("#dup-epics").fill(typed)
         await page.locator("#dup-apply").click()
-        assert (await address(page))[1]["dup_epics"] == f"{epic_a}, {epic_b}"
+        assert (await address(page))[1]["dup_epics"] == typed
 
         # The first page is twenty pairs, and the count says how many there are in all.
         await expect(page.locator("#dup-pairs li.pair")).to_have_count(20, timeout=SLOW)
@@ -82,13 +85,13 @@ async def test_the_drawer_lists_mcps_pairs_with_its_scores_threshold_epics_and_p
         assert [round(s, 6) for _, _, s in shown] == sorted(
             [round(s, 6) for _, _, s in shown], reverse=True
         )
-        small: list[tuple[int, int, float]] = []
+        small: list[tuple[str, str, float]] = []
         offset = 0
         while offset is not None:
             page_of = await ok(
                 client,
                 "find_overlaps",
-                epic_ids=[epic_a, epic_b],
+                epics=[epic_a, epic_b],
                 limit=7,
                 offset=offset,
             )
@@ -111,7 +114,7 @@ async def test_the_drawer_lists_mcps_pairs_with_its_scores_threshold_epics_and_p
         await expect(sample.locator(".side").last).to_contain_text(DUPLICATES[0][1])
 
         # A higher threshold keeps only the pairs at least that alike, as MCP does.
-        strict = await every_overlap(client, epic_ids=[epic_a, epic_b], min_similarity=0.99)
+        strict = await every_overlap(client, epics=[epic_a, epic_b], min_similarity=0.99)
         assert 0 < len(strict["items"]) < len(expected)
         await page.locator("#dup-min").fill("0.99")
         await page.locator("#dup-apply").click()
@@ -119,8 +122,8 @@ async def test_the_drawer_lists_mcps_pairs_with_its_scores_threshold_epics_and_p
         assert await pairs_on(page) == pair_triples(strict)
         assert (await address(page))[1]["dup_min"] == "0.99"
         # Only one epic keeps the pairs that have something in it, which here is every pair.
-        one_epic = await every_overlap(client, epic_ids=[epic_b], min_similarity=0.99)
-        await page.locator("#dup-epics").fill(str(epic_b))
+        one_epic = await every_overlap(client, epics=[epic_b], min_similarity=0.99)
+        await page.locator("#dup-epics").fill(str(number(epic_b)))
         await redrawn(page, "#dup-pairs", page.locator("#dup-apply").click())
         assert await pairs_on(page) == pair_triples(one_epic)
         # Starting again takes the choices off and goes back to the server's threshold.
@@ -146,7 +149,7 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
     )
     async with browser_page(board, token=the_token(), name="Ada Lovelace") as w:
         page = w.page
-        await w.open(f"#/roadmap?drawer=search&dups=1&dup_epics={epic_a}")
+        await w.open(f"#/roadmap?drawer=search&dups=1&dup_epics={number(epic_a)}")
         shown = await pairs_on(page)
         assert (first, second) in {(a, b) for a, b, _ in shown}
         row = page.locator(f"li.pair[data-first='{first}'][data-second='{second}']")
@@ -189,11 +192,11 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
             second: [(first, second, "duplicates")],
         }
         assert await link_count(client) == before["links"] + 1
-        link = (await ok(client, "list_links", node_id=first))["items"][0]
+        link = (await ok(client, "list_links", node=first))["items"][0]
         assert link["link_type"] == "duplicates"
         await expect(row).to_contain_text("already linked: duplicates")
         await expect(page.locator("#notices .notice")).to_contain_text(
-            f"Marked #{first} and #{second} as duplicates."
+            f"Marked {code_of(first)} and {code_of(second)} as duplicates."
         )
         assert w.problems == []
 
@@ -217,16 +220,16 @@ async def test_a_linked_pair_says_so_and_can_be_left_out_and_a_bad_epic_is_refus
         client,
         "add_link",
         actor="a",
-        source_id=seconds[2],
-        target_id=firsts[2],
+        source=seconds[2],
+        target=firsts[2],
         link_type="relates_to",
     )
-    on_server = await every_overlap(client, epic_ids=[epic_a, epic_b])
+    on_server = await every_overlap(client, epics=[epic_a, epic_b])
     unmarked = [p for p in on_server["items"] if not p["already_linked"]]
     assert 0 < len(unmarked) < len(on_server["items"])
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/board?drawer=search&dups=1&dup_epics={epic_a},{epic_b}")
+        await w.open(f"#/board?drawer=search&dups=1&dup_epics={number(epic_a)},{number(epic_b)}")
         assert await pairs_on(page) == pair_triples(on_server)
         row = page.locator(f"li.pair[data-first='{firsts[2]}'][data-second='{seconds[2]}']")
         await expect(row.get_by_role("button", name="Already marked as related")).to_be_disabled()
@@ -250,7 +253,7 @@ async def test_a_linked_pair_says_so_and_can_be_left_out_and_a_bad_epic_is_refus
         await expect(page.locator("#dup-problem")).not_to_have_text("", timeout=SLOW)
         plain(
             await page.locator("#dup-problem").inner_text(),
-            await refused(client, "find_overlaps", epic_ids=["banana"]),
+            await refused(client, "find_overlaps", epics=["banana"]),
         )
         assert await page.locator("#dup-pairs li.pair").count() == 0
         assert w.problems == []
@@ -266,20 +269,25 @@ async def test_requirements_are_compared_too_and_cannot_be_linked(
     story_b = await made(client, "story", f"Billing B {word}", epic_b)
     one, other = "Customers receive an invoice by email", "Clients receive a bill by mail"
     rule_a = await ok(
-        client, "create_rule", actor="a", title=one, story_id=story_a, body="After payment."
+        client, "create_rule", actor="a", title=one, story=story_a, body="After payment."
     )
     rule_b = await ok(
-        client, "create_rule", actor="a", title=other, story_id=story_b, body="After charge."
+        client, "create_rule", actor="a", title=other, story=story_b, body="After charge."
     )
     await reindexed(client)
     before = await link_count(client)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/board?drawer=search&dups=1&dup_type=rule&dup_epics={epic_a},{epic_b}")
+        await w.open(
+            "#/board?drawer=search&dups=1&dup_type=rule"
+            f"&dup_epics={number(epic_a)},{number(epic_b)}"
+        )
         shown = await pairs_on(page)
-        server = await every_overlap(client, item_type="rule", epic_ids=[epic_a, epic_b])
+        server = await every_overlap(client, item_type="rule", epics=[epic_a, epic_b])
         assert shown == pair_triples(server) and shown
-        row = page.locator(f"li.pair[data-first='{rule_a['id']}'][data-second='{rule_b['id']}']")
+        row = page.locator(
+            f"li.pair[data-first='rule:{rule_a['id']}'][data-second='rule:{rule_b['id']}']"
+        )
         await expect(row).to_be_visible()
         await expect(row.locator(".side").first).to_contain_text("After payment.")
         await expect(row.locator(".side .chip").first).to_contain_text("Requirement")

@@ -59,6 +59,16 @@
 .detail-head > .chips, .detail-head > .record-chips { grid-area: chips; }
 .detail-head > .detail-title { grid-area: title; margin: 0; font-size: var(--text-xl); font-weight: 650; line-height: var(--leading-tight); letter-spacing: -0.015em; overflow-wrap: anywhere; }
 .detail-head > .close { grid-area: close; justify-self: end; }
+/* The way to the full page and the close button, together at the top right of the head. */
+.detail-head > .detail-tools { grid-area: close; justify-self: end; display: flex; align-items: center; gap: var(--space-2); }
+.open-page { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: var(--control-h-sm); padding: 0 var(--space-2); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); font-size: var(--text-sm); font-weight: 500; line-height: 1.2; white-space: nowrap; }
+.open-page:hover { background: var(--surface-2); }
+.open-page:active { background: var(--surface-3); }
+.detail a.open-page, .detail a.open-page:hover { color: var(--text); text-decoration: none; }
+@media (max-width: 639.98px) {
+  .open-page { width: var(--control-h-sm); padding: 0; }
+  .open-page .open-page-text { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
 .detail-state > .detail-head { grid-template-areas: ". close"; margin-bottom: var(--space-3); }
 /* The id is in the title for the sake of its name; the head already shows it above. */
 .spoken { font-size: 0; }
@@ -92,6 +102,20 @@
 @container (max-width: 19rem) {
   .detail-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   .detail-grid > dd { margin-bottom: var(--space-2); }
+}
+
+/* The item's own page: the card with the room of a whole page. A strip of what matters first (two
+   labels and values to a row), then the details in a main column and what surrounds them in a side
+   column; one column when the page is narrow. */
+.card-page > .card-marks { margin-bottom: var(--space-4); }
+.card-summary > .detail-grid { margin-bottom: var(--space-2); }
+.card-columns { display: grid; gap: var(--space-2) var(--space-6); min-width: 0; }
+.card-main, .card-side { min-width: 0; }
+@container (min-width: 40rem) {
+  .card-summary > .detail-grid { grid-template-columns: repeat(2, minmax(5.5rem, 7.5rem) minmax(0, 1fr)); }
+}
+@container (min-width: 56rem) {
+  .card-columns { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; }
 }
 .concern-list { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .concern-list li { display: flex; align-items: flex-start; gap: var(--space-2); }

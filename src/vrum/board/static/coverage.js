@@ -7,7 +7,7 @@ import { ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import { kindIcon } from './labels.js';
 import { closeButton, loadingView } from './records.js';
-import { itemLink, openLink } from './references.js';
+import { nodeLink, openLink } from './references.js';
 
 function list(title, key, items, render, total, more) {
   return h(
@@ -63,18 +63,18 @@ export async function drawCoverage(into) {
         'Stories with no requirement',
         'stories-without-requirements',
         stories,
-        (story) => h('li', { 'data-story': story.id, 'data-drop-story': story.id }, kindIcon('story', 14), itemLink(story.id)),
+        (story) => h('li', { 'data-story': story.ref, 'data-drop-story': story.ref }, kindIcon('story', 14), nodeLink(story.ref)),
         report.story_without_rules_count,
-        report.next_stories_after_id && stories.length < report.story_without_rules_count
+        report.next_stories_after && stories.length < report.story_without_rules_count
           ? h(
               'button',
               {
                 type: 'button',
                 class: 'small',
                 onclick: async () => {
-                  const more = await section('stories_without_rules', { stories_after_id: report.next_stories_after_id });
+                  const more = await section('stories_without_rules', { stories_after: report.next_stories_after });
                   stories.push(...more.stories_without_rules);
-                  report.next_stories_after_id = more.next_stories_after_id;
+                  report.next_stories_after = more.next_stories_after;
                   drawStories();
                 },
               },

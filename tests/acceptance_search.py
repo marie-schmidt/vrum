@@ -42,17 +42,19 @@ from tests.board_search import (
     whole_list,
 )
 from tests.helpers import (
+    code_of,
     confirm,
     embeddings_stopped,
     make_decision,
     make_fact,
+    number_of,
     ok,
     refused,
     reindexed,
     unique_word,
 )
 from tests.test_board_references_integration import BODY
-from tests.test_board_search_integration import RECORD, same_as_server
+from tests.test_board_search_integration import WORK, same_as_server
 
 ADA = "Ada Lovelace"
 
@@ -82,19 +84,19 @@ async def exact_words_from_every_view() -> None:
         epic = await made(client, "epic", f"Billing {word}")
         story = await made(client, "story", f"Invoices {word}", epic)
         task = await made(client, "task", f"Send them {word}", story)
-        rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story_id=story)
-        decision = await make_decision(client, f"Decision {word}", node_ids=[story])
-        fact = await make_fact(client, f"A fact {word}", node_ids=[story])
+        rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story=story)
+        decision = await make_decision(client, f"Decision {word}", nodes=[story])
+        fact = await make_fact(client, f"A fact {word}", nodes=[story])
         await confirm(client, "fact", fact)
         await reindexed(client)
         on_server = await asked(client, word, "words")
         wanted = {
-            ("epic", epic),
-            ("story", story),
-            ("task", task),
-            ("rule", rule["id"]),
-            ("decision", decision["id"]),
-            ("fact", fact["id"]),
+            epic,
+            story,
+            task,
+            f"rule:{rule['id']}",
+            f"decision:{decision['id']}",
+            f"fact:{fact['id']}",
         }
         before = (await ok(client, "server_status"))["counts"]
         head = (await ok(client, "changes_since", after_event_id=0, limit=1))["latest_event_id"]
@@ -104,15 +106,17 @@ async def exact_words_from_every_view() -> None:
             with embeddings_stopped():
                 late = await made(client, "story", f"Made while the service was down {later}", epic)
                 for view in VIEWS:
-                    await w.open(f"#/{view}?sel=node:{story}")
+                    await w.open(f"#/{view}?sel={story}")
                     await on_view(page, view)
-                    await expect(page.locator("#panel #card-title")).to_contain_text(f"#{story} ")
+                    await expect(page.locator("#panel #card-title")).to_contain_text(
+                        f"{code_of(story)} "
+                    )
                     await page.locator("#global-search").fill(later)
                     await page.keyboard.press("Enter")
                     await expect(drawer(page, "search")).to_be_visible(timeout=SLOW)
                     name, choices = await address(page)
                     assert name == view and choices["drawer"] == "search"
-                    assert choices["search"] == later and choices["sel"] == f"node:{story}"
+                    assert choices["search"] == later and choices["sel"] == story
                     rows = await result_rows(page, 1)
                     assert shown_triples(rows) == [("story", late, "words")]
                     assert shown_triples(rows) == triples(
@@ -132,14 +136,11 @@ async def exact_words_from_every_view() -> None:
                     rows = await result_rows(page, 6)
                     same_as_server(rows, on_server["items"])
                     for row in rows:
-                        result = (
-                            f"#search-results li.result[data-type={row['type']}]"
-                            f"[data-id='{row['id']}']"
-                        )
+                        result = f"#search-results li.result[data-ref='{row['ref']}']"
                         await page.locator(f"{result} a.result-title").click()
-                        record = f"{RECORD[row['type']]}:{row['id']}"
+                        record = row["ref"]
                         await expect(page).to_have_url(re.compile(rf"sel={record}(&|$)"))
-                        if RECORD[row["type"]] == "node":
+                        if row["type"] in WORK:
                             await expect(page.locator("#panel #card-title")).to_contain_text(
                                 row["title"], timeout=SLOW
                             )
@@ -163,8 +164,11 @@ async def exact_words_from_every_view() -> None:
         "box finds by exact words what search finds, labelled exact words, a story made while "
         "the service was down at once (one item waiting), says in the server's words that meaning "
         "is not possible now, and opens a result of every kind in the ordinary detail panel with "
-        "the drawer still open; merely searching writes nothing",
-        {(r["item_type"], r["id"]) for r in on_server["items"]} == wanted
+        "the drawer still open; merely searching writes nothing. Every result names itself by "
+        "its reference (story:12, decision:7), and only requirements, decisions and facts also "
+        "have an id",
+        {i["ref"] for i in on_server["items"]} == wanted
+        and all(("id" in i) == (i["item_type"] not in WORK) for i in on_server["items"])
         and opened == list(VIEWS)
         and after == {**before, "stories": before["stories"] + 1, "events": before["events"] + 1}
         and news == head + 1,
@@ -193,17 +197,15 @@ async def meaning_and_paging() -> None:
             "create_rule",
             actor="a",
             title=f"The customer gets an invoice by email {word}",
-            story_id=story,
+            story=story,
         )
         decision = await make_decision(
-            client, f"Invoices go to the customer by email {word}", node_ids=[story]
+            client, f"Invoices go to the customer by email {word}", nodes=[story]
         )
         await confirm(client, "decision", decision)
-        fact = await make_fact(
-            client, f"Customers get their invoice by email {word}", node_ids=[task]
-        )
-        for number in range(55):
-            await made(client, "task", f"Filler {number} {word}", story)
+        fact = await make_fact(client, f"Customers get their invoice by email {word}", nodes=[task])
+        for count in range(55):
+            await made(client, "task", f"Filler {count} {word}", story)
         await reindexed(client)
         epics = await epic_of_each(client)
         async with browser_page(board, token=project.key) as w:
@@ -214,21 +216,25 @@ async def meaning_and_paging() -> None:
             await expect(page.locator("#search-waiting")).to_contain_text("0 items waiting")
             await search_in_drawer(page, paraphrase, "meaning")
             by_meaning = await asked(client, paraphrase, "meaning")
-            mine = {(i["item_type"], i["id"]) for i in by_meaning["items"]}
+            mine = {i["ref"] for i in by_meaning["items"]}
             rows = await whole_list(page, by_meaning["total"])
             same_as_server(rows, by_meaning["items"])
-            by_id = {(row["type"], row["id"]): row for row in rows}
-            labels_hold = by_id[("decision", decision["id"])]["label"].startswith(
+            by_ref = {row["ref"]: row for row in rows}
+            labels_hold = by_ref[f"decision:{decision['id']}"]["label"].startswith(
                 "Decision, confirmed by Marie"
-            ) and by_id[("fact", fact["id"])]["label"].startswith("Fact, not confirmed by a person")
+            ) and by_ref[f"fact:{fact['id']}"]["label"].startswith(
+                "Fact, not confirmed by a person"
+            )
             scored = all("similar in meaning (score " in row["why"] for row in rows)
             by_type = await facet(page, "type") == by_meaning["counts_by_type"]
             by_status = await facet(page, "status") == by_meaning["counts_by_status"]
+            # The drawer counts an epic by its number.
             per_epic: dict[str, int] = {}
             for item in by_meaning["items"]:
-                found = epics.get((item["item_type"], item["id"]))
+                found = epics.get(item["ref"])
                 if found is not None:
-                    per_epic[str(found)] = per_epic.get(str(found), 0) + 1
+                    key = str(number_of(found))
+                    per_epic[key] = per_epic.get(key, 0) + 1
             by_epic = await facet(page, "epic") == per_epic
             # By words the drawer shows fifty and asks for the rest: the server's paging, walked
             # in small pages, gives the same list.
@@ -255,19 +261,20 @@ async def meaning_and_paging() -> None:
             )
             same_as_server(await whole_list(page, len(tasks)), tasks)
             await page.locator("#search-facets [data-facet=type] button.on").click()
+            epic_number = str(number_of(epic))
             await page.locator(
-                f"#search-facets [data-facet=epic] button[data-value='{epic}']"
+                f"#search-facets [data-facet=epic] button[data-value='{epic_number}']"
             ).click()
-            under = [i for i in big["items"] if epics.get((i["item_type"], i["id"])) == epic]
+            under = [i for i in big["items"] if epics.get(i["ref"]) == epic]
             await expect(page.locator("#search-count")).to_have_text(
                 f"{len(under)} results of 63.", timeout=SLOW
             )
             same_as_server(await whole_list(page, len(under)), under)
             await page.locator(
-                f"#search-results li.result[data-type=story][data-id='{story}'] a.result-title"
+                f"#search-results li.result[data-ref='{story}'] a.result-title"
             ).click()
             await expect(page.locator("#panel #card-title")).to_contain_text(
-                f"#{story} Send the invoice", timeout=SLOW
+                f"{code_of(story)} Send the invoice", timeout=SLOW
             )
             choices = (await address(page))[1]
             assert w.problems == []
@@ -276,13 +283,7 @@ async def meaning_and_paging() -> None:
         "with the embedding service back, meaning results in the drawer are what search returns "
         "in the same order with the server's scores in their reasons, the labels of a decision "
         "and a fact (confirmed or not), and the counts by kind, status and epic",
-        {
-            ("story", story),
-            ("story", other),
-            ("decision", decision["id"]),
-            ("fact", fact["id"]),
-            ("rule", rule["id"]),
-        }
+        {story, other, f"decision:{decision['id']}", f"fact:{fact['id']}", f"rule:{rule['id']}"}
         <= mine
         and scored
         and labels_hold
@@ -303,8 +304,8 @@ async def meaning_and_paging() -> None:
         and more == "Show 13 more"
         and kind_in_address
         and reopened
-        and choices["search_epic"] == str(epic)
-        and choices["sel"] == f"node:{story}",
+        and choices["search_epic"] == epic_number
+        and choices["sel"] == story,
         f"{len(tasks)} tasks, {len(under)} in one epic",
     )
 
@@ -325,7 +326,7 @@ async def possible_duplicates() -> None:
     pairs = [*DUPLICATES, *more_twins(15)]
     async with fresh_project(URL) as (client, board, project):
         epic_a, epic_b, firsts, seconds = await twin_epics(client, pairs)
-        on_server = await every_overlap(client, epic_ids=[epic_a, epic_b])
+        on_server = await every_overlap(client, epics=[epic_a, epic_b])
         expected = pair_triples(on_server)
         default = on_server["threshold"]
         async with browser_page(board, token=project.key) as w:
@@ -336,7 +337,7 @@ async def possible_duplicates() -> None:
             await page.locator("#search-tab-dups").click()
             await expect(page.locator("#drawer")).to_have_attribute("data-mode", "duplicates")
             await expect(page.locator("#dup-min")).to_have_value(str(default), timeout=SLOW)
-            await page.locator("#dup-epics").fill(f"{epic_a}, {epic_b}")
+            await page.locator("#dup-epics").fill(f"{number_of(epic_a)}, {number_of(epic_b)}")
             await page.locator("#dup-apply").click()
             await expect(page.locator("#dup-pairs li.pair")).to_have_count(20, timeout=SLOW)
             await expect(page.locator("#dup-count")).to_have_text(
@@ -346,11 +347,11 @@ async def possible_duplicates() -> None:
             descending = [round(s, 6) for _, _, s in shown] == sorted(
                 [round(s, 6) for _, _, s in shown], reverse=True
             )
-            small: list[tuple[int, int, float]] = []
+            small: list[tuple[str, str, float]] = []
             offset: int | None = 0
             while offset is not None:
                 page_of = await ok(
-                    client, "find_overlaps", epic_ids=[epic_a, epic_b], limit=7, offset=offset
+                    client, "find_overlaps", epics=[epic_a, epic_b], limit=7, offset=offset
                 )
                 small.extend(pair_triples(page_of))
                 offset = page_of["next_offset"]
@@ -359,15 +360,15 @@ async def possible_duplicates() -> None:
             await expect(sample.locator(".side")).to_have_count(2)
             score = float(await sample.locator(".score strong").inner_text())
             sample_score = next(s for a, b, s in expected if (a, b) == (firsts[0], seconds[0]))
-            strict = await every_overlap(client, epic_ids=[epic_a, epic_b], min_similarity=0.99)
+            strict = await every_overlap(client, epics=[epic_a, epic_b], min_similarity=0.99)
             await page.locator("#dup-min").fill("0.99")
             await page.locator("#dup-apply").click()
             await expect(page.locator("#dup-count")).to_contain_text(
                 "at 0.99 or more", timeout=SLOW
             )
             strict_shown = await pairs_on(page)
-            one_epic = await every_overlap(client, epic_ids=[epic_b], min_similarity=0.99)
-            await page.locator("#dup-epics").fill(str(epic_b))
+            one_epic = await every_overlap(client, epics=[epic_b], min_similarity=0.99)
+            await page.locator("#dup-epics").fill(str(number_of(epic_b)))
             await redrawn(page, "#dup-pairs", page.locator("#dup-apply").click())
             narrowed = await pairs_on(page)
             await redrawn(page, "#dup-pairs", page.locator("#dup-reset").click())
@@ -398,7 +399,7 @@ async def marking_links() -> None:
         epic_a, epic_b, (first,), (second,) = await twin_epics(client, [pair])
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await w.open(f"#/roadmap?drawer=search&dups=1&dup_epics={epic_a}")
+            await w.open(f"#/roadmap?drawer=search&dups=1&dup_epics={number_of(epic_a)}")
             shown = await pairs_on(page)
             row = page.locator(f"li.pair[data-first='{first}'][data-second='{second}']")
             before = {
@@ -435,7 +436,7 @@ async def marking_links() -> None:
             ).to_be_disabled(timeout=SLOW)
             one = await links_of(client, first, second)
             one_count = await link_count(client)
-            link = (await ok(client, "list_links", node_id=first))["items"][0]
+            link = (await ok(client, "list_links", node=first))["items"][0]
             await expect(row).to_contain_text("already linked: duplicates")
             await row.get_by_role("button", name="Mark as related").click()
             await expect(
@@ -460,7 +461,7 @@ async def marking_links() -> None:
         and link["link_type"] == "duplicates"
         and both[first] == [(first, second, "duplicates"), (first, second, "relates_to")]
         and final == before["links"] + 2,
-        f"nodes {first} and {second}",
+        f"{code_of(first)} and {code_of(second)}",
     )
 
 
@@ -478,7 +479,7 @@ async def markdown_is_text() -> None:
         story = await made(client, "story", f"Written {word}", epic, body=BODY.format(word=word))
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await w.open(f"#/board?epic={epic}&sel=node:{story}")
+            await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
             text = card(page).locator(".body-text .markdown")
             await expect(text.locator("pre code")).to_have_text(f"code {word}", timeout=SLOW)
             shown = await text.inner_text()
@@ -510,75 +511,79 @@ async def references() -> None:
     async with fresh_project(URL) as (client, board, project):
         epic = await made(client, "epic", f"References {word}")
         target = await made(client, "story", f"Target {word}", epic)
-        rule = await ok(client, "create_rule", actor="a", title=f"Ruled {word}", story_id=target)
+        rule = await ok(client, "create_rule", actor="a", title=f"Ruled {word}", story=target)
         decision = await make_decision(client, f"Decided {word}")
         fact = await make_fact(client, f"Known {word}")
-        missing = 987654321
+        missing = "story:987654321"
+        # [[belief:3]] and the old [[node:N]] are not references: each stays the text it is.
         body = (
-            f"See [[node:{target}]], [[rule:{rule['id']}]], [[decision:{decision['id']}]], "
-            f"[[fact:{fact['id']}]], [[belief:3]] and [[node:{missing}]]."
+            f"See [[{target}]], [[rule:{rule['id']}]], [[decision:{decision['id']}]], "
+            f"[[fact:{fact['id']}]], [[belief:3]], [[node:{number_of(target)}]] and [[{missing}]]."
         )
         mentioner = await made(client, "story", f"Mentioner {word}", epic, body=body)
         before = await links_of(client, target, mentioner)
-        status_before = await ok(client, "get_node", node_id=mentioner)
+        status_before = await ok(client, "get_node", node=mentioner)
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await w.open(f"#/board?epic={epic}&sel=node:{mentioner}")
+            here = f"#/board?epic={number_of(epic)}&sel={mentioner}"
+            await w.open(here)
             text = card(page).locator(".body-text .markdown")
             await expect(text.locator(".reference")).to_have_count(5, timeout=SLOW)
 
-            def reference(kind: str, ident: int) -> Any:
-                return text.locator(f".reference[data-kind={kind}][data-id='{ident}']")
+            def reference(ref: str) -> Any:
+                return text.locator(f".reference[data-ref='{ref}']")
 
-            await expect(reference("node", target)).to_contain_text(f"#{target} Target {word}")
-            await expect(reference("fact", fact["id"])).to_contain_text(f"Known {word}")
-            gone = reference("node", missing)
+            await expect(reference(target)).to_contain_text(f"{code_of(target)} Target {word}")
+            await expect(reference(f"fact:{fact['id']}")).to_contain_text(f"Known {word}")
+            gone = reference(missing)
             missing_text = await gone.inner_text()
             missing_link = await gone.get_attribute("href")
+            shown = await text.inner_text()
             old_kind = (
-                "[[belief:3]]" in await text.inner_text()
+                "[[belief:3]]" in shown
+                and f"[[node:{number_of(target)}]]" in shown
                 and await text.locator(".reference[data-kind=belief]").count() == 0
+                and await text.locator(".reference[data-kind=node]").count() == 0
             )
             await ok(
-                client, "update_node", actor="a", node_id=target, expected_version=1,
+                client, "update_node", actor="a", node=target, expected_version=1,
                 title=f"Renamed {word}",
             )  # fmt: skip
-            await expect(reference("node", target)).to_contain_text(f"Renamed {word}", timeout=SLOW)
-            await reference("node", target).click()
+            await expect(reference(target)).to_contain_text(f"Renamed {word}", timeout=SLOW)
+            await reference(target).click()
             await expect(card(page).locator("h2").first).to_contain_text(
                 f"Renamed {word}", timeout=SLOW
             )
-            followed = (await hash_params(page))["sel"] == f"node:{target}"
-            await w.go(f"#/board?epic={epic}&sel=node:{mentioner}")
-            await reference("decision", decision["id"]).click()
+            followed = (await hash_params(page))["sel"] == target
+            await w.go(here)
+            await reference(f"decision:{decision['id']}").click()
             await expect(
                 panel(page).locator(f".record-detail[data-record='decision:{decision['id']}']")
             ).to_be_visible(timeout=SLOW)
             same_links = await links_of(client, target, mentioner) == before
-            same_status = (await ok(client, "get_node", node_id=mentioner))["version"] == (
+            same_status = (await ok(client, "get_node", node=mentioner))["version"] == (
                 status_before["version"]
             )
             # "Mentioned in" on the target is find_mentions.
-            await w.go(f"#/board?epic={epic}&sel=node:{target}")
+            await w.go(f"#/board?epic={number_of(epic)}&sel={target}")
             section = panel(page).locator("section[data-part=mentions]")
-            mentions = await ok(client, "find_mentions", node_id=target)
+            mentions = await ok(client, "find_mentions", node=target)
             await expect(section.locator("li.mention")).to_have_count(
                 len(mentions["items"]), timeout=SLOW
             )
             listed = await section.locator("li.mention").evaluate_all(
                 "els => els.map(e => e.dataset.source)"
             )
-            expected = [
-                f"{m['source']['item_type']}:{m['source']['id']}" for m in mentions["items"]
-            ]
+            expected = [m["source"]["ref"] for m in mentions["items"]]
             assert w.problems == []
         proof(
             "M13",
-            "[[node:N]], [[rule:N]], [[decision:N]] and [[fact:N]] show as links with the item's "
-            "current title and follow a rename, a missing id is plain text marked missing, "
-            "[[belief:N]] is only the words it is, following one opens the ordinary panel, and "
-            "writing references makes no link and changes no status",
-            missing_text == f"[[node:{missing}]] (missing)"
+            "[[epic:N]], [[story:N]], [[task:N]], [[rule:N]], [[decision:N]] and [[fact:N]] show "
+            "as links with the item's current title and follow a rename, a missing number is "
+            "plain text marked missing, [[belief:N]] and the old [[node:N]] are only the words "
+            "they are, following one opens the ordinary panel, and writing references makes no "
+            "link and changes no status",
+            missing_text == f"[[{missing}]] (missing)"
             and missing_link is None
             and old_kind
             and followed
@@ -589,7 +594,7 @@ async def references() -> None:
         proof(
             "M13",
             "'Mentioned in' on the panel equals find_mentions through MCP",
-            sorted(listed) == sorted(expected) and f"story:{mentioner}" in listed,
+            sorted(listed) == sorted(expected) and mentioner in listed,
             ", ".join(listed),
         )
 
@@ -619,13 +624,23 @@ async def switching() -> None:
             await page.keyboard.press("Control+k")
             await page.keyboard.type(f"findable {word}")
             await expect(page.locator("#switcher [role=option]").first).to_have_attribute(
-                "data-ref", f"node:{story}", timeout=SLOW
+                "data-ref", story, timeout=SLOW
             )
             await page.keyboard.press("Enter")
             await expect(card(page)).to_contain_text(f"Findable {word}", timeout=SLOW)
-            by_word = (await hash_params(page))["sel"] == f"node:{story}" and "#/roadmap" in (
+            by_word = (await hash_params(page))["sel"] == story and "#/roadmap" in (
                 await page.evaluate("location.hash")
             )
+            # By the code a person reads for it (S-1), which is its kind and number.
+            await w.go("#/board")
+            await page.keyboard.press("Control+k")
+            await page.keyboard.type(code_of(epic))
+            await expect(page.locator("#switcher [role=option]").first).to_have_attribute(
+                "data-ref", epic, timeout=SLOW
+            )
+            await page.keyboard.press("Enter")
+            await expect(card(page)).to_contain_text(f"{code_of(epic)} Switching {word}")
+            by_code = (await hash_params(page))["sel"] == epic
             await w.go("#/graph?view=context&as=list")
             await page.keyboard.press("Control+k")
             await page.keyboard.type(f"fact {fact['id']}")
@@ -643,8 +658,8 @@ async def switching() -> None:
     proof(
         "M13",
         "the quick switcher opens from the keyboard on every page with its box ready, jumps to "
-        "an item by a word of its title and to a fact by its kind and id (in the panel of the "
-        "view the person is on), and opens a drawer by name",
-        all(opened) and len(opened) == len(PAGES) and by_word and by_kind,
+        "an item by a word of its title or by its code (E-1, S-1, T-1), to a fact by its kind and "
+        "number (in the panel of the view the person is on), and opens a drawer by name",
+        all(opened) and len(opened) == len(PAGES) and by_word and by_code and by_kind,
         f"{len(PAGES)} pages",
     )

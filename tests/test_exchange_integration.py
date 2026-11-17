@@ -16,9 +16,12 @@ from tests.helpers import (
     REPO_ROOT,
     confirm,
     export_everything,
+    kind_of,
     make_decision,
     make_fact,
+    number_of,
     ok,
+    ref_order,
     refused,
     rich_world,
     run_sql,
@@ -45,6 +48,20 @@ def by_id(items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return {item["id"]: item for item in items}
 
 
+def ref_in_file(node: dict[str, Any]) -> str:
+    """The ref of an exported epic, story or task: it is in the file by its kind and number."""
+    return f"{node['kind']}:{node['number']}"
+
+
+def by_ref(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {ref_in_file(node): node for node in nodes}
+
+
+def key_of(item: dict[str, Any]) -> Any:
+    """What names something the tools made: the ref of an epic, story or task, else its id."""
+    return item["ref"] if "ref" in item else item["id"]
+
+
 def the_same_moment(left: str, right: str) -> bool:
     from datetime import datetime
 
@@ -65,16 +82,19 @@ async def test_the_export_holds_what_the_tools_show_and_nothing_that_is_worked_o
     assert set(document) == {"format", "version", "counts", *SECTIONS}
     assert document["counts"] == counts_in_the_database()
     assert document["counts"] == {name: len(document[name]) for name in SECTIONS}
-    nodes, rules = by_id(document["nodes"]), by_id(document["rules"])
+    nodes, rules = by_ref(document["nodes"]), by_id(document["rules"])
     decisions, facts = by_id(document["decisions"]), by_id(document["facts"])
-    # Items are in id order, and nothing the server works out is in them.
-    for section in SECTIONS:
+    # Items are in order (epics, then stories, then tasks, each by number; the others by id), and
+    # nothing the server works out is in them: a node is its kind and number, with no id.
+    node_refs = [ref_in_file(node) for node in document["nodes"]]
+    assert node_refs == sorted(set(node_refs), key=ref_order)
+    for section in SECTIONS[1:]:
         ids = [item["id"] for item in document[section]]
         assert ids == sorted(set(ids)), section
-    assert set(nodes[world["epic"]["id"]]) == {
-        "id",
+    assert set(nodes[world["epic"]["ref"]]) == {
         "kind",
-        "parent_id",
+        "number",
+        "parent",
         "title",
         "body",
         "status",
@@ -87,8 +107,8 @@ async def test_the_export_holds_what_the_tools_show_and_nothing_that_is_worked_o
     }
     # Every field is what the tool that reads it says.
     for key in ("epic", "story1", "story2", "task1", "task2", "task3"):
-        shown = await ok(client, "get_node", node_id=world[key]["id"])
-        exported = nodes[world[key]["id"]]
+        shown = await ok(client, "get_node", node=world[key]["ref"])
+        exported = nodes[world[key]["ref"]]
         for name in exported:
             if name in ("created_at", "updated_at"):
                 assert the_same_moment(exported[name], shown[name]), (key, name)
@@ -117,7 +137,7 @@ async def test_the_export_holds_what_the_tools_show_and_nothing_that_is_worked_o
         "confirmed_by",
         "confirmed_at",
         "recorded_at",
-        "node_ids",
+        "nodes",
         "rule_ids",
     }
     assert set(facts[world["fact1"]["id"]]) == {
@@ -131,7 +151,7 @@ async def test_the_export_holds_what_the_tools_show_and_nothing_that_is_worked_o
         "status_reason",
         "confirmed_by",
         "confirmed_at",
-        "node_ids",
+        "nodes",
         "rule_ids",
         "decision_ids",
     }
@@ -155,11 +175,11 @@ async def test_the_export_keeps_dates_statuses_links_replacements_confirmation_a
     client: Client,
 ) -> None:
     world = await rich_world(client)
-    ids = {name: item["id"] for name, item in world.items()}
+    ids = {name: key_of(item) for name, item in world.items()}
 
     document = await export_everything(client)
 
-    nodes, rules = by_id(document["nodes"]), by_id(document["rules"])
+    nodes, rules = by_ref(document["nodes"]), by_id(document["rules"])
     decisions, facts = by_id(document["decisions"]), by_id(document["facts"])
     epic = nodes[ids["epic"]]
     assert (epic["start_on"], epic["target_on"]) == ("2026-12-01", "2026-12-31")
@@ -172,20 +192,20 @@ async def test_the_export_keeps_dates_statuses_links_replacements_confirmation_a
         "high",
         "2026-12-02",
     )
-    links = {(x["source_id"], x["target_id"], x["link_type"]) for x in document["links"]}
+    links = {(x["source"], x["target"], x["link_type"]) for x in document["links"]}
     assert {
         (ids["task2"], ids["task1"], "needs_first"),
         (ids["task3"], ids["task2"], "duplicates"),
         (ids["story2"], ids["story1"], "supersedes"),
     } <= links
-    assert rules[ids["rule1"]]["story_id"] == ids["story1"]
-    assert rules[ids["rule2"]]["story_id"] is None and rules[ids["rule2"]]["status"] == "settled"
+    assert rules[ids["rule1"]]["story"] == ids["story1"]
+    assert rules[ids["rule2"]]["story"] is None and rules[ids["rule2"]]["status"] == "settled"
 
     # A decision that was confirmed and then replaced keeps what it was confirmed as, and points at
     # what replaced it; the replacement starts unconfirmed.
     replaced, replacement = decisions[ids["decision1"]], decisions[ids["decision2"]]
     assert (replaced["status"], replaced["superseded_by_id"]) == ("superseded", ids["decision2"])
-    assert (replaced["node_ids"], replaced["rule_ids"]) == ([ids["story1"]], [ids["rule1"]])
+    assert (replaced["nodes"], replaced["rule_ids"]) == ([ids["story1"]], [ids["rule1"]])
     assert replaced["confirmed_by"] == "Marie" and replaced["confirmed_at"] is not None
     assert replaced["status_reason"] is None and replaced["project_wide"] is False
     assert (replacement["status"], replacement["confirmed_by"]) == ("active", None)
@@ -197,10 +217,10 @@ async def test_the_export_keeps_dates_statuses_links_replacements_confirmation_a
     )
     wide = decisions[ids["wide"]]
     assert (wide["project_wide"], wide["status"], wide["confirmed_by"]) == (True, "active", "Marie")
-    assert (wide["node_ids"], wide["rule_ids"]) == ([], [])
+    assert (wide["nodes"], wide["rule_ids"]) == ([], [])
     # Facts: what they concern, replacement, withdrawal, and confirmation in each state.
     first = facts[ids["fact1"]]
-    assert (first["node_ids"], first["rule_ids"]) == ([ids["story1"]], [ids["rule1"]])
+    assert (first["nodes"], first["rule_ids"]) == ([ids["story1"]], [ids["rule1"]])
     assert first["decision_ids"] == [ids["decision2"]]
     assert (first["confirmed_by"], first["status"]) == ("Marie", "active")
     assert (facts[ids["fact2"]]["confirmed_by"], facts[ids["fact2"]]["status"]) == (None, "active")
@@ -216,11 +236,19 @@ async def test_the_export_keeps_dates_statuses_links_replacements_confirmation_a
     assert (gone["status"], gone["confirmed_by"]) == ("withdrawn", "Marie")
     assert gone["status_reason"] == "They expire in an hour."
     # The history is in it, handoff note included, and a claim is only history, not a lease.
-    events = [event for event in document["events"] if event["node_id"] == ids["task2"]]
+    events = [event for event in document["events"] if event["node"] == ids["task2"]]
     handoff = next(event for event in events if event["action"] == "handoff")
     assert handoff["after"]["note"] == "Waiting for the design of the form."
     assert "claimed" in {event["action"] for event in events}
     assert "claims" not in document
+    # A link's event names both of its ends by their refs.
+    added = next(e for e in events if e["action"] == "link_added")
+    assert (added["node"], added["other_node"]) == (ids["task2"], ids["task1"])
+    assert added["after"] == {
+        "source": ids["task2"],
+        "target": ids["task1"],
+        "link_type": "needs_first",
+    }
     # Who confirmed, who changed their mind and what they said are in the history of the records.
     by_action = {
         (event["action"], event["fact_id"] or event["decision_id"]): event
@@ -309,16 +337,26 @@ async def test_each_page_is_one_list_and_the_cursor_says_where_to_go_on(client: 
 
     assert (first["section"], len(first["items"])) == ("nodes", 2)
     assert first["counts"] == counts
-    assert first["next_after"] == f"nodes:{first['items'][-1]['id']}"
+    assert first["next_after"] == f"nodes:{ref_in_file(first['items'][-1])}"
     second = await ok(client, "export_graph", after=first["next_after"], limit=2)
     assert second["counts"] is None
-    assert second["items"][0]["id"] > first["items"][-1]["id"]
+    assert ref_order(ref_in_file(second["items"][0])) > ref_order(ref_in_file(first["items"][-1]))
     # One past the end of a list goes on to the next list; one past the last list is empty.
     last = await ok(client, "export_graph", after="events:999999999", limit=5)
     assert (last["section"], last["items"], last["next_after"]) == (None, [], None)
     section_end = await ok(client, "export_graph", after=f"links:{10**9}", limit=5)
     assert section_end["section"] in ("rules", "decisions", "facts", "events")
-    for bad in ("nodes", "nodes:x", "nodes:-1", "things:3", ":5", "nodes:1:2"):
+    for bad in (
+        "nodes",
+        "nodes:x",
+        "nodes:-1",
+        "nodes:12",
+        "nodes:node:3",
+        "nodes:story:0",
+        "things:3",
+        ":5",
+        "nodes:1:2",
+    ):
         message = await refused(client, "export_graph", after=bad)
         assert "after must be left empty for the first page" in message, bad
 
@@ -355,12 +393,12 @@ def read_files(folder: Path) -> dict[str, str]:
     }
 
 
-def the_file_of(files: dict[str, str], prefix: str, item_id: int) -> str:
-    """The name (without .md) of the one file that is this item."""
-    found = [
-        Path(path).stem for path in files if Path(path).stem.startswith(f"{prefix}-{item_id}-")
-    ]
-    assert len(found) == 1, (prefix, item_id, found)
+def the_file_of(files: dict[str, str], prefix: str, item: int | str) -> str:
+    """The name (without .md) of the one file that is this item: given its id, or its ref (a file is
+    called kind-number-title)."""
+    number = number_of(item) if isinstance(item, str) else item
+    found = [Path(path).stem for path in files if Path(path).stem.startswith(f"{prefix}-{number}-")]
+    assert len(found) == 1, (prefix, item, found)
     return found[0]
 
 
@@ -379,7 +417,7 @@ async def test_the_markdown_copy_has_one_file_per_item_and_every_connection_is_a
     client: Client, tmp_path: Path
 ) -> None:
     world = await rich_world(client)
-    ids = {name: item["id"] for name, item in world.items()}
+    ids = {name: key_of(item) for name, item in world.items()}
     document = await export_everything(client)
 
     result = run_script("export_markdown.py", tmp_path / "notes")
@@ -395,43 +433,38 @@ async def test_the_markdown_copy_has_one_file_per_item_and_every_connection_is_a
     folders = {Path(path).parts[0] for path in files}
     assert folders <= {"epics", "stories", "tasks", "rules", "decisions", "facts"}
 
-    def file_of(kind: str, item_id: int) -> str:
-        return the_file_of(files, kind, item_id)
+    def file_of(kind: str, item: int | str) -> str:
+        return the_file_of(files, kind, item)
 
-    def text_of(kind: str, item_id: int) -> str:
-        name = file_of(kind, item_id)
+    def text_of(kind: str, item: int | str) -> str:
+        name = file_of(kind, item)
         return next(text for path, text in files.items() if Path(path).stem == name)
 
-    node_prefix = {node["id"]: node["kind"] for node in document["nodes"]}
+    def refs(kind: str, item: int | str) -> set[str]:
+        return set(references_in(text_of(kind, item)))
 
-    def refs(kind: str, item_id: int) -> set[str]:
-        return set(references_in(text_of(kind, item_id)))
+    def at(ref: str) -> tuple[str, int]:
+        """The kind and number of a ref: how the file of an epic, story or task is named."""
+        return kind_of(ref), number_of(ref)
 
     connections: list[tuple[tuple[str, int], tuple[str, int]]] = []
     for node in document["nodes"]:
-        if node["parent_id"] is not None:
-            connections.append(
-                ((node["kind"], node["id"]), (node_prefix[node["parent_id"]], node["parent_id"]))
-            )
+        if node["parent"] is not None:
+            connections.append(((node["kind"], node["number"]), at(node["parent"])))
     for link in document["links"]:
-        connections.append(
-            (
-                (node_prefix[link["source_id"]], link["source_id"]),
-                (node_prefix[link["target_id"]], link["target_id"]),
-            )
-        )
+        connections.append((at(link["source"]), at(link["target"])))
     for rule in document["rules"]:
-        if rule["story_id"] is not None:
-            connections.append((("rule", rule["id"]), ("story", rule["story_id"])))
+        if rule["story"] is not None:
+            connections.append((("rule", rule["id"]), at(rule["story"])))
     for decision in document["decisions"]:
         here = ("decision", decision["id"])
-        connections += [(here, (node_prefix[n], n)) for n in decision["node_ids"]]
+        connections += [(here, at(n)) for n in decision["nodes"]]
         connections += [(here, ("rule", r)) for r in decision["rule_ids"]]
         if decision["superseded_by_id"] is not None:
             connections.append((here, ("decision", decision["superseded_by_id"])))
     for fact in document["facts"]:
         here = ("fact", fact["id"])
-        connections += [(here, (node_prefix[n], n)) for n in fact["node_ids"]]
+        connections += [(here, at(n)) for n in fact["nodes"]]
         connections += [(here, ("rule", r)) for r in fact["rule_ids"]]
         connections += [(here, ("decision", d)) for d in fact["decision_ids"]]
         if fact["superseded_by_id"] is not None:
@@ -450,11 +483,14 @@ async def test_the_markdown_copy_has_one_file_per_item_and_every_connection_is_a
         for reference in references_in(text):
             if re.fullmatch(r"[a-z]+-\d+-.*", reference):
                 assert reference in every_stem, (path, reference)
-        assert not re.search(r"\[\[(node|rule|decision|fact):[1-9][0-9]{0,17}\]\]", text), path
+        assert not re.search(
+            r"\[\[(epic|story|task|rule|decision|fact):[1-9][0-9]{0,17}\]\]", text
+        ), path
 
     # Fields at the top, in the form a person or Obsidian reads.
     epic = front_matter(text_of("epic", ids["epic"]))
-    assert epic["type"] == "epic" and epic["id"] == str(ids["epic"])
+    assert epic["type"] == "epic" and epic["number"] == str(number_of(ids["epic"]))
+    assert "id" not in epic
     assert epic["title"] == json.dumps(world["epic"]["title"], ensure_ascii=False)
     assert (epic["start_on"], epic["target_on"]) == ("2026-12-01", "2026-12-31")
     assert epic["status"] == "ready" and epic["priority"] == "normal"
@@ -506,6 +542,13 @@ async def test_references_written_in_texts_become_links_to_the_files_of_what_the
     rule = await ok(client, "create_rule", actor="ann", title=f"Rule {word}")
     decision = await make_decision(client, f"Decision {word}")
     fact = await make_fact(client, f"Fact {word}")
+    other = await ok(client, "create_node", actor="ann", kind="epic", title=f"Other {word}")
+    story = await ok(
+        client, "create_node", actor="ann", kind="story", title=f"Story {word}", parent=other["ref"]
+    )
+    task = await ok(
+        client, "create_node", actor="ann", kind="task", title=f"Task {word}", parent=story["ref"]
+    )
     epic = await ok(
         client,
         "create_node",
@@ -514,7 +557,9 @@ async def test_references_written_in_texts_become_links_to_the_files_of_what_the
         title=f"Refs {word}",
         body=(
             f"See [[fact:{fact['id']}]], [[decision:{decision['id']}]] and [[rule:{rule['id']}]]; "
-            f"not [[fact:987654321]] and not [[belief:{fact['id']}]]."
+            f"also [[{other['ref']}]], [[{story['ref']}]] and [[{task['ref']}]]; "
+            f"not [[fact:987654321]], not [[story:987654321]], not [[node:{story['number']}]] "
+            f"and not [[belief:{fact['id']}]]."
         ),
     )
 
@@ -522,12 +567,16 @@ async def test_references_written_in_texts_become_links_to_the_files_of_what_the
 
     assert result.returncode == 0, result.stdout + result.stderr
     files = read_files(tmp_path / "notes")
-    text = next(text for path, text in files.items() if f"epic-{epic['id']}-" in path)
+    stem = f"epic-{epic['number']}-"
+    text = next(text for path, text in files.items() if Path(path).stem.startswith(stem))
     assert f"[[{the_file_of(files, 'fact', fact['id'])}]]" in text
     assert f"[[{the_file_of(files, 'decision', decision['id'])}]]" in text
     assert f"[[{the_file_of(files, 'rule', rule['id'])}]]" in text
+    for item in (other, story, task):
+        assert f"[[{the_file_of(files, item['kind'], item['ref'])}]]" in text
     # A reference to nothing is written as plain words, and a kind that is gone is only text.
-    assert "fact:987654321 (missing)" in text and "[[belief:" in text
+    assert "fact:987654321 (missing)" in text and "story:987654321 (missing)" in text
+    assert "[[belief:" in text and f"[[node:{story['number']}]]" in text
 
 
 async def test_the_markdown_copy_is_made_again_the_same_and_only_its_own_folders_change(
@@ -544,12 +593,12 @@ async def test_the_markdown_copy_is_made_again_the_same_and_only_its_own_folders
     assert read_files(target) == first
     # What the person added next to it is left alone, and what changed in the graph is changed.
     (target / "my-notes.md").write_text("mine\n", encoding="utf-8")
-    old_name = the_file_of(first, "task", world["task3"]["id"])
+    old_name = the_file_of(first, "task", world["task3"]["ref"])
     await ok(
         client,
         "update_node",
         actor="ann",
-        node_id=world["task3"]["id"],
+        node=world["task3"]["ref"],
         expected_version=world["task3"]["version"],
         title="Send the code by text message",
     )
@@ -557,7 +606,7 @@ async def test_the_markdown_copy_is_made_again_the_same_and_only_its_own_folders
     files = read_files(target)
     assert (target / "my-notes.md").read_text(encoding="utf-8") == "mine\n"
     assert all(Path(path).stem != old_name for path in files)
-    new_name = the_file_of(files, "task", world["task3"]["id"])
+    new_name = the_file_of(files, "task", world["task3"]["ref"])
     assert "send-the-code-by-text-message" in new_name
 
 

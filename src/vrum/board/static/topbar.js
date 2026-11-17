@@ -5,10 +5,12 @@
 
 import { appearanceControl } from './appearance.js';
 import { wordmark } from './brand.js';
-import { ui, viewLink } from './ctx.js';
+import { itemLink, ui, viewLink } from './ctx.js';
 import { h, put } from './dom.js';
 import { icon } from './icons.js';
+import { codeOf } from './labels.js';
 import { openSidebar } from './sidebar.js';
+import { trailOf } from './store.js';
 
 const top = document.getElementById('top');
 let bar = null; // the parts of the top bar of an open project
@@ -19,8 +21,21 @@ const initial = (name) => ([...String(name).trim()][0] || '?').toUpperCase();
 export function showTop({ project, indexText, openSearch, openJump }) {
   const search = h('input', { id: 'global-search', type: 'search', name: 'search', autocomplete: 'off', 'aria-label': 'Search work, requirements, decisions and facts', placeholder: 'Search work & context…' });
   const page = h('li', { id: 'crumb-page', 'aria-current': 'page' });
+  const crumbs = h(
+    'nav',
+    { class: 'crumbs', 'aria-label': 'Breadcrumb' },
+    h(
+      'ol',
+      {},
+      h('li', { class: 'crumb-root' }, h('a', { href: '/board' }, 'Projects')),
+      h('li', { class: 'crumb-project' }, viewLink('board', {}, { title: project.name }, project.name)),
+      page,
+    ),
+  );
   bar = {
     page,
+    crumbs,
+    trail: [], // the crumbs of the items above the one on the item page
     search,
     typed: '', // the words of the address that the box was last set from
     index: h('span', { id: 'index-state', class: 'chip', title: 'Items that are new or changed and not yet searchable by meaning' }, icon('search', { size: 12 }), indexText()),
@@ -28,17 +43,7 @@ export function showTop({ project, indexText, openSearch, openJump }) {
   };
   top.replaceChildren(
     h('button', { type: 'button', id: 'sidebar-toggle', class: 'ghost icon-only', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Open the menu', onclick: openSidebar }, icon('menu', { size: 20 })),
-    h(
-      'nav',
-      { class: 'crumbs', 'aria-label': 'Breadcrumb' },
-      h(
-        'ol',
-        {},
-        h('li', { class: 'crumb-root' }, h('a', { href: '/board' }, 'Projects')),
-        h('li', { class: 'crumb-project' }, viewLink('board', {}, { title: project.name }, project.name)),
-        page,
-      ),
-    ),
+    crumbs,
     h(
       'form',
       {
@@ -67,10 +72,31 @@ export function showTop({ project, indexText, openSearch, openJump }) {
 }
 
 // What the address decides: the page in the breadcrumbs, and the words in the search box (which
-// follow the address unless they are being typed in).
-export function updateTop(title) {
+// follow the address unless they are being typed in). On the item page `item` is the reference in
+// the address: the crumbs then read from the epic down to the item, each earlier one a link to its
+// own page, and the item itself is the page.
+export function updateTop(title, item = null) {
   if (!bar) return;
-  bar.page.textContent = title;
+  for (const crumb of bar.trail) crumb.remove();
+  bar.trail = [];
+  const trail = item ? trailOf(item) : [];
+  bar.crumbs.classList.toggle('has-trail', trail.length > 0);
+  if (trail.length) {
+    const named = (node) => `${codeOf(node.ref)} ${node.title}`;
+    for (const node of trail.slice(0, -1)) {
+      const crumb = h('li', { class: 'crumb-item' }, itemLink(node.ref, { title: named(node) }, named(node)));
+      bar.page.before(crumb);
+      bar.trail.push(crumb);
+    }
+    const last = trail[trail.length - 1];
+    bar.page.className = 'crumb-item';
+    bar.page.title = named(last);
+    bar.page.textContent = named(last);
+  } else {
+    bar.page.className = '';
+    bar.page.removeAttribute('title');
+    bar.page.textContent = title;
+  }
   const words = ui.params.get('search') || '';
   if (words !== bar.typed) {
     bar.typed = words;

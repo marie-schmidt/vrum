@@ -1,54 +1,59 @@
 // The quick switcher: one key combination (Ctrl+K, or ⌘K) on every view opens a box that jumps to
-// an item by a word of its title or by its id (`12`, `#12`, `node:12`, `requirement 3`,
-// `decision:7`, `fact 5`), and to any view, the search and the activity drawers, and the settings
-// pages. It only navigates: it changes nothing. An item opens in the detail panel (`sel=`) of the
-// view the person is on.
+// an item by a word of its title or by its code (`S-12`, `story 12`, `story:12`, `requirement 3`,
+// `decision:7`, `fact 5`; a bare number finds every kind that has it), and to any view, the search
+// and the activity drawers, and the settings pages. It only navigates: it changes nothing. An item
+// opens in the detail panel (`sel=`) of the view the person is on.
 
 import { ui } from './ctx.js';
 import { h } from './dom.js';
-import { KIND, kindIcon } from './labels.js';
+import { KIND, isNodeKind, itemCode, kindIcon } from './labels.js';
 import { ensureContext, store } from './store.js';
 
 const SHOWN = 10;
-const ORDER = ['node', 'rule', 'decision', 'fact'];
+const ORDER = ['epic', 'story', 'task', 'rule', 'decision', 'fact'];
+const LETTERS = { e: 'epic', s: 'story', t: 'task' };
 
 const clip = (text, size = 70) => {
   const one = String(text).replace(/\s+/g, ' ').trim();
   return one.length > size ? `${one.slice(0, size - 1)}…` : one;
 };
 
+// Every item the switcher can go to: { kind, number, title }, the number being the id of a
+// requirement, a decision or a fact.
 function items() {
   const found = [];
-  for (const node of store.nodes.values()) found.push({ ref: 'node', id: node.id, type: node.kind, title: node.title });
-  for (const rule of store.rules || []) found.push({ ref: 'rule', id: rule.id, type: 'rule', title: rule.title });
-  for (const decision of store.decisions || []) found.push({ ref: 'decision', id: decision.id, type: 'decision', title: decision.title });
-  for (const fact of store.facts || []) found.push({ ref: 'fact', id: fact.id, type: 'fact', title: clip(fact.text) });
+  for (const node of store.nodes.values()) found.push({ kind: node.kind, number: node.number, title: node.title, created: node.created_at || '' });
+  for (const rule of store.rules || []) found.push({ kind: 'rule', number: rule.id, title: rule.title });
+  for (const decision of store.decisions || []) found.push({ kind: 'decision', number: decision.id, title: decision.title });
+  for (const fact of store.facts || []) found.push({ kind: 'fact', number: fact.id, title: clip(fact.text) });
   return found;
 }
 
-// What a typed start finds: pages first, then items. An id finds the item with it, whichever kind.
-// `pages` is a list of { name, title }.
+// What a typed start finds: pages first, then items. A code finds the item with it (S-12, story 12,
+// requirement 3); a bare number finds the items of every kind that has it. `pages` is a list of
+// { name, title }.
 export function find(query, pages) {
   const typed = query.trim().toLowerCase();
   const pageHits = (words) => pages.filter(({ title }) => words.every((word) => title.toLowerCase().includes(word))).map(({ name, title }) => ({ page: name, title }));
   if (typed === '') {
-    const newest = items().filter((item) => item.ref === 'node').sort((a, b) => b.id - a.id).slice(0, 6);
+    const newest = items().filter((item) => isNodeKind(item.kind)).sort((a, b) => b.created.localeCompare(a.created) || b.number - a.number).slice(0, 6);
     return [...pageHits([]), ...newest].slice(0, SHOWN + pages.length);
   }
-  const byRef = /^(node|rule|requirement|decision|fact)\s*:?\s*#?(\d+)$/.exec(typed);
-  if (byRef) {
-    const ref = byRef[1] === 'requirement' ? 'rule' : byRef[1];
-    return items().filter((item) => item.ref === ref && String(item.id) === byRef[2]);
+  const byCode = /^(epic|story|task|rule|requirement|decision|fact|[est])\s*[:#-]?\s*#?(\d+)$/.exec(typed);
+  if (byCode) {
+    const word = byCode[1];
+    const kind = LETTERS[word] || (word === 'requirement' ? 'rule' : word);
+    return items().filter((item) => item.kind === kind && String(item.number) === byCode[2]);
   }
-  const byId = /^#?(\d+)$/.exec(typed);
-  if (byId) {
-    const exact = items().filter((item) => String(item.id) === byId[1]);
-    return exact.sort((a, b) => ORDER.indexOf(a.ref) - ORDER.indexOf(b.ref));
+  const byNumber = /^#?(\d+)$/.exec(typed);
+  if (byNumber) {
+    const exact = items().filter((item) => String(item.number) === byNumber[1]);
+    return exact.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
   }
   const words = typed.split(/\s+/);
-  const matching = items().filter((item) => words.every((word) => `${KIND[item.type]?.label || item.type} ${item.title}`.toLowerCase().includes(word)));
+  const matching = items().filter((item) => words.every((word) => `${KIND[item.kind].label} ${itemCode(item.kind, item.number)} ${item.title}`.toLowerCase().includes(word)));
   const order = (item) => (item.title.toLowerCase().startsWith(typed) ? 0 : 1);
-  matching.sort((a, b) => order(a) - order(b) || ORDER.indexOf(a.ref) - ORDER.indexOf(b.ref) || b.id - a.id);
+  matching.sort((a, b) => order(a) - order(b) || ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || b.number - a.number);
   return [...pageHits(words), ...matching].slice(0, SHOWN);
 }
 
@@ -56,13 +61,13 @@ export function openSwitcher(pages) {
   if (document.getElementById('switcher')) return;
   let hits = [];
   let active = 0;
-  const input = h('input', { id: 'switcher-input', type: 'text', role: 'combobox', autocomplete: 'off', 'aria-expanded': 'true', 'aria-controls': 'switcher-list', 'aria-label': 'Jump to a view, or to an item by a word of its title or by its id', placeholder: 'A word of a title, an id such as 12 or requirement 3, or a view' });
+  const input = h('input', { id: 'switcher-input', type: 'text', role: 'combobox', autocomplete: 'off', 'aria-expanded': 'true', 'aria-controls': 'switcher-list', 'aria-label': 'Jump to a view, or to an item by a word of its title or by its code', placeholder: 'A word of a title, a code such as S-12 or requirement 3, or a view' });
   const list = h('ul', { id: 'switcher-list', class: 'plain switcher-list', role: 'listbox', 'aria-label': 'Where to jump' });
   const box = h(
     'dialog',
     { id: 'switcher', class: 'modal switcher', 'aria-label': 'Jump to' },
     h('h2', {}, 'Jump to'),
-    h('p', { class: 'quiet' }, 'Type a word of an item’s title, or its id (12, requirement 3, decision 7, fact 5), or the name of a view. Enter goes there, Escape closes this.'),
+    h('p', { class: 'quiet' }, 'Type a word of an item’s title, or its code (S-12, T-40, requirement 3, decision 7, fact 5), or the name of a view. Enter goes there, Escape closes this.'),
     input,
     list,
   );
@@ -74,7 +79,7 @@ export function openSwitcher(pages) {
       const spec = pages.find(({ name }) => name === hit.page);
       spec.go();
     } else {
-      ui.navigate({ sel: `${hit.ref}:${hit.id}`, panel: null });
+      ui.navigate({ sel: `${hit.kind}:${hit.number}`, panel: null });
     }
   };
   const draw = () => {
@@ -90,7 +95,7 @@ export function openSwitcher(pages) {
                 role: 'option',
                 class: 'switcher-option',
                 'aria-selected': String(at === active),
-                dataset: hit.page ? { page: hit.page } : { ref: `${hit.ref}:${hit.id}` },
+                dataset: hit.page ? { page: hit.page } : { ref: `${hit.kind}:${hit.number}` },
                 onmousedown: (event) => {
                   event.preventDefault();
                   go(hit);
@@ -98,7 +103,7 @@ export function openSwitcher(pages) {
               },
               hit.page
                 ? h('span', { class: 'switcher-item' }, h('span', { class: 'chip' }, 'View'), ` ${hit.title}`)
-                : h('span', { class: 'switcher-item' }, kindIcon(hit.type, 14), h('code', {}, hit.ref === 'node' ? `#${hit.id}` : `${KIND[hit.type].label.toLowerCase()} ${hit.id}`), ` ${KIND[hit.type]?.label || hit.type}: ${hit.title}`),
+                : h('span', { class: 'switcher-item' }, kindIcon(hit.kind, 14), h('code', {}, isNodeKind(hit.kind) ? itemCode(hit.kind, hit.number) : `${KIND[hit.kind].label.toLowerCase()} ${hit.number}`), ` ${KIND[hit.kind].label}: ${hit.title}`),
             ),
           )
         : [h('li', { class: 'quiet', role: 'presentation' }, 'Nothing matches.')]),

@@ -1,9 +1,11 @@
 """M16's Markdown, references, backlinks, pick-list, quick switcher and the Graph's mentions layer
 against the running containers, driven in a real headless browser and checked against a real MCP
-client (see ./check.sh). A reference is `[[node:12]]`, `[[rule:3]]`, `[[decision:7]]` or
-`[[fact:5]]` and is only text: what the board shows as "Mentioned in" is compared with
-`find_mentions`, and what a reference does to the graph (nothing) is read back through `list_links`
-and `get_node`. Each test works in a project of its own."""
+client (see ./check.sh). A reference is `[[epic:3]]`, `[[story:12]]`, `[[task:40]]`, `[[rule:3]]`,
+`[[decision:7]]` or `[[fact:5]]` and is only text (`[[node:12]]` is not a reference any more): what
+the board shows as "Mentioned in" is compared with `find_mentions`, and what a reference does to
+the graph (nothing) is read back through `list_links` and `get_node`. Each test works in a project
+of its own. Work is named by its reference in every call and in the hooks of the page
+(`data-ref`); the address names an epic by its number (`epic=3`)."""
 
 import re
 from typing import Any
@@ -27,7 +29,8 @@ from tests.board_context import (
     tally,
 )
 from tests.board_helpers import PAGES, SLOW, browser_page, links_of, made
-from tests.helpers import make_decision, make_fact, ok, unique_word
+from tests.helpers import code_of, make_decision, make_fact, ok, unique_word
+from tests.helpers import number_of as number
 from tests.world import Project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -41,8 +44,9 @@ def card(page: Page) -> Any:
     return panel(page).locator(".card-detail")
 
 
-def sources(page_of_mentions: dict[str, Any]) -> set[tuple[str, int]]:
-    return {(m["source"]["item_type"], m["source"]["id"]) for m in page_of_mentions["items"]}
+def sources(page_of_mentions: dict[str, Any]) -> set[str]:
+    """The references of what the page of mentions says mentions the item."""
+    return {m["source"]["ref"] for m in page_of_mentions["items"]}
 
 
 # -- Markdown, and nothing that would run -------------------------------------------------------
@@ -82,7 +86,7 @@ async def test_markdown_shows_structure_and_text_that_would_run_is_shown_as_text
         story = await made(client, "story", f"Written {word}", epic, body=BODY.format(word=word))
         async with _browser(board, project) as w:
             page = w.page
-            await w.open(f"#/board?epic={epic}&sel=node:{story}")
+            await w.open(f"#/board?epic={number(epic)}&sel={story}")
             text = card(page).locator(".body-text .markdown")
             await expect(text).to_be_visible(timeout=SLOW)
             await expect(text.locator("h4")).to_have_text(f"A heading {word}")
@@ -127,7 +131,7 @@ async def test_requirements_decisions_and_facts_are_shown_as_markdown_too(
             "create_rule",
             actor="a",
             title=f"Rule {word}",
-            story_id=story,
+            story=story,
             body="A **bold** requirement",
         )
         decision = await make_decision(
@@ -135,31 +139,32 @@ async def test_requirements_decisions_and_facts_are_shown_as_markdown_too(
             f"Decision {word}",
             text="Use **PDF**",
             reason="Because *it is stable*",
-            node_ids=[story],
+            nodes=[story],
         )
         fact = await make_fact(
-            client, f"A **fact** about {word}", source="The `team` call", node_ids=[story]
+            client, f"A **fact** about {word}", source="The `team` call", nodes=[story]
         )
         async with _browser(board, project) as w:
             page = w.page
-            await w.open(f"#/graph?view=context&as=list&epic={epic}&sel=rule:{rule['id']}")
+            here = f"#/graph?view=context&as=list&epic={number(epic)}"
+            await w.open(f"{here}&sel=rule:{rule['id']}")
             await expect(card(page)).to_have_count(0)
             await expect(
                 panel(page).locator(".rule-detail .body-text .markdown strong")
             ).to_have_text("bold", timeout=SLOW)
 
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=decision:{decision['id']}")
+            await w.go(f"{here}&sel=decision:{decision['id']}")
             record = panel(page).locator(f".record-detail[data-record='decision:{decision['id']}']")
             await expect(record.locator(".record-text strong")).to_have_text("PDF", timeout=SLOW)
             await expect(record.locator(".record-reason em")).to_have_text("it is stable")
 
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=fact:{fact['id']}")
+            await w.go(f"{here}&sel=fact:{fact['id']}")
             record = panel(page).locator(f".record-detail[data-record='fact:{fact['id']}']")
             await expect(record.locator(".record-text strong")).to_have_text("fact", timeout=SLOW)
             await expect(record.locator(".record-source code")).to_have_text("team")
 
             # The same entries, as recall gives them on the story's panel.
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=node:{story}")
+            await w.go(f"{here}&sel={story}")
             entry = card(page).locator(f"li.record[data-record='fact:{fact['id']}']")
             await expect(entry.locator(".record-text strong")).to_have_text("fact", timeout=SLOW)
             entry = card(page).locator(f"li.record[data-record='decision:{decision['id']}']")
@@ -167,7 +172,7 @@ async def test_requirements_decisions_and_facts_are_shown_as_markdown_too(
             assert w.problems == []
 
 
-# -- references, titles, renames, missing ids -----------------------------------------------------
+# -- references, titles, renames, missing numbers ------------------------------------------------
 
 
 async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_no_link(
@@ -177,54 +182,57 @@ async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_
     async with fresh_project(server_url) as (client, board, project):
         epic = await made(client, "epic", f"References {word}")
         target = await made(client, "story", f"Target {word}", epic)
-        rule = await ok(client, "create_rule", actor="a", title=f"Ruled {word}", story_id=target)
+        rule = await ok(client, "create_rule", actor="a", title=f"Ruled {word}", story=target)
         decision = await make_decision(client, f"Decided {word}")
         fact = await make_fact(client, f"Known {word}")
-        missing = 987654321
-        # A belief is not a thing any more, so its reference is only words.
+        missing = f"story:{987654321}"
+        # A belief is not a thing any more, so its reference is only words; neither is a node
+        # (`[[node:12]]` named any epic, story or task once, and now is only text).
         body = (
-            f"See [[node:{target}]], [[rule:{rule['id']}]], [[decision:{decision['id']}]], "
-            f"[[fact:{fact['id']}]], [[belief:3]] and [[node:{missing}]]."
+            f"See [[{target}]], [[rule:{rule['id']}]], [[decision:{decision['id']}]], "
+            f"[[fact:{fact['id']}]], [[belief:3]], [[node:{number(target)}]] and [[{missing}]]."
         )
         mentioner = await made(client, "story", f"Mentioner {word}", epic, body=body)
         before_links = await links_of(client, target, mentioner)
-        before_node = await ok(client, "get_node", node_id=mentioner)
+        before_node = await ok(client, "get_node", node=mentioner)
 
         async with _browser(board, project) as w:
             page = w.page
-            await w.open(f"#/board?epic={epic}&sel=node:{mentioner}")
+            await w.open(f"#/board?epic={number(epic)}&sel={mentioner}")
             text = card(page).locator(".body-text .markdown")
             await expect(text.locator(".reference")).to_have_count(5, timeout=SLOW)
 
-            def reference(kind: str, ident: int) -> Any:
-                return text.locator(f".reference[data-kind={kind}][data-id='{ident}']")
+            def reference(ref: str) -> Any:
+                return text.locator(f".reference[data-ref='{ref}']")
 
-            await expect(reference("node", target)).to_contain_text(f"#{target} Target {word}")
-            await expect(reference("rule", rule["id"])).to_contain_text(f"Ruled {word}")
-            await expect(reference("decision", decision["id"])).to_contain_text(f"Decided {word}")
-            await expect(reference("fact", fact["id"])).to_contain_text(f"Known {word}")
-            for kind, ident in (("node", target), ("rule", rule["id"])):
-                assert (await reference(kind, ident).get_attribute("href") or "").startswith("#/")
-            # An id nothing has is shown plainly as missing, and is not a link.
-            gone = reference("node", missing)
+            await expect(reference(target)).to_contain_text(f"{code_of(target)} Target {word}")
+            await expect(reference(f"rule:{rule['id']}")).to_contain_text(f"Ruled {word}")
+            await expect(reference(f"decision:{decision['id']}")).to_contain_text(f"Decided {word}")
+            await expect(reference(f"fact:{fact['id']}")).to_contain_text(f"Known {word}")
+            for ref in (target, f"rule:{rule['id']}"):
+                assert (await reference(ref).get_attribute("href") or "").startswith("#/")
+            # A number nothing has is shown plainly as missing, and is not a link.
+            gone = reference(missing)
             await expect(gone).to_have_class(re.compile(r"\bmissing\b"))
-            await expect(gone).to_have_text(f"[[node:{missing}]] (missing)")
+            await expect(gone).to_have_text(f"[[{missing}]] (missing)")
             assert await gone.get_attribute("href") is None
-            # [[belief:3]] is not a reference: it stays the text it is.
-            assert "[[belief:3]]" in await text.inner_text()
+            # [[belief:3]] and [[node:N]] are not references: each stays the text it is.
+            shown = await text.inner_text()
+            assert "[[belief:3]]" in shown and f"[[node:{number(target)}]]" in shown
             assert await text.locator(".reference[data-kind=belief]").count() == 0
+            assert await text.locator(".reference[data-kind=node]").count() == 0
 
             # A rename is followed by the reference without reloading the page.
             await ok(
                 client,
                 "update_node",
                 actor="a",
-                node_id=target,
+                node=target,
                 expected_version=1,
                 title=f"Renamed {word}",
             )
-            await expect(reference("node", target)).to_contain_text(f"Renamed {word}", timeout=SLOW)
-            await expect(reference("node", target)).not_to_contain_text("Target")
+            await expect(reference(target)).to_contain_text(f"Renamed {word}", timeout=SLOW)
+            await expect(reference(target)).not_to_contain_text("Target")
             await ok(
                 client,
                 "update_rule",
@@ -233,29 +241,30 @@ async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_
                 expected_version=1,
                 title=f"Reworded {word}",
             )
-            await expect(reference("rule", rule["id"])).to_contain_text(
+            await expect(reference(f"rule:{rule['id']}")).to_contain_text(
                 f"Reworded {word}", timeout=SLOW
             )
 
             # Following a reference opens the item it names, in the same panel, with the page
             # left as it was.
-            await reference("node", target).click()
+            here = f"#/board?epic={number(epic)}&sel={mentioner}"
+            await reference(target).click()
             await expect(card(page).locator("h2").first).to_contain_text(
                 f"Renamed {word}", timeout=SLOW
             )
-            assert (await hash_params(page))["sel"] == f"node:{target}"
-            await w.go(f"#/board?epic={epic}&sel=node:{mentioner}")
-            await reference("rule", rule["id"]).click()
+            assert (await hash_params(page))["sel"] == target
+            await w.go(here)
+            await reference(f"rule:{rule['id']}").click()
             await expect(panel(page).locator(".rule-detail h2")).to_contain_text(
                 f"Reworded {word}", timeout=SLOW
             )
-            await w.go(f"#/board?epic={epic}&sel=node:{mentioner}")
-            await reference("decision", decision["id"]).click()
+            await w.go(here)
+            await reference(f"decision:{decision['id']}").click()
             await expect(
                 panel(page).locator(f".record-detail[data-record='decision:{decision['id']}']")
             ).to_be_visible(timeout=SLOW)
-            await w.go(f"#/board?epic={epic}&sel=node:{mentioner}")
-            await reference("fact", fact["id"]).click()
+            await w.go(here)
+            await reference(f"fact:{fact['id']}").click()
             await expect(
                 panel(page).locator(f".record-detail[data-record='fact:{fact['id']}']")
             ).to_be_visible(timeout=SLOW)
@@ -263,7 +272,7 @@ async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_
 
         # Writing references made no link, and changed neither the status nor the version.
         assert await links_of(client, target, mentioner) == before_links
-        after = await ok(client, "get_node", node_id=mentioner)
+        after = await ok(client, "get_node", node=mentioner)
         assert (after["status"], after["version"]) == (
             before_node["status"],
             before_node["version"],
@@ -281,27 +290,23 @@ async def test_mentioned_in_equals_find_mentions_in_the_panel_and_the_list_and_f
     async with fresh_project(server_url) as (client, board, project):
         epic = await made(client, "epic", f"Backlinks {word}")
         target = await made(client, "story", f"Cited {word}", epic)
-        rule = await ok(
-            client, "create_rule", actor="a", title=f"Cited rule {word}", story_id=target
-        )
-        fact = await make_fact(client, f"Cited fact {word}", node_ids=[target])
-        first = await made(
-            client, "story", f"First {word}", epic, body=f"Refers to [[node:{target}]]."
-        )
+        rule = await ok(client, "create_rule", actor="a", title=f"Cited rule {word}", story=target)
+        fact = await make_fact(client, f"Cited fact {word}", nodes=[target])
+        first = await made(client, "story", f"First {word}", epic, body=f"Refers to [[{target}]].")
         await ok(
             client,
             "update_rule",
             actor="a",
             rule_id=rule["id"],
             expected_version=1,
-            body=f"Also [[node:{target}]] and [[fact:{fact['id']}]].",
+            body=f"Also [[{target}]] and [[fact:{fact['id']}]].",
         )
         decision = await make_decision(
             client,
             f"Deciding {word}",
             text=f"Because of [[fact:{fact['id']}]]",
             reason=f"Like [[rule:{rule['id']}]]",
-            node_ids=[target],
+            nodes=[target],
         )
 
         async def panel_lists(page: Page, key: str, want: dict[str, Any]) -> None:
@@ -314,27 +319,25 @@ async def test_mentioned_in_equals_find_mentions_in_the_panel_and_the_list_and_f
             shown = await section.locator("li.mention").evaluate_all(
                 "els => els.map(e => e.dataset.source)"
             )
-            assert sorted(shown) == sorted(f"{kind}:{ident}" for kind, ident in sources(want)), key
+            assert sorted(shown) == sorted(sources(want)), key
 
         async with _browser(board, project) as w:
             page = w.page
             # On the panel of a story.
-            await w.open(f"#/board?epic={epic}&sel=node:{target}")
-            listed_now = await ok(client, "find_mentions", node_id=target)
+            await w.open(f"#/board?epic={number(epic)}&sel={target}")
+            listed_now = await ok(client, "find_mentions", node=target)
             await panel_lists(page, "story", listed_now)
-            assert ("story", first) in sources(listed_now)
-            assert ("rule", rule["id"]) in sources(listed_now)
+            assert first in sources(listed_now)
+            assert f"rule:{rule['id']}" in sources(listed_now)
 
             # A new mention written by an agent shows up without reloading.
-            second = await made(client, "task", f"Second {word}", first, body=f"[[node:{target}]]")
+            second = await made(client, "task", f"Second {word}", first, body=f"[[{target}]]")
             section = panel(page).locator("section[data-part=mentions]")
             await expect(section.locator("li.mention")).to_have_count(
                 len(listed_now["items"]) + 1, timeout=SLOW
             )
-            await expect(
-                section.locator(f"li.mention[data-source='task:{second}']")
-            ).to_be_visible()
-            assert ("task", second) in sources(await ok(client, "find_mentions", node_id=target))
+            await expect(section.locator(f"li.mention[data-source='{second}']")).to_be_visible()
+            assert second in sources(await ok(client, "find_mentions", node=target))
 
             # On the panel of a requirement, of a decision and of a fact, from the Graph.
             for key, argument, ident in (
@@ -342,21 +345,23 @@ async def test_mentioned_in_equals_find_mentions_in_the_panel_and_the_list_and_f
                 (f"fact:{fact['id']}", "fact_id", fact["id"]),
                 (f"decision:{decision['id']}", "decision_id", decision["id"]),
             ):
-                await w.go(f"#/graph?view=context&as=list&epic={epic}&sel={key}")
+                await w.go(f"#/graph?view=context&as=list&epic={number(epic)}&sel={key}")
                 want = await ok(client, "find_mentions", **{argument: ident})
                 await panel_lists(page, key, want)
             by_rule = await ok(client, "find_mentions", rule_id=rule["id"])
-            assert ("decision", decision["id"]) in sources(by_rule)
+            assert f"decision:{decision['id']}" in sources(by_rule)
             by_fact = await ok(client, "find_mentions", fact_id=fact["id"])
-            assert {("rule", rule["id"]), ("decision", decision["id"])} <= sources(by_fact)
-            await w.go(f"#/graph?view=context&as=list&epic={epic}&sel=decision:{decision['id']}")
+            assert {f"rule:{rule['id']}", f"decision:{decision['id']}"} <= sources(by_fact)
+            await w.go(
+                f"#/graph?view=context&as=list&epic={number(epic)}&sel=decision:{decision['id']}"
+            )
             await expect(panel(page).locator("section[data-part=mentions] .none")).to_have_text(
                 "Nothing refers to it.", timeout=SLOW
             )
 
             # In the Graph's list, a row's "Mentioned in" is closed until it is opened, and then
             # the same.
-            await w.go(f"#/graph?view=context&as=list&epic={epic}")
+            await w.go(f"#/graph?view=context&as=list&epic={number(epic)}")
             for kind, ident, argument in (
                 ("rule", rule["id"], "rule_id"),
                 ("fact", fact["id"], "fact_id"),
@@ -372,7 +377,7 @@ async def test_mentioned_in_equals_find_mentions_in_the_panel_and_the_list_and_f
                 shown = await details.locator("li.mention").evaluate_all(
                     "els => els.map(e => e.dataset.source)"
                 )
-                assert sorted(shown) == sorted(f"{k}:{i}" for k, i in sources(want))
+                assert sorted(shown) == sorted(sources(want))
             assert w.problems == []
 
 
@@ -393,7 +398,7 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
         before = await links_of(client, target, writer)
         async with _browser(board, project) as w:
             page = w.page
-            await w.open(f"#/board?epic={epic}&sel=node:{writer}")
+            await w.open(f"#/board?epic={number(epic)}&sel={writer}")
             box = page.locator("#edit-body")
             await box.click()
             await page.keyboard.type(f"Depends on [[pickable {word}")
@@ -401,34 +406,36 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
             await expect(picker).to_be_visible(timeout=SLOW)
             # Every kind of thing a reference can name is offered, by a word of its title.
             for ref in (
-                f"[[node:{target}]]",
+                f"[[{target}]]",
                 f"[[rule:{rule['id']}]]",
                 f"[[decision:{decision['id']}]]",
                 f"[[fact:{fact['id']}]]",
             ):
                 await expect(picker.locator(f"[data-ref='{ref}']")).to_have_count(1, timeout=SLOW)
             assert await picker.locator("[data-ref^='[[belief']").count() == 0
+            assert await picker.locator("[data-ref^='[[node:']").count() == 0
             # Nothing is written to the server by choosing.
-            await picker.locator(f"[data-ref='[[node:{target}]]']").hover()
+            await picker.locator(f"[data-ref='[[{target}]]']").hover()
             for _ in range(4):
-                if "[[node:" in (
-                    await picker.locator("[aria-selected=true]").get_attribute("data-ref") or ""
+                if (
+                    await picker.locator("[aria-selected=true]").get_attribute("data-ref")
+                    == f"[[{target}]]"
                 ):
                     break
                 await page.keyboard.press("ArrowDown")
             await page.keyboard.press("Enter")
             await expect(picker).to_be_hidden()
-            assert await box.input_value() == f"Depends on [[node:{target}]]"
-            assert (await ok(client, "get_node", node_id=writer))["body"] == ""
+            assert await box.input_value() == f"Depends on [[{target}]]"
+            assert (await ok(client, "get_node", node=writer))["body"] == ""
             await page.get_by_role("button", name="Save changes").click()
             await expect(card(page).locator(".body-text .reference")).to_contain_text(
                 f"Pickable {word}", timeout=SLOW
             )
-            assert (await ok(client, "get_node", node_id=writer))[
-                "body"
-            ] == f"Depends on [[node:{target}]]"
-            mentions = await ok(client, "find_mentions", node_id=target)
-            assert sources(mentions) == {("story", writer)}
+            assert (await ok(client, "get_node", node=writer))["body"] == (
+                f"Depends on [[{target}]]"
+            )
+            mentions = await ok(client, "find_mentions", node=target)
+            assert sources(mentions) == {writer}
             # Typing the kind and an id narrows the list to it, and Escape closes the list and
             # keeps the text.
             await box.click()
@@ -445,7 +452,7 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
             # The same pick-list in the dialog that records a fact: it writes text, and nothing
             # is recorded until the dialog is sent.
             counts = await tally(client)
-            await w.go(f"#/graph?view=context&as=list&epic={epic}")
+            await w.go(f"#/graph?view=context&as=list&epic={number(epic)}")
             await page.locator("#record-fact").click()
             text = dialog(page).locator("#record-fact-text")
             await text.click()
@@ -495,15 +502,16 @@ async def test_the_quick_switcher_opens_from_the_keyboard_on_every_view_and_draw
             assert w.problems == []
 
 
-async def test_the_quick_switcher_jumps_by_a_title_word_by_id_and_to_a_view_or_drawer(
+async def test_the_quick_switcher_jumps_by_a_title_word_by_code_and_to_a_view_or_drawer(
     server_url: str,
 ) -> None:
     word = unique_word()
     async with fresh_project(server_url) as (client, board, project):
         epic = await made(client, "epic", f"Switching {word}")
         story = await made(client, "story", f"Findable {word}", epic)
+        task = await made(client, "task", f"Doable {word}", story)
         rule = await ok(
-            client, "create_rule", actor="a", title=f"Switchable rule {word}", story_id=story
+            client, "create_rule", actor="a", title=f"Switchable rule {word}", story=story
         )
         decision = await make_decision(client, f"Switchable decision {word}")
         fact = await make_fact(client, f"Switchable fact {word}")
@@ -514,24 +522,45 @@ async def test_the_quick_switcher_jumps_by_a_title_word_by_id_and_to_a_view_or_d
             await page.keyboard.press("Control+k")
             await page.keyboard.type(f"findable {word}")
             first = page.locator("#switcher [role=option]").first
-            await expect(first).to_have_attribute("data-ref", f"node:{story}", timeout=SLOW)
+            await expect(first).to_have_attribute("data-ref", story, timeout=SLOW)
             await page.keyboard.press("Enter")
             await expect(page.locator("#switcher")).to_have_count(0)
             await expect(card(page)).to_contain_text(f"Findable {word}", timeout=SLOW)
-            assert (await hash_params(page))["sel"] == f"node:{story}"
+            assert (await hash_params(page))["sel"] == story
             assert "#/roadmap" in await page.evaluate("location.hash")
 
-            # By id, in the plain form.
+            # By code, as the page writes it.
             await w.go("#/board")
             await page.keyboard.press("Control+k")
-            await page.keyboard.type(f"#{epic}")
+            await page.keyboard.type(code_of(epic))
             await expect(page.locator("#switcher [role=option]").first).to_have_attribute(
-                "data-ref", f"node:{epic}", timeout=SLOW
+                "data-ref", epic, timeout=SLOW
             )
             await page.keyboard.press("Enter")
             await expect(card(page)).to_contain_text(f"Switching {word}", timeout=SLOW)
 
-            # By kind and id: a requirement, a decision, a fact.
+            # Each kind is numbered on its own, so a bare number finds every kind that has it: in
+            # a project of its own the first epic, story, task, requirement, decision and fact
+            # are all number 1, and nothing else is.
+            assert [number(ref) for ref in (epic, story, task)] == [1, 1, 1]
+            assert [rule["id"], decision["id"], fact["id"]] == [1, 1, 1]
+            await w.go("#/board")
+            await page.keyboard.press("Control+k")
+            await page.keyboard.type("1")
+            options = page.locator("#switcher [role=option]")
+            await expect(options).to_have_count(6, timeout=SLOW)
+            assert await options.evaluate_all("els => els.map(e => e.dataset.ref)") == [
+                epic,
+                story,
+                task,
+                f"rule:{rule['id']}",
+                f"decision:{decision['id']}",
+                f"fact:{fact['id']}",
+            ]
+            await page.keyboard.press("Escape")
+            await expect(page.locator("#switcher")).to_have_count(0)
+
+            # By kind and number: a requirement, a decision, a fact.
             for typed, key in (
                 (f"requirement {rule['id']}", f"rule:{rule['id']}"),
                 (f"decision {decision['id']}", f"decision:{decision['id']}"),
@@ -591,44 +620,36 @@ async def test_the_graph_draws_a_mentions_layer_that_is_off_until_chosen_and_equ
             "story",
             f"Citing {word}",
             epic,
-            body=f"Needs [[node:{cited}]] and [[node:987654321]]",
+            body=f"Needs [[{cited}]] and [[story:987654321]]",
         )
         rule = await ok(
             client,
             "create_rule",
             actor="a",
             title=f"Rule {word}",
-            story_id=cited,
-            body=f"Mentions [[node:{citing}]]",
+            story=cited,
+            body=f"Mentions [[{citing}]]",
         )
         decision = await make_decision(
-            client, f"Decision {word}", text=f"After [[rule:{rule['id']}]]", node_ids=[cited]
+            client, f"Decision {word}", text=f"After [[rule:{rule['id']}]]", nodes=[cited]
         )
         fact = await make_fact(
-            client, f"Fact {word}", source=f"See [[decision:{decision['id']}]]", node_ids=[cited]
+            client, f"Fact {word}", source=f"See [[decision:{decision['id']}]]", nodes=[cited]
         )
         before = await links_of(client, cited, citing)
         everything = await ok(client, "find_mentions", limit=200)
-        # Every reference to something that exists, as a line from the record that holds it.
-        kind_of = {"epic": "node", "story": "node", "task": "node"}
-
-        def key(kind: str, ident: int) -> str:
-            return f"{kind_of.get(kind, kind)}:{ident}"
-
+        # Every reference to something that exists, as a line from the record that holds it: the
+        # references name every kind the same way, so they are the keys the Graph uses.
         wanted = {
-            (
-                "mention",
-                key(m["source"]["item_type"], m["source"]["id"]),
-                key(m["target"]["kind"], m["target"]["id"]),
-            )
+            ("mention", m["source"]["ref"], m["target"]["ref"])
             for m in everything["items"]
             if m["target"]["exists"]
         }
         assert len(wanted) == 4 and len(everything["items"]) == 5  # one points at nothing
         async with _browser(board, project) as w:
             page = w.page
-            await graph_open(w, f"#/graph?view=everything&epic={epic}")
-            await expect(svg(page).locator(f".dot[data-key='node:{citing}']")).to_be_visible(
+            await graph_open(w, f"#/graph?view=everything&epic={number(epic)}")
+            await expect(svg(page).locator(f".dot[data-key='{citing}']")).to_be_visible(
                 timeout=SLOW
             )
             assert await svg(page).locator(".edge[data-type='mention']").count() == 0
@@ -639,7 +660,7 @@ async def test_the_graph_draws_a_mentions_layer_that_is_off_until_chosen_and_equ
             drawn = {line for line in await map_edges(page) if line[0] == "mention"}
             assert drawn == wanted
             assert "mentions=1" in await page.evaluate("location.hash")
-            await expect(edge(page, "mention", f"node:{citing}", f"node:{cited}")).to_have_count(1)
+            await expect(edge(page, "mention", citing, cited)).to_have_count(1)
             await expect(
                 edge(page, "mention", f"fact:{fact['id']}", f"decision:{decision['id']}")
             ).to_have_count(1)

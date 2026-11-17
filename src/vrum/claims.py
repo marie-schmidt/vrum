@@ -23,11 +23,11 @@ from vrum.graph import Node, change_status, node_state, require_node
 DEFAULT_LEASE_SECONDS = 900
 MAX_LEASE_SECONDS = 86_400
 HANDOFF_OUTCOMES = ("done", "blocked", "dropped", "released")
-_CLAIM_COLUMNS = "node_id, actor, claimed_at, expires_at"
+_CLAIM_COLUMNS = "node, actor, claimed_at, expires_at"
 
 
 class Claim(BaseModel):
-    node_id: int
+    node: str = Field(description="The reference of the story or task, such as story:12.")
     actor: str = Field(description="Who holds the claim.")
     claimed_at: datetime
     expires_at: datetime = Field(
@@ -56,33 +56,33 @@ def refuse_unless_claimable(node: Node) -> None:
     """Work that cannot be done now is not handed out."""
     if node.kind == "epic":
         raise Refusal(
-            f"Node {node.id} is an epic. Only stories and tasks can be claimed; claim one of the "
+            f"{node.ref} is an epic. Only stories and tasks can be claimed; claim one of the "
             "stories or tasks under it."
         )
     if node.status in ("done", "dropped"):
-        raise Refusal(f"Node {node.id} is {node.status}, so there is nothing left to claim.")
+        raise Refusal(f"{node.ref} is {node.status}, so there is nothing left to claim.")
     if node.waiting_on:
-        ids = ", ".join(str(waiting) for waiting in node.waiting_on)
+        needs = ", ".join(node.waiting_on)
         raise Refusal(
-            f"Node {node.id} cannot be started yet: it needs node {ids} first, and "
+            f"{node.ref} cannot be started yet: it needs {needs} first, and "
             f"{'that is' if len(node.waiting_on) == 1 else 'those are'} not done. Finish "
             f"{'that' if len(node.waiting_on) == 1 else 'those'} first, or remove the needs_first "
             "link if it no longer applies. ready_work lists what can be started now."
         )
     if node.status == "blocked":
         raise Refusal(
-            f"Node {node.id} is marked blocked. Once what blocks it is resolved, change its "
+            f"{node.ref} is marked blocked. Once what blocks it is resolved, change its "
             "status with update_node, then claim it."
         )
 
 
-async def current_claim(conn: AsyncConnection, node_id: int) -> dict[str, Any] | None:
+async def current_claim(conn: AsyncConnection, node: str) -> dict[str, Any] | None:
     """The claim row on a node, live or lapsed, or None. `live` says if it is still in force."""
     return await fetch_one(
         conn,
         f"SELECT {_CLAIM_COLUMNS}, expires_at > clock_timestamp() AS live FROM claims "
-        "WHERE node_id = %s",
-        (node_id,),
+        "WHERE node = %s",
+        (node,),
     )
 
 
@@ -90,7 +90,7 @@ async def take_claim(
     conn: AsyncConnection,
     *,
     actor: str,
-    node_id: int,
+    node: str,
     lease_seconds: int,
     current: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -98,24 +98,24 @@ async def take_claim(
     current_claim). The database settles a tie: only an expired claim can be taken over."""
     row = await fetch_one(
         conn,
-        "INSERT INTO claims (node_id, node_kind, actor, claimed_at, expires_at) "
-        "SELECT id, kind, %(actor)s, clock_timestamp(), "
+        "INSERT INTO claims (node, actor, claimed_at, expires_at) "
+        "SELECT ref, %(actor)s, clock_timestamp(), "
         "clock_timestamp() + make_interval(secs => %(lease)s) FROM nodes "
-        "WHERE id = %(node)s "
-        "ON CONFLICT (project_id, node_id) DO UPDATE SET actor = EXCLUDED.actor, "
+        "WHERE ref = %(node)s "
+        "ON CONFLICT (project_id, node) DO UPDATE SET actor = EXCLUDED.actor, "
         "claimed_at = EXCLUDED.claimed_at, expires_at = EXCLUDED.expires_at "
         "WHERE claims.expires_at <= clock_timestamp() "
         f"RETURNING {_CLAIM_COLUMNS}",
-        {"actor": actor, "lease": lease_seconds, "node": node_id},
+        {"actor": actor, "lease": lease_seconds, "node": node},
     )
     if row is None:
         raise Refusal(
-            f"Node {node_id} was claimed by someone else a moment ago. Pick other work "
+            f"{node} was claimed by someone else a moment ago. Pick other work "
             "(ready_work lists what is free)."
         )
     await record_event(
         conn,
-        node_id=node_id,
+        node=node,
         action="claimed",
         actor=actor,
         before=None if current is None else snapshot(current, ("actor", "expires_at")),
@@ -125,27 +125,27 @@ async def take_claim(
 
 
 async def release_in(
-    conn: AsyncConnection, *, actor: str, node_id: int, outcome: str, note: str, verb: str
+    conn: AsyncConnection, *, actor: str, node: str, outcome: str, note: str, verb: str
 ) -> dict[str, Any]:
     """End the holder's claim on a node the caller has locked, and leave the handoff note. Only the
     holder can, whether the claim is still in force or has lapsed with nobody taking it over.
     `verb` is what the caller is doing ("release", "finish"), for the refusals. Returns the claim
     that ended."""
-    current = await current_claim(conn, node_id)
+    current = await current_claim(conn, node)
     if current is None or (not current["live"] and current["actor"] != actor):
-        raise Refusal(f"Nobody holds a claim on node {node_id}, so there is nothing to {verb}.")
+        raise Refusal(f"Nobody holds a claim on {node}, so there is nothing to {verb}.")
     if current["actor"] != actor:
         raise Refusal(
-            f"Node {node_id} is claimed by {current['actor']}, not by you, so you cannot {verb} "
+            f"{node} is claimed by {current['actor']}, not by you, so you cannot {verb} "
             f"it. Their claim ends on its own at {when(current['expires_at'])}."
         )
     row = await fetch_one(
-        conn, f"DELETE FROM claims WHERE node_id = %s RETURNING {_CLAIM_COLUMNS}", (node_id,)
+        conn, f"DELETE FROM claims WHERE node = %s RETURNING {_CLAIM_COLUMNS}", (node,)
     )
     assert row is not None
     await record_event(
         conn,
-        node_id=node_id,
+        node=node,
         action="handoff",
         actor=actor,
         before=None,
@@ -153,7 +153,7 @@ async def release_in(
     )
     await record_event(
         conn,
-        node_id=node_id,
+        node=node,
         action="claim_released",
         actor=actor,
         before=snapshot(row, ("actor", "expires_at")),
@@ -163,14 +163,14 @@ async def release_in(
 
 
 class HeldWork(BaseModel):
-    node_id: int
+    node: str = Field(description="The reference of the story or task, such as story:12.")
     kind: str = Field(description="story or task.")
     title: str
     expires_at: datetime = Field(description="When the claim lapses, or lapsed.")
 
 
 class LastHandoff(BaseModel):
-    node_id: int | None
+    node: str | None = Field(description="The reference of the story or task it was left on.")
     title: str | None
     at: datetime
     outcome: str = Field(description="done, blocked, dropped or released.")
@@ -213,15 +213,16 @@ class Claims:
         async with self._database.transaction() as conn:
             held = await fetch_all(
                 conn,
-                "SELECT c.actor, c.node_id, n.kind, n.title, c.expires_at, "
+                "SELECT c.actor, c.node, n.kind, n.title, c.expires_at, "
                 "c.expires_at > clock_timestamp() AS live "
-                "FROM claims c JOIN nodes n ON n.id = c.node_id ORDER BY c.expires_at, c.node_id",
+                "FROM claims c JOIN nodes n ON n.ref = c.node "
+                "ORDER BY c.expires_at, n.kind_rank, n.number",
             )
             notes = await fetch_all(
                 conn,
-                "SELECT DISTINCT ON (e.actor) e.actor, e.node_id, n.title, e.at, "
+                "SELECT DISTINCT ON (e.actor) e.actor, e.node, n.title, e.at, "
                 "e.after ->> 'outcome' AS outcome, e.after ->> 'note' AS note "
-                "FROM events e LEFT JOIN nodes n ON n.id = e.node_id "
+                "FROM events e LEFT JOIN nodes n ON n.ref = e.node "
                 "WHERE e.action = 'handoff' ORDER BY e.actor, e.at DESC, e.id DESC",
             )
             now = await fetch_one(conn, "SELECT clock_timestamp() AS now")
@@ -237,7 +238,7 @@ class Claims:
 
         for row in held:
             work = HeldWork(
-                node_id=row["node_id"],
+                node=row["node"],
                 kind=row["kind"],
                 title=row["title"],
                 expires_at=row["expires_at"],
@@ -246,7 +247,7 @@ class Claims:
             (agent.holding if row["live"] else agent.lapsed).append(work)
         for row in notes:
             state_of(row["actor"]).last_handoff = LastHandoff(
-                node_id=row["node_id"],
+                node=row["node"],
                 title=row["title"],
                 at=row["at"],
                 outcome=row["outcome"],
@@ -258,56 +259,55 @@ class Claims:
         ordered = sorted(agents.values(), key=lambda a: (_STATE_ORDER[a.state], a.actor.lower()))
         return WhoIsWorking(as_of=now["now"], agents=ordered)
 
-    async def claim_node(self, *, actor: str, node_id: int, lease_seconds: int) -> Claim:
+    async def claim_node(self, *, actor: str, node: str, lease_seconds: int) -> Claim:
         actor = clean_actor(actor)
         lease_seconds = lease_seconds_ok(lease_seconds)
         async with self._database.transaction() as conn:
             # Holding the node's row makes claims, edits and moves of it happen one at a time.
-            await require_node(conn, node_id, lock=True)
-            refuse_unless_claimable(await node_state(conn, node_id))
-            current = await current_claim(conn, node_id)
+            await require_node(conn, node, lock=True)
+            refuse_unless_claimable(await node_state(conn, node))
+            current = await current_claim(conn, node)
             if current is not None and current["live"]:
                 if current["actor"] == actor:
                     raise Refusal(
-                        f"You already hold the claim on node {node_id} until "
+                        f"You already hold the claim on {node} until "
                         f"{when(current['expires_at'])}. Use renew_claim to extend it."
                     )
                 raise Refusal(
-                    f"Node {node_id} is claimed by {current['actor']} until "
+                    f"{node} is claimed by {current['actor']} until "
                     f"{when(current['expires_at'])}. Pick other work (ready_work lists what is "
                     "free), or claim it once that claim ends or is released."
                 )
             row = await take_claim(
-                conn, actor=actor, node_id=node_id, lease_seconds=lease_seconds, current=current
+                conn, actor=actor, node=node, lease_seconds=lease_seconds, current=current
             )
         return Claim.model_validate(row)
 
-    async def renew_claim(self, *, actor: str, node_id: int, lease_seconds: int) -> Claim:
+    async def renew_claim(self, *, actor: str, node: str, lease_seconds: int) -> Claim:
         actor = clean_actor(actor)
         lease_seconds = lease_seconds_ok(lease_seconds)
         async with self._database.transaction() as conn:
-            await require_node(conn, node_id, lock=True)
-            current = await current_claim(conn, node_id)
+            await require_node(conn, node, lock=True)
+            current = await current_claim(conn, node)
             if current is None or not current["live"]:
                 raise Refusal(
-                    f"You do not hold a claim on node {node_id}: there is none, or it has lapsed. "
+                    f"You do not hold a claim on {node}: there is none, or it has lapsed. "
                     "Use claim_node to take it."
                 )
             if current["actor"] != actor:
                 raise Refusal(
-                    f"Node {node_id} is claimed by {current['actor']}, not by you, so you cannot "
-                    "renew it."
+                    f"{node} is claimed by {current['actor']}, not by you, so you cannot renew it."
                 )
             row = await fetch_one(
                 conn,
                 "UPDATE claims SET expires_at = clock_timestamp() + make_interval(secs => %s) "
-                f"WHERE node_id = %s RETURNING {_CLAIM_COLUMNS}",
-                (lease_seconds, node_id),
+                f"WHERE node = %s RETURNING {_CLAIM_COLUMNS}",
+                (lease_seconds, node),
             )
             assert row is not None
             await record_event(
                 conn,
-                node_id=node_id,
+                node=node,
                 action="claim_renewed",
                 actor=actor,
                 before=snapshot(current, ("actor", "expires_at")),
@@ -315,15 +315,15 @@ class Claims:
             )
         return Claim.model_validate(row)
 
-    async def release_claim(self, *, actor: str, node_id: int, note: str) -> Claim:
+    async def release_claim(self, *, actor: str, node: str, note: str) -> Claim:
         """Give up a claim, leaving a handoff note. Work that was in progress is free to take
         again, so it goes back to not started."""
         actor = clean_actor(actor)
         note = clean_note(note)
         async with self._database.transaction() as conn:
-            current = await require_node(conn, node_id, lock=True)
+            current = await require_node(conn, node, lock=True)
             row = await release_in(
-                conn, actor=actor, node_id=node_id, outcome="released", note=note, verb="release"
+                conn, actor=actor, node=node, outcome="released", note=note, verb="release"
             )
             if current["status"] == "in_progress":
                 await change_status(conn, actor, current, "new")

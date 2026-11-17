@@ -1,13 +1,15 @@
 // What happened, in plain words. One change event of the history becomes a sentence: who did what
-// to which item, with the item named by its kind, id and current title and linked to where it is
-// shown (the detail panel). Used by the Activity drawer. Every event the server can write is
-// covered, and one it does not know is shown by its name rather than hidden.
+// to which item, with the item named by its code and current title and linked to where it is
+// shown (the detail panel): "story S-12 “Log in”", "requirement 4 “Short codes”". Used by the
+// Activity drawer. Every event the server can write is covered, and one it does not know is shown
+// by its name rather than hidden. An event names a piece of work by `node` and `other_node` (refs
+// such as story:12); requirements, decisions and facts keep their own ids.
 
 import { h, moment } from './dom.js';
 import { icon } from './icons.js';
 import { recordLink } from './ctx.js';
 import { renderMarkdown } from './markdown.js';
-import { KIND, LINK, STATUS } from './labels.js';
+import { KIND, LINK, STATUS, codeOf, nodeCode, parseNodeRef } from './labels.js';
 import { store } from './store.js';
 
 const clip = (text, size = 60) => {
@@ -34,30 +36,36 @@ export const kindOfAction = (action) => (CHANGE_KINDS.find(([, , actions]) => ac
 // The icon of each kind of change in the feed.
 const CHANGE_ICONS = { work: 'task', links: 'link', claims: 'lock', handoffs: 'done', requirements: 'rule', decisions: 'decision', facts: 'fact', other: 'info' };
 
-// A named item as a link: "story #12 “Log in”", "requirement 4 “Short codes”", "fact 2 “…”".
-function named(kind, id) {
-  if (id === null || id === undefined) return 'an item';
-  let words;
-  if (kind === 'node') {
-    const found = store.nodes.get(id);
-    words = found ? `${KIND[found.kind].label.toLowerCase()} #${id} “${clip(found.title)}”` : `item #${id}`;
-  } else if (kind === 'rule') {
-    const found = (store.rules || []).find((item) => item.id === id);
-    words = found && found.title ? `requirement ${id} “${clip(found.title)}”` : `requirement ${id}`;
-  } else if (kind === 'decision') {
-    const found = (store.decisions || []).find((item) => item.id === id);
-    words = found ? `decision ${id} “${clip(found.title)}”` : `decision ${id}`;
-  } else {
-    const found = (store.facts || []).find((item) => item.id === id);
-    words = found ? `fact ${id} “${clip(found.text)}”` : `fact ${id}`;
-  }
-  return recordLink(kind, id, { class: 'item-link', dataset: { kind, id: String(id) } }, words);
+// A named item as a link: "story S-12 “Log in”", "requirement 4 “Short codes”", "fact 2 “…”".
+const link = (kind, number, words, attributes) => recordLink(kind, number, { class: 'item-link', dataset: { kind, ...attributes } }, words);
+
+// A piece of work, from its ref (story:12).
+function node(ref) {
+  if (ref === null || ref === undefined) return 'an item';
+  const at = parseNodeRef(ref);
+  if (!at) return `an item (${ref})`;
+  const found = store.nodes.get(ref);
+  const code = nodeCode(at.kind, at.number);
+  const words = found ? `${KIND[at.kind].label.toLowerCase()} ${code} “${clip(found.title)}”` : `${at.kind} ${code}`;
+  return link(at.kind, at.number, words, { ref, number: String(at.number) });
 }
 
-const node = (id) => named('node', id);
-const rule = (id) => named('rule', id);
-const decision = (id) => named('decision', id);
-const fact = (id) => named('fact', id);
+const record = (kind, id, words) => (id === null || id === undefined ? 'an item' : link(kind, id, words, { id: String(id) }));
+
+function rule(id) {
+  const found = (store.rules || []).find((item) => item.id === id);
+  return record('rule', id, found && found.title ? `requirement ${id} “${clip(found.title)}”` : `requirement ${id}`);
+}
+
+function decision(id) {
+  const found = (store.decisions || []).find((item) => item.id === id);
+  return record('decision', id, found ? `decision ${id} “${clip(found.title)}”` : `decision ${id}`);
+}
+
+function fact(id) {
+  const found = (store.facts || []).find((item) => item.id === id);
+  return record('fact', id, found ? `fact ${id} “${clip(found.text)}”` : `fact ${id}`);
+}
 
 const present = (value) => value !== null && value !== undefined;
 
@@ -67,21 +75,22 @@ function subject(event) {
   if (present(event.fact_id)) return fact(event.fact_id);
   if (present(event.decision_id)) return decision(event.decision_id);
   if (present(event.rule_id)) return rule(event.rule_id);
-  return node(event.node_id);
+  return node(event.node);
 }
 
 // What a link or a concern points at: the node, requirement or decision the event is also about.
 function target(event) {
-  if (present(event.node_id)) return node(event.node_id);
+  if (present(event.node)) return node(event.node);
   if (present(event.rule_id)) return rule(event.rule_id);
   if (present(event.decision_id)) return decision(event.decision_id);
   return 'an item';
 }
 
-const FIELD = { title: 'title', body: 'details', status: 'status', priority: 'priority', start_on: 'start day', target_on: 'target day', parent_id: 'parent', story_id: 'story' };
+const FIELD = { title: 'title', body: 'details', status: 'status', priority: 'priority', start_on: 'start day', target_on: 'target day', parent: 'parent', story: 'story' };
 const value = (key, text) => {
   if (text === null || text === undefined || text === '') return 'empty';
   if (key === 'status') return STATUS[text]?.label?.toLowerCase() || text;
+  if (key === 'parent' || key === 'story') return codeOf(text);
   return `“${clip(text, 40)}”`;
 };
 
@@ -98,8 +107,8 @@ function changes(event) {
     .join('; ');
 }
 
-function story(id) {
-  return id === null || id === undefined ? 'no story' : node(id);
+function story(ref) {
+  return ref === null || ref === undefined ? 'no story' : node(ref);
 }
 
 // Why a record ended, and the person's own words when it needed them.
@@ -141,32 +150,32 @@ export function describe(event) {
   const b = event.before || {};
   switch (event.action) {
     case 'create':
-      return ['created ', node(event.node_id)];
+      return ['created ', node(event.node)];
     case 'update':
-      return ['changed ', node(event.node_id), `: ${changes(event)}`];
+      return ['changed ', node(event.node), `: ${changes(event)}`];
     case 'move':
-      return ['moved ', node(event.node_id), ' from ', node(b.parent_id), ' to ', node(a.parent_id)];
+      return ['moved ', node(event.node), ' from ', node(b.parent), ' to ', node(a.parent)];
     case 'link_added':
     case 'link_removed': {
       const verb = LINK[(event.action === 'link_added' ? a : b).link_type]?.label || 'is linked to';
-      return [event.action === 'link_added' ? 'added a link: ' : 'removed a link: ', node(event.node_id), ` ${verb} `, node(event.other_node_id)];
+      return [event.action === 'link_added' ? 'added a link: ' : 'removed a link: ', node(event.node), ` ${verb} `, node(event.other_node)];
     }
     case 'claimed':
-      return ['took ', node(event.node_id), ` until ${moment(a.expires_at)}`];
+      return ['took ', node(event.node), ` until ${moment(a.expires_at)}`];
     case 'claim_renewed':
-      return ['kept ', node(event.node_id), ` for longer, until ${moment(a.expires_at)}`];
+      return ['kept ', node(event.node), ` for longer, until ${moment(a.expires_at)}`];
     case 'claim_released':
-      return ['let go of ', node(event.node_id)];
+      return ['let go of ', node(event.node)];
     case 'handoff':
-      return ['finished their work on ', node(event.node_id), ` (${a.outcome}) and left this handoff note`];
+      return ['finished their work on ', node(event.node), ` (${a.outcome}) and left this handoff note`];
     case 'rule_created':
-      return ['wrote ', rule(event.rule_id), event.node_id === null ? ', in no story yet' : [', in ', node(event.node_id)]];
+      return ['wrote ', rule(event.rule_id), present(event.node) ? [', in ', node(event.node)] : ', in no story yet'];
     case 'rule_updated':
       return ['changed ', rule(event.rule_id), `: ${changes(event)}`];
     case 'rule_placed':
-      return ['put ', rule(event.rule_id), ' in ', node(a.story_id)];
+      return ['put ', rule(event.rule_id), ' in ', node(a.story)];
     case 'rule_moved':
-      return ['moved ', rule(event.rule_id), ' from ', story(b.story_id), ' to ', story(a.story_id)];
+      return ['moved ', rule(event.rule_id), ' from ', story(b.story), ' to ', story(a.story)];
     default:
       if (FACT_ACTIONS.includes(event.action)) return describeRecord('fact', event, a);
       if (DECISION_ACTIONS.includes(event.action)) return describeRecord('decision', event, a);
@@ -192,10 +201,11 @@ export function eventRow(event) {
   );
 }
 
-// Whether an event is about the item a person is following: `item` is { kind, id } or null.
+// Whether an event is about the item a person is following: `item` is { ref } for a piece of work,
+// { kind, id } for a requirement, decision or fact, or null.
 export function aboutItem(event, item) {
   if (!item) return true;
-  if (item.kind === 'node') return event.node_id === item.id || event.other_node_id === item.id;
+  if (item.ref) return event.node === item.ref || event.other_node === item.ref;
   if (item.kind === 'rule') return event.rule_id === item.id;
   if (item.kind === 'decision') return event.decision_id === item.id;
   return event.fact_id === item.id;

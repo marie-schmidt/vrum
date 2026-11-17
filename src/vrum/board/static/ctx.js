@@ -3,11 +3,12 @@
 
 import { h } from './dom.js';
 import { icon } from './icons.js';
+import { parseItemRef } from './labels.js';
 
 export const ui = {
   page: 'board',
   params: new URLSearchParams(),
-  // Change the address after the #: navigate({ sel: 'node:12', epic: null }) sets one and removes
+  // Change the address after the #: navigate({ sel: 'story:12', epic: null }) sets one and removes
   // the other. `replace` keeps the browser's back button for something else. `page` goes to
   // another view, taking along what the views share (see carriedTo).
   navigate: () => {},
@@ -21,7 +22,8 @@ export const SETTINGS = ['access', 'tools', 'status'];
 
 // What an address keeps when the person goes to another page: the drawer with its own choices
 // (search, duplicates and activity) everywhere, and, between the three views, the selected record
-// and the work filter and epic.
+// and the work filter and epic. The item of the item page (`item`) is kept nowhere: it names that
+// page.
 const DRAWER_KEYS = ['drawer', 'search', 'search_mode', 'search_type', 'search_status', 'search_epic', 'dups', 'dup_type', 'dup_min', 'dup_epics', 'dup_unlinked', 'act_actor', 'act_kind', 'act_item', 'act_from', 'act_to'];
 const VIEW_KEYS = ['sel', 'q', 'epic'];
 
@@ -78,26 +80,47 @@ export function viewLink(page, choices, props, ...children) {
   );
 }
 
-// The record in the shared detail panel, from `sel=node:12`: { kind, id }, or null. The kinds are
-// node, rule, decision and fact.
-export function parseSel(text) {
-  const found = /^(node|rule|decision|fact):([1-9]\d*)$/.exec(String(text || ''));
-  return found ? { kind: found[1], id: Number(found[2]) } : null;
-}
+// The record in the shared detail panel, from `sel=story:12`: { kind, number, id, ref }, or null.
+// The kinds are epic, story, task, rule, decision and fact; `id` is the number again, for the
+// kinds that are still called by an id (a requirement, a decision, a fact).
+export const parseSel = (text) => parseItemRef(text);
 
 // A link that shows a record in the detail panel on the page the person is on, leaving the rest of
-// the address (the drawer, the filter, the scope) as it is. A plain click changes the address
-// without a page load; a click with a modifier key opens it the way a link does.
-export function recordLink(kind, id, props, ...children) {
+// the address (the drawer, the filter, the scope) as it is. `kind` is the real kind (story, rule)
+// and `number` its number. A plain click changes the address without a page load; a click with a
+// modifier key opens it the way a link does.
+export function recordLink(kind, number, props, ...children) {
   return h(
     'a',
     {
       ...props,
-      href: addressOf(ui.page, { sel: `${kind}:${id}`, panel: null }),
+      href: addressOf(ui.page, { sel: `${kind}:${number}`, panel: null }),
       onclick: (event) => {
         if (!plainClick(event)) return;
         event.preventDefault();
-        ui.navigate({ sel: `${kind}:${id}`, panel: null });
+        ui.navigate({ sel: `${kind}:${number}`, panel: null });
+      },
+    },
+    ...children,
+  );
+}
+
+// The page of one epic, story or task: #/item?item=story:12. `item` is not carried to another
+// page, and is not kept when another page is chosen.
+export const itemAddress = (ref) => hrefTo('item', { item: ref });
+
+// A link to the page of an epic, story or task. A plain click goes there keeping the drawer and
+// dropping the quick look (`sel`) of the page it leaves.
+export function itemLink(ref, props, ...children) {
+  return h(
+    'a',
+    {
+      ...props,
+      href: itemAddress(ref),
+      onclick: (event) => {
+        if (!plainClick(event)) return;
+        event.preventDefault();
+        ui.navigate({ item: ref, sel: null, panel: null }, { page: 'item' });
       },
     },
     ...children,

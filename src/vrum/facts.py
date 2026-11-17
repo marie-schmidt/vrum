@@ -19,6 +19,8 @@ from vrum.common import (
     fetch_all,
     fetch_one,
     page_size,
+    parse_node_ref,
+    parse_node_refs,
     record_event,
     require_link_targets,
     required_text,
@@ -28,7 +30,7 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.decisions import require_decision
-from vrum.graph import EVENT_COLUMNS, Event, EventPage
+from vrum.graph import EVENT_COLUMNS, Event, EventPage, require_node
 from vrum.records import (
     CONFIRMATIONS,
     apply_confirmation,
@@ -37,18 +39,19 @@ from vrum.records import (
     require_a_person_for_confirmed,
     said,
 )
+from vrum.rules import require_rule
 
 FACT_STATUSES = ("active", "superseded", "withdrawn")
 
 FACT_COLUMNS = (
     "id, text, source, recorded_by, recorded_at, status, superseded_by_id, supersedes_ids, "
-    "status_reason, confirmed_by, confirmed_at, confirmation, node_ids, rule_ids, decision_ids"
+    "status_reason, confirmed_by, confirmed_at, confirmation, nodes, rule_ids, decision_ids"
 )
 _RECORDED_FIELDS = ("text", "source")
 
 # Where a fact's links to each kind of thing are kept. Fixed here, never from a caller.
 _LINK_TABLES = {
-    "node": ("fact_nodes", "node_id"),
+    "node": ("fact_nodes", "node"),
     "rule": ("fact_rules", "rule_id"),
     "decision": ("fact_decisions", "decision_id"),
 }
@@ -79,7 +82,9 @@ class Fact(BaseModel):
     )
     confirmed_by: str | None = Field(description="The person who confirmed it.")
     confirmed_at: datetime | None
-    node_ids: list[int] = Field(description="The epics, stories and tasks it concerns.")
+    nodes: list[str] = Field(
+        description="The epics, stories and tasks it concerns, as refs such as story:12."
+    )
     rule_ids: list[int] = Field(description="The requirements it concerns.")
     decision_ids: list[int] = Field(description="The decisions it concerns.")
 
@@ -183,17 +188,24 @@ async def _insert_fact(
     return int(row["id"])
 
 
+def _ends(
+    nodes: list[str], rule_ids: list[int], decision_ids: list[int]
+) -> list[tuple[str, list[Any]]]:
+    """What a fact is linked to, by kind: nodes by their refs, the others by their ids."""
+    return [("node", nodes), ("rule", rule_ids), ("decision", decision_ids)]
+
+
 async def _add_links(
     conn: AsyncConnection,
     fact_id: int,
     actor: str,
-    node_ids: list[int],
+    nodes: list[str],
     rule_ids: list[int],
     decision_ids: list[int],
 ) -> None:
-    for what, ids in (("node", node_ids), ("rule", rule_ids), ("decision", decision_ids)):
+    for what, ends in _ends(nodes, rule_ids, decision_ids):
         table, column = _LINK_TABLES[what]
-        for item in ids:
+        for item in ends:
             await conn.execute(
                 f"INSERT INTO {table} (fact_id, {column}) VALUES (%s, %s)", (fact_id, item)
             )
@@ -212,13 +224,13 @@ async def _remove_links(
     conn: AsyncConnection,
     fact_id: int,
     actor: str,
-    node_ids: list[int],
+    nodes: list[str],
     rule_ids: list[int],
     decision_ids: list[int],
 ) -> None:
-    for what, ids in (("node", node_ids), ("rule", rule_ids), ("decision", decision_ids)):
+    for what, ends in _ends(nodes, rule_ids, decision_ids):
         table, column = _LINK_TABLES[what]
-        for item in ids:
+        for item in ends:
             await conn.execute(
                 f"DELETE FROM {table} WHERE fact_id = %s AND {column} = %s", (fact_id, item)
             )
@@ -243,7 +255,7 @@ class Facts:
         actor: str,
         text: str,
         source: str,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
     ) -> Fact:
@@ -256,16 +268,16 @@ class Facts:
             "A fact needs its source: source cannot be empty. Say where it came from, in plain "
             "words (who said it, which document, what was observed).",
         )
-        nodes, rules, decisions = (
-            unique_ids(node_ids),
+        concerned, rules, decisions = (
+            parse_node_refs(nodes),
             unique_ids(rule_ids),
             unique_ids(decision_ids),
         )
         async with self._database.transaction() as conn:
-            await require_link_targets(conn, nodes, rules, "the fact")
+            await require_link_targets(conn, concerned, rules, "the fact")
             await _require_decisions(conn, decisions)
             fact_id = await _insert_fact(conn, actor=actor, text=text, source=source, supersedes=[])
-            await _add_links(conn, fact_id, actor, nodes, rules, decisions)
+            await _add_links(conn, fact_id, actor, concerned, rules, decisions)
             return to_fact(await require_fact(conn, fact_id))
 
     async def supersede_fact(
@@ -277,7 +289,7 @@ class Facts:
         text: str,
         source: str,
         keep_links: bool,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
         said_by: str | None,
@@ -298,7 +310,7 @@ class Facts:
             "The new fact needs its source: source cannot be empty. Say where it came from.",
         )
         said_words = said(said_by, quote)
-        extra_nodes, extra_rules = unique_ids(node_ids), unique_ids(rule_ids)
+        extra_nodes, extra_rules = parse_node_refs(nodes), unique_ids(rule_ids)
         extra_decisions = unique_ids(decision_ids)
         async with self._database.transaction() as conn:
             await _require_found(conn, old_ids)
@@ -307,7 +319,7 @@ class Facts:
             require_a_person_for_confirmed("fact", olds, said_words)
             await require_link_targets(conn, extra_nodes, extra_rules, "the new fact")
             await _require_decisions(conn, extra_decisions)
-            carried_nodes = [item for row in olds for item in row["node_ids"]] if keep_links else []
+            carried_nodes = [item for row in olds for item in row["nodes"]] if keep_links else []
             carried_rules = [item for row in olds for item in row["rule_ids"]] if keep_links else []
             carried_decisions = (
                 [item for row in olds for item in row["decision_ids"]] if keep_links else []
@@ -319,7 +331,7 @@ class Facts:
                 conn,
                 new_id,
                 actor,
-                unique_ids(carried_nodes + extra_nodes),
+                list(dict.fromkeys(carried_nodes + extra_nodes)),
                 unique_ids(carried_rules + extra_rules),
                 unique_ids(carried_decisions + extra_decisions),
             )
@@ -415,14 +427,14 @@ class Facts:
         *,
         actor: str,
         fact_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
     ) -> Fact:
         return await self._change_links(
             actor=actor,
             fact_id=fact_id,
-            node_ids=node_ids,
+            nodes=nodes,
             rule_ids=rule_ids,
             decision_ids=decision_ids,
             add=True,
@@ -433,14 +445,14 @@ class Facts:
         *,
         actor: str,
         fact_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
     ) -> Fact:
         return await self._change_links(
             actor=actor,
             fact_id=fact_id,
-            node_ids=node_ids,
+            nodes=nodes,
             rule_ids=rule_ids,
             decision_ids=decision_ids,
             add=False,
@@ -451,20 +463,21 @@ class Facts:
         *,
         actor: str,
         fact_id: int,
-        node_ids: list[int] | None,
+        nodes: list[str] | None,
         rule_ids: list[int] | None,
         decision_ids: list[int] | None,
         add: bool,
     ) -> Fact:
         actor = clean_actor(actor)
-        nodes, rules, decisions = (
-            unique_ids(node_ids),
+        concerned, rules, decisions = (
+            parse_node_refs(nodes),
             unique_ids(rule_ids),
             unique_ids(decision_ids),
         )
-        if not nodes and not rules and not decisions:
+        if not concerned and not rules and not decisions:
             raise Refusal(
-                "Nothing to link: give at least one id in node_ids, rule_ids or decision_ids."
+                "Nothing to link: give at least one ref in nodes (such as story:12), or one id in "
+                "rule_ids or decision_ids."
             )
         async with self._database.transaction() as conn:
             row = await require_fact(conn, fact_id, lock=True)
@@ -478,23 +491,28 @@ class Facts:
                     f"{ended_words('fact', row)}, and an ended fact keeps the links it had. {where}"
                 )
             if add:
-                await require_link_targets(conn, nodes, rules, f"fact {fact_id}")
+                await require_link_targets(conn, concerned, rules, f"fact {fact_id}")
                 await _require_decisions(conn, decisions)
-            for what, ids, current in (
-                ("node", nodes, row["node_ids"]),
+            for what, ends, current in (
+                ("node", concerned, row["nodes"]),
                 ("rule", rules, row["rule_ids"]),
                 ("decision", decisions, row["decision_ids"]),
             ):
-                wrong = [str(item) for item in ids if (item in current) == add]
+                # A node's ref already says what it is; the others are named by their ids.
+                wrong = [
+                    str(item) if what == "node" else f"{what} {item}"
+                    for item in ends
+                    if (item in current) == add
+                ]
                 if wrong:
                     raise Refusal(
-                        f"Fact {fact_id} is {'already' if add else 'not'} linked to {what} "
+                        f"Fact {fact_id} is {'already' if add else 'not'} linked to "
                         f"{', '.join(wrong)}, so nothing was changed."
                     )
             if add:
-                await _add_links(conn, fact_id, actor, nodes, rules, decisions)
+                await _add_links(conn, fact_id, actor, concerned, rules, decisions)
             else:
-                await _remove_links(conn, fact_id, actor, nodes, rules, decisions)
+                await _remove_links(conn, fact_id, actor, concerned, rules, decisions)
             return to_fact(await require_fact(conn, fact_id))
 
     async def get_fact(self, fact_id: int) -> Fact:
@@ -506,10 +524,10 @@ class Facts:
         *,
         status: str | None,
         confirmation: str | None,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         decision_id: int | None,
-        within_node_id: int | None,
+        within_node: str | None,
         limit: int,
         after_id: int | None,
     ) -> FactPage:
@@ -518,6 +536,10 @@ class Facts:
             check_choice("status", status, FACT_STATUSES)
         if confirmation is not None:
             check_choice("confirmation", confirmation, CONFIRMATIONS)
+        if node is not None:
+            node = parse_node_ref(node, "node")
+        if within_node is not None:
+            within_node = parse_node_ref(within_node, "within_node")
         conditions: list[str] = []
         params: dict[str, Any] = {}
         for column, wanted in (("status", status), ("confirmation", confirmation)):
@@ -526,48 +548,37 @@ class Facts:
                 params[column] = wanted
         prefix = ""
         async with self._database.transaction() as conn:
-            for what, table, item_id, finder in (
-                ("node", "nodes", node_id, "list_nodes"),
-                ("rule", "rules", rule_id, "list_rules"),
-                ("node", "nodes", within_node_id, "list_nodes"),
-            ):
-                if (
-                    item_id is not None
-                    and await fetch_one(
-                        conn, f"SELECT 1 AS found FROM {table} WHERE id = %s", (item_id,)
-                    )
-                    is None
-                ):
-                    raise Refusal(
-                        f"There is no {what} with id {item_id}. Use {finder} to find the id you "
-                        "want."
-                    )
+            for ref in (node, within_node):
+                if ref is not None:
+                    await require_node(conn, ref)
+            if rule_id is not None:
+                await require_rule(conn, rule_id)
             if decision_id is not None:
                 await require_decision(conn, decision_id)
-            for column, table, linked_id in (
-                ("node_id", "fact_nodes", node_id),
+            for column, table, linked in (
+                ("node", "fact_nodes", node),
                 ("rule_id", "fact_rules", rule_id),
                 ("decision_id", "fact_decisions", decision_id),
             ):
-                if linked_id is not None:
+                if linked is not None:
                     conditions.append(
                         f"EXISTS (SELECT 1 FROM {table} l WHERE l.fact_id = f.id "
                         f"AND l.{column} = %({column})s)"
                     )
-                    params[column] = linked_id
-            if within_node_id is not None:
+                    params[column] = linked
+            if within_node is not None:
                 # The item, everything under it, and the rules placed in any of those stories.
                 prefix = (
-                    "WITH RECURSIVE area(id) AS (SELECT id FROM nodes WHERE id = %(within)s "
-                    "UNION ALL SELECT n.id FROM nodes n JOIN area a ON n.parent_id = a.id) "
+                    "WITH RECURSIVE area(ref) AS (SELECT ref FROM nodes WHERE ref = %(within)s "
+                    "UNION ALL SELECT n.ref FROM nodes n JOIN area a ON n.parent = a.ref) "
                 )
                 conditions.append(
                     "(EXISTS (SELECT 1 FROM fact_nodes l WHERE l.fact_id = f.id "
-                    "AND l.node_id IN (SELECT id FROM area)) "
+                    "AND l.node IN (SELECT ref FROM area)) "
                     "OR EXISTS (SELECT 1 FROM fact_rules l JOIN rules r ON r.id = l.rule_id "
-                    "WHERE l.fact_id = f.id AND r.story_id IN (SELECT id FROM area)))"
+                    "WHERE l.fact_id = f.id AND r.story IN (SELECT ref FROM area)))"
                 )
-                params["within"] = within_node_id
+                params["within"] = within_node
             where = " AND ".join(conditions) or "true"
             counted = await fetch_one(
                 conn, f"{prefix}SELECT count(*) AS total FROM fact_state f WHERE {where}", params

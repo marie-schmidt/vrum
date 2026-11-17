@@ -8,12 +8,14 @@ from mcp import Client
 from tests.acceptance_scenario import URL, chapter, clip, proof, sql_value, stories
 from tests.board_search import DUPLICATES
 from tests.helpers import (
+    all_nodes,
     confirm,
     connect,
     embeddings_stopped,
     make_decision,
     make_fact,
     ok,
+    ref_of,
     refused,
     reindexed,
     run_sql,
@@ -27,12 +29,13 @@ async def search(client: Client, query: str, **arguments: Any) -> dict[str, Any]
     return await ok(client, "search", query=query, **arguments)
 
 
-def by_item(page: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
-    return {(item["item_type"], item["id"]): item for item in page["items"]}
+def by_item(page: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The results of a search by reference: every kind has one (story:12, rule:3, fact:5)."""
+    return {item["ref"]: item for item in page["items"]}
 
 
 async def listing(client: Client, tool: str, **filters: Any) -> list[dict[str, Any]]:
-    """Every item a list tool has, following the pages."""
+    """Every rule, decision or fact a list tool has, following the pages."""
     found: list[dict[str, Any]] = []
     after_id = None
     while True:
@@ -51,7 +54,7 @@ async def story_with(client: Client, title: str, body: str = "") -> dict[str, An
     (epic,) = (await stories(client, 0))[:1]
     return await ok(
         client, "create_node", actor="marie", kind="story", title=title, body=body,
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )  # fmt: skip
 
 
@@ -72,22 +75,23 @@ async def finding() -> None:
         epic = await ok(client, "create_node", actor="a", kind="epic", title=f"Plan {word}")
         story = await ok(
             client, "create_node", actor="a", kind="story", title="Checkout",
-            body=f"We must handle {word} carefully.", parent_id=epic["id"],
+            body=f"We must handle {word} carefully.", parent=epic["ref"],
         )  # fmt: skip
         task = await ok(
             client, "create_node", actor="a", kind="task", title=f"Do the {word} part",
-            parent_id=story["id"],
+            parent=story["ref"],
         )  # fmt: skip
         rule = await ok(
             client, "create_rule", actor="a", title="A rule", body=f"Never skip {word}.",
-            story_id=story["id"],
+            story=story["ref"],
         )  # fmt: skip
         decision = await make_decision(client, "A decision", text=f"We choose {word}.")
         decision = await confirm(client, "decision", decision, "Marie")
         fact = await make_fact(client, f"The {word} service is slow.")
+        fact_ref, decision_ref = ref_of("fact", fact["id"]), ref_of("decision", decision["id"])
         expected = {
-            ("epic", epic["id"]), ("story", story["id"]), ("task", task["id"]),
-            ("rule", rule["id"]), ("decision", decision["id"]), ("fact", fact["id"]),
+            epic["ref"], story["ref"], task["ref"], ref_of("rule", rule["id"]),
+            decision_ref, fact_ref,
         }  # fmt: skip
         page = await search(client, word, mode="words", limit=200)
         results = by_item(page)
@@ -101,9 +105,7 @@ async def finding() -> None:
             f"{page['total']} items, no index built yet",
         )
         nodes = [
-            n
-            for kind in ("epic", "story", "task")
-            for n in await listing(client, "list_nodes", kind=kind)
+            n for kind in ("epic", "story", "task") for n in await all_nodes(client, kind=kind)
         ]
         lists = {
             **{kind: [n for n in nodes if n["kind"] == kind] for kind in ("epic", "story", "task")},
@@ -125,14 +127,12 @@ async def finding() -> None:
             "M5",
             "a fact and a decision are found by words, each carrying its confirmation and whether "
             "it is in force, so an unconfirmed fact is never mistaken for a confirmed decision",
-            (results[("fact", fact["id"])]["confirmation"], results[("fact", fact["id"])]["status"])
+            (results[fact_ref]["confirmation"], results[fact_ref]["status"])
             == ("unconfirmed", "active")
-            and results[("fact", fact["id"])]["label"].startswith("Fact, not confirmed by a person")
-            and results[("decision", decision["id"])]["confirmation"] == "confirmed"
-            and results[("decision", decision["id"])]["label"].startswith(
-                "Decision, confirmed by Marie on "
-            ),
-            results[("fact", fact["id"])]["label"][:60],
+            and results[fact_ref]["label"].startswith("Fact, not confirmed by a person")
+            and results[decision_ref]["confirmation"] == "confirmed"
+            and results[decision_ref]["label"].startswith("Decision, confirmed by Marie on "),
+            results[fact_ref]["label"][:60],
         )
 
         # -- meaning
@@ -146,7 +146,7 @@ async def finding() -> None:
         paraphrase = "Send the bill to clients by mail once charged"
         score = cosine(embed(f"{title}\n{body}"), embed(paraphrase))
         page = await search(client, paraphrase)
-        hit = by_item(page)[("story", found_story["id"])]
+        hit = by_item(page)[found_story["ref"]]
         proof(
             "M5",
             "a paraphrase that shares none of its words is found by meaning and labelled a "
@@ -155,8 +155,7 @@ async def finding() -> None:
             and hit["suggestion"] is True
             and hit["words_matched"] == []
             and abs(hit["similarity"] - score) < 0.002
-            and ("story", found_story["id"])
-            not in by_item(await search(client, paraphrase, mode="words")),
+            and found_story["ref"] not in by_item(await search(client, paraphrase, mode="words")),
             hit["why"],
         )
         page = await search(client, f"{title} {body}")
@@ -164,7 +163,7 @@ async def finding() -> None:
         proof(
             "M5",
             "a result that matches both ways is labelled both and comes first",
-            (first["item_type"], first["id"]) == ("story", found_story["id"])
+            first["ref"] == found_story["ref"]
             and first["matched"] == "both"
             and first["suggestion"] is False
             and first["similarity"] > 0.99
@@ -176,7 +175,7 @@ async def finding() -> None:
         by_meaning = by_item(
             await search(client, "Clients get a bill by mail", mode="meaning", limit=50)
         )
-        keys = [("fact", found_fact["id"]), ("decision", found_decision["id"])]
+        keys = [ref_of("fact", found_fact["id"]), ref_of("decision", found_decision["id"])]
         proof(
             "M5",
             "a fact and a decision are found by words and by meaning, each labelled with its "
@@ -194,11 +193,11 @@ async def finding() -> None:
         paraphrase3 = "Clients get a bill by mail"
         with embeddings_stopped():
             added = await ok(
-                client, "create_node", actor="a", kind="story", title=phrase, parent_id=epic3["id"]
+                client, "create_node", actor="a", kind="story", title=phrase, parent=epic3["ref"]
             )
             page = await search(client, w3)
-            hit = by_item(page)[("story", added["id"])]
-            gap = ("story", added["id"]) in by_item(await search(client, paraphrase3))
+            hit = by_item(page)[added["ref"]]
+            gap = added["ref"] in by_item(await search(client, paraphrase3))
             message = await refused(client, "search", query=paraphrase3, mode="meaning")
         proof(
             "M5",
@@ -212,7 +211,7 @@ async def finding() -> None:
             f'"{clip(message, 80)}"',
         )
         await reindexed(client)
-        back = by_item(await search(client, paraphrase3))[("story", added["id"])]
+        back = by_item(await search(client, paraphrase3))[added["ref"]]
         proof(
             "M5",
             "once the service returns and reindex has run, the paraphrase is found by meaning",
@@ -232,7 +231,7 @@ async def finding() -> None:
                     actor="a",
                     kind="story",
                     title=one,
-                    parent_id=epic_a["id"],
+                    parent=epic_a["ref"],
                 )
             )
             seconds.append(
@@ -242,22 +241,24 @@ async def finding() -> None:
                     actor="a",
                     kind="story",
                     title=other,
-                    parent_id=epic_b["id"],
+                    parent=epic_b["ref"],
                 )
             )
         await reindexed(client)
         pairs = {
-            (a["id"], b["id"]): i == j for i, a in enumerate(firsts) for j, b in enumerate(seconds)
+            (a["ref"], b["ref"]): i == j
+            for i, a in enumerate(firsts)
+            for j, b in enumerate(seconds)
         }
         duplicates = {pair for pair, same in pairs.items() if same}
         unrelated = {pair for pair, same in pairs.items() if not same}
         scores = {
-            (a["id"], b["id"]): cosine(embed(a["title"]), embed(b["title"]))
+            (a["ref"], b["ref"]): cosine(embed(a["title"]), embed(b["title"]))
             for a in firsts
             for b in seconds
         }
-        overlaps = await every_overlap(client, epic_ids=[epic_a["id"], epic_b["id"]])
-        flagged = {(p["first"]["id"], p["second"]["id"]) for p in overlaps["items"]}
+        overlaps = await every_overlap(client, epics=[epic_a["ref"], epic_b["ref"]])
+        flagged = {(p["first"]["ref"], p["second"]["ref"]) for p in overlaps["items"]}
         proof(
             "M5",
             "on a fixture of known duplicate and known unrelated pairs, the overlap finder flags "
@@ -283,19 +284,17 @@ async def finding() -> None:
 
         async def snapshot_results() -> dict[str, Any]:
             meaning = await search(client, "Send the bill to a client by mail", mode="meaning")
-            similar = await ok(
-                client, "similar_items", node_id=first_story["id"], min_similarity=0.3
-            )
-            over = await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
+            similar = await ok(client, "similar_items", node=first_story["ref"], min_similarity=0.3)
+            over = await ok(client, "find_overlaps", epics=[epic_a["ref"]])
             return {
                 "meaning": sorted(
-                    (i["item_type"], i["id"], i["similarity"]) for i in meaning["items"]
+                    (i["item_type"], i["ref"], i["similarity"]) for i in meaning["items"]
                 ),
                 "similar": sorted(
-                    (i["item_type"], i["id"], i["similarity"]) for i in similar["items"]
+                    (i["item_type"], i["ref"], i["similarity"]) for i in similar["items"]
                 ),
                 "overlaps": sorted(
-                    (p["first"]["id"], p["second"]["id"], p["similarity"]) for p in over["items"]
+                    (p["first"]["ref"], p["second"]["ref"], p["similarity"]) for p in over["items"]
                 ),
             }
 
@@ -321,12 +320,12 @@ async def finding() -> None:
         before_index = sql_value(snapshot_sql, as_project=True)
         await search(client, unique_word())
         await search(client, "invoice by email", mode="meaning")
-        await ok(client, "similar_items", node_id=first_story["id"])
+        await ok(client, "similar_items", node=first_story["ref"])
         await ok(client, "similar_items", text="anything at all")
-        await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
-        await ok(client, "recall", node_id=first_story["id"], with_similar=True)
+        await ok(client, "find_overlaps", epics=[epic_a["ref"]])
+        await ok(client, "recall", node=first_story["ref"], with_similar=True)
         await ok(client, "list_nodes", limit=5)
-        await ok(client, "get_node", node_id=first_story["id"])
+        await ok(client, "get_node", node=first_story["ref"])
         proof(
             "M5",
             "no tool other than reindex writes to the index: after every reading tool it is "
@@ -344,20 +343,21 @@ async def finding() -> None:
             actor="marie",
             kind="story",
             title=repeated,
-            parent_id=epic5["id"],
+            parent=epic5["ref"],
         )
         await reindexed(client)
         again = await ok(
-            client, "create_node", actor="ann", kind="story", title=repeated, parent_id=epic5["id"]
+            client, "create_node", actor="ann", kind="story", title=repeated, parent=epic5["ref"]
         )
         (match,) = again["similar"]
         proof(
             "M5B",
             "creating a story whose title repeats an existing one returns the existing one as "
             "similar, and still creates it",
-            again["id"] != existing["id"]
+            again["ref"] != existing["ref"]
             and again["version"] == 1
-            and (match["item_type"], match["id"]) == ("story", existing["id"])
+            and match["ref"] == existing["ref"]
+            and match["item_type"] == "story"
             and match["suggestion"] is True
             and match["similarity"] >= 0.55,
             f"similarity {match['similarity']:.2f}",
@@ -369,7 +369,7 @@ async def finding() -> None:
                 actor="ann",
                 kind="story",
                 title=repeated,
-                parent_id=epic5["id"],
+                parent=epic5["ref"],
             )
         proof(
             "M5B",

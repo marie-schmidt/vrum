@@ -25,7 +25,10 @@ docker compose version > /dev/null 2>&1 || { echo "acceptance.sh needs Docker wi
 docker info > /dev/null 2>&1 || { echo "Docker is not running. Start it and try again." >&2; exit 1; }
 
 port="${VRUM_ACCEPTANCE_PORT:-18400}"
-export COMPOSE_PROJECT_NAME=vrum-acceptance
+# The compose project names can be changed (VRUM_ACCEPTANCE_PROJECT, VRUM_RESTORE_PROJECT) so that
+# several walks can run on one machine at once.
+export COMPOSE_PROJECT_NAME="${VRUM_ACCEPTANCE_PROJECT:-vrum-acceptance}"
+export VRUM_RESTORE_PROJECT="${VRUM_RESTORE_PROJECT:-vrum-restore}"
 export COMPOSE_FILE=compose.yaml:compose.check.yaml
 export VRUM_DB_PASSWORD="$(openssl rand -hex 16)"
 export VRUM_PORT="$port"
@@ -35,7 +38,7 @@ export VRUM_BIND_ADDRESS=127.0.0.1
 export VRUM_RESTORE_TEST_PORT=$((port + 1))
 
 # Whatever happens, leave nothing behind: no containers, no volumes, no images of this stack.
-trap 'docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1; COMPOSE_PROJECT_NAME=vrum-restore COMPOSE_FILE=compose.yaml docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1' EXIT
+trap 'docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1; COMPOSE_PROJECT_NAME="$VRUM_RESTORE_PROJECT" COMPOSE_FILE=compose.yaml docker compose down --volumes --remove-orphans --rmi local > /dev/null 2>&1' EXIT
 docker compose down --volumes --remove-orphans > /dev/null 2>&1 || true
 
 echo "== the browser the board chapters use (Playwright's Chromium, a development tool only)"

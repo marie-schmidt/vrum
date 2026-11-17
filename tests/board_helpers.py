@@ -25,7 +25,7 @@ from playwright.async_api import (
     expect,
 )
 
-from tests.helpers import ok, reindexed, run_sql, unique_word
+from tests.helpers import ok, ref_from_code, reindexed, run_sql, unique_word
 from tests.world import SESSION_COOKIE, Person, Project, Reply, project_at, the_project
 
 # Every request of the board has to go to the server it came from.
@@ -48,13 +48,14 @@ def board_url(mcp_url: str, project: Project | None = None) -> str:
 
 
 async def made(
-    client: Client, kind: str, title: str, parent: int | None = None, **more: Any
-) -> int:
-    """Make an epic, story or task through MCP as an agent would, and give its id."""
+    client: Client, kind: str, title: str, parent: str | None = None, **more: Any
+) -> str:
+    """Make an epic, story or task through MCP as an agent would, and give its reference
+    (`parent` is the reference of its epic or story)."""
     fields: dict[str, Any] = {"actor": "agent-1", "kind": kind, "title": title, **more}
     if parent:
-        fields["parent_id"] = parent
-    return int((await ok(client, "create_node", **fields))["id"])
+        fields["parent"] = parent
+    return str((await ok(client, "create_node", **fields))["ref"])
 
 
 def plain(board_words: str, mcp_words: str) -> None:
@@ -181,57 +182,67 @@ async def apply_filter(page: Page, text: str) -> None:
     await page.locator("form.filter button[type=submit]").click()
 
 
-def card(page: Page, node_id: int) -> Locator:
+def ref_slug(ref: str) -> str:
+    """What the board puts in an element's id for a reference: the colon becomes a dash."""
+    return ref.replace(":", "-")
+
+
+def card(page: Page, ref: str) -> Locator:
     """The Board's card of a story or task."""
-    return page.locator(f".card[data-id='{node_id}']")
+    return page.locator(f".card[data-ref='{ref}']")
 
 
-def cell(page: Page, epic_id: int, status: str) -> Locator:
+def lane(page: Page, epic: str) -> Locator:
+    """The Board's lane of one epic."""
+    return page.locator(f".lane[data-ref='{epic}']")
+
+
+def cell(page: Page, epic: str, status: str) -> Locator:
     """The column of one status in the lane of one epic of the Board."""
-    return page.locator(f".cell[data-epic='{epic_id}'][data-status='{status}']")
+    return page.locator(f".cell[data-epic='{epic}'][data-status='{status}']")
 
 
-async def cards_are(page: Page, wanted: set[int]) -> None:
-    """Wait until the Board shows exactly these cards (stories and tasks), and no others."""
+async def cards_are(page: Page, wanted: set[str]) -> None:
+    """Wait until the Board shows exactly these cards (references of stories and tasks), and no
+    others."""
     await page.wait_for_function(
         """wanted => {
-            const ids = [...document.querySelectorAll('.card')]
-                .map(e => Number(e.dataset.id)).sort((a, b) => a - b);
-            return ids.length === wanted.length && ids.every((id, at) => id === wanted[at]);
+            const refs = [...document.querySelectorAll('.card')].map(e => e.dataset.ref).sort();
+            return refs.length === wanted.length && refs.every((ref, at) => ref === wanted[at]);
         }""",
         arg=sorted(wanted),
         timeout=SLOW,
     )
 
 
-async def shown_cards(page: Page, count: int) -> list[int]:
-    """The ids of the cards the Board shows (stories and tasks), once there are `count` of them."""
+async def shown_cards(page: Page, count: int) -> list[str]:
+    """The references of the cards the Board shows (stories and tasks), in the order shown, once
+    there are `count` of them."""
     await expect(page.locator(".card")).to_have_count(count, timeout=SLOW)
-    ids: list[int] = await page.locator(".card").evaluate_all(
-        "els => els.map(e => Number(e.dataset.id))"
-    )
-    return ids
+    refs: list[str] = await page.locator(".card").evaluate_all("els => els.map(e => e.dataset.ref)")
+    return refs
 
 
 async def create_in_browser(
-    page: Page, kind: str, title: str, parent: int | None = None, *, body: str = ""
-) -> int:
-    """Make an epic, story or task with the Board's own form (New item), and give its id: the
-    form opens the new item in the detail panel, whose title says it."""
+    page: Page, kind: str, title: str, parent: str | None = None, *, body: str = ""
+) -> str:
+    """Make an epic, story or task with the Board's own form (New item), and give its reference
+    (`parent` is the reference of its epic or story): the form opens the new item in the detail
+    panel, whose title starts with its code, such as S-12."""
     await page.locator("#new-item").click()
     dialog = page.locator("dialog.modal")
     await dialog.locator("#new-kind").select_option(kind)
     if parent is not None:
-        await dialog.locator("#new-parent").select_option(str(parent))
+        await dialog.locator("#new-parent").select_option(parent)
     await dialog.locator("#new-title").fill(title)
     if body:
         await dialog.locator("#new-body").fill(body)
     await dialog.get_by_role("button", name="Create").click()
     heading = page.locator("#card-title")
     await expect(heading).to_contain_text(title, timeout=SLOW)
-    found = re.match(r"#(\d+) ", await heading.inner_text())
+    found = re.match(r"([EST]-\d+) ", await heading.inner_text())
     assert found, await heading.inner_text()
-    return int(found.group(1))
+    return ref_from_code(found.group(1))
 
 
 def on(text: str) -> datetime.date:
@@ -255,8 +266,9 @@ def database_footprint() -> tuple[str, str]:
     return tables, rows
 
 
-def bar_of(page: Page, node_id: int) -> Locator:
-    return page.locator(f".rm-bar[data-id='{node_id}']")
+def bar_of(page: Page, ref: str) -> Locator:
+    """The Roadmap's bar of an epic, story or task."""
+    return page.locator(f".rm-bar[data-ref='{ref}']")
 
 
 async def timeline(page: Page) -> dict[str, Any]:
@@ -269,25 +281,26 @@ async def timeline(page: Page) -> dict[str, Any]:
     }
 
 
-async def roadmap_ids(page: Page, dated: int, undated: int) -> set[int]:
-    """The ids on the Roadmap's timeline and in its tray, once the page says how many of each."""
+async def roadmap_ids(page: Page, dated: int, undated: int) -> set[str]:
+    """The references on the Roadmap's timeline and in its tray, once the page says how many of
+    each."""
     await expect(page.locator("#count")).to_contain_text(
         re.compile(rf"^{dated} items? on the timeline, {undated} undated"), timeout=SLOW
     )
-    bars: list[int] = await page.locator(".rm-bar").evaluate_all(
-        "els => els.map(e => Number(e.dataset.id))"
+    bars: list[str] = await page.locator(".rm-bar").evaluate_all(
+        "els => els.map(e => e.dataset.ref)"
     )
-    tray: list[int] = await page.locator(".tray-item").evaluate_all(
-        "els => els.map(e => Number(e.dataset.id))"
+    tray: list[str] = await page.locator(".tray-item").evaluate_all(
+        "els => els.map(e => e.dataset.ref)"
     )
     assert len(bars) == dated and len(tray) == undated
     return set(bars) | set(tray)
 
 
-async def drag_bar(page: Page, node_id: int, days: float, grip: str | None = None) -> None:
+async def drag_bar(page: Page, ref: str, days: float, grip: str | None = None) -> None:
     """Drag a Roadmap bar (or one of its ends: grip 'start' or 'end') sideways by some days."""
     ppd = (await timeline(page))["ppd"]
-    part = bar_of(page, node_id)
+    part = bar_of(page, ref)
     if grip:
         part = part.locator(f".rm-handle.{grip}")
     # The timeline pans inside its own region, and an open detail panel narrows it: a bar may be
@@ -303,16 +316,43 @@ async def drag_bar(page: Page, node_id: int, days: float, grip: str | None = Non
     await page.mouse.up()
 
 
+# -- the page of one epic, story or task ---------------------------------------------------------
+
+
+def item_address(ref: str) -> str:
+    """The address of the page of an epic, story or task: '#/item?item=story:12'."""
+    return f"#/item?item={ref}"
+
+
+async def open_item(w: Watched, ref: str) -> None:
+    """Open the page of an epic, story or task and wait until it shows that item."""
+    await w.open(item_address(ref))
+    await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", ref, timeout=SLOW)
+
+
+def item_row(page: Page, ref: str) -> Locator:
+    """The row of the item page's table that holds a story or a task."""
+    return page.locator(f"#item-table tr#row-{ref_slug(ref)}")
+
+
+async def item_rows(page: Page) -> list[str]:
+    """The references in the item page's table, in the order shown."""
+    refs: list[str] = await page.locator("#item-table tbody tr").evaluate_all(
+        "els => els.map(e => e.dataset.ref)"
+    )
+    return refs
+
+
 # -- Search and possible duplicates (the search drawer) and links -----------------------------
 
 
-async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[str, int, str]]:
-    """What `search` gives for this, every page of it: (type, id, how it matched)."""
-    found: list[tuple[str, int, str]] = []
+async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[str, str, str]]:
+    """What `search` gives for this, every page of it: (type, reference, how it matched)."""
+    found: list[tuple[str, str, str]] = []
     offset = 0
     while True:
         page = await ok(client, "search", query=query, mode=mode, limit=200, offset=offset)
-        found.extend((item["item_type"], item["id"], item["matched"]) for item in page["items"])
+        found.extend((item["item_type"], item["ref"], item["matched"]) for item in page["items"])
         if page["next_offset"] is None:
             return found
         offset = page["next_offset"]
@@ -330,15 +370,16 @@ async def search_for(page: Page, query: str, mode: str = "both") -> None:
     await page.locator("#search-go").click()
 
 
-async def listed(page: Page, count: int) -> list[tuple[str, int, str]]:
-    """The results the search drawer lists, in the order shown, once it says how many there are."""
+async def listed(page: Page, count: int) -> list[tuple[str, str, str]]:
+    """The results the search drawer lists, in the order shown, once it says how many there are:
+    (type, reference, how it matched)."""
     await expect(page.locator("#search-count")).to_have_text(
         re.compile(rf"^{count} results?\b"), timeout=SLOW
     )
-    rows: list[list[Any]] = await page.locator("#search-results li.result").evaluate_all(
-        "els => els.map(e => [e.dataset.type, Number(e.dataset.id), e.dataset.matched])"
+    rows: list[list[str]] = await page.locator("#search-results li.result").evaluate_all(
+        "els => els.map(e => [e.dataset.type, e.dataset.ref, e.dataset.matched])"
     )
-    return [(kind, ident, how) for kind, ident, how in rows]
+    return [(kind, ref, how) for kind, ref, how in rows]
 
 
 async def facet(page: Page, name: str) -> dict[str, int]:
@@ -353,8 +394,10 @@ async def facet(page: Page, name: str) -> dict[str, int]:
 
 async def twin_epics(
     client: Client, pairs: list[tuple[str, str]], body: str = ""
-) -> tuple[int, int, list[int], list[int]]:
-    """Two epics holding the stories of each pair, one side in each, and the index up to date."""
+) -> tuple[str, str, list[str], list[str]]:
+    """Two epics holding the stories of each pair, one side in each, and the index up to date.
+    Gives the references of the two epics and of the stories of each side, in the order of the
+    pairs."""
     word = unique_word()
     epic_a = await made(client, "epic", f"Overlap A {word}")
     epic_b = await made(client, "epic", f"Overlap B {word}")
@@ -374,9 +417,9 @@ async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
     return {**page, "items": items}
 
 
-async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
+async def pairs_on(page: Page) -> list[tuple[str, str, float]]:
     """Every pair the possible-duplicates view of the search drawer lists, in the order shown,
-    asking for more until no more."""
+    asking for more until no more: (reference, reference, how alike)."""
     await expect(page.locator("#dup-count")).to_contain_text(re.compile(r"pairs?\b"), timeout=SLOW)
     for _ in range(100):
         more = page.locator("#dup-more")
@@ -388,16 +431,17 @@ async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
     rows: list[list[str]] = await page.locator("li.pair").evaluate_all(
         "els => els.map(e => [e.dataset.first, e.dataset.second, e.dataset.similarity])"
     )
-    return [(int(first), int(second), float(score)) for first, second, score in rows]
+    return [(first, second, float(score)) for first, second, score in rows]
 
 
-async def links_of(client: Client, *nodes: int) -> dict[int, list[tuple[int, int, str]]]:
-    """Every link at each node, as (source, target, type), to compare before and after."""
-    found: dict[int, list[tuple[int, int, str]]] = {}
+async def links_of(client: Client, *nodes: str) -> dict[str, list[tuple[str, str, str]]]:
+    """Every link at each node (by reference), as (source, target, type), to compare before and
+    after."""
+    found: dict[str, list[tuple[str, str, str]]] = {}
     for node in nodes:
-        page = await ok(client, "list_links", node_id=node, limit=200)
+        page = await ok(client, "list_links", node=node, limit=200)
         found[node] = sorted(
-            (link["source_id"], link["target_id"], link["link_type"]) for link in page["items"]
+            (link["source"], link["target"], link["link_type"]) for link in page["items"]
         )
     return found
 

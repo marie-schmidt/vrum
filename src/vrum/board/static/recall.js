@@ -9,8 +9,8 @@ import { recordLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { recordEntry } from './entries.js';
 import { refuse, uid } from './forms.js';
-import { kindIcon } from './labels.js';
-import { kindWords, referenceKindOf } from './references.js';
+import { isNodeKind, itemCode, kindIcon, parseItemRef } from './labels.js';
+import { kindWords } from './references.js';
 
 const PAGE = 50;
 
@@ -23,7 +23,7 @@ const SECTIONS = [
   ['past_facts', 'Past facts', 'Replaced or withdrawn. None of them is in force.'],
 ];
 
-// `target` is { node_id } or { rule_id }.
+// `target` is { node } (an epic, story or task by its reference) or { rule_id }.
 export const askRecall = (target, extra = {}) => call('recall', { ...target, limit: PAGE, ...extra });
 
 const recordOf = (item) => item.decision || item.fact || null;
@@ -80,15 +80,17 @@ function similarSection(similar) {
     ? h(
         'ul',
         { class: 'plain' },
-        similar.items.map((item) =>
-          h(
+        similar.items.map((item) => {
+          const { kind, number } = parseItemRef(item.ref);
+          const name = isNodeKind(kind) ? `${itemCode(kind, number)} ${item.title}` : `${kindWords(kind).label} #${number}: ${item.title}`;
+          return h(
             'li',
-            { class: 'similar-item', dataset: { similar: `${item.item_type}:${item.id}` } },
-            kindIcon(item.item_type, 14),
-            recordLink(referenceKindOf(item.item_type), item.id, { class: 'item-link' }, `${kindWords(item.item_type).label} #${item.id}: ${item.title}`),
+            { class: 'similar-item', dataset: { similar: item.ref } },
+            kindIcon(kind, 14),
+            recordLink(kind, number, { class: 'item-link' }, name),
             h('span', { class: 'quiet' }, `${item.similarity === null || item.similarity === undefined ? 'by words' : `${item.similarity.toFixed(2)} alike`}`),
-          ),
-        ),
+          );
+        }),
       )
     : h('p', { class: 'quiet none' }, similar.index?.meaning && similar.index.meaning !== 'used' ? similar.index.note : 'Nothing in the index looks like this.');
   return h(

@@ -12,7 +12,7 @@ import { dayOfMonth, fromDay, monthName, monthOf, monthStart, nextMonth, toDay, 
 import { h, plural, put, s } from './dom.js';
 import { filterBar, loadRows } from './filterbar.js';
 import { icon } from './icons.js';
-import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, kindIcon, statusIcon } from './labels.js';
+import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, statusIcon } from './labels.js';
 import { epicOf, store, sync } from './store.js';
 
 const ROW = 30;
@@ -27,13 +27,13 @@ let root = null;
 let params = new URLSearchParams();
 let bar = null; // the filter box
 let rows = []; // what the filter found
-let picked = new Set(); // bars chosen to be moved together
+let picked = new Set(); // refs of the bars chosen to be moved together
 let parts = {};
 let geometry = null; // where everything is, for the pointer and the arrows
 let busy = 0; // changes in flight
 let drag = null; // a bar being dragged
 let keys = null; // arrow keys pressed, not yet sent
-let trayDragged = 0;
+let trayDragged = ''; // the ref of the item being dragged out of the tray
 let generation = 0;
 let wantToday = true;
 
@@ -151,8 +151,8 @@ async function load() {
   const found = await loadRows(params.get('q') || '', bar);
   if (mine !== generation || !root) return;
   if (found !== null) rows = found;
-  const here = new Set(rows.map((node) => node.id));
-  for (const id of [...picked]) if (!here.has(id)) picked.delete(id);
+  const here = new Set(rows.map((node) => node.ref));
+  for (const ref of [...picked]) if (!here.has(ref)) picked.delete(ref);
   draw();
 }
 
@@ -175,10 +175,11 @@ function groupOf(node, mode) {
   if (mode === 'priority') return { key: node.priority, label: `${PRIORITY[node.priority].label} priority`, order: 3 - PRIORITIES.indexOf(node.priority) };
   if (mode === 'claimed') return { key: node.claimed_by || '', label: node.claimed_by ? `Held by ${node.claimed_by}` : 'Held by nobody', order: node.claimed_by ? 0 : 1 };
   const epic = epicOf(node);
-  return { key: String(epic.id), label: `Epic #${epic.id} ${epic.title}`, order: epic.id };
+  return { key: epic.ref, label: `Epic ${nodeCode(epic.kind, epic.number)} ${epic.title}`, order: epic.number };
 }
 
-const storyOf = (node) => (node.kind === 'story' ? node.id : node.kind === 'task' ? node.parent_id : 0);
+// Where a node sorts among its epic's rows: by its story's number (an epic first), a story before its tasks.
+const storyOf = (node) => (node.kind === 'story' ? node.number : node.kind === 'task' ? parseNodeRef(node.parent).number : 0);
 
 function inOrder(items, mode) {
   return [...items].sort((a, b) => {
@@ -187,7 +188,7 @@ function inOrder(items, mode) {
       if (x !== y) return x - y;
       if (a.node.kind !== b.node.kind) return a.node.kind === 'story' || a.node.kind === 'epic' ? -1 : 1;
     }
-    return a.s - b.s || a.node.id - b.node.id;
+    return a.s - b.s || byRef(a.node.ref, b.node.ref);
   });
 }
 
@@ -214,7 +215,7 @@ function draw() {
   const { ppd } = ZOOMS[zoom];
   const mode = GROUPS.some(([value]) => value === params.get('group')) ? params.get('group') : 'epic';
   const today = todayDay();
-  const focusedBar = document.activeElement?.closest?.('.rm-bar')?.dataset.id;
+  const focusedBar = document.activeElement?.closest?.('.rm-bar')?.dataset.ref;
   const scrolled = { left: parts.scroll.scrollLeft, top: parts.scroll.scrollTop };
   parts.scroll.classList.remove('moving');
   bar.setValue(params.get('q') || '');
@@ -237,7 +238,7 @@ function draw() {
   const list = layoutRows(dated, mode);
   const items = new Map();
   list.forEach((entry, at) => {
-    if (entry.type === 'item') items.set(entry.node.id, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR) });
+    if (entry.type === 'item') items.set(entry.node.ref, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR) });
   });
   geometry = { origin, end, ppd, items, today };
 
@@ -258,7 +259,7 @@ function draw() {
       return;
     }
     labels.append(labelFor(entry, mode));
-    area.append(...barFor(entry, items.get(entry.node.id)));
+    area.append(...barFor(entry, items.get(entry.node.ref)));
   });
   // A timeline with nothing on it is still somewhere to drop an item from the tray.
   if (list.length < MIN_ROWS) labels.append(h('div', { class: 'rm-spacer', css: { height: `${(MIN_ROWS - list.length) * ROW}px` } }));
@@ -274,9 +275,9 @@ function draw() {
   area.addEventListener('drop', (event) => {
     event.preventDefault();
     area.classList.remove('over');
-    const id = trayDragged;
-    trayDragged = 0;
-    const node = store.nodes.get(id);
+    const ref = trayDragged;
+    trayDragged = '';
+    const node = store.nodes.get(ref);
     if (!node) return;
     const first = geometry.origin + Math.floor((event.clientX - area.getBoundingClientRect().left) / geometry.ppd);
     changeDates(node, { start_on: fromDay(first), target_on: fromDay(first + NEW_LENGTH_DAYS - 1) }, 'Gave');
@@ -293,7 +294,7 @@ function draw() {
   }
   drawTray(undated);
   parts.summary.textContent = `${plural(dated.length, 'item')} on the timeline, ${undated.length} undated${params.get('q') ? ', for this filter' : ''}${picked.size ? `; ${picked.size} chosen to move together` : ''}.`;
-  if (focusedBar) parts.scroll.querySelector(`.rm-bar[data-id="${focusedBar}"]`)?.focus();
+  if (focusedBar) parts.scroll.querySelector(`.rm-bar[data-ref="${focusedBar}"]`)?.focus();
   parts.scroll.dataset.ready = 'true';
 }
 
@@ -327,15 +328,16 @@ function marks(node, editable) {
 
 function labelFor(entry, mode) {
   const { node } = entry;
+  const code = nodeCode(node.kind, node.number);
   const depth = mode === 'epic' ? (node.kind === 'epic' ? 0 : node.kind === 'story' ? 1 : 2) : 0;
   return h(
     'div',
-    { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { id: node.id, kind: node.kind } },
+    { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { ref: node.ref, kind: node.kind } },
     h('span', { class: 'rm-kind', 'aria-hidden': 'true' }, kindIcon(node.kind, 14)),
-    h('button', { type: 'button', class: 'link', title: `${KIND[node.kind].label} #${node.id} ${node.title}`, onclick: () => ui.navigate({ sel: `node:${node.id}`, panel: null }) }, h('span', { class: 'id mono' }, `#${node.id}`), ` ${node.title}`),
+    h('button', { type: 'button', class: 'link', title: `${KIND[node.kind].label} ${code} ${node.title}`, onclick: () => ui.navigate({ sel: node.ref, panel: null }) }, h('span', { class: 'id mono' }, code), ` ${node.title}`),
     node.overdue ? h('span', { class: 'chip danger overdue', title: 'Overdue' }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Overdue')) : null,
     node.schedule_conflicts.length
-      ? h('span', { class: 'chip warn conflict', title: `It starts before ${node.schedule_conflicts.map((id) => `#${id}`).join(', ')} is due` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
+      ? h('span', { class: 'chip warn conflict', title: `It starts before ${node.schedule_conflicts.map(codeOf).join(', ')} is due` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
       : null,
   );
 }
@@ -343,8 +345,9 @@ function labelFor(entry, mode) {
 function barFor(entry, spot) {
   const { node, s: first, e: last, editable } = entry;
   const found = marks(node, editable);
-  const words = `${KIND[node.kind].label} ${node.id}: ${node.title}. ${fromDay(first)} to ${fromDay(last)}. ${STATUS[node.status].label}.${found.length ? ` ${found.join('. ')}.` : ''}`;
-  const chosen = picked.has(node.id);
+  const code = nodeCode(node.kind, node.number);
+  const words = `${KIND[node.kind].label} ${node.number}: ${node.title}. ${fromDay(first)} to ${fromDay(last)}. ${STATUS[node.status].label}.${found.length ? ` ${found.join('. ')}.` : ''}`;
+  const chosen = picked.has(node.ref);
   const el = h(
     'div',
     {
@@ -355,12 +358,12 @@ function barFor(entry, spot) {
       'aria-label': words,
       title: words,
       css: { left: `${spot.left}px`, width: `${spot.width}px`, top: `${spot.y + 4}px`, height: `${ROW - 8}px` },
-      dataset: { id: node.id, kind: node.kind, start: fromDay(first), end: fromDay(last), workedOut: String(!editable) },
+      dataset: { ref: node.ref, kind: node.kind, start: fromDay(first), end: fromDay(last), workedOut: String(!editable) },
       onkeydown: barKey,
     },
     editable ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
     h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
-    h('span', { class: 'rm-text' }, node.title),
+    h('span', { class: 'rm-text' }, `${code} ${node.title}`),
     editable ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
   );
   const note = found.length
@@ -381,10 +384,10 @@ function arrows(items, width, height) {
   const svg = s('svg', { class: 'rm-deps', width, height, 'aria-hidden': 'true' }, s('defs', {}, marker('rm-arrow', 'rm-arrow'), marker('rm-arrow-conflict', 'rm-arrow conflict')));
   for (const link of store.links) {
     if (link.link_type !== 'needs_first') continue;
-    const waiting = items.get(link.source_id);
-    const first = items.get(link.target_id);
+    const waiting = items.get(link.source);
+    const first = items.get(link.target);
     if (!waiting || !first) continue;
-    const clash = waiting.node.schedule_conflicts.includes(first.node.id);
+    const clash = waiting.node.schedule_conflicts.includes(first.node.ref);
     const [x1, y1] = [first.left + first.width, first.y + ROW / 2];
     const [x2, y2] = [waiting.left, waiting.y + ROW / 2];
     let d;
@@ -396,8 +399,8 @@ function arrows(items, width, height) {
     svg.append(
       s(
         'path',
-        { class: `dep${clash ? ' conflict' : ''}`, d, fill: 'none', 'marker-end': `url(#${clash ? 'rm-arrow-conflict' : 'rm-arrow'})`, 'data-from': first.node.id, 'data-to': waiting.node.id },
-        s('title', {}, `#${first.node.id} ${first.node.title} is needed first by #${waiting.node.id} ${waiting.node.title}${clash ? ': it is planned to start before that is due' : ''}`),
+        { class: `dep${clash ? ' conflict' : ''}`, d, fill: 'none', 'marker-end': `url(#${clash ? 'rm-arrow-conflict' : 'rm-arrow'})`, 'data-from': first.node.ref, 'data-to': waiting.node.ref },
+        s('title', {}, `${codeOf(first.node.ref)} ${first.node.title} is needed first by ${codeOf(waiting.node.ref)} ${waiting.node.title}${clash ? ': it is planned to start before that is due' : ''}`),
       ),
     );
   }
@@ -423,8 +426,8 @@ let trayDrafts = new Map();
 
 function drawTray(undated) {
   const open = parts.tray.open;
-  const here = new Set(undated.map((node) => node.id));
-  for (const id of [...trayDrafts.keys()]) if (!here.has(id)) trayDrafts.delete(id);
+  const here = new Set(undated.map((node) => node.ref));
+  for (const ref of [...trayDrafts.keys()]) if (!here.has(ref)) trayDrafts.delete(ref);
   put(
     parts.tray,
     h('summary', {}, icon('chevron_right', { size: 14 }), h('span', { class: 'tray-title' }, 'Undated'), h('span', { class: 'chip' }, String(undated.length)), h('span', { class: 'tray-sub' }, 'Drag one onto the timeline, or give it dates here')),
@@ -433,14 +436,15 @@ function drawTray(undated) {
           'ul',
           { class: 'plain tray-list' },
           undated.map((node) => {
-            const draft = trayDrafts.get(node.id) || { start: '', target: '' };
-            trayDrafts.set(node.id, draft);
-            const start = h('input', { type: 'date', value: draft.start, 'aria-label': `Start date of #${node.id}`, oninput: () => { draft.start = start.value; } });
-            const target = h('input', { type: 'date', value: draft.target, 'aria-label': `Target date of #${node.id}`, oninput: () => { draft.target = target.value; } });
+            const code = nodeCode(node.kind, node.number);
+            const draft = trayDrafts.get(node.ref) || { start: '', target: '' };
+            trayDrafts.set(node.ref, draft);
+            const start = h('input', { type: 'date', value: draft.start, 'aria-label': `Start date of ${code}`, oninput: () => { draft.start = start.value; } });
+            const target = h('input', { type: 'date', value: draft.target, 'aria-label': `Target date of ${code}`, oninput: () => { draft.target = target.value; } });
             return h(
               'li',
-              { class: 'tray-item', dataset: { id: node.id } },
-              h('span', { class: 'tray-drag', draggable: 'true', title: 'Drag onto the timeline', ondragstart: (event) => { trayDragged = node.id; event.dataTransfer.setData('application/x-vrum-node', String(node.id)); event.dataTransfer.setData('text/plain', `#${node.id}`); event.dataTransfer.effectAllowed = 'move'; }, ondragend: () => { trayDragged = 0; } }, kindIcon(node.kind, 14), h('span', { class: 'id mono' }, `#${node.id}`), h('span', { class: 'tray-name' }, node.title)),
+              { class: 'tray-item', dataset: { ref: node.ref } },
+              h('span', { class: 'tray-drag', draggable: 'true', title: 'Drag onto the timeline', ondragstart: (event) => { trayDragged = node.ref; event.dataTransfer.setData('application/x-vrum-node', node.ref); event.dataTransfer.setData('text/plain', code); event.dataTransfer.effectAllowed = 'move'; }, ondragend: () => { trayDragged = ''; } }, kindIcon(node.kind, 14), h('span', { class: 'id mono' }, code), h('span', { class: 'tray-name' }, node.title)),
               h(
                 'form',
                 {
@@ -490,16 +494,16 @@ function changeFor(item, mode, days) {
   return mode === 'start' ? { start_on: fromDay(item.s + days) } : { target_on: fromDay(item.e + days) };
 }
 
-function targetsFor(id, mode) {
-  if (mode === 'move' && picked.has(id)) return [...picked].filter((other) => geometry.items.get(other)?.editable);
-  return geometry.items.get(id)?.editable ? [id] : [];
+function targetsFor(ref, mode) {
+  if (mode === 'move' && picked.has(ref)) return [...picked].filter((other) => geometry.items.get(other)?.editable);
+  return geometry.items.get(ref)?.editable ? [ref] : [];
 }
 
-function preview(ids, mode, days) {
+function preview(refs, mode, days) {
   const { origin, ppd } = geometry;
-  for (const id of ids) {
-    const item = geometry.items.get(id);
-    const el = parts.scroll.querySelector(`.rm-bar[data-id="${id}"]`);
+  for (const ref of refs) {
+    const item = geometry.items.get(ref);
+    const el = parts.scroll.querySelector(`.rm-bar[data-ref="${ref}"]`);
     if (!item || !el) continue;
     const { first, last } = datesAfter(item, mode, days);
     const [from, to] = first <= last ? [first, last] : [last, first];
@@ -520,8 +524,8 @@ async function settle() {
   }
 }
 
-async function commit(ids, mode, days) {
-  const items = ids.map((id) => geometry.items.get(id)).filter(Boolean);
+async function commit(refs, mode, days) {
+  const items = refs.map((ref) => geometry.items.get(ref)).filter(Boolean);
   if (!items.length) return;
   busy += 1;
   try {
@@ -529,17 +533,17 @@ async function commit(ids, mode, days) {
       const { node } = items[0];
       const change = changeFor(items[0], mode, days);
       try {
-        await call('update_node', { actor: actor(), node_id: node.id, expected_version: node.version, ...change });
-        notify(`Moved #${node.id}: ${describe(change)}.`);
+        await call('update_node', { actor: actor(), node: node.ref, expected_version: node.version, ...change });
+        notify(`Moved ${nodeCode(node.kind, node.number)}: ${describe(change)}.`);
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
         notify(error.message, { refusal: true });
       }
     } else {
-      const changes = items.map((item) => ({ node_id: item.node.id, expected_version: item.node.version, ...changeFor(item, mode, days) }));
+      const changes = items.map((item) => ({ node: item.node.ref, expected_version: item.node.version, ...changeFor(item, mode, days) }));
       try {
         const outcome = await call('update_nodes', { actor: actor(), changes });
-        for (const result of outcome.results.filter((one) => !one.applied)) notify(`#${result.node_id} was not moved. ${result.refusal}`, { refusal: true });
+        for (const result of outcome.results.filter((one) => !one.applied)) notify(`${codeOf(result.node)} was not moved. ${result.refusal}`, { refusal: true });
         if (outcome.applied) notify(`Moved ${plural(outcome.applied, 'item')}${outcome.refused ? `; ${outcome.refused} refused` : ''}.`);
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
@@ -562,8 +566,8 @@ function describe(change) {
 async function changeDates(node, change, verb) {
   busy += 1;
   try {
-    await call('update_node', { actor: actor(), node_id: node.id, expected_version: node.version, ...change });
-    notify(`${verb} #${node.id} dates: ${describe(change)}.`);
+    await call('update_node', { actor: actor(), node: node.ref, expected_version: node.version, ...change });
+    notify(`${verb} ${nodeCode(node.kind, node.number)} dates: ${describe(change)}.`);
     await settle();
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
@@ -604,11 +608,11 @@ function pointerDown(event) {
     return;
   }
   if (event.button !== 0 || !geometry) return;
-  const id = Number(el.dataset.id);
-  const item = geometry.items.get(id);
+  const ref = el.dataset.ref;
+  const item = geometry.items.get(ref);
   if (!item) return;
   const mode = item.editable ? event.target.closest('.rm-handle')?.dataset.handle || 'move' : 'click';
-  const started = { id, mode, x: event.clientX, days: 0, moved: false, together: event.shiftKey || event.ctrlKey || event.metaKey };
+  const started = { ref, mode, x: event.clientX, days: 0, moved: false, together: event.shiftKey || event.ctrlKey || event.metaKey };
   drag = started;
   el.setPointerCapture(event.pointerId);
   const move = (next) => {
@@ -617,7 +621,7 @@ function pointerDown(event) {
     started.moved = true;
     if (mode === 'click') return;
     started.days = Math.round(across / geometry.ppd);
-    preview(targetsFor(id, mode), mode, started.days);
+    preview(targetsFor(ref, mode), mode, started.days);
   };
   const up = () => {
     el.removeEventListener('pointermove', move);
@@ -625,10 +629,10 @@ function pointerDown(event) {
     el.removeEventListener('pointercancel', up);
     drag = null;
     if (!started.moved) {
-      if (started.together) togglePicked(id);
-      else ui.navigate({ sel: `node:${id}`, panel: null });
+      if (started.together) togglePicked(ref);
+      else ui.navigate({ sel: ref, panel: null });
     } else if (started.days !== 0 && mode !== 'click') {
-      commit(targetsFor(id, mode), mode, started.days);
+      commit(targetsFor(ref, mode), mode, started.days);
     } else {
       draw();
     }
@@ -638,9 +642,9 @@ function pointerDown(event) {
   el.addEventListener('pointercancel', up);
 }
 
-function togglePicked(id) {
-  if (picked.has(id)) picked.delete(id);
-  else picked.add(id);
+function togglePicked(ref) {
+  if (picked.has(ref)) picked.delete(ref);
+  else picked.add(ref);
   draw();
 }
 
@@ -648,18 +652,18 @@ function togglePicked(id) {
 
 function barKey(event) {
   const el = event.currentTarget;
-  const id = Number(el.dataset.id);
-  const item = geometry?.items.get(id);
+  const ref = el.dataset.ref;
+  const item = geometry?.items.get(ref);
   if (!item) return;
   const key = event.key;
-  if (key === 'Enter') ui.navigate({ sel: `node:${id}`, panel: null });
-  else if (key === ' ') togglePicked(id);
+  if (key === 'Enter') ui.navigate({ sel: ref, panel: null });
+  else if (key === ' ') togglePicked(ref);
   else if (key === 'Escape') {
     picked = new Set();
     draw();
   } else if ((key === 'ArrowLeft' || key === 'ArrowRight') && item.editable) {
     const mode = event.altKey ? 'start' : event.ctrlKey || event.metaKey ? 'end' : 'move';
-    shiftBy(id, mode, (key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 7 : 1));
+    shiftBy(ref, mode, (key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 7 : 1));
   } else if (key === 'ArrowUp' || key === 'ArrowDown') {
     const bars = [...parts.scroll.querySelectorAll('.rm-bar')];
     bars[bars.indexOf(el) + (key === 'ArrowDown' ? 1 : -1)]?.focus();
@@ -668,11 +672,11 @@ function barKey(event) {
 }
 
 // Arrow keys add up for a moment, and are sent as one change.
-function shiftBy(id, mode, days) {
-  if (keys && (keys.id !== id || keys.mode !== mode)) flushKeys();
-  if (!keys) keys = { id, mode, days: 0, ids: targetsFor(id, mode), timer: 0 };
+function shiftBy(ref, mode, days) {
+  if (keys && (keys.ref !== ref || keys.mode !== mode)) flushKeys();
+  if (!keys) keys = { ref, mode, days: 0, refs: targetsFor(ref, mode), timer: 0 };
   keys.days += days;
-  preview(keys.ids, mode, keys.days);
+  preview(keys.refs, mode, keys.days);
   clearTimeout(keys.timer);
   keys.timer = setTimeout(flushKeys, 700);
 }
@@ -682,6 +686,6 @@ function flushKeys() {
   keys = null;
   if (!sent) return;
   clearTimeout(sent.timer);
-  if (sent.days !== 0) commit(sent.ids, sent.mode, sent.days);
+  if (sent.days !== 0) commit(sent.refs, sent.mode, sent.days);
   else draw();
 }

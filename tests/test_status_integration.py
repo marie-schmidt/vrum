@@ -18,14 +18,15 @@ from tests.helpers import (
     refused,
     reindexed,
     the_token,
+    unique_word,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
 async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
-    epic, story, task = await make_tree(client)
-    await ok(client, "create_rule", actor="marie", title="A rule", story_id=story["id"])
+    _, story, _ = await make_tree(client)
+    await ok(client, "create_rule", actor="marie", title="A rule", story=story["ref"])
     await make_decision(client, "A decision")
     await make_decision(client, "A project-wide decision", project_wide=True)
     await make_fact(client, "A fact")
@@ -54,7 +55,6 @@ async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
     assert counts["links"] == exported["links"] and counts["events"] == exported["events"]
     assert counts["epics"] + counts["stories"] + counts["tasks"] == exported["nodes"]
     assert (counts["decisions"], counts["facts"]) == (exported["decisions"], exported["facts"])
-    assert epic["id"] and task["id"]
 
 
 async def test_the_index_state_equals_what_search_says_and_is_never_a_secret(
@@ -114,7 +114,7 @@ async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(
 ) -> None:
     epic = await ok(client, "create_node", actor="marie", kind="epic", title="Who")
     story = await ok(
-        client, "create_node", actor="marie", kind="story", title="Who story", parent_id=epic["id"]
+        client, "create_node", actor="marie", kind="story", title="Who story", parent=epic["ref"]
     )
     tasks = [
         await ok(
@@ -123,19 +123,21 @@ async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(
             actor="marie",
             kind="task",
             title=f"Who task {number}",
-            parent_id=story["id"],
+            parent=story["ref"],
         )
         for number in range(3)
     ]
-    working, lapsing, finishing = (f"{name}-{epic['id']}" for name in ("ann", "bob", "cy"))
-    await ok(client, "claim_node", actor=working, node_id=tasks[0]["id"], lease_seconds=600)
-    await ok(client, "claim_node", actor=lapsing, node_id=tasks[1]["id"], lease_seconds=1)
-    await ok(client, "claim_node", actor=finishing, node_id=tasks[2]["id"])
+    # Names that only this test uses: other tests' agents are in the same list.
+    word = unique_word()
+    working, lapsing, finishing = (f"{name}-{word}" for name in ("ann", "bob", "cy"))
+    await ok(client, "claim_node", actor=working, node=tasks[0]["ref"], lease_seconds=600)
+    await ok(client, "claim_node", actor=lapsing, node=tasks[1]["ref"], lease_seconds=1)
+    await ok(client, "claim_node", actor=finishing, node=tasks[2]["ref"])
     await ok(
         client,
         "finish_work",
         actor=finishing,
-        node_id=tasks[2]["id"],
+        node=tasks[2]["ref"],
         outcome="done",
         note="All of it is done.\nSecond line.",
     )
@@ -144,20 +146,18 @@ async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(
     result = await ok(client, "who_is_working")
 
     ours = {
-        agent["actor"]: agent
-        for agent in result["agents"]
-        if agent["actor"].endswith(f"-{epic['id']}")
+        agent["actor"]: agent for agent in result["agents"] if agent["actor"].endswith(f"-{word}")
     }
     assert set(ours) == {working, lapsing, finishing}
     assert ours[working]["state"] == "working"
-    assert [held["node_id"] for held in ours[working]["holding"]] == [tasks[0]["id"]]
+    assert [held["node"] for held in ours[working]["holding"]] == [tasks[0]["ref"]]
     assert ours[working]["holding"][0]["title"] == "Who task 0"
     assert ours[lapsing]["state"] == "lapsed" and ours[lapsing]["holding"] == []
-    assert [held["node_id"] for held in ours[lapsing]["lapsed"]] == [tasks[1]["id"]]
+    assert [held["node"] for held in ours[lapsing]["lapsed"]] == [tasks[1]["ref"]]
     assert ours[finishing]["state"] == "finished"
     note = ours[finishing]["last_handoff"]
     assert note["note"] == "All of it is done.\nSecond line." and note["outcome"] == "done"
-    assert note["node_id"] == tasks[2]["id"]
+    assert note["node"] == tasks[2]["ref"]
     # Working first, then lapsed, then finished.
     order = [agent["state"] for agent in result["agents"]]
     assert order == sorted(order, key=["working", "lapsed", "finished"].index)

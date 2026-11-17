@@ -19,6 +19,7 @@ from tests.helpers import (
     ok,
     race_mixed,
     race_results,
+    ref_order,
     refused,
     run_sql,
 )
@@ -41,7 +42,7 @@ DECISION_FIELDS = {
     "confirmation",
     "confirmed_by",
     "confirmed_at",
-    "node_ids",
+    "nodes",
     "rule_ids",
     "recorded_at",
 }
@@ -125,7 +126,7 @@ async def test_a_decision_is_recorded_with_who_decided_it_and_what_it_affects(
     client: Client,
 ) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
 
     decision = await ok(
         client,
@@ -136,7 +137,7 @@ async def test_a_decision_is_recorded_with_who_decided_it_and_what_it_affects(
         reason="Fewer moving parts to run.",
         decided_by="Marie",
         decided_on="2026-11-01",
-        node_ids=[story["id"], story["parent_id"]],
+        nodes=[story["ref"], story["parent"]],
         rule_ids=[rule["id"]],
     )
     assert set(decision) == DECISION_FIELDS
@@ -144,7 +145,7 @@ async def test_a_decision_is_recorded_with_who_decided_it_and_what_it_affects(
     assert decision["reason"] == "Fewer moving parts to run."
     assert decision["decided_on"] == "2026-11-01"
     assert decision["project_wide"] is False
-    assert decision["node_ids"] == sorted([story["id"], story["parent_id"]])
+    assert decision["nodes"] == sorted([story["ref"], story["parent"]], key=ref_order)
     assert decision["rule_ids"] == [rule["id"]]
     assert (decision["superseded_by_id"], decision["supersedes_ids"]) == (None, [])
     assert decision["status_reason"] is None
@@ -177,7 +178,7 @@ async def test_a_decision_is_recorded_with_who_decided_it_and_what_it_affects(
         "project_wide": False,
     }
     # The history of what it affects shows the link too.
-    story_events = (await ok(client, "node_history", node_id=story["id"]))["items"]
+    story_events = (await ok(client, "node_history", node=story["ref"]))["items"]
     assert [e["decision_id"] for e in story_events if e["action"] == "decision_linked"] == [
         decision["id"]
     ]
@@ -191,18 +192,18 @@ async def test_recalling_a_story_returns_its_linked_active_decisions_and_the_pro
     client: Client,
 ) -> None:
     story, other_story = await make_stories(client, 2)
-    mine = await make_decision(client, "About this story", node_ids=[story["id"]])
+    mine = await make_decision(client, "About this story", nodes=[story["ref"]])
     also_mine = await make_decision(
-        client, "Also this story", node_ids=[story["id"], other_story["id"]]
+        client, "Also this story", nodes=[story["ref"], other_story["ref"]]
     )
-    elsewhere = await make_decision(client, "About the other story", node_ids=[other_story["id"]])
+    elsewhere = await make_decision(client, "About the other story", nodes=[other_story["ref"]])
     unlinked = await make_decision(client, "About nothing in particular")
     linked_wide = await make_decision(
-        client, "A linked project-wide one", project_wide=True, node_ids=[story["id"]]
+        client, "A linked project-wide one", project_wide=True, nodes=[story["ref"]]
     )
     free_wide = await make_decision(client, "A free project-wide one", project_wide=True)
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
 
     assert ids(result["active_decisions"]) == [mine["id"], also_mine["id"]]
     for left_out in (elsewhere, unlinked, linked_wide, free_wide):
@@ -225,17 +226,17 @@ async def test_recalling_a_story_returns_its_linked_active_decisions_and_the_pro
     assert result["project_wide_decisions"][0]["label"].startswith("Project-wide decision, ")
 
     # Another story gets its own decisions but the same project-wide ones.
-    other = await recall(client, node_id=other_story["id"])
+    other = await recall(client, node=other_story["ref"])
     assert ids(other["active_decisions"]) == [also_mine["id"], elsewhere["id"]]
     assert ids(other["project_wide_decisions"]) == ids(result["project_wide_decisions"])
 
 
 async def test_nothing_is_invented_for_an_item_with_no_decisions(client: Client) -> None:
     epic, story, task = await make_tree(client)
-    await make_decision(client, "About the epic only", node_ids=[epic["id"]])
+    await make_decision(client, "About the epic only", nodes=[epic["ref"]])
 
     for node in (story, task):
-        result = await recall(client, node_id=node["id"])
+        result = await recall(client, node=node["ref"])
         # Decisions linked to its parent are not inferred: recall is by exact link.
         assert result["active_decisions"] == [] and result["past_decisions"] == []
         assert (result["active_decisions_count"], result["past_decisions_count"]) == (0, 0)
@@ -246,7 +247,7 @@ async def test_a_project_wide_decision_is_in_every_recall_while_it_is_in_force(
     client: Client,
 ) -> None:
     story, other_story = await make_stories(client, 2)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     wide = await make_decision(client, "Applies everywhere", project_wide=True)
     assert wide["project_wide"] is True
     assert wide["label"] == "Project-wide decision, not confirmed by a person"
@@ -255,9 +256,9 @@ async def test_a_project_wide_decision_is_in_every_recall_while_it_is_in_force(
     async def where_it_shows() -> list[bool]:
         shown = []
         for arguments in (
-            {"node_id": story["id"]},
-            {"node_id": other_story["id"]},
-            {"node_id": story["parent_id"]},
+            {"node": story["ref"]},
+            {"node": other_story["ref"]},
+            {"node": story["parent"]},
             {"rule_id": rule["id"]},
         ):
             section = (await recall(client, **arguments))["project_wide_decisions"]
@@ -272,23 +273,23 @@ async def test_a_project_wide_decision_is_in_every_recall_while_it_is_in_force(
     newer = await replace(client, wide, title="Applies everywhere, differently")
     assert newer["project_wide"] is True
     assert await where_it_shows() == [False] * 4
-    for_story = (await recall(client, node_id=story["id"]))["project_wide_decisions"]
+    for_story = (await recall(client, node=story["ref"]))["project_wide_decisions"]
     assert newer["id"] in ids(for_story) and wide["id"] not in ids(for_story)
     assert (await get(client, wide))["project_wide"] is True
     assert (await get(client, wide))["status"] == "superseded"
 
-    narrower = await replace(client, newer, project_wide=False, node_ids=[story["id"]])
-    assert narrower["project_wide"] is False and narrower["node_ids"] == [story["id"]]
-    for_story = await recall(client, node_id=story["id"])
+    narrower = await replace(client, newer, project_wide=False, nodes=[story["ref"]])
+    assert narrower["project_wide"] is False and narrower["nodes"] == [story["ref"]]
+    for_story = await recall(client, node=story["ref"])
     assert narrower["id"] in ids(for_story["active_decisions"])
     assert narrower["id"] not in ids(for_story["project_wide_decisions"])
     assert newer["id"] not in ids(for_story["project_wide_decisions"])
-    for_other = await recall(client, node_id=other_story["id"])
+    for_other = await recall(client, node=other_story["ref"])
     assert narrower["id"] not in ids(for_other["active_decisions"])
 
     broader = await replace(client, narrower, project_wide=True)
-    assert broader["project_wide"] is True and broader["node_ids"] == [story["id"]]
-    for_story = await recall(client, node_id=story["id"])
+    assert broader["project_wide"] is True and broader["nodes"] == [story["ref"]]
+    for_story = await recall(client, node=story["ref"])
     assert broader["id"] in ids(for_story["project_wide_decisions"])
     assert broader["id"] not in ids(for_story["active_decisions"])
     # What the narrower one was linked to still shows it as a past decision there.
@@ -298,7 +299,7 @@ async def test_a_project_wide_decision_is_in_every_recall_while_it_is_in_force(
 
     # A project-wide decision that is withdrawn applies nowhere any more.
     await withdraw(client, broader, reason="No longer true everywhere")
-    for_story = await recall(client, node_id=story["id"])
+    for_story = await recall(client, node=story["ref"])
     assert broader["id"] not in ids(for_story["project_wide_decisions"])
     assert broader["id"] not in ids(await every(client, project_wide=True, status="active"))
     assert broader["id"] in ids(await every(client, project_wide=True, status="withdrawn"))
@@ -312,8 +313,8 @@ async def test_a_superseded_decision_is_shown_as_superseded_and_never_as_active(
     client: Client,
 ) -> None:
     story, other_story = await make_stories(client, 2)
-    old = await make_decision(client, "Use a queue", node_ids=[story["id"]])
-    await make_decision(client, "Unrelated", node_ids=[story["id"]])
+    old = await make_decision(client, "Use a queue", nodes=[story["ref"]])
+    await make_decision(client, "Unrelated", nodes=[story["ref"]])
 
     new = await ok(
         client,
@@ -346,7 +347,7 @@ async def test_a_superseded_decision_is_shown_as_superseded_and_never_as_active(
         old["decided_by"],
     )
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     assert new["id"] in ids(result["active_decisions"])
     assert old["id"] not in ids(result["active_decisions"])
     assert [(d["id"], d["status"], d["superseded_by_id"]) for d in result["past_decisions"]] == [
@@ -358,7 +359,7 @@ async def test_a_superseded_decision_is_shown_as_superseded_and_never_as_active(
     assert result["past_decisions_count"] == 1
     assert old["id"] not in [d["id"] for d in await every(client, status="active")]
     assert old["id"] in ids(await every(client, status="superseded"))
-    assert (await recall(client, node_id=other_story["id"]))["past_decisions"] == []
+    assert (await recall(client, node=other_story["ref"]))["past_decisions"] == []
 
     old_events = await history(client, old)
     assert [(e["action"], e["actor"]) for e in old_events][-1] == ("decision_superseded", "agent-2")
@@ -371,21 +372,21 @@ async def test_a_replacement_keeps_what_the_old_decision_affected_unless_told_ot
     client: Client,
 ) -> None:
     first, second, third = await make_stories(client, 3)
-    rule = await make_rule(client, story_id=first["id"])
+    rule = await make_rule(client, story=first["ref"])
     original = await make_decision(
-        client, "Original", node_ids=[first["id"], second["id"]], rule_ids=[rule["id"]]
+        client, "Original", nodes=[first["ref"], second["ref"]], rule_ids=[rule["id"]]
     )
 
-    kept = await replace(client, original, node_ids=[third["id"]])
-    assert kept["node_ids"] == [first["id"], second["id"], third["id"]]
+    kept = await replace(client, original, nodes=[third["ref"]])
+    assert kept["nodes"] == [first["ref"], second["ref"], third["ref"]]
     assert kept["rule_ids"] == [rule["id"]]
     # The old one is still linked as it was, as a record.
-    assert (await get(client, original))["node_ids"] == [first["id"], second["id"]]
-    assert kept["id"] in ids((await recall(client, node_id=third["id"]))["active_decisions"])
+    assert (await get(client, original))["nodes"] == [first["ref"], second["ref"]]
+    assert kept["id"] in ids((await recall(client, node=third["ref"]))["active_decisions"])
 
-    fresh = await replace(client, kept, keep_links=False, node_ids=[first["id"]])
-    assert (fresh["node_ids"], fresh["rule_ids"]) == ([first["id"]], [])
-    assert fresh["id"] not in ids((await recall(client, node_id=second["id"]))["active_decisions"])
+    fresh = await replace(client, kept, keep_links=False, nodes=[first["ref"]])
+    assert (fresh["nodes"], fresh["rule_ids"]) == ([first["ref"]], [])
+    assert fresh["id"] not in ids((await recall(client, node=second["ref"]))["active_decisions"])
 
     # The new decision says who made it and on what day: it is not the old one's.
     dated = await replace(client, fresh, decided_by="Bob", decided_on="2026-12-24")
@@ -397,7 +398,7 @@ async def test_a_decision_cannot_be_superseded_twice_and_only_one_of_several_rac
 ) -> None:
     (story,) = await make_stories(client, 1)
     for _ in range(6):
-        old = await make_decision(client, "Contested", node_ids=[story["id"]])
+        old = await make_decision(client, "Contested", nodes=[story["ref"]])
         results = await race_results(
             client,
             "supersede_decision",
@@ -439,11 +440,11 @@ async def test_a_decision_cannot_be_superseded_twice_and_only_one_of_several_rac
 
 async def test_withdrawing_a_decision_needs_a_reason_and_keeps_the_record(client: Client) -> None:
     story, other_story = await make_stories(client, 2)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     decision = await make_decision(
-        client, "Use a cache", node_ids=[story["id"]], rule_ids=[rule["id"]]
+        client, "Use a cache", nodes=[story["ref"]], rule_ids=[rule["id"]]
     )
-    kept = await make_decision(client, "Stays", node_ids=[story["id"]])
+    kept = await make_decision(client, "Stays", nodes=[story["ref"]])
     before = await tally(client)
 
     for arguments, expected in (
@@ -476,7 +477,7 @@ async def test_withdrawing_a_decision_needs_a_reason_and_keeps_the_record(client
         decision["reason"],
         decision["decided_by"],
     )
-    assert gone["node_ids"] == [story["id"]] and gone["rule_ids"] == [rule["id"]]
+    assert gone["nodes"] == [story["ref"]] and gone["rule_ids"] == [rule["id"]]
     assert gone["label"] == "Withdrawn decision, not confirmed by a person"
     assert await get(client, decision) == gone
     events = await history(client, decision)
@@ -484,13 +485,13 @@ async def test_withdrawing_a_decision_needs_a_reason_and_keeps_the_record(client
     assert events[-1]["before"] == {"status": "active"}
     assert events[-1]["after"] == {"status": "withdrawn", "reason": "The cache hides bugs"}
 
-    result = await recall(client, node_id=story["id"])
+    result = await recall(client, node=story["ref"])
     assert ids(result["active_decisions"]) == [kept["id"]]
     assert result["past_decisions_why"] == {
         decision["id"]: "linked directly to this node; withdrawn: The cache hides bugs"
     }
     assert ids(await every(client, status="withdrawn"))[-1] == decision["id"]
-    assert (await recall(client, node_id=other_story["id"]))["past_decisions"] == []
+    assert (await recall(client, node=other_story["ref"]))["past_decisions"] == []
     assert ids((await recall(client, rule_id=rule["id"]))["past_decisions"]) == [decision["id"]]
 
     # A decision that is no longer in force cannot be given up, replaced or relinked.
@@ -521,28 +522,26 @@ async def test_withdrawing_a_decision_needs_a_reason_and_keeps_the_record(client
 
 async def test_links_can_be_added_and_removed_from_an_active_decision(client: Client) -> None:
     first, second = await make_stories(client, 2)
-    rule = await make_rule(client, story_id=first["id"])
-    decision = await make_decision(client, "Movable", node_ids=[first["id"]])
+    rule = await make_rule(client, story=first["ref"])
+    decision = await make_decision(client, "Movable", nodes=[first["ref"]])
 
     linked = await ok(
         client,
         "link_decision",
         actor="ann",
         decision_id=decision["id"],
-        node_ids=[second["id"]],
+        nodes=[second["ref"]],
         rule_ids=[rule["id"]],
     )
-    assert (linked["node_ids"], linked["rule_ids"]) == ([first["id"], second["id"]], [rule["id"]])
-    assert decision["id"] in ids((await recall(client, node_id=second["id"]))["active_decisions"])
+    assert (linked["nodes"], linked["rule_ids"]) == ([first["ref"], second["ref"]], [rule["id"]])
+    assert decision["id"] in ids((await recall(client, node=second["ref"]))["active_decisions"])
     assert decision["id"] in ids((await recall(client, rule_id=rule["id"]))["active_decisions"])
 
     unlinked = await ok(
-        client, "unlink_decision", actor="bob", decision_id=decision["id"], node_ids=[first["id"]]
+        client, "unlink_decision", actor="bob", decision_id=decision["id"], nodes=[first["ref"]]
     )
-    assert unlinked["node_ids"] == [second["id"]]
-    assert decision["id"] not in ids(
-        (await recall(client, node_id=first["id"]))["active_decisions"]
-    )
+    assert unlinked["nodes"] == [second["ref"]]
+    assert decision["id"] not in ids((await recall(client, node=first["ref"]))["active_decisions"])
 
     events = [(e["action"], e["actor"]) for e in await history(client, decision)]
     assert events == [
@@ -552,7 +551,7 @@ async def test_links_can_be_added_and_removed_from_an_active_decision(client: Cl
         ("decision_linked", "ann"),
         ("decision_unlinked", "bob"),
     ]
-    node_events = (await ok(client, "node_history", node_id=first["id"]))["items"]
+    node_events = (await ok(client, "node_history", node=first["ref"]))["items"]
     assert [e["action"] for e in node_events if e["decision_id"] == decision["id"]] == [
         "decision_linked",
         "decision_unlinked",
@@ -560,61 +559,61 @@ async def test_links_can_be_added_and_removed_from_an_active_decision(client: Cl
 
     # A fact that concerns the decision does not make the decision concern anything else.
     fact = await make_fact(client, "About the decision", decision_ids=[decision["id"]])
-    assert (await get(client, decision))["node_ids"] == [second["id"]]
+    assert (await get(client, decision))["nodes"] == [second["ref"]]
     assert fact["decision_ids"] == [decision["id"]]
 
 
 async def test_link_changes_that_make_no_sense_change_nothing(client: Client) -> None:
     first, second = await make_stories(client, 2)
-    decision = await make_decision(client, "Careful", node_ids=[first["id"]])
-    replaced = await make_decision(client, "Replaced", node_ids=[first["id"]])
+    decision = await make_decision(client, "Careful", nodes=[first["ref"]])
+    replaced = await make_decision(client, "Replaced", nodes=[first["ref"]])
     newer = await replace(client, replaced, actor="a")
-    withdrawn = await make_decision(client, "Withdrawn", node_ids=[first["id"]])
+    withdrawn = await make_decision(client, "Withdrawn", nodes=[first["ref"]])
     await withdraw(client, withdrawn, reason="Gone")
     link = {"actor": "ann", "decision_id": decision["id"]}
     before = await tally(client)
 
-    assert "already linked to node" in await refused(
-        client, "link_decision", node_ids=[second["id"], first["id"]], **link
+    assert f"already linked to {first['ref']}" in await refused(
+        client, "link_decision", nodes=[second["ref"], first["ref"]], **link
     )
-    assert "is not linked to node" in await refused(
-        client, "unlink_decision", node_ids=[second["id"]], **link
+    assert f"is not linked to {second['ref']}" in await refused(
+        client, "unlink_decision", nodes=[second["ref"]], **link
     )
-    assert "There is no node with id 987654321" in await refused(
-        client, "link_decision", node_ids=[987654321], **link
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "link_decision", nodes=["story:987654321"], **link
     )
     assert "There is no rule with id 987654321" in await refused(
         client, "link_decision", rule_ids=[987654321], **link
     )
     assert "Nothing to link" in await refused(client, "link_decision", **link)
     assert "actor must be the name" in await refused(
-        client, "link_decision", node_ids=[second["id"]], actor=" ", decision_id=decision["id"]
+        client, "link_decision", nodes=[second["ref"]], actor=" ", decision_id=decision["id"]
     )
     message = await refused(
-        client, "link_decision", actor="ann", decision_id=replaced["id"], node_ids=[second["id"]]
+        client, "link_decision", actor="ann", decision_id=replaced["id"], nodes=[second["ref"]]
     )
     assert f"superseded by decision {newer['id']}" in message
     assert "keeps the links it had" in message
     assert "keeps the links it had" in await refused(
-        client, "unlink_decision", actor="ann", decision_id=replaced["id"], node_ids=[first["id"]]
+        client, "unlink_decision", actor="ann", decision_id=replaced["id"], nodes=[first["ref"]]
     )
     assert "It is withdrawn, so its links stay as they were" in await refused(
-        client, "link_decision", actor="ann", decision_id=withdrawn["id"], node_ids=[second["id"]]
+        client, "link_decision", actor="ann", decision_id=withdrawn["id"], nodes=[second["ref"]]
     )
     assert "There is no decision with id 987654321" in await refused(
-        client, "link_decision", actor="a", decision_id=987654321, node_ids=[first["id"]]
+        client, "link_decision", actor="a", decision_id=987654321, nodes=[first["ref"]]
     )
 
     # The failed attempts changed nothing, not even the part that was fine.
-    assert (await get(client, decision))["node_ids"] == [first["id"]]
+    assert (await get(client, decision))["nodes"] == [first["ref"]]
     assert await tally(client) == before
 
 
 async def test_decisions_can_be_recalled_for_a_rule(client: Client) -> None:
     (story,) = await make_stories(client, 1)
-    rule = await make_rule(client, story_id=story["id"])
+    rule = await make_rule(client, story=story["ref"])
     about_rule = await make_decision(client, "About the rule", rule_ids=[rule["id"]])
-    about_story = await make_decision(client, "About the story", node_ids=[story["id"]])
+    about_story = await make_decision(client, "About the story", nodes=[story["ref"]])
 
     result = await recall(client, rule_id=rule["id"])
     assert ids(result["active_decisions"]) == [about_rule["id"]]
@@ -627,12 +626,12 @@ async def test_decisions_can_be_recalled_for_a_rule(client: Client) -> None:
 async def test_each_recall_list_can_be_paged_on_its_own(client: Client) -> None:
     (story,) = await make_stories(client, 1)
     made = [
-        (await make_decision(client, f"Linked {n}", node_ids=[story["id"]]))["id"] for n in range(3)
+        (await make_decision(client, f"Linked {n}", nodes=[story["ref"]]))["id"] for n in range(3)
     ]
     for number in range(2):
         await make_decision(client, f"Wide {number}", project_wide=True)
 
-    both = await ok(client, "recall", node_id=story["id"], limit=2)
+    both = await ok(client, "recall", node=story["ref"], limit=2)
     assert [e["decision"]["id"] for e in both["active_decisions"]["items"]] == made[:2]
     assert both["active_decisions"]["next_after_id"] == made[1]
     assert both["active_decisions"]["count"] == 3
@@ -640,7 +639,7 @@ async def test_each_recall_list_can_be_paged_on_its_own(client: Client) -> None:
     rest = await ok(
         client,
         "recall",
-        node_id=story["id"],
+        node=story["ref"],
         show="active_decisions",
         limit=2,
         after_id=both["active_decisions"]["next_after_id"],
@@ -650,29 +649,29 @@ async def test_each_recall_list_can_be_paged_on_its_own(client: Client) -> None:
     assert rest["project_wide_decisions"]["items"] == []
     assert rest["project_wide_decisions"]["count"] >= 2
 
-    wide = await ok(client, "recall", node_id=story["id"], show="project_wide_decisions", limit=1)
+    wide = await ok(client, "recall", node=story["ref"], show="project_wide_decisions", limit=1)
     assert len(wide["project_wide_decisions"]["items"]) == 1
     assert wide["active_decisions"]["items"] == []
     assert wide["project_wide_decisions"]["next_after_id"] is not None
 
     assert "after_id only works for one section" in await refused(
-        client, "recall", node_id=story["id"], after_id=1
+        client, "recall", node=story["ref"], after_id=1
     )
     assert "show must be one of all, active_decisions, project_wide_decisions" in await refused(
-        client, "recall", node_id=story["id"], show="everything"
+        client, "recall", node=story["ref"], show="everything"
     )
     assert "show must be one of" in await refused(
-        client, "recall", node_id=story["id"], show="active_principles"
+        client, "recall", node=story["ref"], show="active_principles"
     )
-    assert "Give exactly one of node_id or rule_id" in await refused(client, "recall")
-    assert "Give exactly one of node_id or rule_id" in await refused(
-        client, "recall", node_id=story["id"], rule_id=1
+    assert "Give exactly one of node (an epic, story or task" in await refused(client, "recall")
+    assert "Give exactly one of node (an epic, story or task" in await refused(
+        client, "recall", node=story["ref"], rule_id=1
     )
-    assert "There is no node with id 987654321" in await refused(
-        client, "recall", node_id=987654321
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "recall", node="story:987654321"
     )
     assert "limit must be a whole number" in await refused(
-        client, "recall", node_id=story["id"], limit=0
+        client, "recall", node=story["ref"], limit=0
     )
 
 
@@ -752,8 +751,8 @@ async def test_a_decision_with_something_missing_is_refused_in_plain_words(clien
     ):
         for blank in ("  ", ""):
             assert expected in await refused(client, "record_decision", **{**good, field: blank})
-    assert "There is no node with id 987654321" in await refused(
-        client, "record_decision", node_ids=[987654321], **good
+    assert "There is no story 987654321 in this project" in await refused(
+        client, "record_decision", nodes=["story:987654321"], **good
     )
     assert "There is no rule with id 987654321" in await refused(
         client, "record_decision", rule_ids=[987654321], **good
@@ -947,7 +946,7 @@ async def test_a_confirmed_decision_can_only_be_changed_with_that_persons_word(
 ) -> None:
     story, _ = await make_stories(client, 2)
     decision = await make_decision(
-        client, "Confirmed choice", project_wide=True, node_ids=[story["id"]]
+        client, "Confirmed choice", project_wide=True, nodes=[story["ref"]]
     )
     reviewed = await confirm(client, "decision", decision, "Marie")
     before = await tally(client)
@@ -998,7 +997,7 @@ async def test_a_confirmed_decision_can_only_be_changed_with_that_persons_word(
     assert event["after"]["said_by"] == "Marie"
     assert event["after"]["quote"].startswith("In the planning call")
     assert new["confirmation"] == "unconfirmed" and new["project_wide"] is True
-    assert new["node_ids"] == [story["id"]]
+    assert new["nodes"] == [story["ref"]]
     assert (await get(client, decision))["confirmed_by"] == "Marie"
 
     # A decision nobody confirmed can be withdrawn by an agent alone.

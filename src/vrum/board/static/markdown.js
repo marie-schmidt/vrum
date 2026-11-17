@@ -2,7 +2,7 @@
 // quotes and links to web addresses, and it makes them out of elements and text only: raw HTML is
 // never read as HTML (a <script> or an <img> is shown as the characters it is), an image is shown
 // as its text and never loaded, and a link is made only for an http or https address and opens in a
-// new tab. `[[node:12]]` and the other references become links with the item's current title.
+// new tab. `[[story:12]]` and the other references become links with the item's current title.
 
 import { h } from './dom.js';
 import { REFERENCE_PATTERN, renderReference } from './references.js';

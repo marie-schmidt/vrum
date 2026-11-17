@@ -120,14 +120,16 @@ async def search_in_drawer(page: Page, query: str, mode: str = "both") -> None:
 
 async def result_rows(page: Page, count: int) -> list[dict[str, Any]]:
     """The results the drawer lists, in the order shown, once it says how many there are: the type,
-    id and how each matched, and the words the drawer shows for each."""
+    reference and how each matched (and the id, for a requirement, decision or fact, which keep
+    one; None for work), and the words the drawer shows for each."""
     await expect(page.locator("#search-count")).to_contain_text(
         re.compile(rf"^{count} results?\b"), timeout=SLOW
     )
     rows: list[dict[str, Any]] = await page.locator("#search-results li.result").evaluate_all(
         """els => els.map(e => ({
             type: e.dataset.type,
-            id: Number(e.dataset.id),
+            ref: e.dataset.ref,
+            id: e.dataset.id === undefined ? null : Number(e.dataset.id),
             matched: e.dataset.matched,
             chip: e.querySelector('.chip.matched')?.textContent.trim(),
             why: e.querySelector('.why')?.textContent.trim(),
@@ -179,41 +181,42 @@ async def asked(
         offset = page["next_offset"]
 
 
-def triples(items: list[dict[str, Any]]) -> list[tuple[str, int, str]]:
-    return [(item["item_type"], item["id"], item["matched"]) for item in items]
+def triples(items: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    """What `search` found, as (type, reference, how it matched): the reference names every kind,
+    story:12 as well as decision:7."""
+    return [(item["item_type"], item["ref"], item["matched"]) for item in items]
 
 
-def shown_triples(rows: list[dict[str, Any]]) -> list[tuple[str, int, str]]:
-    return [(row["type"], row["id"], row["matched"]) for row in rows]
+def shown_triples(rows: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    """What the drawer lists (from result_rows), in the same shape as triples."""
+    return [(row["type"], row["ref"], row["matched"]) for row in rows]
 
 
-async def epic_of_each(client: Client) -> dict[tuple[str, int], int | None]:
-    """The epic every epic, story, task and requirement is in, from the list tools."""
-    nodes: dict[int, dict[str, Any]] = {}
+async def epic_of_each(client: Client) -> dict[str, str | None]:
+    """The epic (its reference) that every epic, story, task and requirement is in, from the list
+    tools: keyed by the item's reference (story:12, rule:3), None for a requirement in no story.
+    The drawer's epic filter counts by the epic's number (number_of)."""
+    nodes: dict[str, dict[str, Any]] = {}
     after = None
     while True:
-        page = await ok(client, "list_nodes", limit=200, after_id=after)
-        nodes.update({node["id"]: node for node in page["items"]})
-        after = page["next_after_id"]
+        page = await ok(client, "list_nodes", limit=200, after=after)
+        nodes.update({node["ref"]: node for node in page["items"]})
+        after = page["next_after"]
         if after is None:
             break
 
-    def epic(node_id: int) -> int:
-        node = nodes[node_id]
-        return node_id if node["kind"] == "epic" else epic(node["parent_id"])
+    def epic(ref: str) -> str:
+        node = nodes[ref]
+        return ref if node["kind"] == "epic" else epic(node["parent"])
 
-    found: dict[tuple[str, int], int | None] = {
-        (node["kind"], node_id): epic(node_id) for node_id, node in nodes.items()
-    }
-    after = None
+    found: dict[str, str | None] = {ref: epic(ref) for ref in nodes}
+    after_id = None
     while True:
-        page = await ok(client, "list_rules", limit=200, after_id=after)
+        page = await ok(client, "list_rules", limit=200, after_id=after_id)
         for rule in page["items"]:
-            found[("rule", rule["id"])] = (
-                None if rule["story_id"] is None else epic(rule["story_id"])
-            )
-        after = page["next_after_id"]
-        if after is None:
+            found[f"rule:{rule['id']}"] = None if rule["story"] is None else epic(rule["story"])
+        after_id = page["next_after_id"]
+        if after_id is None:
             return found
 
 
@@ -222,8 +225,10 @@ async def epic_of_each(client: Client) -> dict[tuple[str, int], int | None]:
 
 async def twin_epics(
     client: Client, pairs: list[tuple[str, str]], body: str = ""
-) -> tuple[int, int, list[int], list[int]]:
-    """Two epics holding the stories of each pair, one side in each, and the index up to date."""
+) -> tuple[str, str, list[str], list[str]]:
+    """Two epics holding the stories of each pair, one side in each, and the index up to date.
+    Gives the references of the two epics and of the stories of each side, in the order of the
+    pairs."""
     word = unique_word()
     epic_a = await made(client, "epic", f"Overlap A {word}")
     epic_b = await made(client, "epic", f"Overlap B {word}")
@@ -243,8 +248,9 @@ async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
     return {**page, "items": items}
 
 
-def pair_triples(overlaps: dict[str, Any]) -> list[tuple[int, int, float]]:
-    return [(p["first"]["id"], p["second"]["id"], p["similarity"]) for p in overlaps["items"]]
+def pair_triples(overlaps: dict[str, Any]) -> list[tuple[str, str, float]]:
+    """The pairs find_overlaps gave, as (reference, reference, how alike)."""
+    return [(p["first"]["ref"], p["second"]["ref"], p["similarity"]) for p in overlaps["items"]]
 
 
 async def redrawn(page: Page, container: str, action: Awaitable[None]) -> None:
@@ -261,8 +267,9 @@ async def redrawn(page: Page, container: str, action: Awaitable[None]) -> None:
     )
 
 
-async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
-    """Every pair the drawer lists, in the order shown, asking for more until there is no more."""
+async def pairs_on(page: Page) -> list[tuple[str, str, float]]:
+    """Every pair the drawer lists, in the order shown, asking for more until there is no more:
+    (reference, reference, how alike)."""
     await expect(page.locator("#dup-count")).to_contain_text(re.compile(r"pairs?\b"), timeout=SLOW)
     for _ in range(100):
         more = page.locator("#dup-more")
@@ -274,16 +281,17 @@ async def pairs_on(page: Page) -> list[tuple[int, int, float]]:
     rows: list[list[str]] = await page.locator("#dup-pairs li.pair").evaluate_all(
         "els => els.map(e => [e.dataset.first, e.dataset.second, e.dataset.similarity])"
     )
-    return [(int(first), int(second), float(score)) for first, second, score in rows]
+    return [(first, second, float(score)) for first, second, score in rows]
 
 
-async def links_of(client: Client, *nodes: int) -> dict[int, list[tuple[int, int, str]]]:
-    """Every link at each node, as (source, target, type), to compare before and after."""
-    found: dict[int, list[tuple[int, int, str]]] = {}
+async def links_of(client: Client, *nodes: str) -> dict[str, list[tuple[str, str, str]]]:
+    """Every link at each node (by reference), as (source, target, type), to compare before and
+    after."""
+    found: dict[str, list[tuple[str, str, str]]] = {}
     for node in nodes:
-        page = await ok(client, "list_links", node_id=node, limit=200)
+        page = await ok(client, "list_links", node=node, limit=200)
         found[node] = sorted(
-            (link["source_id"], link["target_id"], link["link_type"]) for link in page["items"]
+            (link["source"], link["target"], link["link_type"]) for link in page["items"]
         )
     return found
 

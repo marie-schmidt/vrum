@@ -33,19 +33,33 @@ async def search(client: Client, query: str, **arguments: Any) -> dict[str, Any]
     return await ok(client, "search", query=query, **arguments)
 
 
-def by_item(page: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
-    return {(item["item_type"], item["id"]): item for item in page["items"]}
+def key_of(item: dict[str, Any]) -> tuple[str, Any]:
+    """What names a result: its ref for an epic, story or task (which has no id), and its id
+    for a requirement, decision or fact (whose ref says the same)."""
+    kind = item["item_type"]
+    if kind in ("epic", "story", "task"):
+        assert "id" not in item and item["ref"].startswith(f"{kind}:"), item
+        return kind, item["ref"]
+    assert item["ref"] == f"{kind}:{item['id']}", item
+    return kind, item["id"]
+
+
+def by_item(page: dict[str, Any]) -> dict[tuple[str, Any], dict[str, Any]]:
+    return {key_of(item): item for item in page["items"]}
 
 
 async def listing(client: Client, tool: str, **filters: Any) -> list[dict[str, Any]]:
-    """Every item a list tool has, following the pages."""
+    """Every item a list tool has, following the pages (nodes by `after`, others by `after_id`)."""
+    cursor, onward = (
+        ("after", "next_after") if tool == "list_nodes" else ("after_id", "next_after_id")
+    )
     found: list[dict[str, Any]] = []
-    after_id = None
+    after = None
     while True:
-        page = await ok(client, tool, limit=200, after_id=after_id, **filters)
+        page = await ok(client, tool, limit=200, **{cursor: after}, **filters)
         found.extend(page["items"])
-        after_id = page["next_after_id"]
-        if after_id is None:
+        after = page[onward]
+        if after is None:
             return found
 
 
@@ -54,12 +68,12 @@ def text_of(item: dict[str, Any]) -> str:
 
 
 async def new_story(
-    client: Client, title: str, body: str = "", parent_id: int | None = None
+    client: Client, title: str, body: str = "", parent: str | None = None
 ) -> dict[str, Any]:
     """A story with this title and body, under the given epic or under an epic of its own."""
-    if parent_id is None:
+    if parent is None:
         epic = await ok(client, "create_node", actor="marie", kind="epic", title="An epic")
-        parent_id = epic["id"]
+        parent = epic["ref"]
     return await ok(
         client,
         "create_node",
@@ -67,7 +81,7 @@ async def new_story(
         kind="story",
         title=title,
         body=body,
-        parent_id=parent_id,
+        parent=parent,
     )
 
 
@@ -88,7 +102,7 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
         kind="story",
         title="Checkout",
         body=f"We must handle {word} carefully.",
-        parent_id=epic["id"],
+        parent=epic["ref"],
     )
     task = await ok(
         client,
@@ -96,9 +110,9 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
         actor="a",
         kind="task",
         title=f"Do the {word} part",
-        parent_id=story["id"],
+        parent=story["ref"],
     )
-    rule = await make_rule(client, "A rule", body=f"Never skip {word}.", story_id=story["id"])
+    rule = await make_rule(client, "A rule", body=f"Never skip {word}.", story=story["ref"])
     decision = await make_decision(client, "A decision", text=f"We choose {word}.")
     wide = await make_decision(client, "A wide one", project_wide=True, text=f"Always {word}.")
     await confirm(client, "decision", wide)
@@ -125,9 +139,9 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
     wrong_fact = await make_fact(client, f"The {word} office has a dog.")
     await ok(client, "withdraw_fact", actor="a", fact_ids=[wrong_fact["id"]], reason="A cat.")
     expected = {
-        ("epic", epic["id"]),
-        ("story", story["id"]),
-        ("task", task["id"]),
+        ("epic", epic["ref"]),
+        ("story", story["ref"]),
+        ("task", task["ref"]),
         ("rule", rule["id"]),
         ("decision", decision["id"]),
         ("decision", wide["id"]),
@@ -147,21 +161,21 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
         assert item["why"] == f"exact words: {word}" and item["words_matched"] == [word]
         assert f"«{word}»" in item["snippet"] and item["snippet"].count("«") >= 1
     # Parent and status are read from the graph now.
-    assert results[("story", story["id"])]["parent_id"] == epic["id"]
-    assert results[("story", story["id"])]["parent_kind"] == "epic"
-    assert results[("story", story["id"])]["parent_title"] == f"Plan {word}"
-    assert results[("task", task["id"])]["parent_id"] == story["id"]
-    assert results[("rule", rule["id"])]["parent_id"] == story["id"]
-    assert results[("epic", epic["id"])]["parent_id"] is None
+    assert results[("story", story["ref"])]["parent"] == epic["ref"]
+    assert results[("story", story["ref"])]["parent_kind"] == "epic"
+    assert results[("story", story["ref"])]["parent_title"] == f"Plan {word}"
+    assert results[("task", task["ref"])]["parent"] == story["ref"]
+    assert results[("rule", rule["id"])]["parent"] == story["ref"]
+    assert results[("epic", epic["ref"])]["parent"] is None
     assert {results[key]["status"] for key in expected if key[0] in ("epic", "story", "task")} == {
         "ready"
     }
     assert results[("rule", rule["id"])]["status"] == "held"
     # Work and requirements are labelled as what they are and have no confirmation.
     for key, label in (
-        (("epic", epic["id"]), "Epic"),
-        (("story", story["id"]), "Story"),
-        (("task", task["id"]), "Task"),
+        (("epic", epic["ref"]), "Epic"),
+        (("story", story["ref"]), "Story"),
+        (("task", task["ref"]), "Task"),
         (("rule", rule["id"]), "Requirement"),
     ):
         assert results[key]["label"] == label and results[key]["confirmation"] is None, key
@@ -219,7 +233,7 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
 
     # Filters narrow the results and leave the counts as they were, to show what filtering gives.
     narrowed = await search(client, word, mode="words", types=["story", "task"])
-    assert set(by_item(narrowed)) == {("story", story["id"]), ("task", task["id"])}
+    assert set(by_item(narrowed)) == {("story", story["ref"]), ("task", task["ref"])}
     assert narrowed["total"] == 2 and narrowed["counts_by_type"] == page["counts_by_type"]
     held = await search(client, word, mode="words", statuses=["held"])
     assert set(by_item(held)) == {("rule", rule["id"])} and held["counts_by_status"]["ready"] == 3
@@ -244,9 +258,9 @@ async def test_exact_words_find_every_kind_of_item_and_the_counts_match_the_list
     while offset is not None:
         part = await search(client, word, mode="words", limit=3, offset=offset)
         assert part["total"] == 11
-        seen.extend((item["item_type"], item["id"]) for item in part["items"])
+        seen.extend(key_of(item) for item in part["items"])
         offset = part["next_offset"]
-    assert seen == [(item["item_type"], item["id"]) for item in page["items"]]
+    assert seen == [key_of(item) for item in page["items"]]
     assert len(set(seen)) == 11
 
     for arguments, expected_message in (
@@ -270,13 +284,13 @@ async def test_a_change_is_found_by_words_the_moment_it_is_saved(client: Client)
         client,
         "update_node",
         actor="agent-1",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=story["version"],
         body=f"We are migrating the {word} accounts.",
     )
 
     page = await search(client, word, mode="words")
-    assert [(i["item_type"], i["id"]) for i in page["items"]] == [("story", story["id"])]
+    assert [key_of(i) for i in page["items"]] == [("story", story["ref"])]
     # Words are whole words, with their endings: "migration" finds "migrating".
     stemmed = await search(client, f"migration {word}", mode="words")
     assert stemmed["total"] == 1
@@ -285,7 +299,7 @@ async def test_a_change_is_found_by_words_the_moment_it_is_saved(client: Client)
         client,
         "update_node",
         actor="agent-1",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=updated["version"],
         body="Nothing here now.",
     )
@@ -300,23 +314,23 @@ async def test_the_query_can_ask_for_all_words_a_phrase_an_alternative_or_to_lea
     only_first = await new_story(client, f"{first} stands alone")
     only_second = await new_story(client, f"{second} stands alone")
 
-    def ids(page: dict[str, Any]) -> set[int]:
-        return {item["id"] for item in page["items"]}
+    def refs(page: dict[str, Any]) -> set[str]:
+        return {item["ref"] for item in page["items"]}
 
-    assert ids(await search(client, f"{first} {second}", mode="words")) == {both["id"]}
-    assert ids(await search(client, f"{first} or {second}", mode="words")) == {
-        both["id"],
-        only_first["id"],
-        only_second["id"],
+    assert refs(await search(client, f"{first} {second}", mode="words")) == {both["ref"]}
+    assert refs(await search(client, f"{first} or {second}", mode="words")) == {
+        both["ref"],
+        only_first["ref"],
+        only_second["ref"],
     }
-    assert ids(await search(client, f'"{first} comes before {second}"', mode="words")) == {
-        both["id"]
+    assert refs(await search(client, f'"{first} comes before {second}"', mode="words")) == {
+        both["ref"]
     }
-    assert ids(await search(client, f'"{second} comes before {first}"', mode="words")) == set()
-    assert ids(await search(client, f"{first} -{second}", mode="words")) == {only_first["id"]}
+    assert refs(await search(client, f'"{second} comes before {first}"', mode="words")) == set()
+    assert refs(await search(client, f"{first} -{second}", mode="words")) == {only_first["ref"]}
     # The best match, with the most to say about the words, is listed first.
     ranked = await search(client, f"{first} or {second}", mode="words")
-    assert ranked["items"][0]["id"] == both["id"]
+    assert ranked["items"][0]["ref"] == both["ref"]
 
 
 @pytest.mark.parametrize("mode", ["both", "words", "meaning"])
@@ -372,7 +386,7 @@ async def test_a_paraphrase_is_found_by_meaning_and_labelled_a_suggestion(client
 
     page = await search(client, paraphrase)
 
-    result = by_item(page)[("story", story["id"])]
+    result = by_item(page)[("story", story["ref"])]
     assert result["matched"] == "meaning" and result["suggestion"] is True
     assert result["words_matched"] == []
     assert result["similarity"] == pytest.approx(expected, abs=0.002)
@@ -380,11 +394,11 @@ async def test_a_paraphrase_is_found_by_meaning_and_labelled_a_suggestion(client
     assert page["index"]["meaning"] == "used"
     assert not re.search(r"«", result["snippet"])
     # The same words ask for words only: it has none of them, so it is not found.
-    assert ("story", story["id"]) not in by_item(await search(client, paraphrase, mode="words"))
+    assert ("story", story["ref"]) not in by_item(await search(client, paraphrase, mode="words"))
     # And asking for meaning only finds it too.
-    assert ("story", story["id"]) in by_item(await search(client, paraphrase, mode="meaning"))
+    assert ("story", story["ref"]) in by_item(await search(client, paraphrase, mode="meaning"))
     # A floor of 1 leaves only what is identical, so it is left out.
-    assert ("story", story["id"]) not in by_item(
+    assert ("story", story["ref"]) not in by_item(
         await search(client, paraphrase, min_similarity=1.0)
     )
 
@@ -455,7 +469,7 @@ async def test_what_matches_both_ways_is_labelled_both_and_comes_first(client: C
     page = await search(client, f"{title} {body}")
 
     first = page["items"][0]
-    assert (first["item_type"], first["id"]) == ("story", story["id"])
+    assert key_of(first) == ("story", story["ref"])
     assert first["matched"] == "both" and first["similarity"] == pytest.approx(1.0, abs=0.001)
     assert word in first["words_matched"] and "reminder" in first["words_matched"]
     assert (
@@ -478,19 +492,19 @@ async def test_with_the_embedding_service_stopped_words_still_work_and_meaning_s
     with embeddings_stopped():
         before = await waiting(client)
         story = await new_story(
-            client, f"Customers get an invoice by email {word}", parent_id=epic["id"]
+            client, f"Customers get an invoice by email {word}", parent=epic["ref"]
         )
 
         # Found by words at once, labelled as an exact-words match, and said to be words only.
         page = await search(client, word)
-        result = by_item(page)[("story", story["id"])]
+        result = by_item(page)[("story", story["ref"])]
         assert result["matched"] == "words" and result["similarity"] is None
         assert page["index"]["meaning"] == "service_unreachable"
         assert "cannot be reached" in page["index"]["note"]
         assert page["index"]["waiting_to_index"] == before + 1
 
         # The paraphrase has no words in common, so without meaning it is not found.
-        assert ("story", story["id"]) not in by_item(await search(client, paraphrase))
+        assert ("story", story["ref"]) not in by_item(await search(client, paraphrase))
         message = await refused(client, "search", query=paraphrase, mode="meaning")
         assert "Searching by meaning is not possible now" in message
         assert "cannot be reached" in message
@@ -502,15 +516,17 @@ async def test_with_the_embedding_service_stopped_words_still_work_and_meaning_s
         # What is already in the index still works without the service: overlaps, and similar
         # items for an item that is indexed.
         assert "items" in await ok(client, "find_overlaps")
-        assert "items" in await ok(client, "similar_items", node_id=indexed["id"])
+        assert "items" in await ok(client, "similar_items", node=indexed["ref"])
 
     # Back again: reindex picks the story up, and the paraphrase is found by meaning.
     report = await reindexed(client)
     assert report["error"] is None and report["failed"] == []
     again = await search(client, f"Customers get an invoice by email {word}")
-    assert by_item(again)[("story", story["id"])]["matched"] == "both"
+    assert by_item(again)[("story", story["ref"])]["matched"] == "both"
     assert again["index"]["meaning"] == "used" and again["index"]["waiting_to_index"] == 0
-    assert by_item(await search(client, paraphrase))[("story", story["id"])]["matched"] == "meaning"
+    assert (
+        by_item(await search(client, paraphrase))[("story", story["ref"])]["matched"] == "meaning"
+    )
 
 
 async def test_the_server_indexes_new_work_by_itself(client: Client) -> None:
@@ -523,7 +539,7 @@ async def test_the_server_indexes_new_work_by_itself(client: Client) -> None:
     # No reindex is asked for: the background job finds it within a few seconds.
     for _ in range(40):
         page = await search(client, paraphrase, mode="meaning")
-        if ("story", story["id"]) in by_item(page):
+        if ("story", story["ref"]) in by_item(page):
             break
         await anyio.sleep(0.5)
     else:
@@ -541,7 +557,7 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
         # An epic and a story are new, so they wait.
         assert await waiting(client) == start + 2
         task = await ok(
-            client, "create_node", actor="a", kind="task", title="A task", parent_id=story["id"]
+            client, "create_node", actor="a", kind="task", title="A task", parent=story["ref"]
         )
         assert await waiting(client) == start + 2
         await make_fact(client, "A new fact")
@@ -554,7 +570,7 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
             client,
             "update_node",
             actor="a",
-            node_id=story["id"],
+            node=story["ref"],
             expected_version=story["version"],
             body="Changed text",
         )
@@ -562,19 +578,19 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
             client,
             "update_node",
             actor="a",
-            node_id=task["id"],
+            node=task["ref"],
             expected_version=task["version"],
             body="Changed task text",
         )
         assert await waiting(client) == start + 5
     await reindexed(client)
     # A change that is not to the text (here, the status) leaves it indexed.
-    current = await ok(client, "get_node", node_id=story["id"])
+    current = await ok(client, "get_node", node=story["ref"])
     await ok(
         client,
         "update_node",
         actor="a",
-        node_id=story["id"],
+        node=story["ref"],
         expected_version=current["version"],
         status="in_progress",
     )
@@ -590,20 +606,20 @@ async def test_tasks_are_found_by_words_only(client: Client) -> None:
         actor="a",
         kind="task",
         title=f"Customers get an invoice by email {word}",
-        parent_id=story["id"],
+        parent=story["ref"],
     )
     await reindexed(client)
 
     by_words = await search(client, word)
-    assert by_item(by_words)[("task", task["id"])]["matched"] == "words"
+    assert by_item(by_words)[("task", task["ref"])]["matched"] == "words"
     by_meaning = await search(client, "Clients receive a bill by mail", mode="meaning")
-    assert ("task", task["id"]) not in by_item(by_meaning)
+    assert ("task", task["ref"]) not in by_item(by_meaning)
     count = await ok(client, "reindex")
     assert count["indexed_total"] >= 1 and count["embedded"] == 0
     # A task can still be the thing to find similar items for: its text is embedded as asked.
-    similar = await ok(client, "similar_items", node_id=task["id"], min_similarity=0.0, limit=5)
+    similar = await ok(client, "similar_items", node=task["ref"], min_similarity=0.0, limit=5)
     assert similar["items"] and all(i["matched"] == "meaning" for i in similar["items"])
-    assert ("task", task["id"]) not in by_item(similar)
+    assert ("task", task["ref"]) not in by_item(similar)
 
 
 async def test_dropping_the_index_and_rebuilding_it_gives_the_same_results(
@@ -613,29 +629,27 @@ async def test_dropping_the_index_and_rebuilding_it_gives_the_same_results(
     epic_a = await ok(client, "create_node", actor="a", kind="epic", title="Billing")
     epic_b = await ok(client, "create_node", actor="a", kind="epic", title="Emails")
     first = await new_story(
-        client, f"Customers receive an invoice by email {word}", parent_id=epic_a["id"]
+        client, f"Customers receive an invoice by email {word}", parent=epic_a["ref"]
     )
-    second = await new_story(
-        client, f"Clients receive a bill by mail {word}", parent_id=epic_b["id"]
-    )
+    second = await new_story(client, f"Clients receive a bill by mail {word}", parent=epic_b["ref"])
     decision = await make_decision(client, "Bills", text=f"A bill goes out by mail {word}")
     await reindexed(client)
 
     async def results() -> dict[str, Any]:
         meaning = await search(client, "Send the bill to a client by mail", mode="meaning")
-        similar = await ok(client, "similar_items", node_id=first["id"], min_similarity=0.3)
-        overlaps = await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
+        similar = await ok(client, "similar_items", node=first["ref"], min_similarity=0.3)
+        overlaps = await ok(client, "find_overlaps", epics=[epic_a["ref"]])
         return {
-            "meaning": [(i["item_type"], i["id"], i["similarity"]) for i in meaning["items"]],
-            "similar": [(i["item_type"], i["id"], i["similarity"]) for i in similar["items"]],
+            "meaning": [(*key_of(i), i["similarity"]) for i in meaning["items"]],
+            "similar": [(*key_of(i), i["similarity"]) for i in similar["items"]],
             "overlaps": [
-                (p["first"]["id"], p["second"]["id"], p["similarity"]) for p in overlaps["items"]
+                (p["first"]["ref"], p["second"]["ref"], p["similarity"]) for p in overlaps["items"]
             ],
         }
 
     before = await results()
-    assert ("story", first["id"]) in {(t, i) for t, i, _ in before["meaning"]}
-    assert (first["id"], second["id"]) in {(a, b) for a, b, _ in before["overlaps"]}
+    assert ("story", first["ref"]) in {(t, i) for t, i, _ in before["meaning"]}
+    assert (first["ref"], second["ref"]) in {(a, b) for a, b, _ in before["overlaps"]}
     assert ("decision", decision["id"]) in {(t, i) for t, i, _ in before["similar"]}
 
     with embeddings_stopped():
@@ -681,7 +695,7 @@ async def test_the_vector_size_is_read_from_the_model_and_the_index_follows_a_ne
     model = run_sql("SELECT model FROM semantic_index_info", plain=True)
     assert model.stdout.strip() == "scripted-embedding", model.stderr
     again = await search(client, "Clients receive a bill by mail", mode="meaning")
-    assert ("story", story["id"]) in by_item(again)
+    assert ("story", story["ref"]) in by_item(again)
 
 
 async def test_an_item_the_service_refuses_is_reported_and_does_not_stop_the_others(
@@ -694,19 +708,19 @@ async def test_an_item_the_service_refuses_is_reported_and_does_not_stop_the_oth
 
     report = await ok(client, "reindex")
 
-    assert [(f["item_type"], f["id"]) for f in report["failed"]] == [("story", refused_story["id"])]
+    assert [key_of(f) for f in report["failed"]] == [("story", refused_story["ref"])]
     assert "refused the text" in report["failed"][0]["reason"]
     assert report["error"] is None and report["waiting_after"] == 1
     found = await search(client, "Clients receive a bill by mail", mode="meaning")
-    assert ("story", fine["id"]) in by_item(found)
+    assert ("story", fine["ref"]) in by_item(found)
     # It is still found by words, and stays waiting until its text changes.
-    assert ("story", refused_story["id"]) in by_item(await search(client, word, mode="words"))
+    assert ("story", refused_story["ref"]) in by_item(await search(client, word, mode="words"))
     assert await waiting(client) == 1
     await ok(
         client,
         "update_node",
         actor="a",
-        node_id=refused_story["id"],
+        node=refused_story["ref"],
         expected_version=refused_story["version"],
         body="Short now.",
     )
@@ -754,8 +768,8 @@ async def make_overlap_fixture(
     """Two epics holding the eight pairs of a story and its reworded twin."""
     epic_a = await ok(client, "create_node", actor="a", kind="epic", title="Overlap fixture A")
     epic_b = await ok(client, "create_node", actor="a", kind="epic", title="Overlap fixture B")
-    firsts = [await new_story(client, first, parent_id=epic_a["id"]) for first, _ in _DUPLICATES]
-    seconds = [await new_story(client, second, parent_id=epic_b["id"]) for _, second in _DUPLICATES]
+    firsts = [await new_story(client, first, parent=epic_a["ref"]) for first, _ in _DUPLICATES]
+    seconds = [await new_story(client, second, parent=epic_b["ref"]) for _, second in _DUPLICATES]
     await reindexed(client)
     return epic_a, epic_b, firsts, seconds
 
@@ -774,28 +788,28 @@ async def test_the_overlap_finder_flags_the_duplicates_and_not_the_unrelated_pai
 ) -> None:
     epic_a, epic_b, firsts, seconds = await make_overlap_fixture(client)
     pairs = {
-        (a["id"], b["id"]): (i == j) for i, a in enumerate(firsts) for j, b in enumerate(seconds)
+        (a["ref"], b["ref"]): (i == j) for i, a in enumerate(firsts) for j, b in enumerate(seconds)
     }
     duplicates = {pair for pair, is_duplicate in pairs.items() if is_duplicate}
     unrelated = {pair for pair, is_duplicate in pairs.items() if not is_duplicate}
     assert len(duplicates) == 8 and len(unrelated) == 56
     # The fixture is what it says: known duplicates are alike and known unrelated pairs are not.
     scores = {
-        (a["id"], b["id"]): cosine(embed(a["title"]), embed(b["title"]))
+        (a["ref"], b["ref"]): cosine(embed(a["title"]), embed(b["title"]))
         for a in firsts
         for b in seconds
     }
     assert min(scores[pair] for pair in duplicates) >= 0.85
     assert max(scores[pair] for pair in unrelated) <= 0.4
 
-    page = await every_overlap(client, epic_ids=[epic_a["id"], epic_b["id"]])
+    page = await every_overlap(client, epics=[epic_a["ref"], epic_b["ref"]])
 
-    found = {(p["first"]["id"], p["second"]["id"]): p for p in page["items"]}
+    found = {(p["first"]["ref"], p["second"]["ref"]): p for p in page["items"]}
     both_in_fixture = {
         pair
         for pair in found
-        if pair[0] in {s["id"] for s in firsts + seconds}
-        and pair[1] in {s["id"] for s in firsts + seconds}
+        if pair[0] in {s["ref"] for s in firsts + seconds}
+        and pair[1] in {s["ref"] for s in firsts + seconds}
     }
     flagged_duplicates = duplicates & set(found)
     flagged_unrelated = unrelated & set(found)
@@ -816,64 +830,62 @@ async def test_the_overlap_finder_flags_the_duplicates_and_not_the_unrelated_pai
     # Listed most alike first, and each pair says where its two sides are.
     similarities = [p["similarity"] for p in page["items"]]
     assert similarities == sorted(similarities, reverse=True)
-    sample = found[(firsts[0]["id"], seconds[0]["id"])]
-    assert (sample["first"]["epic_id"], sample["second"]["epic_id"]) == (epic_a["id"], epic_b["id"])
+    sample = found[(firsts[0]["ref"], seconds[0]["ref"])]
+    assert (sample["first"]["epic"], sample["second"]["epic"]) == (epic_a["ref"], epic_b["ref"])
     assert sample["first"]["epic_title"] == "Overlap fixture A"
     assert sample["first"]["status"] == "ready" and sample["already_linked"] == []
     # Stories in the same epic are never a pair, however alike.
-    twin = await new_story(client, _DUPLICATES[0][0], parent_id=epic_a["id"])
+    twin = await new_story(client, _DUPLICATES[0][0], parent=epic_a["ref"])
     await reindexed(client)
-    again = await every_overlap(client, epic_ids=[epic_a["id"]])
+    again = await every_overlap(client, epics=[epic_a["ref"]])
     assert not any(
-        {p["first"]["id"], p["second"]["id"]} == {twin["id"], firsts[0]["id"]}
+        {p["first"]["ref"], p["second"]["ref"]} == {twin["ref"], firsts[0]["ref"]}
         for p in again["items"]
     )
     assert any(
-        {p["first"]["id"], p["second"]["id"]} == {twin["id"], seconds[0]["id"]}
+        {p["first"]["ref"], p["second"]["ref"]} == {twin["ref"], seconds[0]["ref"]}
         for p in again["items"]
     )
 
     # A higher bar leaves fewer, and a link that already exists is shown.
-    strict = await every_overlap(client, epic_ids=[epic_a["id"]], min_similarity=0.999)
+    strict = await every_overlap(client, epics=[epic_a["ref"]], min_similarity=0.999)
     assert strict["threshold"] == 0.999
     assert 0 < len(strict["items"]) < len(again["items"])
     await ok(
         client,
         "add_link",
         actor="a",
-        source_id=firsts[1]["id"],
-        target_id=seconds[1]["id"],
+        source=firsts[1]["ref"],
+        target=seconds[1]["ref"],
         link_type="duplicates",
     )
-    linked = await every_overlap(client, epic_ids=[epic_a["id"]])
+    linked = await every_overlap(client, epics=[epic_a["ref"]])
     pair = next(
         p
         for p in linked["items"]
-        if {p["first"]["id"], p["second"]["id"]} == {firsts[1]["id"], seconds[1]["id"]}
+        if {p["first"]["ref"], p["second"]["ref"]} == {firsts[1]["ref"], seconds[1]["ref"]}
     )
     assert pair["already_linked"] == ["duplicates"]
     # A dropped story is not compared unless asked for.
-    current = await ok(client, "get_node", node_id=seconds[2]["id"])
+    current = await ok(client, "get_node", node=seconds[2]["ref"])
     await ok(
         client,
         "update_node",
         actor="a",
-        node_id=seconds[2]["id"],
+        node=seconds[2]["ref"],
         expected_version=current["version"],
         status="dropped",
     )
     gone = {
-        (p["first"]["id"], p["second"]["id"])
-        for p in (await every_overlap(client, epic_ids=[epic_a["id"]]))["items"]
+        (p["first"]["ref"], p["second"]["ref"])
+        for p in (await every_overlap(client, epics=[epic_a["ref"]]))["items"]
     }
-    assert (firsts[2]["id"], seconds[2]["id"]) not in gone
+    assert (firsts[2]["ref"], seconds[2]["ref"]) not in gone
     kept = {
-        (p["first"]["id"], p["second"]["id"])
-        for p in (await every_overlap(client, epic_ids=[epic_a["id"]], include_dropped=True))[
-            "items"
-        ]
+        (p["first"]["ref"], p["second"]["ref"])
+        for p in (await every_overlap(client, epics=[epic_a["ref"]], include_dropped=True))["items"]
     }
-    assert (firsts[2]["id"], seconds[2]["id"]) in kept
+    assert (firsts[2]["ref"], seconds[2]["ref"]) in kept
 
 
 async def test_the_overlap_finder_only_reports_and_changes_nothing(client: Client) -> None:
@@ -883,15 +895,15 @@ async def test_the_overlap_finder_only_reports_and_changes_nothing(client: Clien
     async def state() -> list[Any]:
         return [
             (
-                (await ok(client, "get_node", node_id=node["id"]))["version"],
-                len((await ok(client, "node_history", node_id=node["id"]))["items"]),
-                len((await ok(client, "list_links", node_id=node["id"]))["items"]),
+                (await ok(client, "get_node", node=node["ref"]))["version"],
+                len((await ok(client, "node_history", node=node["ref"]))["items"]),
+                len((await ok(client, "list_links", node=node["ref"]))["items"]),
             )
             for node in nodes
         ]
 
     before = await state()
-    page = await every_overlap(client, epic_ids=[epic_a["id"], epic_b["id"]])
+    page = await every_overlap(client, epics=[epic_a["ref"], epic_b["ref"]])
     assert len(page["items"]) >= 8
     assert await state() == before
 
@@ -907,17 +919,17 @@ async def test_overlaps_can_compare_epics_and_rules_and_refuse_bad_asks(client: 
     (story,) = await make_stories(client, 1)
     other = await new_story(client, "Another story")
     rule_one = await make_rule(
-        client, "Every customer gets an invoice by email", story_id=story["id"]
+        client, "Every customer gets an invoice by email", story=story["ref"]
     )
-    rule_two = await make_rule(client, "Each client gets a bill by mail", story_id=other["id"])
+    rule_two = await make_rule(client, "Each client gets a bill by mail", story=other["ref"])
     await reindexed(client)
 
-    epics = await every_overlap(client, item_type="epic", epic_ids=[first["id"]])
-    assert {(p["first"]["id"], p["second"]["id"]) for p in epics["items"]} >= {
-        (first["id"], second["id"])
+    epics = await every_overlap(client, item_type="epic", epics=[first["ref"]])
+    assert {(p["first"]["ref"], p["second"]["ref"]) for p in epics["items"]} >= {
+        (first["ref"], second["ref"])
     }
     assert all(p["first"]["item_type"] == "epic" for p in epics["items"])
-    rules = await every_overlap(client, item_type="rule", epic_ids=[story["parent_id"]])
+    rules = await every_overlap(client, item_type="rule", epics=[story["parent"]])
     assert (rule_one["id"], rule_two["id"]) in {
         (p["first"]["id"], p["second"]["id"]) for p in rules["items"]
     }
@@ -925,19 +937,22 @@ async def test_overlaps_can_compare_epics_and_rules_and_refuse_bad_asks(client: 
     assert "item_type must be one of story, epic, rule" in await refused(
         client, "find_overlaps", item_type="task"
     )
-    assert "There is no epic with id 987654321" in await refused(
-        client, "find_overlaps", epic_ids=[987654321]
+    assert "There is no epic 987654321 in this project" in await refused(
+        client, "find_overlaps", epics=["epic:987654321"]
+    )
+    assert "epics must name epics, such as epic:3, but story:1 is not an epic" in await refused(
+        client, "find_overlaps", epics=["story:1"]
     )
     assert "min_similarity must be a number from 0 to 1" in await refused(
         client, "find_overlaps", min_similarity=2
     )
     assert "offset must be 0 or more" in await refused(client, "find_overlaps", offset=-5)
     # Paging: a page of one, then the rest.
-    one = await ok(client, "find_overlaps", item_type="epic", epic_ids=[first["id"]], limit=1)
+    one = await ok(client, "find_overlaps", item_type="epic", epics=[first["ref"]], limit=1)
     assert len(one["items"]) == 1 and one["total"] == len(epics["items"])
     if one["total"] > 1:
         assert one["next_offset"] == 1
-    past = await ok(client, "find_overlaps", item_type="epic", epic_ids=[first["id"]], offset=500)
+    past = await ok(client, "find_overlaps", item_type="epic", epics=[first["ref"]], offset=500)
     assert past["items"] == [] and past["total"] == epics["total"]
 
 
@@ -955,51 +970,51 @@ async def test_similar_items_for_an_item_or_a_text_exclude_the_item_and_are_sugg
     other_fact = await make_fact(client, "Mailing a bill to a client after charging is good")
     await reindexed(client)
 
-    page = await ok(client, "similar_items", node_id=firsts[0]["id"], limit=200)
+    page = await ok(client, "similar_items", node=firsts[0]["ref"], limit=200)
 
     results = by_item(page)
-    assert ("story", firsts[0]["id"]) not in results
-    assert ("story", seconds[0]["id"]) in results
+    assert ("story", firsts[0]["ref"]) not in results
+    assert ("story", seconds[0]["ref"]) in results
     assert ("fact", fact["id"]) in results and ("decision", decision["id"]) in results
     assert all(r["matched"] == "meaning" and r["suggestion"] for r in results.values())
     assert results[("fact", fact["id"])]["confirmation"] == "unconfirmed"
-    assert results[("story", seconds[0]["id"])]["confirmation"] is None
+    assert results[("story", seconds[0]["ref"])]["confirmation"] is None
     assert page["items"][0]["similarity"] >= page["items"][-1]["similarity"]
     assert page["counts_by_type"]["story"] >= 1 and page["index"]["meaning"] == "used"
     for_fact = await ok(client, "similar_items", fact_id=fact["id"], min_similarity=0.2, limit=50)
     assert ("fact", other_fact["id"]) in by_item(for_fact)
     assert ("fact", fact["id"]) not in by_item(for_fact)
 
-    only = await ok(client, "similar_items", node_id=firsts[0]["id"], types=["decision", "fact"])
+    only = await ok(client, "similar_items", node=firsts[0]["ref"], types=["decision", "fact"])
     assert {i["item_type"] for i in only["items"]} <= {"decision", "fact"}
     assert ("decision", decision["id"]) in by_item(only)
     for_text = await ok(
         client, "similar_items", text="Mail every client a bill after charge", limit=50
     )
-    assert ("story", seconds[0]["id"]) in by_item(for_text)
+    assert ("story", seconds[0]["ref"]) in by_item(for_text)
     for_decision = await ok(client, "similar_items", decision_id=decision["id"], types=["story"])
-    assert ("story", firsts[0]["id"]) in by_item(for_decision)
+    assert ("story", firsts[0]["ref"]) in by_item(for_decision)
     for_rule = await make_rule(
-        client, "Send customers an invoice by email after payment", story_id=firsts[0]["id"]
+        client, "Send customers an invoice by email after payment", story=firsts[0]["ref"]
     )
     await reindexed(client)
-    assert ("story", firsts[0]["id"]) in by_item(
+    assert ("story", firsts[0]["ref"]) in by_item(
         await ok(client, "similar_items", rule_id=for_rule["id"], types=["story"])
     )
     # A paged walk gives each once.
     seen: list[tuple[str, int]] = []
     offset: int | None = 0
     while offset is not None:
-        part = await ok(client, "similar_items", node_id=firsts[0]["id"], limit=2, offset=offset)
-        seen.extend((i["item_type"], i["id"]) for i in part["items"])
+        part = await ok(client, "similar_items", node=firsts[0]["ref"], limit=2, offset=offset)
+        seen.extend(key_of(i) for i in part["items"])
         offset = part["next_offset"]
     assert len(seen) == len(set(seen)) == part["total"]
 
     for arguments, expected in (
-        ({}, "Give exactly one of node_id"),
-        ({"node_id": 1, "text": "x"}, "Give exactly one of node_id"),
-        ({"fact_id": 1, "decision_id": 1}, "Give exactly one of node_id"),
-        ({"node_id": 987654321}, "There is no node with id 987654321"),
+        ({}, "Give exactly one of node, rule_id"),
+        ({"node": "story:1", "text": "x"}, "Give exactly one of node, rule_id"),
+        ({"fact_id": 1, "decision_id": 1}, "Give exactly one of node, rule_id"),
+        ({"node": "story:987654321"}, "There is no story 987654321 in this project"),
         ({"rule_id": 987654321}, "There is no requirement with id 987654321"),
         ({"decision_id": 987654321}, "There is no decision with id 987654321"),
         ({"fact_id": 987654321}, "There is no fact with id 987654321"),
@@ -1015,10 +1030,10 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
 ) -> None:
     story = await new_story(client, "Customers receive an invoice by email after payment")
     linked_decision = await make_decision(
-        client, "Linked", text="Customers get an invoice by email", node_ids=[story["id"]]
+        client, "Linked", text="Customers get an invoice by email", nodes=[story["ref"]]
     )
     linked_fact = await make_fact(
-        client, "Clients receive a bill by mail after payment", node_ids=[story["id"]]
+        client, "Clients receive a bill by mail after payment", nodes=[story["ref"]]
     )
     alike_decision = await make_decision(
         client,
@@ -1053,10 +1068,10 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
     )
     await reindexed(client)
 
-    plain = await ok(client, "recall", node_id=story["id"])
+    plain = await ok(client, "recall", node=story["ref"])
     assert plain["similar"] is None
 
-    result = await ok(client, "recall", node_id=story["id"], with_similar=True)
+    result = await ok(client, "recall", node=story["ref"], with_similar=True)
 
     similar = result["similar"]
     found = by_item({"items": similar["items"]})
@@ -1095,7 +1110,7 @@ async def test_recall_can_add_what_is_alike_but_not_linked_and_says_it_is_a_sugg
     # no suggestions and says why, and everything exact is still there.
     with embeddings_stopped():
         fresh = await new_story(client, "Customers receive an invoice by email after payment")
-        down = await ok(client, "recall", node_id=fresh["id"], with_similar=True)
+        down = await ok(client, "recall", node=fresh["ref"], with_similar=True)
         assert down["similar"]["items"] == []
         assert down["similar"]["index"]["meaning"] == "service_unreachable"
         assert down["project_wide_decisions"]["count"] >= 1
@@ -1124,12 +1139,12 @@ async def test_reading_tools_leave_the_index_exactly_as_it_was(client: Client) -
     word = unique_word()
     await search(client, word)
     await search(client, "invoice by email", mode="meaning")
-    await ok(client, "similar_items", node_id=firsts[0]["id"])
+    await ok(client, "similar_items", node=firsts[0]["ref"])
     await ok(client, "similar_items", text="anything at all")
-    await ok(client, "find_overlaps", epic_ids=[epic_a["id"]])
-    await ok(client, "recall", node_id=firsts[0]["id"], with_similar=True)
+    await ok(client, "find_overlaps", epics=[epic_a["ref"]])
+    await ok(client, "recall", node=firsts[0]["ref"], with_similar=True)
     await ok(client, "list_nodes", limit=5)
-    await ok(client, "get_node", node_id=firsts[0]["id"])
-    await ok(client, "node_history", node_id=firsts[0]["id"])
+    await ok(client, "get_node", node=firsts[0]["ref"])
+    await ok(client, "node_history", node=firsts[0]["ref"])
     await ok(client, "server_status")
     assert snapshot() == before

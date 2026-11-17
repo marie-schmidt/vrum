@@ -12,22 +12,22 @@ import { attribution, concernsList, confirmationWords, describedBy, isActive, li
 import { describe } from './events.js';
 import { clip, refuse, uid } from './forms.js';
 import { icon } from './icons.js';
-import { KIND, kindIcon } from './labels.js';
+import { KIND, itemCode, kindIcon } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { recallBlock, askRecall } from './recall.js';
 import { confirmDialog, linkDialog, placeRequirementDialog, recordDecisionDialog, recordFactDialog, requirementDialog, supersedeDialog, withdrawDialog } from './record-forms.js';
 import { withReferences } from './reference-picker.js';
-import { fetchMentions, itemLink, loadTargets, mentionsList, statusWords } from './references.js';
+import { fetchMentions, loadTargets, mentionsList, nodeLink, statusWords } from './references.js';
 import { sync } from './store.js';
 
 export { linkDialog, placeRequirementDialog, recordDecisionDialog, recordFactDialog, requirementDialog, supersedeDialog, withdrawDialog };
 
 // -- what other pages call ---------------------------------------------------------------------------
 
-// Shows one item in the shared detail panel, on whatever page the person is on. `kind` is node,
-// rule, decision or fact.
-export function openRecord(kind, id) {
-  ui.navigate({ sel: `${kind}:${id}`, panel: null });
+// Shows one item in the shared detail panel, on whatever page the person is on. `kind` is the real
+// kind (epic, story, task, rule, decision or fact) and `number` its number.
+export function openRecord(kind, number) {
+  ui.navigate({ sel: `${kind}:${number}`, panel: null });
 }
 
 // The Unconfirmed / Confirmed dropdown of a fact or a decision, with who confirmed it and when.
@@ -108,17 +108,18 @@ export const closeButton = (label, onclick = () => ui.navigate({ sel: null })) =
 // the head already shows in its own place.
 const spoken = (text) => h('span', { class: 'spoken' }, text);
 
-// The head of the panel: what it is (kind and id, small and in capitals), its chips, a large title
-// and the way to close it. The close button comes last, so that the title is followed by it when
-// the Tab key is pressed; it is drawn at the top, beside the label.
-export function detailHead({ kind, id, chips = null, title, titleId, close }) {
+// The head of the panel: what it is (kind and code, small and in capitals), its chips, a large title
+// and the way to close it. `code` is S-12 for an epic, story or task and #7 for the rest. The tools
+// (a link to the full page, then the close button) come last, so that the title is followed by them
+// when the Tab key is pressed; they are drawn at the top, beside the label.
+export function detailHead({ kind, code, chips = null, title, titleId, close = null, actions = null }) {
   return h(
     'header',
     { class: 'detail-head' },
-    h('p', { class: 'detail-label' }, kindIcon(kind, 14), h('span', {}, `#${id} / ${KIND[kind].label}`)),
+    h('p', { class: 'detail-label' }, kindIcon(kind, 14), h('span', {}, `${code} / ${KIND[kind].label}`)),
     chips,
-    h('h2', { id: titleId, class: 'detail-title', tabindex: -1 }, spoken(`#${id} `), ...title),
-    close,
+    h('h2', { id: titleId, class: 'detail-title', tabindex: -1 }, spoken(`${code} `), ...title),
+    actions || close ? h('div', { class: 'detail-tools' }, actions, close) : null,
   );
 }
 
@@ -237,10 +238,10 @@ export const requirementKindChip = (rule) => h('span', { class: 'chip kind kind-
 // A requirement in a list: its status, its title (which opens it in the panel) and what can be
 // done to it. The version it is changed at is the one it was drawn with.
 export function requirementRow(rule) {
-  const unplaced = rule.story_id === null || rule.story_id === undefined;
+  const unplaced = rule.story === null || rule.story === undefined;
   return h(
     'li',
-    { class: `requirement status-${rule.status}`, dataset: { rule: rule.id, status: rule.status, story: rule.story_id ?? '' } },
+    { class: `requirement status-${rule.status}`, dataset: { rule: rule.id, status: rule.status, story: rule.story ?? '' } },
     h('div', { class: 'record-chips' }, requirementKindChip(rule), ruleStatusChip(rule)),
     recordLink('rule', rule.id, { class: 'record-title' }, rule.title),
     h('div', { class: 'row-actions' }, button('Edit…', () => requirementDialog({ rule }), 'edit-requirement'), button(unplaced ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
@@ -294,7 +295,7 @@ export async function renderRecord(root, kind, id, state = { dirty: false }) {
   state.version = null;
   state.dirty = false;
   // What it concerns, so that news about one of those (a rename, say) redraws the panel.
-  state.concerns = { node: record.node_ids || [], rule: record.rule_ids || [], decision: record.decision_ids || [] };
+  state.concerns = { node: record.nodes || [], rule: record.rule_ids || [], decision: record.decision_ids || [] };
   const label = KIND[kind].label;
   const statement = kind === 'fact' && sayableAsTitle(record.text);
   const lifecycle = lifecycleLines(record);
@@ -303,7 +304,7 @@ export async function renderRecord(root, kind, id, state = { dirty: false }) {
     { class: 'record-detail detail', dataset: { record: `${kind}:${record.id}`, kind, status: record.status, confirmation: record.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed', projectWide: String(Boolean(record.project_wide)) } },
     detailHead({
       kind,
-      id: record.id,
+      code: itemCode(kind, record.id),
       chips: recordChips(record, { kind: false }),
       title: [kind === 'decision' ? record.title : statement ? record.text.trim() : clip(record.text, 140)],
       titleId: 'record-title',
@@ -399,12 +400,12 @@ export async function renderRule(root, id, state = { dirty: false }, force = tru
   }
   state.version = rule.version;
   state.dirty = false;
-  const unplaced = rule.story_id === null || rule.story_id === undefined;
+  const unplaced = rule.story === null || rule.story === undefined;
   const view = h(
     'article',
-    { class: 'record-detail rule-detail detail', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, story: rule.story_id ?? '' } },
-    detailHead({ kind: 'rule', id: rule.id, chips: h('div', { class: 'chips' }, ruleStatusChip(rule)), title: [rule.title], titleId: 'record-title', close: closeButton('Close the requirement') }),
-    unplaced ? h('p', { class: 'in-story quiet' }, 'It is in no story yet.') : h('p', { class: 'in-story' }, 'In story ', itemLink(rule.story_id)),
+    { class: 'record-detail rule-detail detail', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, story: rule.story ?? '' } },
+    detailHead({ kind: 'rule', code: itemCode('rule', rule.id), chips: h('div', { class: 'chips' }, ruleStatusChip(rule)), title: [rule.title], titleId: 'record-title', close: closeButton('Close the requirement') }),
+    unplaced ? h('p', { class: 'in-story quiet' }, 'It is in no story yet.') : h('p', { class: 'in-story' }, 'In story ', nodeLink(rule.story)),
     h('div', { class: 'panel-actions' }, button(unplaced ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
     section('Details', 'edit', h('div', { class: 'body-text' }, rule.body ? renderMarkdown(rule.body) : h('span', { class: 'quiet' }, 'No details.')), ruleForm(rule, state)),
     section('Facts and decisions', 'context', recordButtons({ rule_ids: [rule.id] }), recallBlock({ rule_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) })),

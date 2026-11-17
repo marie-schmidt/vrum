@@ -16,14 +16,24 @@ from playwright.async_api import expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
 from tests.board_helpers import SLOW, browser_page, made
-from tests.helpers import compose, connect, export_everything, ok, refused, run_sql, unique_word
+from tests.helpers import (
+    all_nodes,
+    code_of,
+    compose,
+    connect,
+    export_everything,
+    ok,
+    refused,
+    run_sql,
+    unique_word,
+)
 from tests.test_accounts_integration import hashed, held, messages, said, sign_in
 from tests.test_board_accounts_integration import (
     create_in_the_browser,
     register_in_the_browser,
     wait_until_healthy,
 )
-from tests.test_projects_isolation_integration import Side, sql_refused, three_projects
+from tests.test_projects_isolation_integration import Side, nowhere, sql_refused, three_projects
 from tests.world import api, make_project, register, server_base
 
 PASSWORD = "a long enough password"
@@ -73,7 +83,7 @@ async def registering(base: str) -> None:
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
         key = (await w.page.locator("#key-secret").inner_text()).strip()
         async with connect(f"{base}/mcp", key) as agent:
-            seen = {node["id"]: node["title"] for node in (await ok(agent, "list_nodes"))["items"]}
+            seen = {node["ref"]: node["title"] for node in (await ok(agent, "list_nodes"))["items"]}
         proof(
             "M15",
             "starting with no account, a person registers in the browser (no server token is typed "
@@ -98,9 +108,9 @@ async def registering(base: str) -> None:
         await expect(w.page.locator("li.project")).to_have_count(1, timeout=SLOW)
         await w.page.locator("li.project a.open-project").click()
         await w.go("#/board")
-        await expect(w.page.locator(f".card[data-id='{task}']")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
         async with connect(f"{base}/mcp", key) as agent:
-            after = [node["id"] for node in (await ok(agent, "list_nodes"))["items"]]
+            after = [node["ref"] for node in (await ok(agent, "list_nodes"))["items"]]
         proof(
             "M15",
             "signing out and back in with the email and password, after the server has restarted, "
@@ -235,17 +245,17 @@ async def walls() -> None:
         forged = await a1.client.call_tool(
             "list_nodes", {"limit": 200, "project_id": b1.project.id, "owner": "the other account"}
         )
-        guessed = await refused(a1.client, "get_node", node_id=there.node)
+        guessed = await refused(a1.client, "get_node", node=there.node)
         proof(
             "M15",
             "two accounts, two projects of one and one of the other: each account's list holds "
-            "only its own projects; another owner's project, a guessed record id and forged "
-            "owner or project arguments are refused without revealing or changing anything",
+            "only its own projects; another owner's project, a guessed record reference and "
+            "forged owner or project arguments are refused without revealing or changing anything",
             mine == ["One", "Two"]
             and theirs == ["Three"]
             and taken.status == absent.status == 404
             and taken.body == absent.body
-            and f"no node with id {there.node}" in guessed
+            and nowhere(there.node) in guessed
             and (forged.is_error or b1.word not in json.dumps(forged.structured_content)),
             f"{mine} / {theirs}",
         )
@@ -253,6 +263,11 @@ async def walls() -> None:
         for side in sides:
             await reindexed_side(side)
         checks = []
+        # Each project numbers its own epics, stories and tasks from 1: the same references name
+        # different items in each.
+        shared = {"epic:1", "story:1", "story:2", "task:1", "task:2", "task:3"}
+        for side in sides:
+            checks.append(shared <= {node["ref"] for node in await all_nodes(side.client)})
         for side in sides:
             others = [other for other in sides if other is not side]
             found = {
@@ -262,7 +277,7 @@ async def walls() -> None:
                 ),
                 "similar": await ok(side.client, "similar_items", text="log in with email"),
                 "overlaps": await ok(side.client, "find_overlaps", min_similarity=0.0),
-                "recall": await ok(side.client, "recall", node_id=side.world["task3"]["id"]),
+                "recall": await ok(side.client, "recall", node=side.world["task3"]["ref"]),
                 "coverage": await ok(side.client, "coverage_report", limit=200),
                 "claims": await ok(side.client, "who_is_working"),
                 "feed": await ok(side.client, "changes_since", after_event_id=0, limit=200),
@@ -285,7 +300,8 @@ async def walls() -> None:
             "M15",
             "exact and semantic search, similar items, overlaps, recall, project-wide decisions, "
             "coverage, claims, change feeds, counts and exports each show only the project's own "
-            "records, though the three projects share the same id numbers",
+            "records, though the three projects share the very same references (epic:1, story:1, "
+            "task:3 and the rest) and the same record numbers",
             all(checks),
             f"{len(checks)} comparisons over 3 projects",
         )
@@ -301,14 +317,14 @@ async def walls() -> None:
                 actor="x",
                 kind="story",
                 title="orphan",
-                parent_id=there.epic,
+                parent=there.epic,
             ),
             await refused(
                 a1.client,
                 "add_link",
                 actor="x",
-                source_id=a1.world["story1"]["id"],
-                target_id=there.node,
+                source=a1.world["story1"]["ref"],
+                target=there.node,
                 link_type="relates_to",
             ),
             await refused(
@@ -334,12 +350,12 @@ async def walls() -> None:
         mine_ids = a1.world
         by_database = [
             sql_refused(
-                "INSERT INTO nodes (project_id, id, kind, parent_id, title) "
-                f"VALUES ({one}, 9001, 'story', {there.epic}, 'x')"
+                "INSERT INTO nodes (project_id, kind, number, parent, title) "
+                f"VALUES ({one}, 'story', 9001, '{there.epic}', 'x')"
             ),
             sql_refused(
-                "INSERT INTO links (project_id, source_id, target_id, link_type) "
-                f"VALUES ({one}, {mine_ids['story1']['id']}, {there.node}, 'relates_to')",
+                "INSERT INTO links (project_id, source, target, link_type) "
+                f"VALUES ({one}, '{mine_ids['story1']['ref']}', '{there.node}', 'relates_to')",
                 project=one,
             ),
             sql_refused(
@@ -374,7 +390,8 @@ async def walls() -> None:
             as_project=True,
         ).stdout.strip()
         forged_row = sql_refused(
-            f"INSERT INTO nodes (project_id, kind, title) VALUES ({b1.project.id}, 'epic', 'x')",
+            "INSERT INTO nodes (project_id, kind, number, title) "
+            f"VALUES ({b1.project.id}, 'epic', next_id('epic'), 'x')",
             project=one,
             as_project=True,
         )
@@ -399,8 +416,8 @@ async def walls() -> None:
         text = json.dumps(document)
         proof(
             "M15",
-            "a project's export loads into an empty project with the same ids and comes back "
-            "identical, holds nothing of any account, and changes no other project",
+            "a project's export loads into an empty project with the same references and ids and "
+            "comes back identical, holds nothing of any account, and changes no other project",
             same
             and "already holds data" in second
             and not any(
@@ -437,9 +454,9 @@ async def switching() -> None:
         await made(two, "epic", f"Only in the second {word}")
         async with browser_page(first.address, token=first.key, name=None, keep_bodies=True) as w:
             # The first project's search drawer and detail panel are open when it is left.
-            await w.open(f"#/board?drawer=search&search=first+{word}&sel=node:{story_one}")
+            await w.open(f"#/board?drawer=search&search=first+{word}&sel={story_one}")
             await expect(w.page.locator("#card-title")).to_contain_text(
-                f"#{story_one} ", timeout=SLOW
+                f"{code_of(story_one)} ", timeout=SLOW
             )
             await expect(w.page.locator("#search-results li.result").first).to_be_visible(
                 timeout=SLOW
@@ -494,7 +511,7 @@ async def switching() -> None:
                 "#/roadmap",
                 "#/board?drawer=activity",
                 f"#/board?drawer=search&search=first+{word}",
-                f"#/board?sel=node:{story_one}",
+                f"#/board?sel={story_one}",
             ):
                 await w.go(address)
                 await asyncio.sleep(1)
@@ -563,24 +580,24 @@ async def keys() -> None:
                 actor="agent",
                 kind="story",
                 title=f"A story {word}",
-                parent_id=epic,
+                parent=epic,
             )
             taken = await ok(agent, "next_work", actor="agent-keyed")
             await ok(
                 agent,
                 "finish_work",
                 actor="agent-keyed",
-                node_id=story["id"],
+                node=story["ref"],
                 outcome="done",
                 note="Done with a key made on the board.",
             )
-            finished = await ok(agent, "get_node", node_id=story["id"])
+            finished = await ok(agent, "get_node", node=story["ref"])
             seen = json.dumps(await ok(agent, "list_nodes", limit=200))
             proof(
                 "M15",
                 "a key made on the board connects a real MCP client that completes next_work and "
                 "finish_work in its project, and cannot see the owner's other project",
-                taken["work"]["id"] == story["id"]
+                taken["work"]["ref"] == story["ref"]
                 and finished["status"] == "done"
                 and f"Work {word}" in seen
                 and f"Elsewhere {word}" not in seen,

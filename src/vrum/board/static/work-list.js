@@ -1,45 +1,51 @@
 // The Graph's list of work: the hierarchy of epics, stories and tasks as a tree that opens and
 // closes, with each item's status, what it needs first and what needs it, and who holds it.
-// Choosing an item shows it in the shared detail panel. It draws what the Graph page hands it (the
-// same scope the map draws) and keeps nothing of its own but which branches are closed.
+// Choosing an item shows it in the shared detail panel. The title of an epic or a story is a link to
+// its own page (a plain click goes there, a click with a modifier key opens it the way a link
+// does), and a small "Quick look" button beside it shows it in the panel; a task's title opens the
+// panel. It draws what the Graph page hands it (the same scope the map draws) and keeps nothing of
+// its own but which branches are closed.
 
+import { itemLink } from './ctx.js';
 import { h, moment, plural } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, kindIcon, statusChip } from './labels.js';
+import { KIND, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, statusChip } from './labels.js';
 import { openRecord } from './records.js';
 import { store } from './store.js';
-import { keyOf } from './graph-data.js';
+import { byDot } from './graph-data.js';
 import { connectionsDetails } from './list-parts.js';
 
-const byId = (a, b) => a.id - b.id;
-
 export function createWorkList() {
-  const closed = new Set(); // ids of the branches the person closed
+  const closed = new Set(); // refs of the branches the person closed
   const tree = h('ul', { class: 'gv-tree', id: 'work-tree', role: 'tree', 'aria-label': 'Epics, stories and tasks' });
   let current = null; // what the page last handed over
   let chosen = null;
 
-  const select = (node) => openRecord('node', node.id);
+  const select = (node) => openRecord(node.kind, node.number);
+  const showRef = (ref) => {
+    const { kind, number } = parseNodeRef(ref);
+    openRecord(kind, number);
+  };
 
   function relation(node, type, outgoing) {
-    const ids = store.links
-      .filter((link) => link.link_type === type && (outgoing ? link.source_id === node.id : link.target_id === node.id))
-      .map((link) => (outgoing ? link.target_id : link.source_id));
-    return [...new Set(ids)].sort((a, b) => a - b);
+    const refs = store.links
+      .filter((link) => link.link_type === type && (outgoing ? link.source === node.ref : link.target === node.ref))
+      .map((link) => (outgoing ? link.target : link.source));
+    return [...new Set(refs)].sort(byRef);
   }
 
   function ties(node) {
     const needs = relation(node, 'needs_first', true);
     const needed = relation(node, 'needs_first', false);
-    const part = (className, words, ids) =>
-      ids.length
+    const part = (className, words, refs) =>
+      refs.length
         ? h(
             'span',
-            { class: `gv-ties ${className}`, dataset: { ids: ids.join(',') } },
+            { class: `gv-ties ${className}`, dataset: { refs: refs.join(',') } },
             `${words} `,
-            ids.map((id, at) => {
-              const other = store.nodes.get(id);
-              return [at ? ', ' : '', h('button', { type: 'button', class: 'link gv-link', tabindex: -1, 'data-other': keyOf('node', id), onclick: () => openRecord('node', id) }, other ? `#${id} ${other.title}${other.status === 'done' ? ' (done)' : ''}` : `#${id}`)];
+            refs.map((ref, at) => {
+              const other = store.nodes.get(ref);
+              return [at ? ', ' : '', h('button', { type: 'button', class: 'link gv-link', tabindex: -1, 'data-other': ref, onclick: () => showRef(ref) }, other ? `${codeOf(ref)} ${other.title}${other.status === 'done' ? ' (done)' : ''}` : codeOf(ref))];
             }),
           )
         : null;
@@ -67,13 +73,24 @@ export function createWorkList() {
     return details;
   }
 
+  // The title of an epic or story is a link to its page, with a quick look at it in the panel
+  // beside it; a task's title is plain, and a click on its row shows it in the panel.
+  function titleOf(node) {
+    if (node.kind === 'task') return node.title;
+    const code = nodeCode(node.kind, node.number);
+    return [
+      itemLink(node.ref, { class: 'gv-title', tabindex: -1 }, node.title),
+      h('button', { type: 'button', class: 'gv-quick ghost icon-only small', tabindex: -1, title: 'Quick look', 'aria-label': `Quick look at ${code}`, onclick: () => select(node) }, icon('search', { size: 14 })),
+    ];
+  }
+
   function branch(dot, level, kids) {
     const node = dot.record;
-    const children = kids(node.id);
+    const children = kids(node.ref);
     const parent = children.length > 0;
-    const open = parent && !closed.has(node.id);
+    const open = parent && !closed.has(node.ref);
     const total = node.progress_total;
-    const key = keyOf('node', node.id);
+    const key = node.ref;
     const item = h(
       'li',
       {
@@ -84,18 +101,18 @@ export function createWorkList() {
         'aria-expanded': parent ? String(open) : null,
         'aria-selected': key === chosen ? 'true' : 'false',
         'aria-current': key === chosen ? 'true' : null,
-        'aria-label': `${node.kind[0].toUpperCase()}${node.kind.slice(1)} ${node.id}: ${node.title}. ${node.status.replace('_', ' ')}.${total !== null ? ` ${node.progress_done} of ${total} tasks done.` : ''}${node.claimed_by ? ` Held by ${node.claimed_by}.` : ''}`,
-        dataset: { key, kind: 'node', type: node.kind, id: node.id, status: node.status },
+        'aria-label': `${KIND[node.kind].label} ${node.number}: ${node.title}. ${node.status.replace('_', ' ')}.${total !== null ? ` ${node.progress_done} of ${total} tasks done.` : ''}${node.claimed_by ? ` Held by ${node.claimed_by}.` : ''}`,
+        dataset: { key, ref: node.ref, kind: node.kind, number: node.number, status: node.status },
         onkeydown: (event) => walk(event, node, parent, open),
       },
       h(
         'div',
         { class: 'gv-row', onclick: (event) => { if (!event.target.closest('button, a, summary, details')) select(node); } },
         parent
-          ? h('button', { type: 'button', class: 'gv-twisty', tabindex: -1, 'aria-label': `${open ? 'Close' : 'Open'} ${node.title}`, onclick: () => setOpen(node.id, !open) }, icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }))
+          ? h('button', { type: 'button', class: 'gv-twisty', tabindex: -1, 'aria-label': `${open ? 'Close' : 'Open'} ${node.title}`, onclick: () => setOpen(node.ref, !open) }, icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }))
           : h('span', { class: 'gv-twisty none' }),
         h('span', { class: 'gv-kind' }, kindIcon(node.kind, 14), KIND[node.kind].label),
-        h('span', { class: 'gv-label' }, h('span', { class: 'id' }, `#${node.id} `), node.title),
+        h('span', { class: 'gv-label' }, h('span', { class: 'id' }, `${nodeCode(node.kind, node.number)} `), titleOf(node)),
         statusChip(node.status),
         total !== null ? progress(node, total) : null,
         h('div', { class: 'gv-ties-line' }, claim(node), ties(node)),
@@ -126,14 +143,14 @@ export function createWorkList() {
     const hadFocus = tree.contains(document.activeElement);
     const focused = tree.querySelector('li[tabindex="0"]')?.dataset.key;
     const dots = [...ctx.shown.dots.values()].filter((dot) => dot.isNode);
-    const present = new Set(dots.map((dot) => dot.id));
+    const present = new Set(dots.map((dot) => dot.key));
     const kidsOf = new Map();
     for (const dot of dots) {
-      const parent = present.has(dot.record.parent_id) ? dot.record.parent_id : null;
+      const parent = present.has(dot.record.parent) ? dot.record.parent : null;
       if (!kidsOf.has(parent)) kidsOf.set(parent, []);
       kidsOf.get(parent).push(dot);
     }
-    const kids = (parent) => (kidsOf.get(parent) || []).sort((a, b) => byId(a, b));
+    const kids = (parent) => (kidsOf.get(parent) || []).sort(byDot);
     const rows = kids(null).map((dot) => branch(dot, 1, kids));
     const nothing = ![...ctx.all.dots.values()].some((dot) => dot.isNode);
     tree.replaceChildren(...(rows.length ? rows : [emptyRow(ctx, nothing)]));
@@ -164,9 +181,9 @@ export function createWorkList() {
     return item;
   }
 
-  function setOpen(id, open) {
-    if (open) closed.delete(id);
-    else closed.add(id);
+  function setOpen(ref, open) {
+    if (open) closed.delete(ref);
+    else closed.add(ref);
     if (current) draw(current);
   }
 
@@ -189,10 +206,10 @@ export function createWorkList() {
     else if (key === 'Home') focusItem(list[0]);
     else if (key === 'End') focusItem(list[list.length - 1]);
     else if (key === 'ArrowRight') {
-      if (parent && !open) setOpen(node.id, true);
+      if (parent && !open) setOpen(node.ref, true);
       else if (parent) focusItem(list[at + 1]);
     } else if (key === 'ArrowLeft') {
-      if (parent && open) setOpen(node.id, false);
+      if (parent && open) setOpen(node.ref, false);
       else {
         const up = here.parentElement.closest('li[role=treeitem]');
         if (up) focusItem(up);

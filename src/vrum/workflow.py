@@ -25,15 +25,20 @@ from vrum.claims import (
     take_claim,
 )
 from vrum.common import (
+    Ref,
     Refusal,
     check_choice,
     clean_actor,
     fetch_all,
     fetch_one,
+    is_node_ref,
+    node_order,
+    node_words,
     page_size,
     parse_day,
+    parse_node_ref,
+    split_node_ref,
     split_page,
-    unique_ids,
 )
 from vrum.db import Database
 from vrum.decisions import require_decision
@@ -62,7 +67,7 @@ from vrum.search import Searcher, SearchResult
 # What a story or task is picked by: urgent first, then the earliest target date, then the oldest.
 _URGENCY = (
     "CASE s.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, "
-    "s.target_on NULLS LAST, s.created_at, s.id"
+    "s.target_on NULLS LAST, s.created_at, s.kind_rank, s.number"
 )
 # Free work: a story or task nobody holds that can be started (ready), or that someone took and
 # left when their claim ran out. A story whose tasks are still open is worked through those tasks,
@@ -70,10 +75,10 @@ _URGENCY = (
 _FREE_WORK = (
     "s.kind IN ('story', 'task') AND s.claimed_by IS NULL AND cardinality(s.waiting_on) = 0 "
     "AND (s.status = 'ready' OR (s.status = 'in_progress' AND s.lapsed_claim_by IS NOT NULL)) "
-    "AND (s.kind = 'task' OR NOT EXISTS (SELECT 1 FROM nodes t WHERE t.parent_id = s.id "
+    "AND (s.kind = 'task' OR NOT EXISTS (SELECT 1 FROM nodes t WHERE t.parent = s.ref "
     "AND t.status NOT IN ('done', 'dropped'))) "
-    "AND (%(within)s::bigint IS NULL OR s.id = %(within)s OR s.parent_id = %(within)s "
-    "OR s.parent_id IN (SELECT id FROM nodes WHERE parent_id = %(within)s))"
+    "AND (%(within)s::text IS NULL OR s.ref = %(within)s OR s.parent = %(within)s "
+    "OR s.parent IN (SELECT ref FROM nodes WHERE parent = %(within)s))"
 )
 DEFAULT_CONTEXT_CHARS = 10_000
 _PARENT_BODY_CHARS = 600
@@ -97,14 +102,14 @@ _SECTION_ORDER = tuple(_SECTION_NAMES)
 
 
 class Brief(BaseModel):
-    id: int
+    ref: str = Field(description="Its reference, such as story:12.")
     kind: str = Field(description="epic, story or task.")
     title: str
     status: str
 
 
 class ContextParent(BaseModel):
-    id: int
+    ref: str = Field(description="Its reference, such as epic:3.")
     kind: str
     title: str
     status: str
@@ -138,8 +143,8 @@ class ContextDecision(BaseModel):
         description="confirmed once a named person has reviewed it, otherwise unconfirmed."
     )
     confirmed_by: str | None = Field(description="The person who confirmed it.")
-    linked_to: list[int] = Field(
-        description="Which of this item and its parents it is linked to. Empty for a "
+    linked_to: list[str] = Field(
+        description="Which of this item and its parents it is linked to, by reference. Empty for a "
         "project-wide decision that is not linked to any of them."
     )
 
@@ -157,7 +162,9 @@ class ContextFact(BaseModel):
         description="confirmed once a named person has reviewed it, otherwise unconfirmed."
     )
     confirmed_by: str | None = Field(description="The person who confirmed it.")
-    linked_to: list[int] = Field(description="Which of this item and its parents it is linked to.")
+    linked_to: list[str] = Field(
+        description="Which of this item and its parents it is linked to, by reference."
+    )
 
 
 class Prerequisite(BaseModel):
@@ -254,7 +261,8 @@ class CreatedNode(Node):
 class PlanItem(BaseModel):
     key: str = Field(
         description="A name for this item that only this plan uses, so others can "
-        "refer to it. Not stored."
+        "refer to it. Not stored. It must not look like a reference (such as story:12): those "
+        "mean existing items."
     )
     kind: str = Field(description="epic, story or task.")
     title: str
@@ -262,19 +270,20 @@ class PlanItem(BaseModel):
     priority: str = Field(default="normal", description="low, normal, high or urgent.")
     start_on: str | None = Field(default=None, description="YYYY-MM-DD.")
     target_on: str | None = Field(default=None, description="YYYY-MM-DD.")
-    parent: str | int | None = Field(
+    parent: Ref | None = Field(
         default=None,
         description="Required for a story (an epic) and a task (a story): the key of an item in "
-        "this plan, or the id (a number) of one that exists. Leave empty for an epic.",
+        "this plan, or the reference (such as epic:3) of one that exists. Leave empty for an "
+        "epic.",
     )
 
 
 class PlanLink(BaseModel):
-    source: str | int = Field(
-        description="A key in this plan, or the id (a number) of an existing node."
+    source: Ref = Field(
+        description="A key in this plan, or the reference (such as story:12) of an existing node."
     )
-    target: str | int = Field(
-        description="A key in this plan, or the id (a number) of an existing node."
+    target: Ref = Field(
+        description="A key in this plan, or the reference (such as story:12) of an existing node."
     )
     link_type: str = Field(description="needs_first, supersedes, duplicates or relates_to.")
 
@@ -283,28 +292,28 @@ class PlanRule(BaseModel):
     title: str
     body: str = ""
     status: str = Field(default="held", description="held, settled or dropped.")
-    story: str | int | None = Field(
+    story: Ref | None = Field(
         default=None,
-        description="The story that owns it: a key in this plan, or the id of an existing story. "
-        "Leave empty to place it later.",
+        description="The story that owns it: a key in this plan, or the reference (such as "
+        "story:12) of an existing story. Leave empty to place it later.",
     )
 
 
 class PlannedItem(BaseModel):
     key: str
-    id: int
+    ref: str = Field(description="The reference it was given, such as story:12.")
     kind: str
     title: str
 
 
 class PlanSimilar(BaseModel):
     key: str
-    id: int
+    ref: str = Field(description="The reference of the new item.")
     similar: list[SearchResult]
 
 
 class PlanResult(BaseModel):
-    created: list[PlannedItem] = Field(description="Every node created, with its new id.")
+    created: list[PlannedItem] = Field(description="Every node created, with its new reference.")
     link_ids: list[int] = Field(description="The new links, in the order you gave them.")
     rule_ids: list[int] = Field(description="The new rules, in the order you gave them.")
     counts: dict[str, int]
@@ -316,7 +325,7 @@ class PlanResult(BaseModel):
 
 
 class NodeChange(BaseModel):
-    node_id: int
+    node: Ref = Field(description="The reference of the node to change, such as story:12.")
     expected_version: int = Field(description="The version you last read of this node.")
     title: str | None = None
     body: str | None = None
@@ -331,7 +340,7 @@ class NodeChange(BaseModel):
 
 
 class ChangeResult(BaseModel):
-    node_id: int
+    node: str = Field(description="The reference of the node the change was for.")
     applied: bool
     version: int | None = Field(description="The node's version after the change.")
     status: str | None = Field(description="The node's status after the change.")
@@ -364,26 +373,42 @@ class ChangesPage(BaseModel):
 # -- planning: checking a plan before anything is created --------------------------------------
 
 
-def _label(ref: str | int) -> str:
-    return f"the key {ref!r}" if isinstance(ref, str) else f"existing node {ref}"
+def _existing(value: str) -> str | None:
+    """The reference of an existing item, when the text is written as one (a plan key never is)."""
+    return value.strip().lower() if is_node_ref(value) else None
+
+
+def _label(value: str) -> str:
+    found = _existing(value)
+    return f"existing {found}" if found else f"the key {value!r}"
+
+
+def _a(kind: str) -> str:
+    return f"an {kind}" if kind == "epic" else f"a {kind}"
 
 
 def _plan_problems(
     items: list[PlanItem],
     links: list[PlanLink],
     rules: list[PlanRule],
-    existing: dict[int, str],
-    edges: set[tuple[int, int]],
+    existing: set[str],
+    edges: set[tuple[str, str]],
 ) -> list[str]:
-    """Everything wrong with a plan, each saying which item it is about. `existing` is the kind of
-    each existing node it refers to (missing ones do not exist) and `edges` the needs_first links
-    that already exist."""
+    """Everything wrong with a plan, each saying which item it is about. `existing` is the
+    references the plan gives that exist in the project (the others do not exist) and `edges` the
+    needs_first links that already exist."""
     problems: list[str] = []
     kinds: dict[str, str] = {}
     for position, item in enumerate(items, start=1):
         where = f"Item {position} (key {item.key!r}, {item.title.strip()[:40]!r})"
         if not item.key.strip():
             problems.append(f"Item {position}: key cannot be empty.")
+        elif _existing(item.key):
+            problems.append(
+                f"{where}: the key looks like the reference of an existing item (a kind, a colon "
+                "and a number, such as story:12), which a plan uses for items that already "
+                "exist. Use another name, such as 'login-story'."
+            )
         elif item.key in kinds:
             problems.append(f"{where}: the key is used by more than one item.")
         else:
@@ -416,34 +441,35 @@ def _plan_problems(
             continue
         if item.parent is None:
             problems.append(
-                f"{where}: {'a story' if wanted == 'epic' else 'a task'} needs a parent {wanted}. "
-                f"Give parent: the key of a {wanted} in this plan, or the id of one that exists."
+                f"{where}: {_a(item.kind).capitalize()} needs a parent {wanted}. Give parent: "
+                f"the key of {_a(wanted)} in this plan, or the reference of one that exists, "
+                f"such as {wanted}:3."
             )
-        elif isinstance(item.parent, str):
+            continue
+        reference = _existing(item.parent)
+        if reference is None:
             found = kinds.get(item.parent)
             if found is None:
                 problems.append(
                     f"{where}: parent {item.parent!r} is not the key of any item in this plan. "
-                    "If you meant an existing node, give its id as a number."
+                    "If you meant an existing item, give its reference, a kind and a number, "
+                    "such as epic:3."
                 )
             elif found != wanted:
                 problems.append(
-                    f"{where}: its parent {item.parent!r} is {'an' if found == 'epic' else 'a'} "
-                    f"{found}, but {'a story' if wanted == 'epic' else 'a task'} belongs under a "
-                    f"{wanted}."
+                    f"{where}: its parent {item.parent!r} is {_a(found)}, but "
+                    f"{_a(item.kind)} belongs under {_a(wanted)}."
                 )
-        else:
-            found = existing.get(item.parent)
-            if found is None:
-                problems.append(
-                    f"{where}: there is no node with id {item.parent} to be its parent."
-                )
-            elif found != wanted:
-                problems.append(
-                    f"{where}: node {item.parent} is {'an' if found == 'epic' else 'a'} {found}, "
-                    f"but {'a story' if wanted == 'epic' else 'a task'} belongs under a {wanted}."
-                )
-    seen: set[tuple[str | int, str | int, str]] = set()
+        elif split_node_ref(reference)[0] != wanted:
+            problems.append(
+                f"{where}: {reference} is {_a(split_node_ref(reference)[0])}, but "
+                f"{_a(item.kind)} belongs under {_a(wanted)}."
+            )
+        elif reference not in existing:
+            problems.append(
+                f"{where}: there is no {node_words(reference)} in this project to be its parent."
+            )
+    seen: set[tuple[str, str, str]] = set()
     for position, link in enumerate(links, start=1):
         where = f"Link {position} ({_label(link.source)} to {_label(link.target)})"
         if link.link_type not in LINK_TYPES:
@@ -451,18 +477,24 @@ def _plan_problems(
                 f"{where}: link_type must be one of {', '.join(LINK_TYPES)}, but it is "
                 f"{link.link_type!r}."
             )
-        for end, ref in (("source", link.source), ("target", link.target)):
-            if isinstance(ref, str) and ref not in kinds:
+        for end, value in (("source", link.source), ("target", link.target)):
+            reference = _existing(value)
+            if reference is None:
+                if value not in kinds:
+                    problems.append(
+                        f"{where}: the {end} {value!r} is not the key of any item in this plan. "
+                        "If you meant an existing node, give its reference, a kind and a number, "
+                        "such as story:12."
+                    )
+            elif reference not in existing:
                 problems.append(
-                    f"{where}: the {end} {ref!r} is not the key of any item in this plan. If you "
-                    "meant an existing node, give its id as a number."
+                    f"{where}: there is no {node_words(reference)} in this project for the {end}."
                 )
-            elif isinstance(ref, int) and ref not in existing:
-                problems.append(f"{where}: there is no node with id {ref} for the {end}.")
-        if link.source == link.target:
+        source, target = _ends(link)
+        if source == target:
             problems.append(f"{where}: a node cannot be linked to itself.")
-        pair = (link.source, link.target, link.link_type)
-        flipped = (link.target, link.source, link.link_type)
+        pair = (source, target, link.link_type)
+        flipped = (target, source, link.link_type)
         if pair in seen or (link.link_type in ("duplicates", "relates_to") and flipped in seen):
             problems.append(f"{where}: the same link is given more than once.")
         seen.add(pair)
@@ -475,46 +507,58 @@ def _plan_problems(
                 f"{where}: status must be one of {', '.join(RULE_STATUSES)}, but it is "
                 f"{rule.status!r}."
             )
-        if isinstance(rule.story, str):
+        if rule.story is None:
+            continue
+        reference = _existing(rule.story)
+        if reference is None:
             found = kinds.get(rule.story)
             if found is None:
                 problems.append(
-                    f"{where}: story {rule.story!r} is not the key of any item in this plan."
+                    f"{where}: story {rule.story!r} is not the key of any item in this plan. "
+                    "If you meant an existing story, give its reference, such as story:12."
                 )
             elif found != "story":
                 problems.append(
                     f"{where}: {rule.story!r} is not a story, and a rule belongs to a story."
                 )
-        elif isinstance(rule.story, int):
-            found = existing.get(rule.story)
-            if found is None:
-                problems.append(f"{where}: there is no node with id {rule.story} to hold it.")
-            elif found != "story":
-                problems.append(
-                    f"{where}: node {rule.story} is not a story, and a rule belongs to a story."
-                )
+        elif split_node_ref(reference)[0] != "story":
+            problems.append(f"{where}: {reference} is not a story, and a rule belongs to a story.")
+        elif reference not in existing:
+            problems.append(
+                f"{where}: there is no {node_words(reference)} in this project to hold it."
+            )
     problems.extend(_circles(links, edges))
     return problems
 
 
-def _circles(links: list[PlanLink], edges: set[tuple[int, int]]) -> list[str]:
+def _ends(link: PlanLink) -> tuple[str, str]:
+    """The two ends of a plan link, each as its key or, for an existing item, its reference."""
+    return _end(link.source), _end(link.target)
+
+
+def _end(value: str) -> str:
+    return _existing(value) or value
+
+
+def _circles(links: list[PlanLink], edges: set[tuple[str, str]]) -> list[str]:
     """The circles of waiting the plan's needs_first links would make, with each other and with
-    the links that already exist. A node here is a key (text) or an existing id (a number)."""
-    graph: dict[str | int, set[str | int]] = {}
+    the links that already exist. A node here is a plan key or the reference of an existing item,
+    and the two never look alike."""
+    graph: dict[str, set[str]] = {}
     for old_source, old_target in edges:
         graph.setdefault(old_source, set()).add(old_target)
-    own = [(link.source, link.target) for link in links if link.link_type == "needs_first"]
+    own = [_ends(link) for link in links if link.link_type == "needs_first"]
     for source, target in own:
         graph.setdefault(source, set()).add(target)
-    reported: set[frozenset[str | int]] = set()
+    reported: set[frozenset[str]] = set()
     problems: list[str] = []
     for source, target in own:
         # A circle is made when the target can reach the source again.
-        path: dict[str | int, str | int | None] = {target: None}
+        path: dict[str, str | None] = {target: None}
         queue = [target]
         while queue and source not in path:
             here = queue.pop(0)
-            for following in sorted(graph.get(here, ()), key=str):
+            for following in sorted(graph.get(here, ())):
                 if following not in path:
                     path[following] = here
                     queue.append(following)
@@ -522,8 +566,8 @@ def _circles(links: list[PlanLink], edges: set[tuple[int, int]]) -> list[str]:
             continue
         # The route from the target back to the source, so the circle reads source, target, ...,
         # source.
-        route: list[str | int] = []
-        step: str | int | None = source
+        route: list[str] = []
+        step: str | None = source
         while step is not None:
             route.append(step)
             step = path[step]
@@ -556,7 +600,7 @@ class Workflow:
         actor: str,
         kind: str,
         title: str,
-        parent_id: int | None,
+        parent: str | None,
         body: str,
         priority: str,
         start_on: date | None,
@@ -566,7 +610,7 @@ class Workflow:
             actor=actor,
             kind=kind,
             title=title,
-            parent_id=parent_id,
+            parent=parent,
             body=body,
             priority=priority,
             start_on=start_on,
@@ -579,7 +623,7 @@ class Workflow:
             found, index = await self._searcher.possible_duplicates(
                 [f"{title.strip()}\n{body}".strip()],
                 types=[kind],
-                exclude={(kind, node.id)},
+                exclude={(kind, node.number)},
             )
             similar = found[0]
             checked = index.meaning == "used"
@@ -599,35 +643,35 @@ class Workflow:
         actor = clean_actor(actor)
         if not items and not links and not rules:
             raise Refusal("The plan is empty: give at least one item, link or rule.")
-        referenced = unique_ids(
-            [
-                ref
-                for ref in (
+        referenced = sorted(
+            {
+                reference
+                for value in (
                     *(item.parent for item in items),
                     *(end for link in links for end in (link.source, link.target)),
                     *(rule.story for rule in rules),
                 )
-                if isinstance(ref, int)
-            ]
+                if value is not None and (reference := _existing(value)) is not None
+            }
         )
         async with self._database.transaction() as conn:
             existing = {
-                row["id"]: row["kind"]
+                row["ref"]
                 for row in await fetch_all(
-                    conn, "SELECT id, kind FROM nodes WHERE id = ANY(%s)", (referenced,)
+                    conn, "SELECT ref FROM nodes WHERE ref = ANY(%s)", (referenced,)
                 )
             }
-            edges: set[tuple[int, int]] = set()
+            edges: set[tuple[str, str]] = set()
             if any(
                 link.link_type == "needs_first"
-                and (isinstance(link.source, int) or isinstance(link.target, int))
+                and (_existing(link.source) or _existing(link.target))
                 for link in links
             ):
                 edges = {
-                    (row["source_id"], row["target_id"])
+                    (row["source"], row["target"])
                     for row in await fetch_all(
                         conn,
-                        "SELECT source_id, target_id FROM links WHERE link_type = 'needs_first'",
+                        "SELECT source, target FROM links WHERE link_type = 'needs_first'",
                     )
                 }
             problems = _plan_problems(items, links, rules, existing, edges)
@@ -656,10 +700,10 @@ class Workflow:
         found, note = await self._searcher.possible_duplicates(
             [f"{item.title}\n{bodies[item.key]}".strip() for item in indexed],
             types=["epic", "story"],
-            exclude={(item.kind, item.id) for item in created},
+            exclude={(item.kind, split_node_ref(item.ref)[1]) for item in created},
         )
         similar = [
-            PlanSimilar(key=item.key, id=item.id, similar=matches)
+            PlanSimilar(key=item.key, ref=item.ref, similar=matches)
             for item, matches in zip(indexed, found, strict=True)
             if matches
         ]
@@ -682,39 +726,40 @@ class Workflow:
         links: list[PlanLink],
         rules: list[PlanRule],
     ) -> tuple[list[PlannedItem], list[int], list[int]]:
-        ids: dict[str, int] = {}
+        refs: dict[str, str] = {}
         created: list[PlannedItem] = []
-        # Parents before what is under them, whatever order the plan was written in.
+
+        def resolve(value: str) -> str:
+            return _existing(value) or refs[value]
+
+        # Parents before what is under them, whatever order the plan was written in. Each kind is
+        # numbered in the order the plan lists it.
         for kind in KINDS:
             for item in (item for item in items if item.kind == kind):
-                parent = item.parent
                 row = await insert_node(
                     conn,
                     actor=actor,
                     kind=kind,
                     title=clean_title(item.title),
-                    parent_id=ids[parent] if isinstance(parent, str) else parent,
+                    parent=None if item.parent is None else resolve(item.parent),
                     body=item.body,
                     priority=item.priority,
                     start_on=parse_day("start_on", item.start_on),
                     target_on=parse_day("target_on", item.target_on),
                 )
-                ids[item.key] = row["id"]
+                refs[item.key] = row["ref"]
                 created.append(
-                    PlannedItem(key=item.key, id=row["id"], kind=kind, title=row["title"])
+                    PlannedItem(key=item.key, ref=row["ref"], kind=kind, title=row["title"])
                 )
         created.sort(key=lambda planned: [item.key for item in items].index(planned.key))
-
-        def resolve(ref: str | int) -> int:
-            return ids[ref] if isinstance(ref, str) else ref
 
         link_ids = []
         for link in links:
             row = await insert_link(
                 conn,
                 actor=actor,
-                source_id=resolve(link.source),
-                target_id=resolve(link.target),
+                source=resolve(link.source),
+                target=resolve(link.target),
                 link_type=link.link_type,
             )
             link_ids.append(int(row["id"]))
@@ -726,7 +771,7 @@ class Workflow:
                 title=rule.title.strip(),
                 body=rule.body,
                 status=rule.status,
-                story_id=None if rule.story is None else resolve(rule.story),
+                story=None if rule.story is None else resolve(rule.story),
             )
             rule_ids.append(int(rule_row["id"]))
         return created, link_ids, rule_ids
@@ -737,18 +782,19 @@ class Workflow:
         actor = clean_actor(actor)
         if not changes:
             raise Refusal("There is nothing to change: give at least one change.")
+        nodes = [parse_node_ref(change.node, "node") for change in changes]
         results: list[ChangeResult] = []
-        for change in changes:
+        for node, change in zip(nodes, changes, strict=True):
             try:
-                node = await self._graph.update_node(
+                updated = await self._graph.update_node(
                     actor=actor,
-                    node_id=change.node_id,
+                    node=node,
                     expected_version=change.expected_version,
                     title=change.title,
                     body=change.body,
                     status=change.status,
                     priority=change.priority,
-                    parent_id=None,
+                    parent=None,
                     start_on=parse_day("start_on", change.start_on),
                     target_on=parse_day("target_on", change.target_on),
                     clear_start_on=change.clear_start_on,
@@ -757,20 +803,16 @@ class Workflow:
             except Refusal as refusal:
                 results.append(
                     ChangeResult(
-                        node_id=change.node_id,
-                        applied=False,
-                        version=None,
-                        status=None,
-                        refusal=str(refusal),
+                        node=node, applied=False, version=None, status=None, refusal=str(refusal)
                     )
                 )
             else:
                 results.append(
                     ChangeResult(
-                        node_id=change.node_id,
+                        node=node,
                         applied=True,
-                        version=node.version,
-                        status=node.status,
+                        version=updated.version,
+                        status=updated.status,
                         refusal=None,
                     )
                 )
@@ -784,7 +826,7 @@ class Workflow:
         *,
         after_event_id: int,
         actor: str | None,
-        node_id: int | None,
+        node: str | None,
         rule_id: int | None,
         decision_id: int | None,
         fact_id: int | None,
@@ -801,7 +843,7 @@ class Workflow:
         given = [
             name
             for name, value in (
-                ("node_id", node_id),
+                ("node", node),
                 ("rule_id", rule_id),
                 ("decision_id", decision_id),
                 ("fact_id", fact_id),
@@ -810,14 +852,14 @@ class Workflow:
         ]
         if len(given) > 1:
             raise Refusal(
-                "Give at most one of node_id, rule_id, decision_id or fact_id: the one item to "
+                "Give at most one of node, rule_id, decision_id or fact_id: the one item to "
                 "follow. Leave them all out to see every change."
             )
         async with self._database.transaction(snapshot=True) as conn:
             # One snapshot for the page and for latest_event_id: an event that finishes in
             # between must not be counted in the latest id without being in the page.
-            if node_id is not None:
-                await require_node(conn, node_id)
+            if node is not None:
+                await require_node(conn, node)
             if rule_id is not None:
                 await require_rule(conn, rule_id)
             if decision_id is not None:
@@ -861,8 +903,8 @@ class Workflow:
                 "AND (e.xid, e.id) > (%(xid)s::text::xid8, %(id)s) "
                 "AND (%(bid)s::bigint IS NULL OR (e.xid, e.id) < (%(bxid)s::text::xid8, %(bid)s)) "
                 "AND (%(actor)s::text IS NULL OR e.actor = %(actor)s) "
-                "AND (%(node)s::bigint IS NULL OR e.node_id = %(node)s "
-                "OR e.other_node_id = %(node)s) "
+                "AND (%(node)s::text IS NULL OR e.node = %(node)s "
+                "OR e.other_node = %(node)s) "
                 "AND (%(rule)s::bigint IS NULL OR e.rule_id = %(rule)s) "
                 "AND (%(decision)s::bigint IS NULL OR e.decision_id = %(decision)s) "
                 "AND (%(fact)s::bigint IS NULL OR e.fact_id = %(fact)s) "
@@ -871,7 +913,7 @@ class Workflow:
                     **cursor,
                     **(ceiling or {"bxid": "0", "bid": None}),
                     "actor": actor.strip() if actor and actor.strip() else None,
-                    "node": node_id,
+                    "node": node,
                     "rule": rule_id,
                     "decision": decision_id,
                     "fact": fact_id,
@@ -901,16 +943,14 @@ class Workflow:
 
     # -- ending work --------------------------------------------------------------------------
 
-    async def finish_work(
-        self, *, actor: str, node_id: int, outcome: str, note: str
-    ) -> FinishResult:
+    async def finish_work(self, *, actor: str, node: str, outcome: str, note: str) -> FinishResult:
         actor = clean_actor(actor)
         check_choice("outcome", outcome, HANDOFF_OUTCOMES)
         note = clean_note(note)
         async with self._database.transaction() as conn:
-            current = await require_node(conn, node_id, lock=True)
+            current = await require_node(conn, node, lock=True)
             await release_in(
-                conn, actor=actor, node_id=node_id, outcome=outcome, note=note, verb="finish"
+                conn, actor=actor, node=node, outcome=outcome, note=note, verb="finish"
             )
             # Released work goes back to not started, if it was in progress. The other outcomes
             # are the status itself.
@@ -921,20 +961,20 @@ class Workflow:
             )
             if status != current["status"]:
                 await change_status(conn, actor, current, status)
-            node = await node_state(conn, node_id)
-            handoff = (await handoffs_of(conn, node_id, newest_first=True))[0]
+            finished = await node_state(conn, node)
+            handoff = (await handoffs_of(conn, node, newest_first=True))[0]
             unblocked = [
                 Brief.model_validate(row)
                 for row in await fetch_all(
                     conn,
-                    "SELECT s.id, s.kind, s.title, s.status FROM links l "
-                    "JOIN node_state s ON s.id = l.source_id "
-                    "WHERE l.target_id = %s AND l.link_type = 'needs_first' "
-                    "AND s.status = 'ready' ORDER BY s.id",
-                    (node_id,),
+                    "SELECT s.ref, s.kind, s.title, s.status FROM links l "
+                    "JOIN node_state s ON s.ref = l.source "
+                    "WHERE l.target = %s AND l.link_type = 'needs_first' "
+                    "AND s.status = 'ready' ORDER BY s.kind_rank, s.number",
+                    (node,),
                 )
             ]
-        return FinishResult(node=node, handoff=handoff, unblocked=unblocked)
+        return FinishResult(node=finished, handoff=handoff, unblocked=unblocked)
 
     # -- starting work ------------------------------------------------------------------------
 
@@ -942,7 +982,7 @@ class Workflow:
         self,
         *,
         actor: str,
-        within_node_id: int | None,
+        within_node: str | None,
         peek: bool,
         lease_seconds: int,
         context_chars: int,
@@ -956,59 +996,56 @@ class Workflow:
             )
         taken_over_from: str | None = None
         async with self._database.transaction() as conn:
-            if within_node_id is not None:
-                await require_node(conn, within_node_id)
-            excluded: list[int] = []
+            if within_node is not None:
+                await require_node(conn, within_node)
+            excluded: list[str] = []
             claim: Claim | None = None
             while True:
                 picked = await fetch_one(
                     conn,
-                    "SELECT n.id FROM nodes n JOIN node_state s ON s.id = n.id "
-                    f"WHERE {_FREE_WORK} AND n.id <> ALL(%(excluded)s) ORDER BY {_URGENCY} "
+                    "SELECT n.ref FROM nodes n JOIN node_state s ON s.ref = n.ref "
+                    f"WHERE {_FREE_WORK} AND n.ref <> ALL(%(excluded)s) ORDER BY {_URGENCY} "
                     f"LIMIT 1{'' if peek else ' FOR UPDATE OF n SKIP LOCKED'}",
-                    {"within": within_node_id, "excluded": excluded},
+                    {"within": within_node, "excluded": excluded},
                 )
                 if picked is None:
-                    return await self._nothing_free(conn, within_node_id, peek)
-                node_id = int(picked["id"])
+                    return await self._nothing_free(conn, within_node, peek)
+                ref = str(picked["ref"])
                 if peek:
                     break
                 # The row is ours now. Look again, because the node may have been taken in the
                 # moment between the search and the lock.
                 row = await fetch_one(
                     conn,
-                    f"SELECT s.id FROM node_state s WHERE s.id = %(id)s AND {_FREE_WORK}",
-                    {"id": node_id, "within": within_node_id},
+                    f"SELECT s.ref FROM node_state s WHERE s.ref = %(ref)s AND {_FREE_WORK}",
+                    {"ref": ref, "within": within_node},
                 )
                 if row is None:
-                    excluded.append(node_id)
+                    excluded.append(ref)
                     continue
-                current = await current_claim(conn, node_id)
+                current = await current_claim(conn, ref)
                 lapsed = current if current is not None and not current["live"] else None
-                stored = await require_node(conn, node_id)
+                stored = await require_node(conn, ref)
                 if stored["status"] == "new":
                     await change_status(conn, actor, stored, "in_progress")
                 claim_row = await take_claim(
-                    conn, actor=actor, node_id=node_id, lease_seconds=lease_seconds, current=current
+                    conn, actor=actor, node=ref, lease_seconds=lease_seconds, current=current
                 )
                 claim = Claim.model_validate(claim_row)
                 if lapsed is not None:
                     taken_over_from = lapsed["actor"]
                 break
-            work = await node_state(conn, node_id)
+            work = await node_state(conn, ref)
             parts = await self._exact_context(conn, work)
         similar, similar_note = await self._similar_items(work, parts)
         context = self._fit(parts, similar, similar_note, context_chars)
-        message = (
-            f"Here is {work.kind} {work.id}, {work.title!r}, with what you need to start. "
-            + (
-                "You asked to look without claiming, so nobody holds it."
-                if peek
-                else f"It is yours until {claim.expires_at:%Y-%m-%d %H:%M:%S} UTC; renew it with "
-                "renew_claim to keep it longer, and end it with finish_work."
-                if claim
-                else ""
-            )
+        message = f"Here is {work.ref}, {work.title!r}, with what you need to start. " + (
+            "You asked to look without claiming, so nobody holds it."
+            if peek
+            else f"It is yours until {claim.expires_at:%Y-%m-%d %H:%M:%S} UTC; renew it with "
+            "renew_claim to keep it longer, and end it with finish_work."
+            if claim
+            else ""
         )
         if taken_over_from:
             message += (
@@ -1026,7 +1063,7 @@ class Workflow:
         )
 
     async def _nothing_free(
-        self, conn: AsyncConnection, within_node_id: int | None, peek: bool
+        self, conn: AsyncConnection, within_node: str | None, peek: bool
     ) -> NextWork:
         counts = await fetch_one(
             conn,
@@ -1039,9 +1076,9 @@ class Workflow:
             f"count(*) FILTER (WHERE {_FREE_WORK}) AS being_taken "
             "FROM node_state s WHERE s.kind IN ('story', 'task') "
             "AND s.status NOT IN ('done', 'dropped') "
-            "AND (%(within)s::bigint IS NULL OR s.id = %(within)s OR s.parent_id = %(within)s "
-            "OR s.parent_id IN (SELECT id FROM nodes WHERE parent_id = %(within)s))",
-            {"within": within_node_id},
+            "AND (%(within)s::text IS NULL OR s.ref = %(within)s OR s.parent = %(within)s "
+            "OR s.parent IN (SELECT ref FROM nodes WHERE parent = %(within)s))",
+            {"within": within_node},
         )
         assert counts is not None
         reasons = [
@@ -1057,7 +1094,7 @@ class Workflow:
             )
             if number
         ]
-        where = f" under node {within_node_id}" if within_node_id is not None else ""
+        where = f" under {within_node}" if within_node is not None else ""
         message = (
             f"Nothing is free right now{where}."
             + (f" The open work is {', '.join(reasons)}." if reasons else " There is no open work.")
@@ -1078,17 +1115,17 @@ class Workflow:
     async def _exact_context(self, conn: AsyncConnection, work: Node) -> dict[str, Any]:
         """Everything in a work item's context that comes by exact link."""
         chain: list[Node] = []
-        parent_id = work.parent_id
-        while parent_id is not None:
-            parent = await node_state(conn, parent_id)
-            chain.append(parent)
-            parent_id = parent.parent_id
+        parent = work.parent
+        while parent is not None:
+            above = await node_state(conn, parent)
+            chain.append(above)
+            parent = above.parent
         chain.reverse()
-        chain_ids = [work.id, *(node.id for node in chain)]
-        story_id = work.id if work.kind == "story" else work.parent_id
+        chain_refs = [work.ref, *(node.ref for node in chain)]
+        story = work.ref if work.kind == "story" else work.parent
         parents = [
             ContextParent(
-                id=node.id,
+                ref=node.ref,
                 kind=node.kind,
                 title=node.title,
                 status=node.status,
@@ -1109,10 +1146,10 @@ class Workflow:
                 await fetch_all(
                     conn,
                     "SELECT id, title, body, status FROM rules "
-                    "WHERE story_id = %s AND status <> 'dropped' ORDER BY id",
-                    (story_id,),
+                    "WHERE story = %s AND status <> 'dropped' ORDER BY id",
+                    (story,),
                 )
-                if story_id is not None
+                if story is not None
                 else []
             )
         ]
@@ -1120,17 +1157,18 @@ class Workflow:
             conn,
             "SELECT d.id, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.project_wide, "
             "d.status, d.superseded_by_id, d.status_reason, d.confirmed_by, d.confirmed_at, "
-            "ARRAY(SELECT dn.node_id FROM decision_nodes dn "
-            "WHERE dn.decision_id = d.id AND dn.node_id = ANY(%(chain)s) ORDER BY dn.node_id) "
+            "ARRAY(SELECT dn.node FROM decision_nodes dn "
+            "WHERE dn.decision_id = d.id AND dn.node = ANY(%(chain)s)) "
             "AS linked_to FROM decisions d WHERE EXISTS (SELECT 1 FROM decision_nodes dn "
-            "WHERE dn.decision_id = d.id AND dn.node_id = ANY(%(chain)s)) "
+            "WHERE dn.decision_id = d.id AND dn.node = ANY(%(chain)s)) "
             "OR (d.project_wide AND d.status = 'active') ORDER BY d.id",
-            {"chain": chain_ids},
+            {"chain": chain_refs},
         )
         decisions = [
             ContextDecision.model_validate(
                 {
                     **row,
+                    "linked_to": sorted(row["linked_to"], key=node_order),
                     "label": label_of("decision", row),
                     "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
                 }
@@ -1140,16 +1178,17 @@ class Workflow:
         fact_rows = await fetch_all(
             conn,
             "SELECT f.id, f.text, f.source, f.recorded_by, f.status, f.confirmed_by, "
-            "f.confirmed_at, ARRAY(SELECT fn.node_id FROM fact_nodes fn WHERE fn.fact_id = f.id "
-            "AND fn.node_id = ANY(%(chain)s) ORDER BY fn.node_id) AS linked_to "
+            "f.confirmed_at, ARRAY(SELECT fn.node FROM fact_nodes fn WHERE fn.fact_id = f.id "
+            "AND fn.node = ANY(%(chain)s)) AS linked_to "
             "FROM facts f WHERE f.status = 'active' AND EXISTS (SELECT 1 FROM fact_nodes "
-            "fn WHERE fn.fact_id = f.id AND fn.node_id = ANY(%(chain)s)) ORDER BY f.id",
-            {"chain": chain_ids},
+            "fn WHERE fn.fact_id = f.id AND fn.node = ANY(%(chain)s)) ORDER BY f.id",
+            {"chain": chain_refs},
         )
         facts = [
             ContextFact.model_validate(
                 {
                     **row,
+                    "linked_to": sorted(row["linked_to"], key=node_order),
                     "label": f"{label_of('fact', row)}. Source: {row['source']}",
                     "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
                 }
@@ -1158,14 +1197,15 @@ class Workflow:
         ]
         prerequisites = [
             Prerequisite(
-                node=Brief.model_validate(row), handoffs=await handoffs_of(conn, row["id"])
+                node=Brief.model_validate(row), handoffs=await handoffs_of(conn, row["ref"])
             )
             for row in await fetch_all(
                 conn,
-                "SELECT t.id, t.kind, t.title, t.status FROM links l "
-                "JOIN node_state t ON t.id = l.target_id "
-                "WHERE l.source_id = %s AND l.link_type = 'needs_first' ORDER BY t.id",
-                (work.id,),
+                "SELECT t.ref, t.kind, t.title, t.status FROM links l "
+                "JOIN node_state t ON t.ref = l.target "
+                "WHERE l.source = %s AND l.link_type = 'needs_first' "
+                "ORDER BY t.kind_rank, t.number",
+                (work.ref,),
             )
         ]
         dependents = [
@@ -1175,26 +1215,26 @@ class Workflow:
             )
             for row in await fetch_all(
                 conn,
-                "SELECT s.id, s.kind, s.title, s.status, NOT EXISTS (SELECT 1 FROM links l2 "
-                "JOIN nodes t2 ON t2.id = l2.target_id WHERE l2.source_id = s.id "
-                "AND l2.link_type = 'needs_first' AND l2.target_id <> %(work)s "
+                "SELECT s.ref, s.kind, s.title, s.status, NOT EXISTS (SELECT 1 FROM links l2 "
+                "JOIN nodes t2 ON t2.ref = l2.target WHERE l2.source = s.ref "
+                "AND l2.link_type = 'needs_first' AND l2.target <> %(work)s "
                 "AND t2.status <> 'done') AS becomes_ready_when_done "
-                "FROM links l JOIN node_state s ON s.id = l.source_id "
-                "WHERE l.target_id = %(work)s AND l.link_type = 'needs_first' "
-                "AND s.status NOT IN ('done', 'dropped') ORDER BY s.id",
-                {"work": work.id},
+                "FROM links l JOIN node_state s ON s.ref = l.source "
+                "WHERE l.target = %(work)s AND l.link_type = 'needs_first' "
+                "AND s.status NOT IN ('done', 'dropped') ORDER BY s.kind_rank, s.number",
+                {"work": work.ref},
             )
         ]
         shown = {
-            *((node.kind, node.id) for node in chain),
-            (work.kind, work.id),
+            *((node.kind, node.number) for node in chain),
+            (work.kind, work.number),
             *(("decision", d.id) for d in decisions),
             *(("fact", f.id) for f in facts),
         }
         return {
             "parents": parents,
             "rules": rules,
-            "handoffs": await handoffs_of(conn, work.id),
+            "handoffs": await handoffs_of(conn, work.ref),
             "prerequisites": prerequisites,
             "active_decisions": [
                 d for d in decisions if d.status == "active" and not d.project_wide
@@ -1214,7 +1254,7 @@ class Workflow:
         """Existing items alike in meaning to this work, apart from what is already in its
         context. Suggestions, and never worth waiting for: it says so when it cannot be had."""
         found, _, note = await self._searcher.similar(
-            node_id=work.id,
+            node=work.ref,
             wanted_types=["story", "decision", "fact"],
             exclude=parts["shown"],
             limit=_SIMILAR_WANTED,

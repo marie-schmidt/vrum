@@ -94,23 +94,21 @@ async def busy_project(client: Client) -> dict[str, Any]:
         ("dropped", "dropped"),
     ):
         await ok(
-            client, "update_node", actor="a", node_id=tasks[name], expected_version=1, status=status
+            client, "update_node", actor="a", node=tasks[name], expected_version=1, status=status
         )
     await ok(
         client,
         "add_link",
         actor="a",
-        source_id=tasks["waiting"],
-        target_id=tasks["free"],
+        source=tasks["waiting"],
+        target=tasks["free"],
         link_type="needs_first",
     )
-    await ok(client, "claim_node", actor=f"holder-{word}", node_id=tasks["held"], lease_seconds=600)
-    await ok(
-        client, "claim_node", actor=f"quitter-{word}", node_id=tasks["lapsing"], lease_seconds=1
-    )
+    await ok(client, "claim_node", actor=f"holder-{word}", node=tasks["held"], lease_seconds=600)
+    await ok(client, "claim_node", actor=f"quitter-{word}", node=tasks["lapsing"], lease_seconds=1)
     await make_rule(client, f"Unplaced {word}")
     placed = await made(client, "story", f"Has a requirement {word}", epic)
-    await make_rule(client, f"Placed {word}", story_id=placed)
+    await make_rule(client, f"Placed {word}", story=placed)
     await anyio.sleep(1.5)  # a claim of one second has lapsed
     return {"word": word, "epic": epic, "story": story, "placed": placed, "tasks": tasks}
 
@@ -157,13 +155,13 @@ async def test_following_a_number_lands_on_the_view_that_shows_exactly_those_ite
 ) -> None:
     world = await busy_project(client)
     expected = await asked(client)
-    everything = {n["id"]: n for n in await all_nodes(client)}
+    everything = {n["ref"]: n for n in await all_nodes(client)}
 
-    def lane_of(node_id: int) -> int:
-        node = everything[node_id]
+    def lane_of(ref: str) -> str:
+        node = everything[ref]
         while node["kind"] != "epic":
-            node = everything[node["parent_id"]]
-        return int(node["id"])
+            node = everything[node["parent"]]
+        return str(node["ref"])
 
     async with browser_page(board, token=the_token()) as w:
         page = w.page
@@ -191,16 +189,16 @@ async def test_following_a_number_lands_on_the_view_that_shows_exactly_those_ite
             assert (await page.evaluate("location.hash")).startswith(
                 f"#/board?q={query.replace(' ', '+')}"
             )
-            await cards_are(page, {n["id"] for n in matched if n["kind"] != "epic"})
+            await cards_are(page, {n["ref"] for n in matched if n["kind"] != "epic"})
             lanes = set(
                 await page.locator("section.lane").evaluate_all(
-                    "els => els.map(e => Number(e.dataset.epic))"
+                    "els => els.map(e => e.dataset.ref)"
                 )
             )
-            assert lanes == {lane_of(n["id"]) for n in matched}, key
+            assert lanes == {lane_of(n["ref"]) for n in matched}, key
         # The work of this test is among them.
         await follow("blocked")
-        await expect(page.locator(f".card[data-id='{world['tasks']['stuck']}']")).to_be_visible()
+        await expect(page.locator(f".card[data-ref='{world['tasks']['stuck']}']")).to_be_visible()
 
         # The requirements in no story: the list of requirements in Graph's context view says the
         # same number, and holds exactly those requirements.
@@ -225,11 +223,10 @@ async def test_following_a_number_lands_on_the_view_that_shows_exactly_those_ite
         )
         assert expected["bare"] <= 200
         assert {
-            int(await row.get_attribute("data-story") or 0)
-            for row in await part.locator("li").all()
-        } == {story["id"] for story in report["stories_without_rules"]}
-        assert world["story"] in {story["id"] for story in report["stories_without_rules"]}
-        assert world["placed"] not in {story["id"] for story in report["stories_without_rules"]}
+            str(await row.get_attribute("data-story")) for row in await part.locator("li").all()
+        } == {story["ref"] for story in report["stories_without_rules"]}
+        assert world["story"] in {story["ref"] for story in report["stories_without_rules"]}
+        assert world["placed"] not in {story["ref"] for story in report["stories_without_rules"]}
         assert w.problems == []
 
 
@@ -250,9 +247,7 @@ async def test_the_strip_follows_what_agents_do_with_no_reload_and_a_claim_that_
 
         # A task that an agent blocks, and a requirement it writes, change two numbers.
         task = await made(client, "task", f"Stuck {word}", story)
-        await ok(
-            client, "update_node", actor="a", node_id=task, expected_version=1, status="blocked"
-        )
+        await ok(client, "update_node", actor="a", node=task, expected_version=1, status="blocked")
         await make_rule(client, f"Loose {word}")
         link = page.locator("#attention a[data-key=blocked]")
         await expect(link).to_have_attribute("data-value", str(before["blocked"] + 1), timeout=SLOW)
@@ -263,7 +258,7 @@ async def test_the_strip_follows_what_agents_do_with_no_reload_and_a_claim_that_
 
         # A claim that runs out changes nothing that is written, so the strip asks again by itself.
         quitter = await made(client, "task", f"Quits {word}", story)
-        await ok(client, "claim_node", actor=f"quitter-{word}", node_id=quitter, lease_seconds=1)
+        await ok(client, "claim_node", actor=f"quitter-{word}", node=quitter, lease_seconds=1)
         lapsed = page.locator("#attention a[data-key=lapsed]")
         await expect(lapsed).to_have_attribute(
             "data-value", str(before["lapsed"] + 1), timeout=40_000
@@ -288,7 +283,7 @@ async def test_a_project_with_nothing_in_it_says_so_and_every_number_is_zero() -
             )
         # An epic with nothing in it has a lane of its own and says so with its zero counts.
         epic = await made(agent, "epic", f"Empty {word}")
-        lane = w.page.locator(f"section.lane[data-epic='{epic}']")
+        lane = w.page.locator(f"section.lane[data-ref='{epic}']")
         await expect(lane).to_contain_text("0 of 0 tasks done", timeout=SLOW)
         assert await lane.locator(".card").count() == 0
         await expect(w.page.locator("#board-empty")).to_have_count(0)

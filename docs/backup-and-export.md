@@ -37,14 +37,18 @@ uv run python scripts/export_graph.py http://127.0.0.1:8000/mcp graph.json
 ```
 
 - **Export:** `scripts/export_graph.py` writes the whole graph of that project as one JSON file that
-  you can read and keep: every item with its ids, dates, confirmations and history. The file is
-  readable only by you and holds everything in the project, so keep it private. Accounts, sessions
-  and keys are never in it. The board's **Status and export** page has the same download.
+  you can read and keep: every item with its number or id, dates, confirmations and history. An
+  epic, story or task is in it by its kind and number (`story:12`), and everything that points at
+  one (a parent, a link, a requirement's story, what a decision or fact concerns, an event) names
+  it that way. The file is readable only by you and holds everything in the project, so keep it
+  private. Accounts, sessions and keys are never in it. The board's **Status and export** page has
+  the same download.
 - **Import:** `scripts/import_graph.py` loads such a file into an **empty project** (make one on the
-  board, and a key for it), keeping every id, date, confirmation and the history. It is all or
-  nothing, and the file can be as big as one request may be (4 MiB unless you raise
-  `VRUM_MAX_REQUEST_BYTES`). A project that already holds anything refuses. To move a bigger graph,
-  back it up and restore it.
+  board, and a key for it), keeping every number, id, date, confirmation and the history, so
+  `story:12` is still `story:12`, and the next new epic, story or task continues after the highest
+  number of its own kind. It is all or nothing, and the file can be as big as one request may be
+  (4 MiB unless you raise `VRUM_MAX_REQUEST_BYTES`). A project that already holds anything
+  refuses. To move a bigger graph, back it up and restore it.
 
 ```
 uv run python scripts/import_graph.py http://127.0.0.1:8000/mcp graph.json
@@ -57,8 +61,11 @@ uv run python scripts/export_markdown.py http://127.0.0.1:8000/mcp notes
 ```
 
 `scripts/export_markdown.py` writes one file for every epic, story, task, requirement, decision and
-fact of the project, with its fields (including whether a person confirmed it, and whether it is
-still in force) at the top and everything it is connected to as `[[references]]`, to read in
-Obsidian or keep in git. It is read-only and is made again from the graph each time, and the same
-graph gives the same files. It replaces the folders it made inside the target folder and refuses a
-target folder that holds something else, so nothing of yours is overwritten.
+fact of the project, named by its kind, its number and a short form of its title (`story-12-login.md`
+in the folder `stories`), with its fields (including whether a person confirmed it, and whether it
+is still in force) at the top and everything it is connected to as `[[references]]`, to read in
+Obsidian or keep in git. Epics, stories and tasks are numbered each on its own, so `epic-1-…`,
+`story-1-…` and `task-1-…` are three different files. It is read-only and is made again from the
+graph each time, and the same graph gives the same files. It replaces the folders it made inside
+the target folder and refuses a target folder that holds something else, so nothing of yours is
+overwritten.

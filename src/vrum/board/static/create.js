@@ -1,39 +1,42 @@
-// Making a new epic, story or task, and the list of parents to choose from.
+// Making a new epic, story or task, and the list of parents to choose from. A parent is named by its
+// reference (epic:3, story:12) everywhere here: in the options, in `openCreate` and in what is sent.
 
 import { call } from './api.js';
 import { actor, notify, ui } from './ctx.js';
 import { h } from './dom.js';
 import { dialogForm, field, fieldRow, openDialog } from './forms.js';
-import { KIND, PRIORITIES, PRIORITY } from './labels.js';
+import { KIND, PRIORITIES, PRIORITY, codeOf, nodeWords } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { epics, store, sync } from './store.js';
 
-const byTitle = (a, b) => a.title.localeCompare(b.title) || a.id - b.id;
+const byTitle = (a, b) => a.title.localeCompare(b.title) || a.number - b.number;
 
 // The <option>s a node of this kind can be put under: epics for a story, stories (grouped by their
-// epic) for a task. Nothing for an epic.
+// epic) for a task. Nothing for an epic. The value of an option is the parent's reference and
+// `selected` is a reference too.
 export function parentChoices(kind, selected = null) {
   if (kind === 'story') {
     return epics()
       .sort(byTitle)
-      .map((epic) => h('option', { value: epic.id, selected: epic.id === selected }, `#${epic.id} ${epic.title}`));
+      .map((epic) => h('option', { value: epic.ref, selected: epic.ref === selected }, `${codeOf(epic.ref)} ${epic.title}`));
   }
   if (kind === 'task') {
     return epics()
       .sort(byTitle)
       .map((epic) => {
-        const stories = [...store.nodes.values()].filter((node) => node.parent_id === epic.id).sort(byTitle);
+        const stories = [...store.nodes.values()].filter((node) => node.parent === epic.ref).sort(byTitle);
         if (!stories.length) return null;
         return h(
           'optgroup',
-          { label: `#${epic.id} ${epic.title}` },
-          stories.map((story) => h('option', { value: story.id, selected: story.id === selected }, `#${story.id} ${story.title}`)),
+          { label: `${codeOf(epic.ref)} ${epic.title}` },
+          stories.map((story) => h('option', { value: story.ref, selected: story.ref === selected }, `${codeOf(story.ref)} ${story.title}`)),
         );
       });
   }
   return [];
 }
 
+// Opens the dialog for a new item. `parent` is the reference of the epic or story it starts under.
 export function openCreate({ kind = 'epic', parent = null } = {}) {
   const kindField = h(
     'select',
@@ -57,7 +60,7 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
     parentRow.hidden = wanted === 'epic';
     parentRow.firstChild.textContent = wanted === 'task' ? 'In story' : 'In epic';
     parentField.replaceChildren(...parentChoices(wanted, selected).filter(Boolean));
-    if (selected !== null) parentField.value = String(selected);
+    if (selected !== null) parentField.value = selected;
   };
   kindField.addEventListener('change', () => fillParents(null));
   fillParents(parent);
@@ -76,16 +79,16 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
         start_on: start.value || null,
         target_on: target.value || null,
       };
-      if (wanted !== 'epic') args.parent_id = parentField.value ? Number(parentField.value) : null;
+      if (wanted !== 'epic') args.parent = parentField.value || null;
       const made = await call('create_node', args);
       box.close();
       await sync();
-      const similar = (made.similar || []).map((item) => `#${item.id} ${item.title}`);
+      const similar = (made.similar || []).map((item) => `${codeOf(item.ref)} ${item.title}`);
       notify(
-        `Created ${KIND[made.kind].label.toLowerCase()} #${made.id}, “${made.title}”.` +
+        `Created ${nodeWords(made.ref)}, “${made.title}”.` +
           (similar.length ? ` It looks like: ${similar.join('; ')}.` : ''),
       );
-      ui.navigate({ sel: `node:${made.id}`, panel: null });
+      ui.navigate({ sel: made.ref, panel: null });
     },
   });
   const box = openDialog('New item', [form]);

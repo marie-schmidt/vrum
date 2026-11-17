@@ -6,6 +6,7 @@
 import { Refusal } from './api.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
+import { codeOf, readNodeRef } from './labels.js';
 import { store, titleOf } from './store.js';
 
 let counter = 0;
@@ -87,13 +88,15 @@ export function dialogForm({ fields, submit, cancel = null, work, also = [] }) {
 
 // -- what a record concerns ------------------------------------------------------------------------
 
-// The way an item is named in a picker: #12 for an epic, story or task, "requirement 3",
-// "decision 5". "rule 3" is understood too, because that is what the tools call a requirement.
-const refText = {
-  node: (id) => `#${id}`,
+// What is chosen is { type, id }: `type` is node, rule or decision, and `id` is the reference
+// (story:12) of an epic, story or task and the number of a requirement or a decision.
+const refName = {
+  node: (ref) => codeOf(ref),
   rule: (id) => `requirement ${id}`,
   decision: (id) => `decision ${id}`,
 };
+// The reference a chosen item is known by on the page: story:12, rule:3, decision:5.
+export const pickedRef = (item) => (item.type === 'node' ? item.id : `${item.type}:${item.id}`);
 
 function titleOfRef(type, id) {
   if (type === 'node') return titleOf(id);
@@ -102,14 +105,16 @@ function titleOfRef(type, id) {
   return found ? found.title : `${type === 'rule' ? 'requirement' : type} ${id}`;
 }
 
+// What was typed or picked: S-12 or story 12 for an epic, story or task, "requirement 3" (or "rule
+// 3") and "decision 5". A bare number names nothing, since each kind is numbered on its own.
 export function parseRef(text, kinds) {
   const typed = text.trim();
-  let found = /^(?:rule|requirement)\s*#?\s*(\d+)/i.exec(typed);
+  let found = /^(?:rule|requirement)\s*[:#]?\s*#?(\d+)/i.exec(typed);
   if (found && kinds.includes('rule')) return { type: 'rule', id: Number(found[1]) };
-  found = /^decision\s*#?\s*(\d+)/i.exec(typed);
+  found = /^decision\s*[:#]?\s*#?(\d+)/i.exec(typed);
   if (found && kinds.includes('decision')) return { type: 'decision', id: Number(found[1]) };
-  found = /^#?(\d+)/.exec(typed);
-  if (found && kinds.includes('node')) return { type: 'node', id: Number(found[1]) };
+  const node = readNodeRef(typed);
+  if (node && kinds.includes('node')) return { type: 'node', id: node };
   return null;
 }
 
@@ -119,10 +124,10 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
   const refs = new Map();
   const listId = uid('picker-list-');
   const options = [];
-  if (kinds.includes('node')) for (const node of store.nodes.values()) options.push(`#${node.id} ${node.title}`);
+  if (kinds.includes('node')) for (const node of store.nodes.values()) options.push(`${codeOf(node.ref)} ${node.title}`);
   if (kinds.includes('rule')) for (const rule of store.rules || []) options.push(`requirement ${rule.id} ${rule.title}`);
   if (kinds.includes('decision')) for (const decision of store.decisions || []) options.push(`decision ${decision.id} ${decision.title}`);
-  const input = h('input', { type: 'text', list: listId, autocomplete: 'off', 'aria-label': `${label}: type an id or pick from the list`, placeholder: 'an id such as #12, or a title' });
+  const input = h('input', { type: 'text', list: listId, autocomplete: 'off', 'aria-label': `${label}: type a code or pick from the list`, placeholder: 'a code such as S-12, or a title' });
   const problem = h('p', { class: 'problem', role: 'alert' });
   const shown = h('ul', { class: 'chips plain picker-chosen', 'aria-label': `${label}: chosen` });
 
@@ -131,9 +136,9 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
       ...[...refs.values()].map((ref) =>
         h(
           'li',
-          { class: 'chip', dataset: { ref: `${ref.type}:${ref.id}` } },
-          h('span', { class: 'chip-text' }, `${refText[ref.type](ref.id)} ${clip(titleOfRef(ref.type, ref.id), 40)}`),
-          h('button', { type: 'button', class: 'chip-remove ghost icon-only small', 'aria-label': `Take out ${refText[ref.type](ref.id)}`, onclick: () => { refs.delete(`${ref.type}:${ref.id}`); draw(); } }, icon('close', { size: 12 })),
+          { class: 'chip', dataset: { ref: pickedRef(ref) } },
+          h('span', { class: 'chip-text' }, `${refName[ref.type](ref.id)} ${clip(titleOfRef(ref.type, ref.id), 40)}`),
+          h('button', { type: 'button', class: 'chip-remove ghost icon-only small', 'aria-label': `Take out ${refName[ref.type](ref.id)}`, onclick: () => { refs.delete(pickedRef(ref)); draw(); } }, icon('close', { size: 12 })),
         ),
       ),
     );
@@ -142,10 +147,10 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
     if (!input.value.trim()) return;
     const ref = parseRef(input.value, kinds);
     if (!ref) {
-      refuse(problem, 'Type an id such as #12 (requirement 3 for a requirement, decision 5 for a decision), or pick from the list.');
+      refuse(problem, 'Type a code such as S-12 (requirement 3 for a requirement, decision 5 for a decision), or pick from the list.');
       return;
     }
-    refs.set(`${ref.type}:${ref.id}`, ref);
+    refs.set(pickedRef(ref), ref);
     input.value = '';
     draw();
   };
@@ -155,7 +160,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
       add();
     }
   });
-  for (const ref of chosen) refs.set(`${ref.type}:${ref.id}`, ref);
+  for (const ref of chosen) refs.set(pickedRef(ref), ref);
   draw();
 
   const element = h(
@@ -177,12 +182,13 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
       problem.replaceChildren();
       draw();
     },
-    // What to send: a list for each kind, and only when something was chosen.
+    // What to send: a list for each kind, and only when something was chosen: `nodes` (references),
+    // `rule_ids` and `decision_ids`.
     value() {
       add();
       const pick = (type) => [...refs.values()].filter((ref) => ref.type === type).map((ref) => ref.id);
       const out = {};
-      if (kinds.includes('node') && pick('node').length) out.node_ids = pick('node');
+      if (kinds.includes('node') && pick('node').length) out.nodes = pick('node');
       if (kinds.includes('rule') && pick('rule').length) out.rule_ids = pick('rule');
       if (kinds.includes('decision') && pick('decision').length) out.decision_ids = pick('decision');
       return out;

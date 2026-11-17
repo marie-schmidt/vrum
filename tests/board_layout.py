@@ -20,8 +20,18 @@ from urllib.parse import urlparse
 from mcp import Client
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from tests.board_helpers import SLOW, Watched, board_url, made
-from tests.helpers import confirm, connect, day, make_decision, make_fact, ok, set_status
+from tests.board_helpers import SLOW, Watched, board_url, item_address, made
+from tests.helpers import (
+    confirm,
+    connect,
+    day,
+    make_decision,
+    make_fact,
+    number_of,
+    ok,
+    ref_of,
+    set_status,
+)
 from tests.world import SESSION_COOKIE, Project, make_project, project_at, register
 
 THEMES = ("light", "dark")
@@ -77,14 +87,21 @@ BY_NAME = {screen.name: screen for screen in SCREENS}
 @dataclass
 class World:
     """A project of its own (an account, a project and a key, made as a person would), with work
-    and context of varied lengths, and the ids of what was made by short name."""
+    and context of varied lengths, and the references of what was made by short name: story:12 for
+    an epic, story or task, and rule:3, decision:7 and fact:5 for the records that are named in
+    the board's addresses and hooks the same way."""
 
     project: Project
     board: str
-    ids: dict[str, int] = field(default_factory=dict)
+    refs: dict[str, str] = field(default_factory=dict)
 
-    def __getitem__(self, name: str) -> int:
-        return self.ids[name]
+    def __getitem__(self, name: str) -> str:
+        return self.refs[name]
+
+    def number(self, name: str) -> int:
+        """The number in a reference: what a rule, decision or fact is called by its own tools, and
+        what an epic is called in an address (epic=3)."""
+        return number_of(self.refs[name])
 
 
 _worlds: dict[str, World] = {}
@@ -105,21 +122,21 @@ async def build(client: Client, world: World) -> None:
     """Work and context made through MCP: epics that are dense in one column and sparse in the
     others, one with nothing in it, one all done, one made of long words, requirements, decisions
     and facts (some with long words and a long source), links, dates, a claim."""
-    ids = world.ids
+    refs = world.refs
 
     async def node(name: str, kind: str, title: str, parent: str | None, **more: Any) -> None:
-        ids[name] = await made(client, kind, title, ids[parent] if parent else None, **more)
+        refs[name] = await made(client, kind, title, refs[parent] if parent else None, **more)
 
     async def status(name: str, to: str) -> None:
-        await set_status(client, {"id": ids[name]}, to)
+        await set_status(client, {"ref": refs[name]}, to)
 
     async def needs_first(waiting: str, first: str) -> None:
         await ok(
             client,
             "add_link",
             actor="agent-1",
-            source_id=ids[waiting],
-            target_id=ids[first],
+            source=refs[waiting],
+            target=refs[first],
             link_type="needs_first",
         )
 
@@ -171,54 +188,67 @@ async def build(client: Client, world: World) -> None:
     await node("F2", "task", "Done two", "S6")
     await status("F1", "done")
     await status("F2", "done")
-    await ok(client, "claim_node", actor="agent-1", node_id=ids["B1"])
+    await ok(client, "claim_node", actor="agent-1", node=refs["B1"])
 
     # Context: requirements, decisions and facts, some with long words.
-    ids["R1"] = (
+    async def record(name: str, kind: str, made_one: dict[str, Any]) -> None:
+        refs[name] = ref_of(kind, made_one["id"])
+
+    await record(
+        "R1",
+        "rule",
         await ok(
             client,
             "create_rule",
             actor="ann",
             title="Keep actor, time and handoff note",
-            story_id=ids["S1"],
-        )
-    )["id"]
-    ids["R2"] = (await ok(client, "create_rule", actor="ann", title="Not in any story yet"))["id"]
-    ids["R3"] = (
-        await ok(client, "create_rule", actor="ann", title=LONG_TITLE, story_id=ids["S5"])
-    )["id"]
+            story=refs["S1"],
+        ),
+    )
+    await record(
+        "R2", "rule", await ok(client, "create_rule", actor="ann", title="Not in any story yet")
+    )
+    await record(
+        "R3",
+        "rule",
+        await ok(client, "create_rule", actor="ann", title=LONG_TITLE, story=refs["S5"]),
+    )
     claims = await make_decision(
         client,
         "Claims expire; work stays visible",
         text="A claim has a lease that expires. At most one actor holds a claim at a time.",
         reason="Coordinate work without a permanent lock when an agent stops.",
-        node_ids=[ids["S2"]],
-        rule_ids=[ids["R1"]],
+        nodes=[refs["S2"]],
+        rule_ids=[world.number("R1")],
     )
-    ids["X1"] = claims["id"]
+    await record("X1", "decision", claims)
     long_decision = await make_decision(
         client,
         LONG_TITLE,
         text=f"{UNBROKEN} {LONG_TITLE}",
         reason=LONG_SOURCE,
-        node_ids=[ids["S5"]],
+        nodes=[refs["S5"]],
     )
-    ids["X2"] = long_decision["id"]
-    ids["X3"] = (await make_decision(client, "Everything is written down", project_wide=True))["id"]
+    await record("X2", "decision", long_decision)
+    await record(
+        "X3",
+        "decision",
+        await make_decision(client, "Everything is written down", project_wide=True),
+    )
     await confirm(client, "decision", claims)
     lease = await make_fact(
-        client, "The team call agreed the lease is ten minutes", node_ids=[ids["S2"]]
+        client, "The team call agreed the lease is ten minutes", nodes=[refs["S2"]]
     )
-    ids["Y1"] = lease["id"]
+    await record("Y1", "fact", lease)
     long_fact = await make_fact(
         client,
         f"{UNBROKEN} {LONG_TITLE}",
         source=LONG_SOURCE,
-        node_ids=[ids["D1"]],
-        decision_ids=[ids["X2"]],
+        nodes=[refs["D1"]],
+        decision_ids=[world.number("X2")],
     )
-    ids["Y2"] = long_fact["id"]
-    ids["Y3"] = (await make_fact(client, "A fact about nothing in particular"))["id"]
+    await record("Y2", "fact", long_fact)
+    await record("Y3", "fact", await make_fact(client, "A fact about nothing in particular"))
     await confirm(client, "fact", lease)
 
 
@@ -336,13 +366,21 @@ class Stop:
 
 def stops(world: World) -> list[Stop]:
     """Every screen the proof names that needs a project and a person signed in: the Board, the
-    Graph (map and list, Work, Context and Everything), the Roadmap, the detail panel of each
-    kind of record, the search and activity drawers, the three settings pages, and the pages
-    that have no project open."""
-    e1 = world["E1"]
+    Graph (map and list, Work, Context and Everything), the Roadmap, the full page of an epic, a
+    story and a task, the detail panel of each kind of record (and over a page), the search and
+    activity drawers, the three settings pages, and the pages that have no project open."""
+    e1 = world.number("E1")
     map_ready = "svg#graph-svg[data-ready=true]"
+
+    def page_of(name: str, item: str, ready: str) -> Stop:
+        """The full page of an epic, story or task: ready once its table or its place is drawn."""
+        return Stop(
+            name, item_address(world[item]), f"#item-page[data-ref='{world[item]}'] {ready}", "item"
+        )
+
+    rows = "#item-table tbody tr"
     return [
-        Stop("board", "#/board", ".card[data-id]", "board"),
+        Stop("board", "#/board", ".card[data-ref]", "board"),
         Stop("board-no-match", "#/board?q=zzzznothingmatches", "#board-empty", "board"),
         Stop("graph-work-map", f"#/graph?view=work&as=map&epic={e1}", map_ready, "graph"),
         Stop("graph-context-map", f"#/graph?view=context&as=map&epic={e1}", map_ready, "graph"),
@@ -354,12 +392,24 @@ def stops(world: World) -> list[Stop]:
         Stop("graph-context-list", "#/graph?view=context&as=list", ".gv-record", "graph"),
         Stop("graph-everything-list", "#/graph?view=everything&as=list", ".gv-record", "graph"),
         Stop("roadmap", "#/roadmap", ".rm-bar", "roadmap"),
-        Stop("panel-epic", f"#/board?sel=node:{world['E3']}", "#panel .card-detail", "panel"),
-        Stop("panel-story", f"#/board?sel=node:{world['S5']}", "#panel .card-detail", "panel"),
-        Stop("panel-task", f"#/board?sel=node:{world['D1']}", "#panel .card-detail", "panel"),
-        Stop("panel-requirement", f"#/board?sel=rule:{world['R3']}", "#panel .detail", "panel"),
-        Stop("panel-decision", f"#/board?sel=decision:{world['X2']}", "#panel .detail", "panel"),
-        Stop("panel-fact", f"#/board?sel=fact:{world['Y2']}", "#panel .detail", "panel"),
+        page_of("item-epic", "E1", rows),
+        page_of("item-epic-long", "E3", rows),
+        page_of("item-epic-empty", "E4", "#item-empty .empty-text"),
+        page_of("item-story", "S2", rows),
+        page_of("item-story-long", "S5", rows),
+        page_of("item-task", "D1", "#item-part-title"),
+        Stop(
+            "item-quick-look",
+            f"{item_address(world['S2'])}&sel={world['B1']}",
+            f"#panel .card-detail[data-ref='{world['B1']}']",
+            "item",
+        ),
+        Stop("panel-epic", f"#/board?sel={world['E3']}", "#panel .card-detail", "panel"),
+        Stop("panel-story", f"#/board?sel={world['S5']}", "#panel .card-detail", "panel"),
+        Stop("panel-task", f"#/board?sel={world['D1']}", "#panel .card-detail", "panel"),
+        Stop("panel-requirement", f"#/board?sel={world['R3']}", "#panel .detail", "panel"),
+        Stop("panel-decision", f"#/board?sel={world['X2']}", "#panel .detail", "panel"),
+        Stop("panel-fact", f"#/board?sel={world['Y2']}", "#panel .detail", "panel"),
         Stop("panel-coverage", "#/board?panel=coverage", "#panel .detail", "panel"),
         Stop("search", "#/board?drawer=search&search=card", "#search-results li.result", "drawer"),
         Stop("search-empty", "#/board?drawer=search&search=zzzznothing", "#search-count", "drawer"),
@@ -656,10 +706,11 @@ for (let n = walker.nextNode(); n; n = walker.nextNode()) {
   if (found.length) out.glyphs.push(desc(p) + ' has ' + found.join(''));
 }
 
-// 6. Headings: one h1, and no level skipped inside a region of the page.
+// 6. Headings: one h1, and no level skipped inside a region of the page. A heading that is only
+// for a screen reader (.sr-only) is a heading to the people who move by headings, so it counts.
 const levels = [];
 for (const e of document.body.querySelectorAll('h1, h2, h3, h4, h5, h6, [role=heading]')) {
-  if (!vis(e) || e.closest('.sr-only')) continue;
+  if (!vis(e)) continue;
   const level = e.getAttribute('aria-level') ? Number(e.getAttribute('aria-level')) : Number(e.tagName[1]);
   const region = e.closest('main, #sidebar, #top, #drawer, #panel, dialog, nav');
   levels.push({ level, desc: desc(e), region: region ? region.id || region.tagName : 'body' });
@@ -684,7 +735,9 @@ for (const e of document.querySelectorAll('nav, aside, [role=region], [role=sear
 
 // 8. Text stays in its box: it wraps, scrolls, or is clipped with the whole of it said elsewhere.
 const alt = (e) => {
-  const text = words(e.textContent);
+  // What is spoken says an item's code in words ("Task 25: Past its date" for "T-25 Past its date"),
+  // so the words after the code are what has to be there.
+  const text = words(e.textContent).replace(/^[EST]-\d+\s+/, '');
   if (!text) return true;
   const probe = text.slice(0, 12);
   const holders = [e, ...e.querySelectorAll('[title], [aria-label]')];
@@ -1123,7 +1176,7 @@ async def tour(server_url: str, screen: Screen, theme: str) -> Tour:
             await visit(w, stop)
             await look(stop.name)
         await visit(w, stops(world)[0])
-        for name, state in states(screen).items():
+        for name, state in states(screen, world).items():
             await state.show(w)
             await look(name, state.quick)
             await state.leave(w)
@@ -1166,9 +1219,10 @@ async def press_escape(w: Watched) -> None:
     await w.page.keyboard.press("Escape")
 
 
-def states(screen: Screen) -> dict[str, State]:
+def states(screen: Screen, world: World) -> dict[str, State]:
     """The sidebar (on a window narrow enough to hide it), the Settings menu, a card's Move menu,
-    and two dialogs."""
+    and three dialogs (the Board's New item, a fact to record, and a task to add on a story's
+    page)."""
 
     async def sidebar(w: Watched) -> None:
         await w.page.locator("#sidebar-toggle").click()
@@ -1207,16 +1261,23 @@ def states(screen: Screen) -> dict[str, State]:
         await w.page.locator("#record-fact").click()
         await w.page.wait_for_selector("dialog.modal[open]", state="visible")
 
+    async def new_task(w: Watched) -> None:
+        await w.page.evaluate("(hash) => { location.hash = hash; }", item_address(world["S2"]))
+        await w.page.wait_for_selector("#item-table tbody tr", state="attached")
+        await w.page.locator("#new-child").click()
+        await w.page.wait_for_selector("dialog.modal[open]", state="visible")
+
     async def back_to_board(w: Watched) -> None:
         await close_dialog(w)
         await w.page.evaluate("() => { location.hash = '#/board'; }")
-        await w.page.wait_for_selector(".card[data-id]", state="attached")
+        await w.page.wait_for_selector(".card[data-ref]", state="attached")
 
     found = {
         "settings-menu": State("settings-menu", settings, close_settings, quick=True),
         "move-menu": State("move-menu", move, press_escape, quick=True),
         "new-item-dialog": State("new-item-dialog", new_item, close_dialog),
         "record-fact-dialog": State("record-fact-dialog", record_fact, back_to_board),
+        "new-task-dialog": State("new-task-dialog", new_task, back_to_board),
     }
     if screen.narrow:
         found = {"sidebar": State("sidebar", sidebar, close_sidebar), **found}
@@ -1277,8 +1338,8 @@ CARDS = """
   const s = getComputedStyle(card);
   const cell = card.closest('.cell');
   return {
-    id: Number(card.dataset.id), kind: card.dataset.kind, status: card.dataset.status,
-    epic: cell ? Number(cell.dataset.epic) : null, cell: cell ? cell.dataset.status : null,
+    ref: card.dataset.ref, kind: card.dataset.kind, status: card.dataset.status,
+    epic: cell ? cell.dataset.epic : null, cell: cell ? cell.dataset.status : null,
     cellBox: cell ? box(cell) : null, box: box(card),
     siblings: card.closest('.cards') ? card.closest('.cards').children.length : 0,
     top: rel(card.querySelector('.card-top')), title: rel(title),
@@ -1342,10 +1403,10 @@ GRAPH = """
 """
 
 
-async def cards(page: Page) -> dict[int, dict[str, Any]]:
-    """Every card of the Board, by id."""
+async def cards(page: Page) -> dict[str, dict[str, Any]]:
+    """Every card of the Board, by reference."""
     found: list[dict[str, Any]] = await page.evaluate(CARDS)
-    return {card["id"]: card for card in found}
+    return {card["ref"]: card for card in found}
 
 
 async def graph(page: Page) -> dict[str, Any]:
