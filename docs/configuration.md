@@ -1,17 +1,32 @@
 # Configuration
 
-Everything is set in `.env`, which `docker compose` reads. `./scripts/init-env.sh` creates it with a
-random database password, and `.env.example` lists every setting with what it does. Restart the
-stack after a change: `docker compose up -d --build --wait`.
+Vrum starts with no configuration at all. Every setting below has a default. To change one, copy
+`.env.example` to `.env` in the folder you run `docker compose` from, edit it, and restart the
+stack: `docker compose up -d --build --wait`. You can also set one for a single start on the
+command line, for example `VRUM_PORT=8090 docker compose up -d --build --wait`. `.env` is ignored
+by git.
 
-`.env` holds the database password, so keep it where only you can read it and never commit it. The
-file is created readable only by you and is ignored by git.
+## The database password
+
+You never have to make one. The first time Vrum starts, the database makes a random password and
+keeps it in a Docker volume of its own (`vrum-secrets`) that the server reads. The database is not
+published outside Docker, and no two installs share a password. The password is chosen once, when
+the database is first made.
+
+- To choose it yourself, set `VRUM_DB_PASSWORD` before the very first start. Setting or changing it
+  after that changes nothing, so it can never lock the server out of its own database.
+- `docker compose down` keeps the database and the password. `docker compose down --volumes`
+  deletes both, accounts and projects included, and the next start makes a new password.
+- If the database is still there but its password file is gone (for example, only the
+  `vrum-secrets` volume was deleted), the database will not start, and `docker compose logs db`
+  says why. Set `VRUM_DB_PASSWORD` to the old password, or run `docker compose down --volumes` to
+  start again with an empty database.
 
 ## Settings
 
 | Setting | What it does |
 | --- | --- |
-| `VRUM_DB_PASSWORD` | The database password. Required. `./scripts/init-env.sh` makes one. |
+| `VRUM_DB_PASSWORD` | The database password, only read the first time Vrum starts. Optional: if it is not set, a random one is made. |
 | `VRUM_PORT` | The port on this machine, for the board and the agents' endpoint. 8000 by default. |
 | `VRUM_BIND_ADDRESS` | The address the port is published on. `127.0.0.1` by default: this machine only. |
 | `VRUM_MAX_REQUEST_BYTES` | The most one request may hold. 4 MiB by default. It is the only limit on what one write may contain. |

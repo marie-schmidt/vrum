@@ -161,6 +161,12 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
+        db_password = _secret(env, "VRUM_DB_PASSWORD")
+        if db_password is None:
+            raise ConfigError(
+                "VRUM_DB_PASSWORD is not set. Set it, or set VRUM_DB_PASSWORD_FILE to a file "
+                "that holds it. docker compose makes the password and sets this up for you."
+            )
         return cls(
             host=env.get("VRUM_HOST", "").strip() or "127.0.0.1",
             port=_port(env, "VRUM_PORT", 8000),
@@ -170,11 +176,7 @@ class Settings:
             db_port=_port(env, "VRUM_DB_PORT", 5432),
             db_name=env.get("VRUM_DB_NAME", "").strip() or "vrum",
             db_user=env.get("VRUM_DB_USER", "").strip() or "vrum",
-            db_password=_required(
-                env,
-                "VRUM_DB_PASSWORD",
-                "There is no default password; run ./scripts/init-env.sh to create one in .env.",
-            ),
+            db_password=db_password,
             max_request_bytes=_whole_number(
                 env, "VRUM_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES, 1000
             ),

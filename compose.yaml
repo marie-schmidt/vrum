@@ -7,9 +7,35 @@ services:
     environment:
       POSTGRES_USER: vrum
       POSTGRES_DB: vrum
-      POSTGRES_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+      # Optional. Only read the first time, to choose the password (see the entrypoint below).
+      VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:-}
+    # Nothing has to be set up to start Vrum. The first time this runs it makes a random database
+    # password and keeps it in a volume of its own, which the server reads (the database is not
+    # reachable from outside Docker, and no two installs share a password). Set VRUM_DB_PASSWORD
+    # before the very first start to choose the password yourself; it is ignored afterwards.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -s /secrets/db-password ]; then
+          if [ -z "$$VRUM_DB_PASSWORD" ] && [ -e /var/lib/postgresql/data/PG_VERSION ]; then
+            echo "This database already exists, but the file that holds its password is gone." >&2
+            echo "Set VRUM_DB_PASSWORD to its password, or, to start again with an empty" >&2
+            echo "database (this deletes the data), run: docker compose down --volumes" >&2
+            exit 1
+          fi
+          umask 022
+          if [ -n "$$VRUM_DB_PASSWORD" ]; then
+            printf '%s' "$$VRUM_DB_PASSWORD" > /secrets/db-password
+          else
+            head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > /secrets/db-password
+          fi
+        fi
+        export POSTGRES_PASSWORD_FILE=/secrets/db-password
+        exec docker-entrypoint.sh postgres
     volumes:
       - vrum-data:/var/lib/postgresql/data
+      - vrum-secrets:/secrets
     healthcheck:
       # Over TCP on purpose: during first-time setup the database only listens on its socket.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U vrum -d vrum"]
@@ -27,7 +53,7 @@ services:
       VRUM_HOST: 0.0.0.0
       VRUM_PORT: ${VRUM_PORT:-8000}
       VRUM_DB_HOST: db
-      VRUM_DB_PASSWORD: ${VRUM_DB_PASSWORD:?VRUM_DB_PASSWORD is not set. Run ./scripts/init-env.sh to create .env with a random password.}
+      VRUM_DB_PASSWORD_FILE: /secrets/db-password
       VRUM_MAX_REQUEST_BYTES: ${VRUM_MAX_REQUEST_BYTES:-}
       VRUM_BOARD_POLL_SECONDS: ${VRUM_BOARD_POLL_SECONDS:-}
       # The embedding service, if any: see .env.example. Without these, search works by exact
@@ -39,6 +65,8 @@ services:
       EMBEDDING_MIN_SIMILARITY: ${EMBEDDING_MIN_SIMILARITY:-}
       EMBEDDING_OVERLAP_THRESHOLD: ${EMBEDDING_OVERLAP_THRESHOLD:-}
       EMBEDDING_REINDEX_SECONDS: ${EMBEDDING_REINDEX_SECONDS:-}
+    volumes:
+      - vrum-secrets:/secrets:ro
     ports:
       # The same port inside and outside, because the server only accepts requests addressed to
       # localhost on that port. Bound to this machine only unless VRUM_BIND_ADDRESS says otherwise.
@@ -81,4 +109,5 @@ services:
 
 volumes:
   vrum-data:
+  vrum-secrets:
   vrum-models:

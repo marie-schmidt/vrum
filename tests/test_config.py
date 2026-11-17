@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,24 @@ def test_defaults_apply_when_only_the_required_values_are_set() -> None:
 def test_there_is_no_default_database_password() -> None:
     with pytest.raises(ConfigError, match="VRUM_DB_PASSWORD is not set"):
         Settings.from_env({"VRUM_DB_HOST": "db"})
+
+
+def test_the_database_password_can_come_from_a_file(tmp_path: Path) -> None:
+    password_file = tmp_path / "db-password"
+    password_file.write_text("from-the-file\n", encoding="utf-8")
+    base = {"VRUM_DB_HOST": "db"}
+
+    settings = Settings.from_env({**base, "VRUM_DB_PASSWORD_FILE": str(password_file)})
+    assert settings.db_password == "from-the-file"
+    assert "from-the-file" in settings.secrets()
+    with pytest.raises(ConfigError, match="only one of VRUM_DB_PASSWORD and VRUM_DB_PASSWORD_FILE"):
+        Settings.from_env({**FULL_ENV, "VRUM_DB_PASSWORD_FILE": str(password_file)})
+    with pytest.raises(ConfigError, match="cannot be read"):
+        Settings.from_env({**base, "VRUM_DB_PASSWORD_FILE": str(tmp_path / "missing")})
+    empty = tmp_path / "empty"
+    empty.write_text("\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="is empty"):
+        Settings.from_env({**base, "VRUM_DB_PASSWORD_FILE": str(empty)})
 
 
 def test_a_blank_database_host_is_refused() -> None:
@@ -161,3 +180,23 @@ def test_the_request_size_limit_has_a_default_and_can_be_changed() -> None:
     )
     with pytest.raises(ConfigError, match="VRUM_MAX_REQUEST_BYTES must be a whole number of 1000"):
         Settings.from_env({**FULL_ENV, "VRUM_MAX_REQUEST_BYTES": "10"})
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_the_compose_file_needs_no_setting_to_start() -> None:
+    # A fresh clone has no .env. Nothing in compose.yaml may refuse to start without a value (a
+    # `${NAME:?...}` does), and the server must be given its password as a file the database
+    # made, not as a variable someone had to set.
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    assert not re.search(r"\$\{[A-Z_]+:?\?", compose)
+    assert "VRUM_DB_PASSWORD_FILE: /secrets/db-password" in compose
+
+
+def test_nothing_documented_or_configured_sets_up_a_language_model() -> None:
+    # Vrum does not generate answers, so no setting for a chat service is offered.
+    for name in (".env.example", "compose.yaml"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "LLM_" not in text, name
+        assert "language model" not in text.lower(), name

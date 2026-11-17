@@ -27,6 +27,7 @@ from tests.acceptance_scenario import Failed, chapter, clip, proof
 from tests.board_helpers import SLOW, browser_page, create_in_browser
 from tests.board_m14 import events_of, feed_becomes, feed_row, spoken
 from tests.helpers import REPO_ROOT, connect, embeddings_stopped, ok, unique_word
+from tests.second_stack import SecondStack
 from tests.test_board_accounts_integration import register_in_the_browser
 from tests.world import Person, server_base
 
@@ -45,6 +46,7 @@ async def quickstart() -> None:
     base = server_base()
     try:
         read_the_readme(base)
+        await starts_with_nothing_set()
         with embeddings_stopped():
             await first_minutes(base)
     except BrowserError as error:
@@ -151,25 +153,54 @@ def read_the_readme(base: str) -> None:
         "every command in Getting started's code blocks that runs something from the checkout "
         "names a script or file that exists (and a script that can be run), and the addresses it "
         "gives (the board, the health check) answer as it says when asked of this stack",
-        len(lines) >= 2 and not gone and "/board" in named and not unanswered and health_as_told,
+        len(lines) >= 1 and not gone and "/board" in named and not unanswered and health_as_told,
         clip("; ".join(gone + unanswered), 120)
         or f"{len(lines)} commands read, none run; {', '.join(named)} answered",
     )
 
     env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "compose.yaml").read_text(encoding="utf-8")
     set_there = re.findall(r"^(?:EMBEDDING|LLM)_\w+=", env_example, re.M)
     mentioned = re.findall(r"EMBEDDING_|LLM_|language[- ]model|Ollama", started, re.I)
+    first_step = re.findall(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", started, re.S | re.M)[0]
     proof(
         "M18",
-        "the core setup asks for no embedding service and no language model: Getting started "
-        "names no setting for either, and the .env its script writes from .env.example sets "
-        "neither (the only value it must have is the database password)",
+        "the core setup asks for no setting at all, no embedding service and no language model: "
+        "Getting started has no .env or script to run first, names no setting for either service, "
+        "compose.yaml never refuses to start for a missing value, and .env.example leaves the "
+        "database password empty",
         not mentioned
         and not set_there
+        and "init-env" not in started
+        and "docker compose up" in first_step
+        and not re.search(r"\$\{[A-Z_]+:?\?", compose)
         and re.findall(r"^VRUM_DB_PASSWORD=$", env_example, re.M) == ["VRUM_DB_PASSWORD="]
         and not re.search(r"\bvr[ks]_[\w-]{8,}", text + guide),
         "no setting named, no key in an example",
     )
+
+
+async def starts_with_nothing_set() -> None:
+    """A copy started the way Getting started says, in a folder with no .env and with no
+    password given anywhere: the thing a person following the README on a fresh clone does."""
+    stack = SecondStack(nothing_set=True)
+    try:
+        stack.up()
+        found = stack.compose("exec", "-T", "app", "cat", "/secrets/db-password")
+        async with stack.client() as client:
+            status = await ok(client, "server_status")
+        proof(
+            "M18",
+            "a copy started with no .env and no setting at all, as on a fresh clone, comes up "
+            "healthy on its own random database password, a person registers and makes a project "
+            "on it, and that project's agent key reaches it",
+            found.returncode == 0
+            and re.fullmatch(r"[0-9a-f]{48}", found.stdout) is not None
+            and str(status["postgres_version"]).startswith("17"),
+            f"PostgreSQL {status['postgres_version']}, a {len(found.stdout)}-character password",
+        )
+    finally:
+        stack.close()
 
 
 # -- the first minutes, in a browser and with an agent

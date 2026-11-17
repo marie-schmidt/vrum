@@ -5,9 +5,11 @@ own port, its own account, project and agent key. ./check.sh gives it a port
 
 import os
 import random
+import shutil
 import string
 import subprocess
 import sys
+import tempfile
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
@@ -27,7 +29,11 @@ def _secret() -> str:
 
 
 class SecondStack:
-    def __init__(self) -> None:
+    """With no arguments, a copy with a random database password of its own. `password` names the
+    one to start it with; `nothing_set` starts it as on a new install, with no database password
+    given anywhere (and no .env read), so that Vrum makes its own."""
+
+    def __init__(self, password: str | None = None, *, nothing_set: bool = False) -> None:
         port = os.environ.get("VRUM_RESTORE_TEST_PORT")
         if not port:
             pytest.fail(
@@ -41,11 +47,17 @@ class SecondStack:
             **os.environ,
             "COMPOSE_PROJECT_NAME": PROJECT,
             "COMPOSE_FILE": "compose.yaml",
-            "VRUM_DB_PASSWORD": _secret(),
+            "VRUM_DB_PASSWORD": password or _secret(),
             "VRUM_PORT": port,
             "VRUM_BIND_ADDRESS": "127.0.0.1",
         }
         self.env.pop("VRUM_AGENT_KEY", None)
+        self.env_file: Path | None = None
+        if nothing_set:
+            self.env.pop("VRUM_DB_PASSWORD")
+            # An empty file stands in for the .env that a checkout may or may not have.
+            self.env_file = Path(tempfile.mkdtemp(prefix="vrum-no-env-")) / "empty.env"
+            self.env_file.write_text("", encoding="utf-8")
 
     @property
     def key(self) -> str:
@@ -54,8 +66,9 @@ class SecondStack:
         return self.project.key
 
     def compose(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        before = ["--env-file", str(self.env_file)] if self.env_file else []
         return subprocess.run(
-            ["docker", "compose", *arguments],
+            ["docker", "compose", *before, *arguments],
             cwd=REPO_ROOT,
             env=self.env,
             capture_output=True,
@@ -93,6 +106,8 @@ class SecondStack:
 
     def close(self) -> None:
         self.compose("down", "--volumes", "--remove-orphans", "--rmi", "local")
+        if self.env_file:
+            shutil.rmtree(self.env_file.parent, ignore_errors=True)
 
     def client(self) -> AbstractAsyncContextManager[Client]:
         return connect(self.url, self.key)
