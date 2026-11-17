@@ -641,7 +641,9 @@ async def test_a_title_is_edited_in_the_panel_and_saved_with_the_keyboard(
             await tab_to(page, f".card[data-ref='{task}']")
             await page.keyboard.press("Enter")
             await expect(page.locator("#card-title")).to_contain_text("Old title", timeout=SLOW)
-            await tab_to(page, "#edit-title")
+            await tab_to(page, "#panel button.edit-details")
+            await page.keyboard.press("Enter")
+            await expect(page.locator("#edit-title")).to_be_focused()
             await page.keyboard.press("ControlOrMeta+a")
             await page.keyboard.type("A new title from the keyboard")
             await tab_to(page, "#panel form.edit button[type=submit]")
@@ -849,6 +851,9 @@ async def test_dates_are_scheduled_through_the_tray_the_panel_and_the_bar_withou
             await expect(page.locator("#card-title")).to_contain_text(
                 "Dated in the panel", timeout=SLOW
             )
+            await tab_to(page, "#panel button.edit-details")
+            await page.keyboard.press("Enter")
+            await expect(page.locator("#edit-title")).to_be_focused()
             await tab_to(page, "#edit-start")
             await type_date(page, "2028-01-02")
             await tab_to(page, "#edit-target")

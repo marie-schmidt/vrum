@@ -25,6 +25,7 @@ from tests.board_helpers import (
     http,
     made,
     on,
+    open_editor,
     roadmap_ids,
     timeline,
 )
@@ -310,6 +311,7 @@ async def people_edit(client: Client, page_url: str, token: str) -> None:
         friend = await create_in_browser(page, "task", f"Logout {word}", story)
         await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
         await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
+        await open_editor(page)
         await page.locator("#edit-title").fill(f"Login form, better {word}")
         await page.locator("#edit-body").fill("Email and password, then a code.")
         await page.locator("#edit-priority").select_option("high")
@@ -425,6 +427,7 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
             f'"{clip(cycle_words, 80)}"',
         )
         await w.go(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_editor(page)
         title = page.locator("#edit-title")
         await title.fill("My title")
         await ok(
@@ -463,6 +466,7 @@ async def refusals(client: Client, page_url: str, token: str) -> None:
         )
         await page.evaluate("localStorage.setItem('vrum.actor', 'Tester')")
         await w.go(f"#/board?epic={number_of(epic)}&sel={dated}")
+        await open_editor(page)
         await page.locator("#edit-start").fill(day(12))
         await page.get_by_role("button", name="Save changes").click()
         late = page.locator("#panel .edit .problem .refusal-text")
@@ -512,6 +516,7 @@ async def index_follows(client: Client, page_url: str, token: str) -> None:
     async with browser_page(page_url, token=token) as w:
         page = w.page
         await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_editor(page)
         await page.locator("#edit-body").fill(f"The phrase {word} appears here")
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.locator("#panel .card-detail")).to_contain_text(f"The phrase {word}")
@@ -527,6 +532,7 @@ async def index_follows(client: Client, page_url: str, token: str) -> None:
         )
         with embeddings_stopped():
             before = await waiting(client)
+            await open_editor(page)
             await page.locator("#edit-body").fill(f"The second phrase {later} appears here")
             await page.get_by_role("button", name="Save changes").click()
             await expect(page.locator("#panel .card-detail")).to_contain_text(
@@ -823,6 +829,7 @@ async def days_work() -> None:
         await expect(page.locator("#card-title")).to_contain_text(
             f"{code_of(later)} ", timeout=SLOW
         )
+        await open_editor(page)
         await page.locator("#edit-title").fill(f"My title {word}")
         version = (await ok(agent, "get_node", node=later))["version"]
         await ok(
@@ -871,6 +878,7 @@ async def days_work() -> None:
         await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
         line = await timeline(page)
         first_start = line["today"] + datetime.timedelta(days=2)
+        await open_editor(page)
         await page.locator("#edit-start").fill(first_start.isoformat())
         await page.locator("#edit-target").fill((first_start + datetime.timedelta(6)).isoformat())
         await page.get_by_role("button", name="Save changes").click()

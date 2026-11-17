@@ -121,7 +121,7 @@ export function recallBlock(target, data, { withSimilar = false, onSimilar = () 
   const extra = (more = {}) => ({ ...more, ...(similar ? { with_similar: true } : {}) });
   const draw = (answer) => {
     const total = recallTotal(answer);
-    put(summary, `What an agent calling recall for this is told: ${plural(total, 'entry', 'entries')}. Only exact links are followed, and nothing is inferred.`);
+    put(summary, `${plural(total, 'entry', 'entries')}. An agent asking for the context of this item is told exactly these: only exact links are followed, and nothing is guessed.`);
     const sections = recallSections(answer, (more) => askRecall(target, extra(more)));
     put(body, sections.length ? sections : h('p', { class: 'quiet none' }, 'Nothing is recorded for it yet.'));
   };

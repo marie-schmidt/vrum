@@ -345,11 +345,15 @@ function build() {
       h(
         'header',
         { class: 'page-header gm-head' },
-        h('div', { class: 'gm-heading' }, h('h1', {}, 'Graph'), h('p', { class: 'gm-subtitle' }, 'Follow the connections. Keep the reason beside the work.')),
-        h('button', { type: 'button', class: 'primary', id: 'graph-new-item', onclick: newItem }, icon('plus', { size: 16 }), 'New item'),
+        h('div', { class: 'page-title gm-heading' }, h('h1', {}, 'Graph'), h('p', { class: 'page-sub gm-subtitle' }, 'Follow the connections. Keep the reason beside the work.')),
+        h('div', { class: 'page-actions' }, h('button', { type: 'button', class: 'primary', id: 'graph-new-item', onclick: newItem }, icon('plus', { size: 16 }), 'New item')),
       ),
-      h('div', { class: 'gm-bar' }, views, field('Epic', epicSelect, 'gm-epic'), h('div', { class: 'gm-view-end' }, parts.scope, presentations)),
-      h('div', { class: 'gm-tools' }, h('div', { class: 'gm-filter' }, bar.form, bar.help, bar.problem), options, filters),
+      h(
+        'div',
+        { class: 'gm-toolbar' },
+        h('div', { class: 'gm-bar' }, views, field('Epic', epicSelect, 'gm-epic'), h('div', { class: 'gm-view-end' }, parts.scope, presentations)),
+        h('div', { class: 'gm-tools' }, h('div', { class: 'gm-filter' }, bar.form, bar.help, bar.problem), h('div', { class: 'gm-options-row' }, options, filters)),
+      ),
       parts.notice,
       parts.map,
       parts.list,
@@ -831,8 +835,13 @@ function extent() {
 }
 
 function fit() {
-  const box = parts.svg.getBoundingClientRect();
   const { x0, y0, x1, y1 } = extent();
+  // A map in rows is usually wider than it is tall: its canvas is as tall as the map is at the width
+  // it has, so there is no empty space above and below it (the style sheet caps the height).
+  const across = parts.svg.getBoundingClientRect().width || 800;
+  if (mode === 'layered') parts.canvas.style.setProperty('--gm-h', `${Math.ceil((y1 - y0) * Math.min(across / (x1 - x0), 1))}px`);
+  else parts.canvas.style.removeProperty('--gm-h');
+  const box = parts.svg.getBoundingClientRect();
   const width = box.width || 800;
   const height = box.height || 500;
   const k = Math.min(Math.max(Math.min(width / (x1 - x0), height / (y1 - y0)), LEAST_ZOOM), 1);

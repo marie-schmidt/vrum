@@ -29,6 +29,7 @@ from tests.board_helpers import (
     http,
     item_rows,
     made,
+    open_editor,
     plain,
 )
 from tests.helpers import (
@@ -427,6 +428,7 @@ async def test_what_a_person_does_on_the_board_is_in_the_graph_with_their_name_a
 
         await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
         await expect(w.page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
+        await open_editor(w.page)
         await w.page.locator("#edit-title").fill(f"Login form, better {word}")
         await w.page.locator("#edit-body").fill("Email and password, then a code.")
         await w.page.locator("#edit-priority").select_option("high")
@@ -615,6 +617,7 @@ async def test_a_stale_edit_is_refused_keeps_what_was_typed_and_offers_the_curre
     story = await made(client, "story", f"Original title {word}", epic)
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_editor(w.page)
         title = w.page.locator("#edit-title")
         await expect(title).to_have_value(f"Original title {word}")
         await title.fill(f"My title {word}")
@@ -657,6 +660,7 @@ async def test_a_blank_name_is_refused_in_the_words_mcp_uses_and_changes_nothing
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
         await w.page.evaluate("localStorage.setItem('vrum.actor', '   ')")
+        await open_editor(w.page)
         await w.page.locator("#edit-title").fill(f"Changed {word}")
         await w.page.get_by_role("button", name="Save changes").click()
         problem = w.page.locator("#panel .edit .problem .refusal-text")
@@ -692,6 +696,7 @@ async def test_an_edit_on_the_board_is_searchable_at_once_and_indexed_without_a_
 
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_editor(w.page)
         await w.page.locator("#edit-body").fill(f"The phrase {word} appears here")
         await w.page.get_by_role("button", name="Save changes").click()
         await expect(w.page.locator("#panel .card-detail")).to_contain_text(f"The phrase {word}")
@@ -704,6 +709,7 @@ async def test_an_edit_on_the_board_is_searchable_at_once_and_indexed_without_a_
         # With the embedding service gone the edit still saves, and one item waits.
         with embeddings_stopped():
             before = await waiting(client)
+            await open_editor(w.page)
             await w.page.locator("#edit-body").fill(f"The second phrase {later} appears here")
             await w.page.get_by_role("button", name="Save changes").click()
             await expect(w.page.locator("#panel .card-detail")).to_contain_text(
@@ -1180,6 +1186,7 @@ async def test_a_start_date_after_the_target_typed_in_the_card_is_refused_in_the
     before = (await node(client, task), len(await history(client, task)))
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={number_of(epic)}&sel={task}")
+        await open_editor(w.page)
         await w.page.locator("#edit-start").fill(day(12))
         await w.page.get_by_role("button", name="Save changes").click()
         problem = w.page.locator("#panel .edit .problem .refusal-text")

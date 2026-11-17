@@ -297,6 +297,16 @@ async def roadmap_ids(page: Page, dated: int, undated: int) -> set[str]:
     return set(bars) | set(tray)
 
 
+async def open_tray(page: Page) -> None:
+    """Open the Roadmap's tray of undated items, as a person does by pressing its title. The tray
+    starts closed when something is on the timeline, and open when nothing is; this does nothing
+    when it is already open."""
+    tray = page.locator("#tray")
+    if await tray.get_attribute("open") is None:
+        await page.locator("#tray > summary").click()
+    await expect(tray.locator(".tray-item, .tray-none").first).to_be_visible(timeout=SLOW)
+
+
 async def drag_bar(page: Page, ref: str, days: float, grip: str | None = None) -> None:
     """Drag a Roadmap bar (or one of its ends: grip 'start' or 'end') sideways by some days."""
     ppd = (await timeline(page))["ppd"]
@@ -333,6 +343,19 @@ async def open_item(w: Watched, ref: str) -> None:
 def item_row(page: Page, ref: str) -> Locator:
     """The row of the item page's table that holds a story or a task."""
     return page.locator(f"#item-table tr#row-{ref_slug(ref)}")
+
+
+async def open_editor(page: Page, where: str = "") -> None:
+    """Open the details of an epic, story, task or requirement for editing, as a person does with
+    the Edit button, and wait for the form. It does nothing when the form is already open. `where`
+    is '#panel' or '#item-page' when both are on the screen and it matters which."""
+    scope = page.locator(where) if where else page
+    button = scope.locator("button.edit-details")
+    # The details may still be loading: wait for the button, or for the form if it is open.
+    await expect(scope.locator("button.edit-details, form.edit").first).to_be_visible(timeout=SLOW)
+    if await button.count():
+        await button.first.click()
+    await expect(scope.locator("form.edit input[type=text]").first).to_be_visible(timeout=SLOW)
 
 
 async def item_rows(page: Page) -> list[str]:

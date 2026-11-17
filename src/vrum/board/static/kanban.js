@@ -19,9 +19,11 @@ import { epicOf, epics, store, sync, titleOf } from './store.js';
 // What "ready work nobody holds" means: the filter that gives exactly the tool's answer.
 const FREE = 'kind:story,task status:ready -claimed';
 const TILE_ICONS = { free: 'ready', blocked: 'blocked', overdue: 'clock', lapsed: 'alert', unplaced: 'rule', bare: 'story' };
+const DRAG_HELP = 'Drag a card to another column of its own epic to change its status, or use its Move menu. Ready is worked out from the links, so nothing can be dropped there.';
 
 let root = null;
-let frame = null; // the board with its scroll hint
+let frame = null; // the board with its fading edges
+let hint = null; // the arrows that scroll the columns, shown only while some of them are out of sight
 let body = null; // the region with the columns, which scrolls sideways
 let strip = null; // where the numbers that need attention are
 let bar = null; // the filter box
@@ -53,7 +55,8 @@ export function mount(element, initial) {
   parts = { select, count: h('p', { class: 'board-count', id: 'board-count' }) };
   strip = h('section', { id: 'attention', class: 'attention', 'aria-label': 'What needs attention' }, h('p', { class: 'attention-note' }, 'Reading the numbers…'));
   body = h('div', { class: 'board', id: 'board', role: 'region', tabindex: 0, 'aria-label': 'Board columns, one lane for each epic', onscroll: seeScroll, ondragover: autoscroll });
-  frame = h('div', { class: 'board-frame' }, scrollHint(), h('div', { class: 'board-viewport' }, body));
+  hint = scrollHint();
+  frame = h('div', { class: 'board-frame' }, h('div', { class: 'board-viewport' }, body));
   put(
     root,
     h(
@@ -63,7 +66,7 @@ export function mount(element, initial) {
       strip,
       h('div', { class: 'board-toolbar' }, bar.form, h('div', { class: 'board-select' }, h('label', { for: 'epic-filter', class: 'sr-only' }, 'Epic'), select), parts.count),
       bar.problem,
-      h('div', { class: 'board-notes' }, bar.help, h('p', { class: 'board-help' }, 'Drag a card to another column of its own epic to change its status, or use its Move menu. Ready is worked out from the links, so nothing can be dropped there.')),
+      h('div', { class: 'board-notes' }, bar.help, h('p', { class: 'board-help', title: DRAG_HELP }, DRAG_HELP), hint),
       frame,
     ),
   );
@@ -87,6 +90,7 @@ export function unmount() {
   counting += 1;
   root = null;
   frame = null;
+  hint = null;
   body = null;
   strip = null;
   parts = {};
@@ -137,13 +141,14 @@ function header() {
   );
 }
 
-// The hint above the columns, shown only while some of them are out of sight.
+// The arrows beside the drag hint, shown only while some of the columns are out of sight. The words
+// are for a screen reader and a tooltip: the fading edge of the board and the arrows say it too.
 function scrollHint() {
   const go = (way) => body.scrollBy({ left: way * Math.max(body.clientWidth * 0.8, 200), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   return h(
     'div',
-    { class: 'scroll-hint' },
-    h('span', {}, 'More columns are out of sight. Scroll sideways, or use the arrows.'),
+    { class: 'scroll-hint', hidden: true, title: 'More columns are out of sight. Scroll sideways, or use the arrows.' },
+    h('span', { class: 'sr-only' }, 'More columns are out of sight. Scroll sideways, or use the arrows.'),
     h('button', { type: 'button', class: 'small icon-only flip', 'aria-label': 'Scroll the columns left', onclick: () => go(-1) }, icon('chevron_right', { size: 16 })),
     h('button', { type: 'button', class: 'small icon-only', 'aria-label': 'Scroll the columns right', onclick: () => go(1) }, icon('chevron_right', { size: 16 })),
   );
@@ -161,6 +166,7 @@ function seeScroll() {
   if (!body || !frame) return;
   const over = body.scrollWidth > body.clientWidth + 1;
   frame.dataset.overflow = String(over);
+  if (hint) hint.hidden = !over;
   frame.dataset.left = String(over && body.scrollLeft > 1);
   frame.dataset.right = String(over && body.scrollLeft + body.clientWidth < body.scrollWidth - 1);
   // A lane's header stays as wide as what is in view, so its buttons never scroll out of reach.
@@ -281,7 +287,22 @@ function emptyState(only) {
     : found !== null
       ? ['Nothing matches this filter.', 'Change the words, or clear the filter to see everything.']
       : ['Nothing here yet.', 'Create an epic, or ask an agent to make a plan.'];
-  return h('div', { class: 'empty', id: 'board-empty' }, icon('epic', { size: 24 }), h('p', { class: 'empty-text' }, h('strong', {}, title), ' ', more));
+  // A project with no work at all is the first thing a new person sees: say what to do next.
+  const first = !only && found === null;
+  return h(
+    'div',
+    { class: 'empty', id: 'board-empty' },
+    icon('epic', { size: 24 }),
+    h('p', { class: 'empty-text' }, h('strong', {}, title), ' ', more),
+    first
+      ? h(
+          'div',
+          { class: 'empty-actions' },
+          h('button', { type: 'button', class: 'primary', id: 'empty-new-epic', onclick: () => openCreate({ kind: 'epic' }) }, icon('plus', { size: 16 }), 'Create the first epic'),
+          viewLink('access', {}, { id: 'empty-connect-agent' }, 'Connect an agent'),
+        )
+      : null,
+  );
 }
 
 function columnHeads(counts) {
@@ -366,7 +387,7 @@ function cell(epic, status, cards) {
   const place = h(
     'div',
     { class: `cell status-${status}`, role: 'group', 'aria-label': `${STATUS[status].label} in ${epic.title}`, 'data-status': status, 'data-epic': epic.ref },
-    cards.length ? h('ul', { class: 'cards' }, cards.map((node) => h('li', {}, card(node)))) : h('p', { class: 'cell-empty' }, 'No items'),
+    cards.length ? h('ul', { class: 'cards' }, cards.map((node) => h('li', {}, card(node)))) : h('p', { class: 'cell-empty sr-only' }, 'No items'),
   );
   place.addEventListener('dragover', (event) => {
     const ref = event.dataTransfer?.types.includes('application/x-vrum-node') ? dragged : '';

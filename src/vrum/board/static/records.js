@@ -98,6 +98,47 @@ export function recordRow(record, { actions = null, choose = null } = {}) {
 // A section of the panel: a heading over a hairline, and what it holds.
 export const section = (title, key, ...content) => h('section', { class: 'part', dataset: { part: key } }, h('h3', {}, title), content);
 
+// The same, with what can be done to it in the row of the heading (an Edit button, the buttons that
+// record a fact or a decision). `quietSection` is a section with nothing in it but a line saying so:
+// the line then sits beside the heading and takes one row.
+export const sectionWith = (title, key, actions, ...content) =>
+  h('section', { class: 'part', dataset: { part: key } }, h('div', { class: 'part-head' }, h('h3', {}, title), actions), content);
+export const quietSection = (title, key, line) =>
+  h('section', { class: 'part part-quiet', dataset: { part: key } }, h('h3', {}, title), line);
+
+// The details of an item or a requirement: what is written, read as Markdown, with an Edit button
+// beside the heading (or none, when the page has put it in its own header); while `editing`, the
+// form is in its place and the text is not drawn twice.
+export function detailsSection({ body, form, editing, edit = null, extras = [] }) {
+  const open = !editing && edit ? h('button', { type: 'button', class: 'small edit-details', 'aria-label': 'Edit details', onclick: edit }, 'Edit') : null;
+  const read = h('div', { class: 'body-text' }, body ? renderMarkdown(body) : h('span', { class: 'quiet' }, 'No details yet.'));
+  return sectionWith('Details', 'edit', open, editing ? form : read, ...extras);
+}
+
+// The words and the sign of an Edit button that is in a page's header.
+export const editButton = (onclick, id = null) => h('button', { type: 'button', class: 'edit-details', id, 'aria-label': 'Edit details', onclick }, 'Edit');
+
+// Holds the details section of an item or a requirement. `build(editing)` makes it. Starting or
+// ending an edit draws only that section again, asking the server nothing and leaving the rest of
+// the panel as it is, and puts the focus where the person goes next (the first field, or back on
+// the Edit button). `after(editing)` is for whatever else changes with it.
+export function detailsHolder(state, build, after = () => {}) {
+  let current = build(Boolean(state.editing));
+  return {
+    get element() {
+      return current;
+    },
+    set(editing) {
+      state.editing = editing;
+      const fresh = build(editing);
+      current.replaceWith(fresh);
+      current = fresh;
+      after(editing);
+      (editing ? fresh.querySelector('input[type="text"]') : fresh.querySelector('.edit-details'))?.focus();
+    },
+  };
+}
+
 // A heading with how many there are: "Mentioned in (3)".
 export const countTitle = (title, count) => [title, h('span', { class: 'heading-count' }, ` (${count})`)];
 
@@ -129,6 +170,14 @@ export function detailGrid(rows) {
   const shown = rows.filter((row) => row && row[1] !== null && row[1] !== undefined && row[1] !== false);
   if (!shown.length) return null;
   return h('dl', { class: 'detail-grid' }, shown.flatMap(([label, value, props = {}]) => [h('dt', {}, label), h('dd', props, value)]));
+}
+
+// The same facts as a row of small groups, each with its label over its value: for the head of an
+// item's page, where there is room to read them across.
+export function factsStrip(rows) {
+  const shown = rows.filter((row) => row && row[1] !== null && row[1] !== undefined && row[1] !== false);
+  if (!shown.length) return null;
+  return h('dl', { class: 'facts' }, shown.map(([label, value, props = {}]) => h('div', { class: 'fact' }, h('dt', {}, label), h('dd', props, value))));
 }
 
 // A panel that has only something to say: that it is loading, that the server said no, that the
@@ -258,6 +307,14 @@ export function recordButtons(concern) {
   );
 }
 
+// What is known about whatever is open: the buttons that add to it are in the heading's row, and
+// `recalled` (the recall block) is what the server says.
+export const contextSection = (concern, recalled) => sectionWith('Facts and decisions', 'context', recordButtons(concern), recalled);
+
+// Who mentions it. With nobody, the section is one quiet line beside its heading.
+export const mentionsSection = (mentions) =>
+  mentions.length ? section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)) : quietSection(countTitle('Mentioned in', 0), 'mentions', mentionsList(mentions));
+
 // -- a fact or a decision ----------------------------------------------------------------------------------
 
 const TOOLS = {
@@ -321,7 +378,7 @@ export async function renderRecord(root, kind, id, state = { dirty: false }) {
     kind === 'decision' ? section('Decision', 'record', renderMarkdown(record.text, { className: 'markdown record-text' })) : null,
     kind === 'decision' ? section('Reason', 'reason', h('div', { class: 'reason' }, renderMarkdown(record.reason, { className: 'markdown record-reason' }))) : null,
     kind === 'fact' && !statement ? section('Fact', 'record', renderMarkdown(record.text, { className: 'markdown record-text' })) : null,
-    section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)),
+    mentionsSection(mentions),
     historySection(history),
   );
   const restoreFocus = rememberFocus(root);
@@ -339,7 +396,7 @@ const RULE_STATUSES = [
   ['dropped', 'Dropped'],
 ];
 
-function ruleForm(rule, state) {
+function ruleForm(rule, state, cancel) {
   const title = h('input', { id: 'edit-title', type: 'text', value: rule.title, autocomplete: 'off' });
   const body = withReferences(h('textarea', { id: 'edit-body', rows: 6, value: rule.body || '' }));
   const status = h('select', { id: 'edit-status', value: rule.status }, RULE_STATUSES.map(([value, label]) => h('option', { value }, label)));
@@ -363,8 +420,10 @@ function ruleForm(rule, state) {
         try {
           await call('update_rule', args);
           state.dirty = false;
+          state.editing = false;
           notify(`Saved requirement #${rule.id}.`);
           await sync();
+          await state.reload(true);
         } catch (error) {
           if (!(error instanceof Refusal)) throw error;
           await explainStale(error, problem, state, async () => (await call('get_rule', { rule_id: rule.id })).version);
@@ -375,7 +434,7 @@ function ruleForm(rule, state) {
     field('Details', body, 'edit-body'),
     field('Status', status, 'edit-status', false),
     problem,
-    h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
+    h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'cancel-edit', onclick: cancel }, 'Cancel'), h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
   );
 }
 
@@ -401,15 +460,26 @@ export async function renderRule(root, id, state = { dirty: false }, force = tru
   state.version = rule.version;
   state.dirty = false;
   const unplaced = rule.story === null || rule.story === undefined;
+  const holder = detailsHolder(state, (editing) =>
+    detailsSection({
+      body: rule.body,
+      form: ruleForm(rule, state, () => {
+        state.dirty = false;
+        holder.set(false);
+      }),
+      editing,
+      edit: () => holder.set(true),
+    }),
+  );
   const view = h(
     'article',
     { class: 'record-detail rule-detail detail', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, story: rule.story ?? '' } },
     detailHead({ kind: 'rule', code: itemCode('rule', rule.id), chips: h('div', { class: 'chips' }, ruleStatusChip(rule)), title: [rule.title], titleId: 'record-title', close: closeButton('Close the requirement') }),
     unplaced ? h('p', { class: 'in-story quiet' }, 'It is in no story yet.') : h('p', { class: 'in-story' }, 'In story ', nodeLink(rule.story)),
     h('div', { class: 'panel-actions' }, button(unplaced ? 'Put in a story…' : 'Move to another story…', () => placeRequirementDialog(rule), 'place-requirement')),
-    section('Details', 'edit', h('div', { class: 'body-text' }, rule.body ? renderMarkdown(rule.body) : h('span', { class: 'quiet' }, 'No details.')), ruleForm(rule, state)),
-    section('Facts and decisions', 'context', recordButtons({ rule_ids: [rule.id] }), recallBlock({ rule_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) })),
-    section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)),
+    holder.element,
+    contextSection({ rule_ids: [rule.id] }, recallBlock({ rule_id: id }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) })),
+    mentionsSection(mentions),
     historySection(history),
   );
   const restoreFocus = rememberFocus(root);

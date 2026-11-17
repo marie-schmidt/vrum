@@ -15,7 +15,7 @@ import pytest
 from mcp import Client
 from playwright.async_api import expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, made, plain
+from tests.board_helpers import SLOW, board_url, browser_page, made, open_editor, plain
 from tests.board_m14 import events_of, feed_becomes, feed_ids, spoken
 from tests.board_m14 import feed_row as row
 from tests.board_search import VIEWS, address, drawer, keyboard_to_activity, on_view
@@ -601,6 +601,7 @@ async def test_activity_opens_by_keyboard_from_every_view_and_leaves_a_draft_in_
 
         # A draft typed in the panel is still there, in the same field, when the drawer shows news
         # and when it is closed and opened again.
+        await open_editor(page)
         await page.locator("#edit-body").fill(draft)
         await page.evaluate("window.__body = document.querySelector('#edit-body')")
         await ok(

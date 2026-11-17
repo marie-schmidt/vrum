@@ -1,9 +1,10 @@
 // The full page of one epic, story or task (#/item?item=story:12): all of its details at once, the
-// same ones the detail panel shows and edited the same way, and under them a table of what is under
-// it: a story's tasks, an epic's stories with how far each has got. A task has nothing under it, so
-// the page says which story it is part of. The table is read from the store, which the clock keeps
-// current, so it follows the work as agents change it; the details are the card's, and a draft
-// typed in them is never drawn over.
+// same ones the detail panel shows and edited the same way, a table of what is under it, and a list of
+// the sections that is always in reach. A story's table holds its tasks, an epic's its stories with
+// how far each has got, and a task's the work it needs first and the work that needs it. A task also
+// says, in a card above its details, which story it is part of. The tables are read from the store,
+// which the clock keeps current, so they follow the work as agents change it; the details are the
+// card's, and a draft typed in them is never drawn over.
 
 import { Refusal } from './api.js';
 import { renderCard } from './card.js';
@@ -11,15 +12,20 @@ import { itemLink, ui, viewLink } from './ctx.js';
 import { openCreate } from './create.js';
 import { announce, day, h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, PRIORITIES, STATUSES, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, priorityChip, refSlug, statusChip } from './labels.js';
+import { KIND, PRIORITIES, STATUS, STATUSES, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, priorityChip, refSlug, statusChip } from './labels.js';
 import { stateView } from './records.js';
-import { childrenOf, nodeOf, sync, titleOf } from './store.js';
+import { childrenOf, nodeOf, store, sync, titleOf } from './store.js';
 
-// What each kind has under it, and the words for it.
+// What each kind has under it, and the words for it. A task has no children: its table is its
+// relations.
 const UNDER = {
   epic: { kind: 'story', one: 'story', many: 'stories', heading: 'Stories' },
   story: { kind: 'task', one: 'task', many: 'tasks', heading: 'Tasks' },
 };
+
+// The ids of the two kinds of table section: what is under an item, and what a task is tied to.
+const CHILDREN_IDS = { section: 'item-children', title: 'item-children-title', count: 'item-count', region: 'item-region', empty: 'item-empty', table: 'item-table' };
+const RELATION_IDS = { section: 'item-relations', title: 'item-relations-title', count: 'relations-count', region: 'relations-region', empty: 'relations-empty', table: 'relations-table' };
 
 // -- the columns and how they sort ------------------------------------------------------------------
 
@@ -117,6 +123,12 @@ const COLUMNS = [
   },
 ];
 
+// A task's table: how it is tied to the row, then the same columns that say how that work is doing.
+const RELATION_COLUMNS = [
+  { key: 'relation', label: 'Relation', cell: (_node, _code, how) => h('td', { class: 'cell-relation' }, how) },
+  ...['item', 'title', 'status', 'priority', 'held', 'due'].map((key) => COLUMNS.find((column) => column.key === key)),
+];
+
 // The rows in the order the person chose. A row with nothing in the column is last whichever way it
 // goes, and rows that tie keep the order of their numbers.
 function sortedRows(rows, sort) {
@@ -132,7 +144,7 @@ function sortedRows(rows, sort) {
 // -- the page ---------------------------------------------------------------------------------------
 
 let root = null; // the element the page is drawn in
-let current = null; // { ref, kind, state, parts, signature, headSignature } for the item on show
+let current = null; // { ref, kind, state, parts, signature, headSignature, navSignature, tableCount } for the item on show
 let shownRef; // the item of the address the page was last opened for, whether or not it could be shown
 let generation = 0;
 let sorting = { key: 'item', descending: false };
@@ -152,37 +164,50 @@ function say(message, { refusal = true } = {}) {
   );
 }
 
-// The page is a heading that says what the item is, the card (which draws the details and lays them
-// out for a page, with no heading of its own) and, under it, what is under the item.
+// A heading, how many, the way to add one, and the table in a box that scrolls (or a line saying
+// there is nothing yet).
+function tableSection(ids) {
+  const parts = {
+    heading: h('h2', { id: ids.title, tabindex: -1 }),
+    count: h('span', { class: 'item-count', id: ids.count }),
+    breakdown: h('span', { class: 'item-breakdown' }),
+    add: h('span', { class: 'item-add' }),
+    region: h('div', { class: 'table-scroll item-region', id: ids.region, role: 'region', tabindex: 0 }),
+    empty: h('div', { class: 'empty item-empty', id: ids.empty }),
+  };
+  parts.section = h(
+    'section',
+    { class: 'item-children', id: ids.section, 'aria-labelledby': ids.title },
+    h('header', { class: 'item-children-head' }, parts.heading, parts.count, parts.breakdown, parts.add),
+    parts.region,
+    parts.empty,
+  );
+  return parts;
+}
+
+// The page is a header that says what the item is and how it stands, a list of its sections, the
+// card (which draws the details and lays them out for a page, with no heading of its own) and,
+// under it, the table. A task also has a card saying what it is part of, above its details.
 function skeleton(ref, kind) {
-  const under = UNDER[kind];
   const parts = {
     title: h('h1', { id: 'item-title', tabindex: -1 }),
     what: h('p', { class: 'page-sub', id: 'item-what' }),
+    actions: h('div', { class: 'page-actions item-actions' }),
+    summary: h('div', { class: 'card-summary' }),
+    nav: h('nav', { class: 'item-nav', 'aria-label': 'Sections of this page' }),
     details: h('section', { class: 'item-details', id: 'item-details', 'aria-labelledby': 'item-details-title' }),
   };
-  if (under) {
-    parts.heading = h('h2', { id: 'item-children-title' });
-    parts.count = h('span', { class: 'item-count', id: 'item-count' });
-    parts.add = h('span', { class: 'item-add' });
-    parts.region = h('div', { class: 'table-scroll item-region', id: 'item-region', role: 'region', tabindex: 0 });
-    parts.empty = h('div', { class: 'empty item-empty', id: 'item-empty' });
-    parts.children = h(
-      'section',
-      { class: 'item-children', id: 'item-children', 'aria-labelledby': 'item-children-title' },
-      h('header', { class: 'item-children-head' }, parts.heading, parts.count, parts.add),
-      parts.region,
-      parts.empty,
-    );
-  } else {
-    parts.children = h('section', { class: 'item-part', id: 'item-part', 'aria-labelledby': 'item-part-title' });
-  }
+  if (UNDER[kind]) Object.assign(parts, { table: tableSection(CHILDREN_IDS) });
+  else Object.assign(parts, { table: tableSection(RELATION_IDS), part: h('section', { class: 'item-part', id: 'item-part', 'aria-labelledby': 'item-part-title' }) });
+  parts.children = parts.table.section;
   put(
     root,
     h(
       'div',
       { class: 'item-page', id: 'item-page', dataset: { ref, kind } },
-      h('header', { class: 'page-header item-head' }, h('div', { class: 'page-title' }, parts.title, parts.what)),
+      h('header', { class: 'page-header item-head' }, h('div', { class: 'page-title' }, parts.title, parts.what), parts.actions, parts.summary),
+      parts.nav,
+      parts.part || null,
       h('h2', { class: 'sr-only', id: 'item-details-title' }, `Details of ${codeOf(ref)}`),
       parts.details,
       parts.children,
@@ -205,7 +230,7 @@ function drawHead(node) {
   const signature = JSON.stringify([node.title, node.parent, node.parent ? titleOf(node.parent) : childrenOf(node.ref).length]);
   if (signature === current.headSignature) return;
   current.headSignature = signature;
-  put(parts.title, h('span', { class: 'item-code' }, nodeCode(node.kind, node.number)), ' ', node.title);
+  put(parts.title, kindIcon(node.kind, 22), h('span', { class: 'item-code' }, nodeCode(node.kind, node.number)), ' ', node.title);
   put(parts.what, whatIs(node));
 }
 
@@ -218,6 +243,97 @@ function keepFocus(place) {
     if (key) [...place.querySelectorAll('[data-focus-key]')].find((one) => one.dataset.focusKey === key)?.focus();
   };
 }
+
+// -- the list of sections -----------------------------------------------------------------------------
+
+// Where each section is, by the name its `data-part` has in the card, in the order a person meets
+// them; the table, which is outside the card, comes last.
+const SECTIONS = [
+  ['edit', 'Details'],
+  ['requirements', 'Requirements'],
+  ['links', 'Links'],
+  ['context', 'Facts and decisions'],
+  ['history', 'History'],
+];
+
+const targetOf = (key) => (key === 'table' ? current.parts.children : current.parts.details.querySelector(`[data-part="${key}"]`));
+
+function jump(key) {
+  if (!current) return;
+  const target = targetOf(key);
+  if (!target) return;
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ block: 'start', behavior: calm ? 'auto' : 'smooth' });
+  const heading = target.querySelector('h2, h3');
+  if (heading) {
+    heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: true });
+  }
+}
+
+// The list of sections says which one is in view: the last whose top has gone up to the list.
+let looking = false;
+function markCurrent() {
+  looking = false;
+  if (!current) return;
+  const buttons = [...current.parts.nav.querySelectorAll('.item-jump')];
+  if (!buttons.length) return;
+  const line = current.parts.nav.getBoundingClientRect().bottom + 24;
+  const atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+  let here = buttons[0];
+  let nearest = -Infinity;
+  for (const button of buttons) {
+    const top = targetOf(button.dataset.jump)?.getBoundingClientRect().top;
+    // The sections of the side column start beside the ones of the main column, so the nearest one
+    // above the line is the one in view, not the last in the list.
+    if (top !== undefined && top <= line && top > nearest) {
+      here = button;
+      nearest = top;
+    }
+  }
+  if (atEnd) here = buttons[buttons.length - 1];
+  for (const button of buttons) {
+    if (button === here) button.setAttribute('aria-current', 'location');
+    else button.removeAttribute('aria-current');
+  }
+}
+
+function onScroll() {
+  if (looking) return;
+  looking = true;
+  window.requestAnimationFrame(markCurrent);
+}
+
+// The counts come from the card (what each of its sections holds) and from the table.
+function drawNav() {
+  if (!current || !current.state.counts) return;
+  const { parts, state } = current;
+  const node = nodeOf(current.ref);
+  const label = node ? (UNDER[node.kind]?.heading ?? 'Relations') : 'Table';
+  const items = [...SECTIONS.map(([key, name]) => [key, name, state.counts[key] ?? null]), ['table', label, current.tableCount]];
+  const signature = JSON.stringify(items);
+  if (signature === current.navSignature) return;
+  current.navSignature = signature;
+  const restore = keepFocus(parts.nav);
+  put(
+    parts.nav,
+    h(
+      'ul',
+      { class: 'plain' },
+      items.map(([key, name, count]) =>
+        h(
+          'li',
+          {},
+          h('button', { type: 'button', class: 'item-jump', 'data-jump': key, 'data-focus-key': `jump:${key}`, onclick: () => jump(key) }, name, count ? h('span', { class: 'item-jump-count' }, String(count)) : null),
+        ),
+      ),
+    ),
+  );
+  restore();
+  markCurrent();
+}
+
+// -- the table ----------------------------------------------------------------------------------------
 
 function headerCell(column) {
   const here = sorting.key === column.key;
@@ -242,12 +358,12 @@ function lookButton(node, code) {
   );
 }
 
-function row(node, columns) {
+function row(node, columns, how = null) {
   const code = nodeCode(node.kind, node.number);
   return h(
     'tr',
     { id: `row-${refSlug(node.ref)}`, dataset: { ref: node.ref, kind: node.kind, number: node.number, status: node.status } },
-    columns.map((column) => column.cell(node, code)),
+    columns.map((column) => column.cell(node, code, how)),
     h('td', { class: 'cell-look' }, lookButton(node, code)),
   );
 }
@@ -256,10 +372,30 @@ function table(node, rows) {
   const columns = COLUMNS.filter((column) => !column.only || column.only === node.kind);
   return h(
     'table',
-    { class: 'item-table', id: 'item-table', 'aria-describedby': 'item-count' },
+    { class: 'item-table', id: CHILDREN_IDS.table, 'aria-describedby': CHILDREN_IDS.count },
     h('caption', { class: 'sr-only' }, `${UNDER[node.kind].heading} in ${nodeCode(node.kind, node.number)}`),
     h('thead', {}, h('tr', {}, columns.map(headerCell), h('th', { scope: 'col', class: 'col-look' }, h('span', { class: 'sr-only' }, 'Quick look')))),
     h('tbody', {}, sortedRows(rows, sorting).map((one) => row(one, columns))),
+  );
+}
+
+// A task's table is not sorted by the person: what it needs first, then what needs it.
+function relationTable(node, relations) {
+  return h(
+    'table',
+    { class: 'item-table relation-table', id: RELATION_IDS.table, 'aria-describedby': RELATION_IDS.count },
+    h('caption', { class: 'sr-only' }, `Relations of ${nodeCode(node.kind, node.number)}`),
+    h(
+      'thead',
+      {},
+      h(
+        'tr',
+        {},
+        RELATION_COLUMNS.map((column) => h('th', { scope: 'col', class: `col-${column.key}` }, h('span', { class: 'col-label' }, column.label))),
+        h('th', { scope: 'col', class: 'col-look' }, h('span', { class: 'sr-only' }, 'Quick look')),
+      ),
+    ),
+    h('tbody', {}, relations.map(({ how, node: other }) => row(other, RELATION_COLUMNS, how))),
   );
 }
 
@@ -273,14 +409,30 @@ function addButton(node, primary) {
   );
 }
 
+// How the rows are doing, in a few words: "2 done, 1 in progress, 1 blocked".
+function breakdown(rows) {
+  const counts = new Map();
+  for (const one of rows) counts.set(one.status, (counts.get(one.status) || 0) + 1);
+  return ['done', 'in_progress', 'blocked', 'dropped']
+    .filter((status) => counts.has(status))
+    .map((status) => `${counts.get(status)} ${STATUS[status].label.toLowerCase()}`)
+    .join(', ');
+}
+
 function drawTable(node) {
   const { parts } = current;
+  const view = parts.table;
   const under = UNDER[node.kind];
   const rows = childrenOf(node.ref);
   const label = `${under.heading} in ${nodeCode(node.kind, node.number)}`;
-  put(parts.heading, label);
-  put(parts.count, plural(rows.length, under.one, under.many));
-  parts.region.setAttribute('aria-label', label);
+  put(view.heading, label);
+  put(view.count, plural(rows.length, under.one, under.many));
+  put(view.breakdown, rows.length > 1 ? breakdown(rows) : null);
+  view.region.setAttribute('aria-label', label);
+  if (current.tableCount !== rows.length) {
+    current.tableCount = rows.length;
+    drawNav();
+  }
   // Drawn again only when what it shows, or the way it is sorted, has changed.
   const signature = JSON.stringify([
     node.ref,
@@ -290,38 +442,87 @@ function drawTable(node) {
   if (signature === current.signature) return;
   current.signature = signature;
   const restore = keepFocus(parts.children);
-  put(parts.add, rows.length ? addButton(node, false) : null);
-  parts.region.hidden = rows.length === 0;
-  parts.empty.hidden = rows.length > 0;
+  put(view.add, rows.length ? addButton(node, false) : null);
+  view.region.hidden = rows.length === 0;
+  view.empty.hidden = rows.length > 0;
   if (rows.length) {
-    put(parts.region, table(node, rows));
-    put(parts.empty);
+    put(view.region, table(node, rows));
+    put(view.empty);
   } else {
-    put(parts.region);
-    put(parts.empty, h('p', { class: 'empty-text' }, h('strong', {}, `No ${under.many} yet.`)), addButton(node, true));
+    put(view.region);
+    put(view.empty, h('p', { class: 'empty-text' }, h('strong', {}, `No ${under.many} yet.`)), addButton(node, true));
   }
   restore();
 }
 
-// A task has no table: it says what it is part of.
+// What a task needs first, and what needs it, from the links the store holds.
+function relationsOf(node) {
+  const found = [];
+  for (const link of store.links) {
+    if (link.link_type !== 'needs_first') continue;
+    if (link.source === node.ref) found.push({ how: 'Needs first', node: nodeOf(link.target) });
+    else if (link.target === node.ref) found.push({ how: 'Needed by', node: nodeOf(link.source) });
+  }
+  return found.filter((one) => one.node).sort((a, b) => (a.how === b.how ? a.node.number - b.node.number : a.how === 'Needs first' ? -1 : 1));
+}
+
+function drawRelations(node) {
+  const { parts } = current;
+  const view = parts.table;
+  const relations = relationsOf(node);
+  const label = `Relations of ${nodeCode(node.kind, node.number)}`;
+  put(view.heading, label);
+  put(view.count, plural(relations.length, 'relation'));
+  view.region.setAttribute('aria-label', label);
+  if (current.tableCount !== relations.length) {
+    current.tableCount = relations.length;
+    drawNav();
+  }
+  const signature = JSON.stringify([node.ref, relations.map(({ how, node: other }) => [how, other.ref, other.title, other.status, other.priority, other.claimed_by, other.target_on, other.overdue])]);
+  if (signature === current.signature) return;
+  current.signature = signature;
+  const restore = keepFocus(parts.children);
+  view.region.hidden = relations.length === 0;
+  view.empty.hidden = relations.length > 0;
+  if (relations.length) {
+    put(view.region, relationTable(node, relations));
+    put(view.empty);
+  } else {
+    put(view.region);
+    put(
+      view.empty,
+      h('p', { class: 'empty-text' }, h('strong', {}, 'Nothing is needed first, and nothing waits for it.')),
+      h('button', { type: 'button', class: 'small', 'data-focus-key': 'add-link', onclick: () => document.getElementById('link-target')?.focus() }, icon('link', { size: 14 }), 'Add a link'),
+    );
+  }
+  restore();
+}
+
+// A task says what it is part of: its story, the epic that is in, and how far the story has got.
 function drawPart(node) {
   const { parts } = current;
   const story = nodeOf(node.parent);
   const epic = story ? nodeOf(story.parent) : null;
   const signature = JSON.stringify([node.parent, story?.title, story?.progress_done, story?.progress_total, epic?.ref, epic?.title]);
-  if (signature === current.signature) return;
-  current.signature = signature;
+  if (signature === current.partSignature) return;
+  current.partSignature = signature;
+  parts.part.hidden = !node.parent;
   put(
-    parts.children,
-    node.parent ? h('h2', { id: 'item-part-title' }, 'Part of ', itemLink(node.parent, { 'data-focus-key': 'part-story' }, `${codeOf(node.parent)} ${titleOf(node.parent)}`)) : null,
-    story
-      ? h(
-          'p',
-          { class: 'quiet item-part-note' },
-          epic ? ['In ', itemLink(epic.ref, {}, `${codeOf(epic.ref)} ${epic.title}`), '. '] : null,
-          story.progress_total ? `${story.progress_done} of ${plural(story.progress_total, 'task')} in the story are done.` : null,
-        )
-      : null,
+    parts.part,
+    h(
+      'div',
+      { class: 'item-part-main' },
+      node.parent ? h('h2', { id: 'item-part-title' }, h('span', { class: 'item-part-label' }, 'Part of '), itemLink(node.parent, { 'data-focus-key': 'part-story' }, `${codeOf(node.parent)} ${titleOf(node.parent)}`)) : null,
+      story
+        ? h(
+            'p',
+            { class: 'quiet item-part-note' },
+            epic ? ['In ', itemLink(epic.ref, {}, `${codeOf(epic.ref)} ${epic.title}`), '. '] : null,
+            story.progress_total ? `${story.progress_done} of ${plural(story.progress_total, 'task')} in the story are done.` : null,
+          )
+        : null,
+    ),
+    story?.progress_total ? h('span', { class: 'meter item-part-meter', 'aria-hidden': 'true' }, h('span', { css: { width: `${Math.round((story.progress_done / story.progress_total) * 100)}%` } })) : null,
   );
 }
 
@@ -329,7 +530,10 @@ function drawChildren() {
   const node = nodeOf(current.ref);
   if (!node) return;
   if (UNDER[node.kind]) drawTable(node);
-  else drawPart(node);
+  else {
+    drawPart(node);
+    drawRelations(node);
+  }
   markSelected();
 }
 
@@ -371,10 +575,17 @@ async function open(ref) {
   }
   const state = {};
   const parts = skeleton(ref, parsed.kind);
-  current = { ref, kind: parsed.kind, state, parts, signature: null, headSignature: null };
+  current = { ref, kind: parsed.kind, state, parts, signature: null, headSignature: null, navSignature: null, partSignature: null, tableCount: null };
   drawAll();
   try {
-    await renderCard(parts.details, ref, state, { page: true, layout: 'wide' });
+    await renderCard(parts.details, ref, state, {
+      page: true,
+      summary: parts.summary,
+      actions: parts.actions,
+      drawn: () => {
+        if (current && current.state === state) drawNav();
+      },
+    });
   } catch (error) {
     if (mine !== generation) return;
     if (!(error instanceof Refusal)) throw error;
@@ -431,6 +642,7 @@ const NEEDS_ITEM = 'This page needs an item. The address looks like #/item?item=
 
 export function mount(element, params) {
   root = element;
+  window.addEventListener('scroll', onScroll, { passive: true });
   shownRef = undefined;
   current = null;
   const ref = params.get('item');
@@ -441,6 +653,7 @@ export function mount(element, params) {
 }
 
 export function unmount() {
+  window.removeEventListener('scroll', onScroll);
   generation += 1;
   if (current) current.state.dead = true;
   current = null;
@@ -461,8 +674,8 @@ export function update(params) {
   else markSelected();
 }
 
-// Something changed on the server. The table is read from the store, which has already heard of it;
-// the details are fetched again unless the person is typing in them.
+// Something changed on the server. The tables are read from the store, which has already heard of
+// it; the details are fetched again unless the person is typing in them.
 export async function refresh(events) {
   if (!current) return;
   const { ref, kind, state, parts } = current;

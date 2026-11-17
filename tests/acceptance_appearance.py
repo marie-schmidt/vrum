@@ -24,7 +24,7 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import Page, expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, Watched, hold_back_news, item_address, made
+from tests.board_helpers import SLOW, Watched, hold_back_news, item_address, made, open_editor
 from tests.board_layout import (
     LONG_SOURCE,
     LONG_TITLE,
@@ -455,6 +455,7 @@ async def switching_keeps_what_was_typed(world: World) -> None:
             await expect(page.locator(f".card.selected[data-ref='{task}']")).to_have_count(1)
             await hold_back_news(page)
             await page.locator("#filter").fill("kind:task status:ready")
+            await open_editor(page)
             await page.locator("#edit-title").fill("A draft title that is not saved")
             await page.locator("#edit-body").fill("Draft line one\nDraft line two")
             await page.locator("#edit-body").focus()
@@ -938,6 +939,7 @@ async def losing_the_server(world: World) -> None:
         context = page.context
         await in_project(page, f"{world.board}#/board?sel={task}")
         await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
+        await open_editor(page)
         await page.locator("#edit-title").fill(draft)
         note, chip = page.locator("#connection-note"), page.locator("#connection")
         quiet_before = await note.is_hidden() and await chip.is_hidden()

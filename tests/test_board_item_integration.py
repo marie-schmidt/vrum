@@ -29,6 +29,7 @@ from tests.board_helpers import (
     item_row,
     item_rows,
     made,
+    open_editor,
     open_item,
     plain,
 )
@@ -227,9 +228,10 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
                 "els => els.map(e => e.getAttribute('href'))"
             ) == ["/board", "#/board", item_address(world["epic"])]
 
-            # Every detail the server has is on the page.
+            # Every detail the server has is on the page: how it stands in the header, the words
+            # and what surrounds them in the details.
             details = page.locator("#item-details")
-            text = cell_text(await details.inner_text())
+            text = cell_text(await page.locator("#item-page").inner_text())
             assert "High" in text and status_words(server["status"]) in text
             assert f"{server['progress_done']} of {server['progress_total']} tasks done" in text
             assert await details.locator(".body-text em").inner_text() == "story"
@@ -237,6 +239,10 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
                 "first point",
                 "second point",
             ]
+            # The words are read as text first: the form is not on the page until Edit is pressed.
+            assert await details.locator("form.edit").count() == 0
+            await open_editor(page, "#item-page")
+            assert await details.locator(".body-text").count() == 0
             assert f"Fast {world.word}" in text
             assert f"Use REST {world.word}" in text and f"Orders are small {world.word}" in text
             assert f"{code_of(world['track'])} Track it {world.word}" in text  # the link
@@ -516,7 +522,7 @@ async def test_an_epics_page_lists_its_stories_with_the_progress_the_server_give
             )
             assert await page.locator("#item-details").inner_text()
             assert f"{server['progress_done']} of {server['progress_total']} tasks done" in (
-                cell_text(await page.locator("#item-details").inner_text())
+                cell_text(await page.locator("#item-page .card-summary").inner_text())
             )
             for story in stories:
                 cells = await cells_of(page, story["ref"])
@@ -549,14 +555,13 @@ async def test_an_epics_page_lists_its_stories_with_the_progress_the_server_give
 SKELETON = """() => {
     const name = (e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '');
     const page = document.querySelector('#item-page');
-    const children = document.querySelector('#item-children');
+    const children = document.querySelector('#item-children, #item-relations');
     return {
         page: [...page.children].map(name),
-        head: [...page.querySelector('header').children].map(name),
+        head: [...page.querySelector('header').children].map((e) => e.className),
         title: [...page.querySelectorAll('h1')].length,
         card: [...page.querySelectorAll('#item-details > article')].map((e) => e.className),
-        summary: [...page.querySelectorAll('#item-details .card-summary > *')]
-            .map((e) => e.className),
+        summary: [...page.querySelectorAll('header .card-summary > *')].map((e) => e.className),
         columns: [...page.querySelectorAll('#item-details .card-columns > *')]
             .map((e) => e.className),
         children: children ? [...children.children].map(name) : null,
@@ -592,14 +597,36 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
             note = cell_text(await part.locator(".item-part-note").inner_text())
             epic_code = f"In {code_of(world['epic'])} Ordering {world.word}."
             assert note == f"{epic_code} 1 of 7 tasks in the story are done."
-            # It has no table, no count and no way to add something under it.
+            # It has no children table, no count and no way to add something under it (what it is
+            # tied to is in a table of relations, which has ids of its own).
             for gone in ("#item-table", "#item-count", "#new-child", "#item-region", "#item-empty"):
                 assert await page.locator(gone).count() == 0, gone
-            # Its details: waiting for T-1, urgent, overdue, and the edit form.
-            details = cell_text(await page.locator("#item-details").inner_text())
-            assert f"Waiting for {code_of(world['form'])}" in details and "Urgent" in details
-            assert "Overdue" in details and "Might be the same as" not in details
+            # Its state: waiting for T-1, urgent, overdue; and its details, with the edit form.
+            summary = cell_text(await page.locator("#item-page .card-summary").inner_text())
+            assert f"waiting for {code_of(world['form'])}".lower() in summary.lower()
+            assert "urgent" in summary.lower()
+            assert "Overdue" in summary
+            assert "Might be the same as" not in cell_text(
+                await page.locator("#item-page").inner_text()
+            )
+            await open_editor(page, "#item-page")
             assert await page.locator("#item-details #edit-title").input_value() == server["title"]
+            # What it needs first and what needs it, in the same columns as a story's table: it
+            # needs the form task first, and the polish task needs it.
+            assert cell_text(await page.locator("#relations-count").inner_text()) == "2 relations"
+            relation = page.locator("#relations-table tbody tr")
+            assert await relation.count() == 2
+            assert await relation.locator(".cell-relation").all_inner_texts() == [
+                "Needs first",
+                "Needed by",
+            ]
+            assert await relation.evaluate_all("els => els.map(e => e.dataset.ref)") == [
+                world["form"],
+                world["polish"],
+            ]
+            assert cell_text(await relation.first.locator(".cell-item").inner_text()) == code_of(
+                world["form"]
+            )
             # Following the link goes to the story's page, with the task in its table.
             await part.locator("h2 a").click()
             await expect(page.locator("#item-page")).to_have_attribute(
@@ -608,22 +635,37 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
             await expect(item_row(page, task)).to_be_visible(timeout=SLOW)
 
             # One structure: an epic's and a story's pages differ only by what is in the table;
-            # a task's page has the same head and details, and says "Part of" where they have a
-            # table.
+            # a task's page has the same head, list of sections and details, a card saying what it
+            # is part of above them, and a table of relations where they have a table of children.
             epic_shape, story_shape, task_shape = shapes["epic"], shapes["story"], shapes["api"]
             assert epic_shape == story_shape
-            assert (
-                epic_shape["page"][0] == "header" and "section#item-details" in epic_shape["page"]
-            )
-            assert epic_shape["page"][-1] == "section#item-children"
+            assert epic_shape["page"] == [
+                "header",
+                "nav",
+                "h2#item-details-title",
+                "section#item-details",
+                "section#item-children",
+            ]
             assert epic_shape["children"] == ["header", "div#item-region", "div#item-empty"]
-            assert task_shape["page"][:-1] == epic_shape["page"][:-1]
-            assert task_shape["page"][-1] == "section#item-part"
+            assert task_shape["page"] == [
+                "header",
+                "nav",
+                "section#item-part",
+                "h2#item-details-title",
+                "section#item-details",
+                "section#item-relations",
+            ]
+            assert task_shape["children"] == [
+                "header",
+                "div#relations-region",
+                "div#relations-empty",
+            ]
             for shape in shapes.values():
-                assert shape["head"] == ["div"] and shape["title"] == 1 and shape["mains"] == 1
+                assert shape["head"] == ["page-title", "page-actions item-actions", "card-summary"]
+                assert shape["title"] == 1 and shape["mains"] == 1
                 assert shape["card"] == ["card-detail detail card-page"]
                 assert shape["columns"] == ["card-main", "card-side"]
-            assert task_shape["summary"] == story_shape["summary"]
+                assert shape["summary"][:2] == ["chips", "facts"], shape["summary"]
             assert w.problems == [], w.problems
 
 
@@ -756,6 +798,7 @@ async def test_an_edit_on_the_page_is_saved_and_a_stale_one_is_refused_in_the_se
         async with browser_page(world.board, token=world.project.key) as w:
             await see_page(w, story)
             page = w.page
+            await open_editor(page, "#item-page")
             await page.locator("#edit-title").fill(f"Place an order, better {word}")
             await page.locator("#edit-priority").select_option("urgent")
             await page.get_by_role("button", name="Save changes").click()
@@ -775,6 +818,7 @@ async def test_an_edit_on_the_page_is_saved_and_a_stale_one_is_refused_in_the_se
             assert await item_rows(page) == [t["ref"] for t in await children_of(client, story)]
 
             # Someone else changes it while a draft is typed: nothing typed is overwritten.
+            await open_editor(page, "#item-page")
             title = page.locator("#edit-title")
             await title.fill(f"My draft {word}")
             await ok(
@@ -815,6 +859,7 @@ async def test_an_agent_adding_a_task_updates_the_open_page_and_a_draft_typed_th
             page = w.page
             before = await item_rows(page)
             assert cell_text(await page.locator("#item-count").inner_text()) == "7 tasks"
+            await open_editor(page, "#item-page")
             draft = page.locator("#edit-body")
             await draft.fill(f"A draft that is not saved {word}")
             title = page.locator("#edit-title")
@@ -879,8 +924,11 @@ async def test_a_rows_quick_look_opens_the_panel_beside_the_page_and_no_id_is_us
                 await item_row(page, task).locator(".item-code-link").get_attribute("aria-current")
                 == "true"
             )
-            # The page is still the story's, with both cards on it, each with its own ids.
+            # The page is still the story's, with both cards on it, each with its own ids (also
+            # with both forms open).
             assert await page.locator("h1#item-title").count() == 1
+            await open_editor(page, "#panel")
+            await open_editor(page, "#item-page")
             ids = await page.evaluate(
                 "() => { const all = [...document.querySelectorAll('[id]')].map((e) => e.id);"
                 " return all.filter((id, at) => all.indexOf(id) !== at); }"
@@ -980,7 +1028,7 @@ NARROW = {"width": 390, "height": 900}
 OVERFLOW = """() => {
     const width = window.innerWidth;
     const region = document.querySelector('#item-region');
-    const inside = (e) => e.closest('.table-scroll, .gv-tree, svg');
+    const inside = (e) => e.closest('.table-scroll, .gv-tree, .item-nav, svg');
     const offenders = [...document.querySelectorAll('body *')]
         .filter((e) => !inside(e) && e.getBoundingClientRect().width > 0
             && e.getBoundingClientRect().right > width + 1)

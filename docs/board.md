@@ -78,7 +78,8 @@ from the links, so nothing can be dropped there.
 
 Above the columns, **Needs attention** counts the ready work nobody holds, the blocked and the
 overdue items, the claims that ran out with no handoff note, the requirements that are in no story
-and the stories that have no requirement. Each number is a link that shows exactly those items. The
+and the stories that have no requirement. Each number is a link that shows exactly those items (on
+a narrow window they scroll sideways in one line). The
 **filter box** keeps only the cards that the [filter language](#the-filter-language) asks for.
 **New item** makes an epic, a story or a task, and **Coverage** shows the requirements that are in
 no story and the stories that have no requirement. Choose a card to open it in the detail panel.
@@ -117,14 +118,23 @@ Requirements, decisions and facts keep their own numbers and are written `#7` be
 Choose **Open full page** in the detail panel of an epic, story or task, or the title of an epic or
 story in the Graph's List, to see it as a full page (`#/item?item=story:12`).
 
-- At the top, the item's title, where it sits and everything the detail panel shows: its status,
-  progress, dates, details and the form to change them (at the version you saw), its links, its
-  requirements, the facts and decisions that concern it, what mentions it and its history. If an
-  agent changes it while you are editing, the page says so and what you typed stays.
+- At the top, the item's title and where it sits, its status and priority, and how it stands: its
+  progress, dates, who holds it and what it waits for. **Edit** opens the form for the title,
+  details, status, priority and dates in place of the text (at the version you saw): **Save
+  changes** keeps it and **Cancel** leaves it as it was. If an agent changes the item while you are
+  editing, the page says so and what you typed stays.
+- A list of the sections (Details, Requirements, Links, Facts and decisions, History and the table)
+  stays in view as you scroll, each with how many it holds, and takes you to one.
+- A task says which story, and which epic, it is part of in a card above its details, and its last
+  handoff note is the first thing in its details.
+- Then its details as text, with the place to move it, its requirements and its links, what
+  mentions it and what the index thinks it may duplicate; across the page, the facts and decisions
+  that concern it and its history.
 - Under it, **a table of what is under it**: a story's tasks, or an epic's stories with their
-  progress. A task has nothing under it, and says which story it is part of. Each column's heading
-  sorts the table. **New task** (or **New story**) adds one, and the magnifier on a row opens that
-  item in the detail panel at the right without leaving the page.
+  progress. A task has a table of its **relations** instead: the work it needs first and the work
+  that needs it, with their status, priority, who holds them and when they are due. Each column's
+  heading sorts the table of tasks or stories. **New task** (or **New story**) adds one, and the
+  magnifier on a row opens that item in the detail panel at the right without leaving the page.
 
 ## Requirements
 
@@ -181,12 +191,13 @@ so an unconfirmed record is never presented as confirmed.
 Choose an epic, story, task, requirement, decision or fact, from any view, a search result, the
 activity feed or a `[[reference]]`, and it opens on the right.
 
-- An **epic, story or task** shows its last handoff note, its details and the form to change its
-  title, details, priority, dates and parent (at the version you saw), the links to add or remove,
-  its requirements, the facts and decisions that concern it as an agent's `recall` would say them
-  (decisions in force, project-wide decisions, facts, and the replaced or withdrawn ones apart, each
-  with its confirmation and why it is there), what mentions it, what the index thinks it may
-  duplicate, and its history.
+- An **epic, story or task** shows its last handoff note, its details as text with an **Edit**
+  button (the form for the title, details, status, priority and dates opens in place of the text,
+  at the version you saw, with **Save changes** and **Cancel**), the place to move it, the links to
+  add or remove, its requirements, the facts and decisions that concern it as an agent's `recall`
+  would say them (decisions in force, project-wide decisions, facts, and the replaced or withdrawn
+  ones apart, each with its confirmation and why it is there), what mentions it, what the index
+  thinks it may duplicate, and its history. A requirement's details work the same way.
 - A **requirement, decision or fact** shows all its fields, its confirmation and lifecycle, what it
   concerns, what mentions it and its history, with the buttons described above.
 
@@ -207,8 +218,12 @@ filter with the [filter language](#the-filter-language).
 - An arrow runs from what must come first to the item that waits for it. An item planned to start
   before something it needs first is due is marked "Schedule conflict" (a warning, nothing is
   blocked), and an overdue item says so in words.
-- Items with no dates wait in a tray above. Drag one onto the timeline to give it a week starting
-  where you drop it, or type its dates there.
+- Items with no dates wait in a tray above the timeline. It starts closed when something is on the
+  timeline (press *Undated* to open it), and open when nothing is. Drag one onto the timeline to
+  give it a week starting where you drop it, or type its dates there.
+- *Key to the bars* explains each look: the icon and pattern of a status, a dashed bar worked out
+  from what is under it, and the mark for overdue. A bar too short for its icon and words shows
+  its status icon beside it instead; the row's label on the left always says what it is.
 - Every move is a change at the version the bar was drawn at, so one an agent changed since is
   refused and the bar goes back, and a start after the target is refused in the server's words.
 - Choose a bar to open its item in the detail panel. The roadmap has no sprints.

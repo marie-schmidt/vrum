@@ -20,7 +20,7 @@ from playwright.async_api import Page, Route, expect
 
 from tests.acceptance_board import same_words
 from tests.acceptance_scenario import URL, Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, board_call, board_url, browser_page, made
+from tests.board_helpers import SLOW, board_call, board_url, browser_page, made, open_editor
 from tests.board_m14 import events_of, feed_becomes, feed_ids, feed_row, ids_of, spoken
 from tests.board_search import (
     address,
@@ -825,6 +825,7 @@ async def drafts(client: Client, page_url: str) -> None:
         await expect(page.locator("#panel #card-title")).to_contain_text(
             f"{code_of(story)} ", timeout=SLOW
         )
+        await open_editor(page)
         await page.locator("#edit-body").fill(draft)
         await page.evaluate("window.__body = document.querySelector('#edit-body')")
         steps = 0

@@ -36,7 +36,7 @@ from tests.board_context import (
     svg,
     whole,
 )
-from tests.board_helpers import SLOW, Watched, board_url, browser_page, made
+from tests.board_helpers import SLOW, Watched, board_url, browser_page, made, open_editor
 from tests.helpers import all_nodes, make_decision, make_fact, ok, reindexed, unique_word
 from tests.helpers import code_of as code
 from tests.helpers import number_of as number
@@ -547,6 +547,7 @@ async def test_a_draft_in_the_detail_panel_survives_switching_presentation_and_o
             card = panel(page).locator(".card-detail")
             await expect(card).to_be_visible(timeout=SLOW)
             await card.evaluate("e => { e.dataset.mark = 'kept'; }")
+            await open_editor(page)
             await page.locator("#edit-title").fill(draft_title)
             await page.locator("#edit-body").fill(draft_body)
 

@@ -104,18 +104,34 @@
   .detail-grid > dd { margin-bottom: var(--space-2); }
 }
 
-/* The item's own page: the card with the room of a whole page. A strip of what matters first (two
-   labels and values to a row), then the details in a main column and what surrounds them in a side
-   column; one column when the page is narrow. */
-.card-page > .card-marks { margin-bottom: var(--space-4); }
-.card-summary > .detail-grid { margin-bottom: var(--space-2); }
-.card-columns { display: grid; gap: var(--space-2) var(--space-6); min-width: 0; }
-.card-main, .card-side { min-width: 0; }
-@container (min-width: 40rem) {
-  .card-summary > .detail-grid { grid-template-columns: repeat(2, minmax(5.5rem, 7.5rem) minmax(0, 1fr)); }
-}
+/* The item's own page: the card with the room of a whole page. The state of the item is in the page's
+   header (item.css); here are the details in a main sheet and what surrounds them in a side sheet,
+   side by side when the page is wide and one above the other when it is not. */
+.card-columns { display: grid; gap: var(--space-4); min-width: 0; align-items: start; }
+.card-main, .card-side { min-width: 0; padding: var(--space-4) var(--space-5); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
+.card-main { container-type: inline-size; }
+.card-page .card-main > .part:first-child, .card-page .card-side > .part:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 @container (min-width: 56rem) {
-  .card-columns { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; }
+  .card-columns { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); }
+}
+@media (max-width: 699.98px) {
+  .card-main, .card-side { padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); }
+}
+/* What is known and what happened have the width of the page: their headings sit on the page and
+   what they hold sits on sheets (a record each, and the list of events). */
+.card-page { display: grid; gap: var(--space-5); }
+.detail.card-page > .part { min-width: 0; margin: 0; padding: 0; border: 0; }
+.detail.card-page > .part > h3, .detail.card-page > .part > .part-head > h3 { font-size: var(--text-lg); }
+.detail.card-page > .part > h3 { margin-bottom: var(--space-3); }
+.card-page > [data-part="context"] .recall-sections { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: var(--space-4) var(--space-5); align-items: start; margin-top: var(--space-3); }
+.card-page > [data-part="context"] .recall-section { margin: 0; min-width: 0; }
+.card-page > [data-part="context"] .recall-sections > p.none { grid-column: 1 / -1; }
+.card-page > [data-part="context"] ul.entries { display: grid; gap: var(--space-3); margin: var(--space-2) 0 0; }
+.card-page > [data-part="context"] .recall-section .record { padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
+.card-page > [data-part="history"] ul.history { padding: var(--space-2) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
+@container (min-width: 40rem) {
+  .card-page > [data-part="history"] .history > li { grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: var(--space-5); }
+  .card-page > [data-part="history"] .history > li > .handoff-note { grid-column: 1 / -1; }
 }
 .concern-list { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .concern-list li { display: flex; align-items: flex-start; gap: var(--space-2); }
@@ -128,16 +144,29 @@
 .detail [data-part="actions"] { margin-bottom: var(--space-3); }
 .detail [data-part="actions"] > p { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 
-/* Sections, with a hairline over each. */
-.detail .part { margin-top: var(--space-5); padding-top: var(--space-4); border-top: var(--border-w) solid var(--border); }
+/* Sections, with a hairline over each. The heading may have what can be done to the section in its
+   row (Edit, Record a fact), and a section with nothing in it is one line beside its heading. */
+.detail .part { margin-top: var(--space-4); padding-top: var(--space-3); border-top: var(--border-w) solid var(--border); }
 .detail .part > h3 { margin-bottom: var(--space-3); font-size: var(--text-md); }
+.part-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
+.detail .part-head > h3 { margin: 0; font-size: var(--text-md); }
+.part-head > .panel-actions { margin: 0; }
+.detail .part-quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-4); margin-top: var(--space-4); padding-top: var(--space-3); }
+.detail .part-quiet > h3 { margin: 0; }
+.detail .part-quiet > .none { flex: 1 1 12rem; }
 .heading-count { color: var(--text-2); font-size: var(--text-sm); font-weight: 500; }
 .detail .part > p:first-of-type { margin-top: 0; }
 .detail ul.plain { display: grid; gap: var(--space-2); }
 .detail .none { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .detail .body-text { white-space: normal; overflow-wrap: anywhere; }
-.detail .body-text + form { margin-top: var(--space-4); padding-top: var(--space-4); border-top: var(--border-w) solid var(--border); }
+.detail .body-text + form, .detail form.edit + form { margin-top: var(--space-4); padding-top: var(--space-4); border-top: var(--border-w) solid var(--border); }
 .detail .coverage-lists .part:first-child { margin-top: var(--space-4); }
+
+/* The last handoff note is what the next person to take the work most needs: it stands out. */
+.detail [data-part="handoff"] { padding: var(--space-3) var(--space-4); border: 0; border-left: 3px solid var(--info); border-radius: var(--radius-md); background: var(--info-soft); }
+.detail [data-part="handoff"] > h3 { margin-bottom: var(--space-1); font-size: var(--text-sm); }
+.detail [data-part="handoff"] > p { margin: 0; }
+.card-page .card-main > [data-part="handoff"]:first-child { padding: var(--space-3) var(--space-4); }
 
 /* The lifecycle of a fact or a decision that is no longer in force. */
 .detail [data-part="lifecycle"] { padding: var(--space-3) var(--space-4); border: 0; border-left: 3px solid var(--warn); border-radius: var(--radius-md); background: var(--warn-soft); }
@@ -169,6 +198,15 @@
 .inline-row { display: flex; gap: var(--space-2); min-width: 0; }
 .inline-row > input, .inline-row > select { flex: 1 1 0; width: 0; min-width: 0; }
 .inline-row > button { flex: none; }
+/* Moving an item is one line: what it is, where it is now, and the button. */
+.inline-form.move { display: flex; flex-wrap: wrap; align-items: center; }
+.inline-form.move > label { flex: none; }
+.inline-form.move > .inline-row { flex: 1 1 14rem; }
+.inline-form.move > .problem { flex: 1 0 100%; }
+/* On a page there is room for the four small fields in one row. */
+@container (min-width: 34rem) {
+  .card-main .form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
 
 .detail .problem, dialog.modal .problem { padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); }
 .detail .problem { flex-wrap: wrap; }
@@ -192,6 +230,15 @@
 .requirement { list-style: none; overflow-wrap: anywhere; }
 .requirement.status-dropped .record-title { color: var(--text-2); }
 .requirement .record-chips { margin-bottom: var(--space-1); }
+/* In a section a requirement is two rows: what it is and what can be done to it, then its title. */
+.detail .requirements > .requirement { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "chips actions" "title title"; align-items: center; gap: var(--space-1) var(--space-3); }
+.detail .requirements > .requirement > .record-chips { grid-area: chips; margin: 0; }
+.detail .requirements > .requirement > .record-title { grid-area: title; }
+.detail .requirements > .requirement > .row-actions { grid-area: actions; margin: 0; }
+@container (max-width: 24rem) {
+  .detail .requirements > .requirement { grid-template-columns: minmax(0, 1fr); grid-template-areas: "chips" "title" "actions"; }
+  .detail .requirements > .requirement > .row-actions { margin-top: var(--space-1); }
+}
 
 .detail ul.history { gap: 0; }
 .history > li { display: grid; gap: 2px; padding: var(--space-2) 0; border-top: var(--border-w) solid var(--border); font-size: var(--text-sm); overflow-wrap: anywhere; }
@@ -238,8 +285,9 @@
 .detail ul.entries { gap: 0; }
 
 /* Recall */
-.recall-block { margin: var(--space-2) 0 0; }
-.recall-heading { margin: 0 0 var(--space-2); font-size: var(--text-xs); }
+.recall-block { margin: 0; }
+.recall-heading { margin: 0 0 var(--space-1); font-size: var(--text-xs); }
+.recall-block > label.check { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
 .recall-section { margin-top: var(--space-4); }
 .recall-section > h4 { font-size: var(--text-sm); font-weight: 650; }
 .recall-section > .section-note { margin: var(--space-1) 0; font-size: var(--text-xs); }
@@ -248,6 +296,13 @@
 .recall-section .similar-item > .icon { align-self: center; color: var(--text-2); }
 .recall-section .show-more { margin-top: var(--space-2); }
 .recall-block .problem { margin: var(--space-2) 0; }
+/* An entry in a recall is tight: who and when run on in one paragraph, and why it is here is a quiet line. */
+.recall-section .record { padding: var(--space-2) 0; }
+.recall-section .record .who, .recall-section .record .confirmation-words { display: inline; margin: 0 var(--space-2) 0 0; }
+.recall-section .record .why { padding: 0; background: none; }
+.recall-section .record .open-record { margin: var(--space-1) 0 0; }
+/* What the chip already says is not said twice: the sentence stays for a screen reader. */
+.recall-section .record[data-confirmation="confirmed"] .confirmation-words { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* The Unconfirmed / Confirmed dropdown. */
 .confirmation-control { display: grid; gap: var(--space-1); }
@@ -266,7 +321,7 @@ dialog.modal > p, dialog.modal form > p:not(.problem) { margin: var(--space-2) 0
 dialog.modal .field select, dialog.modal .field textarea { width: 100%; }
 dialog.modal .field { margin: var(--space-4) 0 0; }
 dialog.modal .field > .hint { margin-top: var(--space-1); }
-dialog.modal .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 var(--space-4); }
+dialog.modal .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 var(--space-4); }
 dialog.modal .form-row > .field { min-width: 0; }
 dialog.modal .problem { margin: var(--space-4) 0 0; }
 /* The buttons stay in view while a long form scrolls. */

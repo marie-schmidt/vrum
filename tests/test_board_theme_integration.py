@@ -17,7 +17,7 @@ from urllib.parse import parse_qs
 import pytest
 from playwright.async_api import Page, Route, expect
 
-from tests.board_helpers import SLOW, hold_back_news, http, item_address, made
+from tests.board_helpers import SLOW, hold_back_news, http, item_address, made, open_editor
 from tests.board_theme import (
     CHOICES,
     FIRST_PAINT,
@@ -514,6 +514,7 @@ async def test_switching_appearance_keeps_the_draft_selection_filters_and_drawer
         await hold_back_news(page)
 
         # A draft in the panel's form and in the drawer's box, and marks to know them again by.
+        await open_editor(page)
         await page.locator("#edit-title").fill("A draft title ✎ not saved")
         await page.locator("#edit-body").fill("Draft line one\nDraft line two with [[task:1]]")
         await page.locator("#edit-priority").select_option("high")
@@ -877,6 +878,7 @@ async def test_the_board_the_panel_the_drawer_and_the_controls_use_the_tokens_of
         )
         await expect(page.locator("#search-results li.result").first).to_be_visible(timeout=SLOW)
         await expect(page.locator(".board .card").first).to_be_visible(timeout=SLOW)
+        await open_editor(page)
         found = await painted_in_both(page, BOARD)
         for theme in THEMES:
             check_tokens(found[theme], theme, EXPECTED)
@@ -922,11 +924,12 @@ async def test_the_page_of_an_item_its_table_and_its_chosen_row_use_the_tokens_o
         await expect(page.locator("#item-table tbody tr.selected")).to_have_count(1, timeout=SLOW)
         await expect(page.locator("#panel .card-detail")).to_be_visible(timeout=SLOW)
         await page.wait_for_load_state("networkidle")
+        await open_editor(page, "#item-page")
         found = await painted_in_both(
             page,
             {
                 "body": "body",
-                "details": "#item-details",
+                "details": "#item-details .card-main",
                 "head": "#item-table thead th",
                 "sort": "#item-table th:not([aria-sort]) button.sort",
                 "sorted": "#item-table th[aria-sort] button.sort",

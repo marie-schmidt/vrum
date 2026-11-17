@@ -25,6 +25,8 @@ from tests.board_helpers import (
     hold_back_news,
     made,
     on,
+    open_editor,
+    open_tray,
     plain,
     timeline,
 )
@@ -318,6 +320,8 @@ async def test_an_undated_item_dropped_on_the_timeline_gets_both_dates_and_the_t
         await w.open(f"#/roadmap?q=epic:{number(epic)}")
         await shown(page, 3, 2)
         line = await timeline(page)
+        # With something on the timeline the tray of undated items starts closed.
+        await open_tray(page)
 
         # Dropped two days after today, it gets that day and the six after it.
         at = ((line["today"] - line["origin"]).days + 2) * line["ppd"] + line["ppd"] / 2
@@ -552,6 +556,7 @@ async def test_an_undated_item_is_scheduled_from_the_panel_and_a_late_start_is_r
         await expect(page.locator("#card-title")).to_contain_text(f"{code(undated)} ", timeout=SLOW)
 
         # Dates that start after they end are refused by the server, in its words, in the panel.
+        await open_editor(page)
         await page.locator("#edit-start").fill(day(20))
         await page.locator("#edit-target").fill(day(12))
         await page.get_by_role("button", name="Save changes").click()

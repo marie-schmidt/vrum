@@ -19,6 +19,7 @@ const ROW = 30;
 const MIN_ROWS = 4; // an empty timeline keeps this many rows, so there is room to drop an item
 const SCALE = 56;
 const MIN_BAR = 8;
+const SHORT_BAR = 26; // a bar narrower than this has no room for its icon and words
 const NEW_LENGTH_DAYS = 7; // an item dropped on the timeline gets a week
 const ZOOMS = { month: { ppd: 10, label: 'Month' }, quarter: { ppd: 4, label: 'Quarter' }, year: { ppd: 1.2, label: 'Year' } };
 const GROUPS = [['epic', 'Epic'], ['status', 'Status'], ['priority', 'Priority'], ['claimed', 'Who holds it']];
@@ -45,6 +46,7 @@ export function mount(element, initial) {
   picked = new Set();
   rows = [];
   trayDrafts = new Map();
+  trayDecided = false;
   wantToday = true;
   bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
   const group = h('select', { id: 'group', onchange: () => ui.navigate({ group: group.value === 'epic' ? null : group.value }) }, GROUPS.map(([value, label]) => h('option', { value }, label)));
@@ -57,7 +59,7 @@ export function mount(element, initial) {
     group,
     zooms,
     summary: h('p', { class: 'count', id: 'count', role: 'status' }),
-    tray: h('details', { class: 'rm-tray', id: 'tray', open: true }),
+    tray: h('details', { class: 'rm-tray', id: 'tray' }),
     scroll: h('div', { class: 'rm-scroll', id: 'rm-scroll', role: 'region', tabindex: 0, 'aria-label': 'Timeline, scrolls sideways and down' }, h('p', { class: 'loading', role: 'status' }, 'Reading the timeline…')),
   };
   const pan = (way) => parts.scroll.scrollBy({ left: way * Math.max(parts.scroll.clientWidth * 0.6, 160), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
@@ -96,9 +98,9 @@ export function mount(element, initial) {
             'A bar runs from its start date to its target date. Drag a bar to move both dates, or an end to move one. With a bar focused, the left and right arrows move it a day (Shift: a week); Alt moves only its start and Ctrl only its end; Space chooses it to move together with others, and Enter opens it. A light dashed bar is worked out from what is under it. An arrow runs from what is needed first to what waits for it. Drag the empty timeline to move along it.',
           ),
         ),
+        h('details', { class: 'filter-help rm-key' }, h('summary', {}, icon('chevron_right', { size: 14 }), 'Key to the bars'), legend()),
+        parts.summary,
       ),
-      parts.summary,
-      legend(),
       parts.tray,
       parts.scroll,
     ),
@@ -290,9 +292,9 @@ function draw() {
   parts.scroll.scrollTop = scrolled.top;
   if (wantToday) {
     wantToday = false;
-    scrollToToday();
+    scrollToStart();
   }
-  drawTray(undated);
+  drawTray(undated, dated.length);
   parts.summary.textContent = `${plural(dated.length, 'item')} on the timeline, ${undated.length} undated${params.get('q') ? ', for this filter' : ''}${picked.size ? `; ${picked.size} chosen to move together` : ''}.`;
   if (focusedBar) parts.scroll.querySelector(`.rm-bar[data-ref="${focusedBar}"]`)?.focus();
   parts.scroll.dataset.ready = 'true';
@@ -348,10 +350,13 @@ function barFor(entry, spot) {
   const code = nodeCode(node.kind, node.number);
   const words = `${KIND[node.kind].label} ${node.number}: ${node.title}. ${fromDay(first)} to ${fromDay(last)}. ${STATUS[node.status].label}.${found.length ? ` ${found.join('. ')}.` : ''}`;
   const chosen = picked.has(node.ref);
+  // A bar with no room for its icon and words shows neither: the row's label says what it is, and
+  // its status icon stands beside it, so nothing is drawn over the bar.
+  const short = spot.width < SHORT_BAR;
   const el = h(
     'div',
     {
-      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', node.overdue ? 'overdue' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
+      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', short ? 'short' : '', node.overdue ? 'overdue' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
       role: 'button',
       tabindex: 0,
       'aria-pressed': String(chosen),
@@ -362,20 +367,23 @@ function barFor(entry, spot) {
       onkeydown: barKey,
     },
     editable ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
-    h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
-    h('span', { class: 'rm-text' }, `${code} ${node.title}`),
+    short ? null : h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
+    short ? null : h('span', { class: 'rm-text' }, `${code} ${node.title}`),
     editable ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
   );
-  const note = found.length
-    ? [
-        h(
-          'span',
-          { class: `rm-note${node.overdue ? ' overdue' : ''}`, css: { left: `${spot.left + spot.width + 6}px`, top: `${spot.y + 6}px` } },
-          node.overdue || node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
-          found.map((text) => (text === 'Worked out from what is under it' ? 'worked out' : text)).join(' · '),
-        ),
-      ]
-    : [];
+  const said = found.filter((text) => text !== 'Worked out from what is under it');
+  const note =
+    short || said.length
+      ? [
+          h(
+            'span',
+            { class: `rm-note status-${node.status}${node.overdue ? ' overdue' : ''}`, css: { left: `${spot.left + spot.width + 4}px`, top: `${spot.y + 4}px` } },
+            short ? statusIcon(node.status, 13) : null,
+            node.overdue || node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
+            said.join(' · '),
+          ),
+        ]
+      : [];
   return [el, ...note];
 }
 
@@ -419,13 +427,37 @@ function scrollToToday() {
   parts.scroll.scrollLeft = Math.max(0, at - parts.scroll.clientWidth / 3);
 }
 
+// Where the timeline opens: at today, or at the first item when nothing is anywhere near today, so
+// that it never opens on months of empty space.
+function scrollToStart() {
+  if (!geometry || !geometry.items.size) {
+    scrollToToday();
+    return;
+  }
+  const { today, origin, ppd, items } = geometry;
+  const labels = parts.scroll.querySelector('.rm-labels')?.offsetWidth ?? 0;
+  const days = (parts.scroll.clientWidth - labels) / ppd;
+  const spans = [...items.values()];
+  if (spans.some((item) => item.e >= today - days / 3 && item.s <= today + (days * 2) / 3)) scrollToToday();
+  else parts.scroll.scrollLeft = Math.max(0, (Math.min(...spans.map((item) => item.s)) - origin) * ppd - 16);
+}
+
 // -- the tray of undated items ---------------------------------------------------------------------
 
 // What was typed in the tray's date boxes and not sent yet, kept across the redraws that news causes.
 let trayDrafts = new Map();
+// The tray opens by itself only when there is nothing on the timeline to look at and something
+// waits in it; after that it stays as the person left it.
+let trayDecided = false;
 
-function drawTray(undated) {
+function drawTray(undated, onTimeline) {
+  if (!trayDecided) {
+    parts.tray.open = onTimeline === 0 && undated.length > 0;
+    trayDecided = true;
+  }
   const open = parts.tray.open;
+  // With nothing undated the tray has nothing to hold: the count above the timeline says so.
+  parts.tray.hidden = undated.length === 0;
   const here = new Set(undated.map((node) => node.ref));
   for (const ref of [...trayDrafts.keys()]) if (!here.has(ref)) trayDrafts.delete(ref);
   put(

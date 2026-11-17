@@ -72,13 +72,18 @@ export function showSignIn(main, { onSignedIn, message = '', registering = false
     put(
       main,
       h(
-        'section',
-        { class: 'entry' },
-        heading(creating ? 'user' : 'lock', creating ? 'Create an account' : 'Sign in to Vrum', creating ? 'An account holds your own private projects. Nobody else can see them.' : 'Use the email and password of your account.'),
-        form,
-        creating
-          ? h('p', { class: 'entry-switch' }, 'Have an account already? ', h('button', { type: 'button', class: 'link', id: 'show-sign-in', onclick: () => draw(false) }, 'Sign in'))
-          : h('p', { class: 'entry-switch' }, 'New here? ', h('button', { type: 'button', class: 'link', id: 'show-register', onclick: () => draw(true) }, 'Create an account')),
+        'div',
+        { class: 'entry-wrap' },
+        h('p', { class: 'entry-intro' }, 'One shared place for the plan, the decisions and the facts behind it, for people and AI agents.'),
+        h(
+          'section',
+          { class: 'entry' },
+          heading(creating ? 'user' : 'lock', creating ? 'Create an account' : 'Sign in to Vrum', creating ? 'An account holds your own private projects. Nobody else can see them.' : 'Use the email and password of your account.'),
+          form,
+          creating
+            ? h('p', { class: 'entry-switch' }, 'Have an account already? ', h('button', { type: 'button', class: 'link', id: 'show-sign-in', onclick: () => draw(false) }, 'Sign in'))
+            : h('p', { class: 'entry-switch' }, 'New here? ', h('button', { type: 'button', class: 'link', id: 'show-register', onclick: () => draw(true) }, 'Create an account')),
+        ),
       ),
     );
     (creating ? name : email).focus();

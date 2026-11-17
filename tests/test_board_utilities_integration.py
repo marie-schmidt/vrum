@@ -15,7 +15,15 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, Route, expect
 
-from tests.board_helpers import SLOW, board_call, board_url, browser_page, cards_are, made
+from tests.board_helpers import (
+    SLOW,
+    board_call,
+    board_url,
+    browser_page,
+    cards_are,
+    made,
+    open_editor,
+)
 from tests.board_m14 import events_of, feed_ids, ids_of, spoken
 from tests.board_search import (
     address,
@@ -305,6 +313,7 @@ async def test_a_draft_survives_opening_drawers_switching_presentations_and_view
         await expect(page.locator("#panel #card-title")).to_contain_text(
             f"{code_of(story)} ", timeout=SLOW
         )
+        await open_editor(page)
         await page.locator("#edit-body").fill(draft)
         await page.evaluate("window.__body = document.querySelector('#edit-body')")
 

@@ -55,7 +55,7 @@ export async function mount(element, initial) {
           h('label', { for: 'tool-search', class: 'sr-only' }, 'Search'),
           icon('search', { size: 16, className: 'tools-search-icon' }),
           search,
-          h('button', { type: 'submit', class: 'primary' }, 'Search'),
+          h('button', { type: 'submit' }, 'Search'),
           h('button', { type: 'button', id: 'clear-tool-search', onclick: () => ui.navigate({ q: null }) }, 'Clear'),
         ),
       ),

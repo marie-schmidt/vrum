@@ -13,7 +13,7 @@ import re
 import pytest
 from playwright.async_api import Locator, Page, Route, expect
 
-from tests.board_helpers import SLOW, hold_back_news, made, plain
+from tests.board_helpers import SLOW, hold_back_news, made, open_editor, plain
 from tests.board_theme import (
     THEMES,
     choose,
@@ -367,6 +367,7 @@ async def test_a_blank_title_and_bad_dates_are_refused_in_the_servers_words_and_
                 target_on="2027-09-01",
                 body="A new body that is only a draft",
             )
+            await open_editor(page)
             await page.locator("#edit-start").fill("2027-09-10")
             await page.locator("#edit-target").fill("2027-09-01")
             await page.locator("#edit-body").fill("A new body that is only a draft")
@@ -574,6 +575,7 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
             )
             # The board has not heard of what the agent does next, as in the seconds before it does.
             await hold_back_news(page)
+            await open_editor(page)
             await page.locator("#edit-title").fill("My own title")
             await page.locator("#edit-body").fill("My own words, not saved yet")
             await ok(
@@ -645,6 +647,7 @@ async def test_an_agents_change_while_typing_is_offered_not_forced_and_loading_i
             await expect(page.locator("#card-title")).to_contain_text(
                 f"{code_of(story)} ", timeout=SLOW
             )
+            await open_editor(page)
             await page.locator("#edit-title").fill("What I am typing")
             await ok(
                 client,
@@ -798,6 +801,7 @@ async def test_losing_the_server_says_so_in_the_current_view_keeps_the_draft_and
             await expect(page.locator("#card-title")).to_contain_text(
                 f"{code_of(story)} ", timeout=SLOW
             )
+            await open_editor(page)
             await page.locator("#edit-title").fill("Typed while the server was away")
             note, chip = page.locator("#connection-note"), page.locator("#connection")
             await expect(note).to_be_hidden()

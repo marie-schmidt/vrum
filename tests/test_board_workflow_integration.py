@@ -20,6 +20,7 @@ from tests.board_helpers import (
     create_in_browser,
     drag_bar,
     on,
+    open_editor,
     plain,
     roadmap_ids,
     timeline,
@@ -238,6 +239,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
             f"{code_of(later)} ", timeout=SLOW
         )
         title = page.locator("#edit-title")
+        await open_editor(page)
         await title.fill(f"My title {word}")
         version = (await ok(agent, "get_node", node=later))["version"]
         await ok(
@@ -279,6 +281,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         # With nothing dated there is no timeline to drop on, so the first task gets its dates in
         # the panel, and the second is dropped on the timeline, ten days after the first starts.
         first_start = line["today"] + datetime.timedelta(days=2)
+        await open_editor(page)
         await page.locator("#edit-start").fill(first_start.isoformat())
         await page.locator("#edit-target").fill((first_start + datetime.timedelta(6)).isoformat())
         await page.get_by_role("button", name="Save changes").click()

@@ -3,11 +3,16 @@
 // operation an agent would call, with the version the person saw, so a change made meanwhile by an
 // agent is refused in the same words and nothing typed is lost.
 //
+// The details are read as text first, with an Edit button: the form for the title, the words,
+// the status, the priority and the dates opens in their place, with Save changes and Cancel, so the
+// same words are never on the page twice.
+//
 // It is drawn in the shared detail panel, and, with `{ page: true }`, as the details of the item's own
 // page (item.js): the same sections laid out in a main column and a side column when the page is
-// wide. The page owns the title, the line saying what the item is and the table under it, so the card
-// there starts with the item's state (status, priority and what is wrong with it) and has no heading,
-// no close button and no link to itself.
+// wide. The page owns the title, the line saying what the item is, the table under the card and
+// the place in its header for the state of the item (`options.summary`) and the Edit button
+// (`options.actions`), which the card fills; so the card there has no heading, no close button and
+// no link to itself.
 
 import { Refusal, call, callAll } from './api.js';
 import { actor, itemLink, notify, ui } from './ctx.js';
@@ -16,11 +21,30 @@ import { parentChoices, openCreate } from './create.js';
 import { field, refuse } from './forms.js';
 import { icon } from './icons.js';
 import { KIND, LINK, PRIORITIES, PRIORITY, STATUS, SETTABLE, codeOf, nodeCode, nodeWords, parseNodeRef, priorityChip, readNodeRef, statusChip } from './labels.js';
-import { renderMarkdown } from './markdown.js';
-import { askRecall, recallBlock } from './recall.js';
-import { closeButton, countTitle, detailGrid, detailHead, explainStale, historySection, loadingView, recordButtons, rememberFocus, requirementDialog, requirementRow, section, watchEdits } from './records.js';
+import { askRecall, recallBlock, recallTotal } from './recall.js';
+import {
+  closeButton,
+  contextSection,
+  detailGrid,
+  detailHead,
+  detailsHolder,
+  detailsSection,
+  editButton,
+  explainStale,
+  factsStrip,
+  historySection,
+  loadingView,
+  mentionsSection,
+  quietSection,
+  rememberFocus,
+  requirementDialog,
+  requirementRow,
+  section,
+  sectionWith,
+  watchEdits,
+} from './records.js';
 import { withReferences } from './reference-picker.js';
-import { fetchMentions, loadTargets, mentionsList, nodeLink } from './references.js';
+import { fetchMentions, loadTargets, nodeLink } from './references.js';
 import { childrenOf, store, sync } from './store.js';
 
 const wide = (element) => {
@@ -31,14 +55,14 @@ const wide = (element) => {
 // -- the form -------------------------------------------------------------------------------------
 
 // `pre` is put in front of the ids of the fields, so that a card in the detail panel does not repeat
-// the ids of the card on the item page beside it.
-function editForm(node, state, pre) {
+// the ids of the card on the item page beside it. `cancel` closes the form with nothing saved.
+function editForm(node, state, pre, cancel) {
   const title = h('input', { id: `${pre}edit-title`, type: 'text', value: node.title, autocomplete: 'off' });
   const body = withReferences(h('textarea', { id: `${pre}edit-body`, rows: 6, value: node.body || '' }));
   const status = h(
     'select',
     { id: `${pre}edit-status`, value: node.status },
-    node.status === 'ready' ? h('option', { value: 'ready', disabled: true }, 'Ready (worked out from the links)') : null,
+    node.status === 'ready' ? h('option', { value: 'ready', disabled: true }, 'Ready (automatic)') : null,
     SETTABLE.map((name) => h('option', { value: name }, STATUS[name].label)),
   );
   const priority = h(
@@ -71,8 +95,10 @@ function editForm(node, state, pre) {
     try {
       await call('update_node', args);
       state.dirty = false;
+      state.editing = false;
       notify(`Saved ${nodeWords(node.ref)}.`);
       await sync();
+      await state.reload(true);
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
       await explain(error, problem, node, state);
@@ -89,7 +115,7 @@ function editForm(node, state, pre) {
     field('Start', start),
     field('Target', target),
     problem,
-    h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
+    h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'cancel-edit', onclick: cancel }, 'Cancel'), h('button', { type: 'submit', class: 'primary' }, 'Save changes')),
   );
 }
 
@@ -222,21 +248,24 @@ function linksSection(node, items, state, link, pre) {
 
 // The requirements of a story are the ones in it. An epic shows those of its stories and a task
 // those of its story, so that what has to hold for the work is read where the work is.
+const storiesOf = (node) => (node.kind === 'epic' ? childrenOf(node.ref) : node.kind === 'task' ? [store.nodes.get(node.parent)].filter(Boolean) : [node]);
+const inStory = (ref) => (store.rules || []).filter((rule) => rule.story === ref);
+const requirementCount = (node) => storiesOf(node).reduce((sum, story) => sum + inStory(story.ref).length, 0);
+
 function requirementsSection(node, link) {
-  const rules = store.rules || [];
-  const inStory = (ref) => rules.filter((rule) => rule.story === ref);
   const list = (items) => h('ul', { class: 'plain requirements' }, items.map(requirementRow));
   if (node.kind === 'story') {
     const own = inStory(node.ref);
-    return section(
+    return sectionWith(
       'Requirements',
       'requirements',
+      h('button', { type: 'button', class: 'small add-requirement', onclick: () => requirementDialog({ story: node.ref }) }, icon('plus', { size: 14 }), 'Add a requirement…'),
       own.length ? list(own) : h('p', { class: 'quiet none' }, 'No requirements in this story.'),
-      h('div', { class: 'panel-actions' }, h('button', { type: 'button', class: 'small add-requirement', onclick: () => requirementDialog({ story: node.ref }) }, icon('plus', { size: 14 }), 'Add a requirement…')),
     );
   }
-  const stories = node.kind === 'epic' ? childrenOf(node.ref) : [store.nodes.get(node.parent)].filter(Boolean);
-  const groups = stories.map((story) => [story, inStory(story.ref)]).filter(([, own]) => own.length);
+  const groups = storiesOf(node)
+    .map((story) => [story, inStory(story.ref)])
+    .filter(([, own]) => own.length);
   return section(
     node.kind === 'epic' ? 'Requirements in its stories' : 'Requirements of its story',
     'requirements',
@@ -253,7 +282,7 @@ function overlapSection(node, result, link) {
   if (result.index.meaning !== 'used') {
     return section('Might be the same as', 'overlaps', h('p', { class: 'quiet' }, result.index.note));
   }
-  if (!result.items.length) return section('Might be the same as', 'overlaps', h('p', { class: 'quiet' }, 'Nothing in the index looks like this item.'));
+  if (!result.items.length) return quietSection('Might be the same as', 'overlaps', h('p', { class: 'quiet none' }, 'Nothing in the index looks like this item.'));
   return section(
     'Might be the same as (suggestions from the index)',
     'overlaps',
@@ -288,12 +317,13 @@ const openFullPage = (ref) =>
 // panel needs to know about it. `options.page` draws it as the details of the item's own page: no
 // heading, close button, link to the page or line saying where it sits (the page has them), the
 // focus goes to the page's title (`#item-title`), and links to other items lead to their own pages.
-// `options.layout` is 'wide' for the main column and side column (a page always has it).
+// A page also gives the places in its header: `options.summary` for the state of the item and
+// `options.actions` for the Edit button, and `options.drawn(counts)` is called after each drawing
+// with how many entries each section has, for the page's list of sections.
 // `options.force` (default true) is false for a redraw after news, which leaves the card as it is
 // when the person started typing meanwhile.
 export async function renderCard(root, ref, state = { ref, version: null, dirty: false }, options = {}) {
   const { page = false, force = true } = options;
-  const columns = page || options.layout === 'wide';
   const seen = state.touches || 0;
   state.skipped = false;
   state.reload = (now = false) => renderCard(root, ref, state, { ...options, force: now });
@@ -327,7 +357,9 @@ export async function renderCard(root, ref, state = { ref, version: null, dirty:
   // A card in the panel beside the item's page would repeat the page's ids.
   const pre = !page && ui.page === 'item' ? 'panel-' : '';
   const link = (other) => nodeLink(other, { page });
-  const worked = node.span_worked_out ? `Worked out from what is under it: ${day(node.span_start)} to ${day(node.span_end)}.` : null;
+  const worked = node.span_worked_out
+    ? `Worked out from what is under it: ${node.span_start && node.span_end ? `${day(node.span_start)} to ${day(node.span_end)}` : node.span_start ? `from ${day(node.span_start)}` : `until ${day(node.span_end)}`}.`
+    : null;
   const marks = [];
   if (node.overdue) marks.push(h('span', { class: 'chip overdue danger' }, icon('alert', { size: 14 }), 'Overdue'));
   if (node.schedule_conflicts.length) {
@@ -338,64 +370,119 @@ export async function renderCard(root, ref, state = { ref, version: null, dirty:
     : node.lapsed_claim_by
       ? `${node.lapsed_claim_by}’s claim ran out on ${moment(node.lapsed_claim_at)} with no handoff note.`
       : null;
+  const claimClass = node.claimed_by ? 'claim' : node.lapsed_claim_by ? 'claim lapsed' : 'claim quiet';
   const waiting = node.waiting_on.length ? node.waiting_on.map((other, position) => [position ? ', ' : '', link(other)]) : null;
   const last = node.last_handoff;
   const parentKind = node.parent === null ? null : KIND[parseNodeRef(node.parent).kind].label;
 
   const chips = h('div', { class: 'chips' }, statusChip(node.status), priorityChip(node.priority), marks);
-  const head = page
-    ? h('div', { class: 'card-marks' }, chips)
-    : detailHead({
-        kind: node.kind,
-        code: nodeCode(node.kind, node.number),
-        chips,
-        title: [node.title],
-        titleId: 'card-title',
-        close: closeButton('Close the details'),
-        actions: openFullPage(node.ref),
-      });
+  const progress = node.progress_total !== null ? progressRow(node) : null;
   const where = page || node.parent === null ? null : h('p', { class: 'card-parent' }, `In ${parentKind.toLowerCase()} `, link(node.parent));
-  const summary = detailGrid([
-    ['Progress', node.progress_total !== null ? progressRow(node) : null],
-    ['Dates', [`Start ${day(node.start_on) || 'not set'}. Target ${day(node.target_on) || 'not set'}. `, worked], { class: 'dates' }],
-    ['Claim', claim, { class: node.claimed_by ? 'claim' : 'claim quiet' }],
-    ['Waiting for', waiting],
-  ]);
   // On the item page the table under the card has its own way to add one.
   const addChild =
     node.kind !== 'task' && !page
       ? h('div', { class: 'panel-actions' }, h('button', { type: 'button', class: 'small add-child', onclick: () => openCreate({ kind: node.kind === 'epic' ? 'story' : 'task', parent: node.ref }) }, icon('plus', { size: 14 }), node.kind === 'epic' ? 'Add a story' : 'Add a task'))
       : null;
   const handoff = last ? section('Last handoff note', 'handoff', h('p', {}, `${last.actor}, ${moment(last.at)}, ${last.outcome}: ${last.note}`)) : null;
-  const details = section('Details', 'edit', h('div', { class: 'body-text' }, node.body ? renderMarkdown(node.body) : h('span', { class: 'quiet' }, 'No details.')), editForm(node, state, pre), moveForm(node, state, pre));
+
+  const headerEdit = page ? editButton(() => holder.set(true), `${pre}edit-open`) : null;
+  const holder = detailsHolder(
+    state,
+    (editing) =>
+      detailsSection({
+        body: node.body,
+        form: editForm(node, state, pre, () => {
+          state.dirty = false;
+          holder.set(false);
+        }),
+        editing,
+        edit: page ? null : () => holder.set(true),
+        extras: [moveForm(node, state, pre)],
+      }),
+    (editing) => {
+      if (!page || !options.actions) return;
+      put(options.actions, editing ? null : headerEdit);
+      if (!editing) headerEdit.focus();
+    },
+  );
   const linked = linksSection(node, links, state, link, pre);
   const requirements = requirementsSection(node, link);
-  const context = section(
-    'Facts and decisions',
-    'context',
-    recordButtons({ nodes: [node.ref] }),
+  const context = contextSection(
+    { nodes: [node.ref] },
     recallBlock({ node: ref }, recalled, { withSimilar: Boolean(state.withSimilar), onSimilar: (on) => (state.withSimilar = on) }),
   );
-  const mentioned = section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions));
+  const mentioned = mentionsSection(mentions);
   const overlaps = overlapSection(node, similar, link);
   const past = historySection(history);
 
-  const view = h(
-    'article',
-    { class: `card-detail detail${columns ? ' card-page' : ''}`, dataset: { ref: node.ref, kind: node.kind, number: node.number } },
-    head,
-    where,
-    ...(columns
-      ? [
-          h('div', { class: 'card-summary' }, summary, addChild),
-          h('div', { class: 'card-columns' }, h('div', { class: 'card-main' }, details, requirements, context), h('div', { class: 'card-side' }, handoff, linked, mentioned, overlaps, past)),
-        ]
-      : [summary, addChild, handoff, details, linked, requirements, context, mentioned, overlaps, past]),
-  );
+  let view;
+  if (page) {
+    // The state of the item goes up into the page's header, with the Edit button.
+    if (options.summary) {
+      put(
+        options.summary,
+        chips,
+        factsStrip([
+          ['Progress', progress],
+          ...(node.start_on || node.target_on
+            ? [
+                ['Start', day(node.start_on) || h('span', { class: 'quiet' }, 'Not set'), { class: 'start' }],
+                ['Target', day(node.target_on) || h('span', { class: 'quiet' }, 'Not set'), { class: 'target' }],
+              ]
+            : [['Dates', h('span', { class: 'quiet' }, 'Not set'), { class: 'dates' }]]),
+          ['Claim', claim, { class: claimClass }],
+          ['Waiting for', waiting],
+        ]),
+        worked ? h('p', { class: 'quiet card-note worked-out' }, worked) : null,
+      );
+    }
+    if (options.actions) put(options.actions, state.editing ? null : headerEdit);
+    view = h(
+      'article',
+      { class: 'card-detail detail card-page', dataset: { ref: node.ref, kind: node.kind, number: node.number } },
+      h('div', { class: 'card-columns' }, h('div', { class: 'card-main' }, handoff, holder.element, requirements), h('div', { class: 'card-side' }, linked, mentioned, overlaps)),
+      context,
+      past,
+    );
+  } else {
+    const head = detailHead({
+      kind: node.kind,
+      code: nodeCode(node.kind, node.number),
+      chips,
+      title: [node.title],
+      titleId: 'card-title',
+      close: closeButton('Close the details'),
+      actions: openFullPage(node.ref),
+    });
+    const summary = detailGrid([
+      ['Progress', progress],
+      ['Dates', [`Start ${day(node.start_on) || 'not set'}. Target ${day(node.target_on) || 'not set'}. `, worked], { class: 'dates' }],
+      ['Claim', claim, { class: claimClass }],
+      ['Waiting for', waiting],
+    ]);
+    view = h(
+      'article',
+      { class: 'card-detail detail', dataset: { ref: node.ref, kind: node.kind, number: node.number } },
+      head,
+      where,
+      summary,
+      addChild,
+      handoff,
+      holder.element,
+      linked,
+      requirements,
+      context,
+      mentioned,
+      overlaps,
+      past,
+    );
+  }
+  state.counts = { requirements: requirementCount(node), context: recallTotal(recalled), links: links.length, mentions: mentions.length, history: history.length };
   const restoreFocus = rememberFocus(root);
   clear(root).append(view);
   restoreFocus();
   watchEdits(view, state);
+  options.drawn?.(state.counts);
   // The panel's title, or, on the item's page, the page's own title, which is outside the card.
   state.focus = () => (page ? document.getElementById('item-title') : root.querySelector('#card-title'))?.focus();
   return state;

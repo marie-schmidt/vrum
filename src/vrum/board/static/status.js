@@ -88,7 +88,7 @@ const row = (name, label, value, extra) =>
   h('tr', { dataset: { name } }, h('th', { scope: 'row' }, label), h('td', { class: 'value' }, value), extra === undefined ? null : h('td', { class: 'quiet' }, extra));
 
 // A table of facts that scrolls inside its own box when it is wider than the page.
-const facts = (label, ...rows) => h('div', { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': label }, h('table', { class: 'facts' }, h('tbody', {}, rows)));
+const facts = (label, ...rows) => h('div', { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': label }, h('table', { class: 'status-facts' }, h('tbody', {}, rows)));
 
 function draw(status) {
   const index = status.index;

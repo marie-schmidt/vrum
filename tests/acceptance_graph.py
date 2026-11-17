@@ -53,6 +53,7 @@ from tests.board_helpers import (
     hold_back_news,
     made,
     on,
+    open_tray,
     plain,
     roadmap_ids,
     timeline,
@@ -956,6 +957,7 @@ async def keys_and_tray() -> None:
             await expect(bar_of(page, keyed)).to_have_attribute("data-start", day(-1), timeout=SLOW)
             line = await timeline(page)
             at = ((line["today"] - line["origin"]).days + 2) * line["ppd"] + line["ppd"] / 2
+            await open_tray(page)
             await page.drag_and_drop(
                 f".tray-item[data-ref='{loose}'] .tray-drag",
                 ".rm-rows",

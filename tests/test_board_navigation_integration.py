@@ -12,7 +12,17 @@ import pytest
 from mcp import Client
 from playwright.async_api import Page, expect
 
-from tests.board_helpers import GONE, PAGES, SETTINGS, SLOW, VIEWS, board_url, browser_page, made
+from tests.board_helpers import (
+    GONE,
+    PAGES,
+    SETTINGS,
+    SLOW,
+    VIEWS,
+    board_url,
+    browser_page,
+    made,
+    open_editor,
+)
 from tests.helpers import code_of, connect, number_of, ok, the_token, unique_word
 from tests.world import make_project, register
 
@@ -371,6 +381,7 @@ async def test_a_draft_in_the_panel_survives_opening_drawers_and_changing_views(
         await expect(page.locator("#card-title")).to_contain_text(
             f"{code_of(story)} ", timeout=SLOW
         )
+        await open_editor(page)
         await page.locator("#edit-title").fill(f"My draft {word}")
         await page.locator("#edit-body").fill(f"Half a thought {word}")
         await page.evaluate("window.__panel = document.getElementById('edit-title'); true")

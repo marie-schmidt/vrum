@@ -28,7 +28,7 @@ from tests.board_context import (
     svg,
     tally,
 )
-from tests.board_helpers import PAGES, SLOW, browser_page, links_of, made
+from tests.board_helpers import PAGES, SLOW, browser_page, links_of, made, open_editor
 from tests.helpers import code_of, make_decision, make_fact, ok, unique_word
 from tests.helpers import number_of as number
 from tests.world import Project
@@ -399,6 +399,7 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
         async with _browser(board, project) as w:
             page = w.page
             await w.open(f"#/board?epic={number(epic)}&sel={writer}")
+            await open_editor(page)
             box = page.locator("#edit-body")
             await box.click()
             await page.keyboard.type(f"Depends on [[pickable {word}")
@@ -438,6 +439,7 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
             assert sources(mentions) == {writer}
             # Typing the kind and an id narrows the list to it, and Escape closes the list and
             # keeps the text.
+            await open_editor(page)
             await box.click()
             await page.keyboard.press("Control+End")
             await page.keyboard.type(f" and [[fact:{fact['id']}")

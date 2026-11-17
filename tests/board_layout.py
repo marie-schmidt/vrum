@@ -188,7 +188,8 @@ async def build(client: Client, world: World) -> None:
     await node("F2", "task", "Done two", "S6")
     await status("F1", "done")
     await status("F2", "done")
-    await ok(client, "claim_node", actor="agent-1", node=refs["B1"])
+    # A long lease, so that the claim is still held however long the whole run takes.
+    await ok(client, "claim_node", actor="agent-1", node=refs["B1"], lease_seconds=86_400)
 
     # Context: requirements, decisions and facts, some with long words.
     async def record(name: str, kind: str, made_one: dict[str, Any]) -> None:

@@ -41,6 +41,7 @@ export function showTop({ project, indexText, openSearch, openJump }) {
     index: h('span', { id: 'index-state', class: 'chip', title: 'Items that are new or changed and not yet searchable by meaning' }, icon('search', { size: 12 }), indexText()),
     connection: h('span', { id: 'connection', class: 'chip warn', hidden: true }, icon('alert', { size: 12 }), 'Cannot reach the server: trying again'),
   };
+  quietIndex();
   top.replaceChildren(
     h('button', { type: 'button', id: 'sidebar-toggle', class: 'ghost icon-only', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Open the menu', onclick: openSidebar }, icon('menu', { size: 20 })),
     crumbs,
@@ -104,8 +105,15 @@ export function updateTop(title, item = null) {
   }
 }
 
+// An index with nothing waiting says nothing a person needs, so a narrow window leaves its chip out.
+function quietIndex() {
+  bar.index.toggleAttribute('data-quiet', /^Index: 0 waiting$/.test(bar.index.textContent));
+}
+
 export function setIndexText(text) {
-  if (bar) bar.index.replaceChildren(icon('search', { size: 12 }), text);
+  if (!bar) return;
+  bar.index.replaceChildren(icon('search', { size: 12 }), text);
+  quietIndex();
 }
 
 export function setConnection(trouble) {

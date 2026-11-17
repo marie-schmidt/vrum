@@ -10,28 +10,28 @@
 
 /* -- the toolbar -------------------------------------------------------------------------------- */
 
-.rm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-3); }
+.rm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-1); }
 .rm-group-choice { display: flex; align-items: center; gap: var(--space-2); }
 .rm-group-choice label { margin: 0; }
 .rm-pan { display: flex; gap: var(--space-2); }
 .rm-pan .flip .icon { transform: rotate(180deg); }
-.rm-notes { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-2); }
-.roadmap-page .count { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-sm); }
+.rm-notes { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-4); margin: 0 0 var(--space-2); }
+.roadmap-page .count { margin: 0 0 0 auto; color: var(--text-2); font-size: var(--text-sm); }
 
-.rm-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-3); padding: 0; list-style: none; color: var(--text-2); font-size: var(--text-xs); }
+.rm-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: var(--space-2) 0 0; padding: 0; list-style: none; color: var(--text-2); font-size: var(--text-xs); }
 .rm-legend li { display: inline-flex; align-items: center; gap: var(--space-2); }
 
 /* -- the tray of items with no dates ------------------------------------------------------------ */
 
 .rm-tray { margin: 0 0 var(--space-3); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
-.rm-tray > summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-height: 2.5rem; padding: var(--space-1) var(--space-3); cursor: pointer; list-style: none; }
+.rm-tray > summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-height: var(--control-h); padding: 0 var(--space-3); cursor: pointer; list-style: none; }
 .rm-tray > summary::-webkit-details-marker { display: none; }
 .rm-tray > summary .icon { transition: transform var(--ease); }
 .rm-tray[open] > summary .icon { transform: rotate(90deg); }
 .tray-title { font-weight: 650; }
 .tray-sub { color: var(--text-2); font-size: var(--text-sm); }
-.tray-list { max-height: 10rem; margin: 0; padding: 0; overflow: auto; list-style: none; border-top: var(--border-w) solid var(--border); }
-.tray-item { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-2) var(--space-3); }
+.tray-list { max-height: 9rem; margin: 0; padding: 0; overflow: auto; list-style: none; border-top: var(--border-w) solid var(--border); }
+.tray-item { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); padding: var(--space-1) var(--space-3); }
 .tray-item + .tray-item { border-top: var(--border-w) solid var(--border); }
 .tray-drag {
   display: inline-flex; align-items: center; gap: var(--space-2); flex: 1 1 14rem; min-width: 0; padding: var(--space-1) var(--space-2);
@@ -101,9 +101,17 @@
 .rm-handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
 .rm-handle.start { left: 0; }
 .rm-handle.end { right: 0; }
+.rm-bar.short { padding: 0; }
+.rm-bar.short .rm-handle { width: 3px; }
 .rm-bar:hover .rm-handle { background: var(--border-strong); opacity: 0.5; }
-.rm-note { position: absolute; z-index: 2; display: inline-flex; align-items: center; gap: var(--space-1); color: var(--warn); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; pointer-events: none; }
+/* What stands beside a bar: its status icon when the bar is too short to hold it, and its marks. It
+   has the colour of the timeline behind it, so a grid line or today's line never runs through it. */
+.rm-note { position: absolute; z-index: 2; display: inline-flex; align-items: center; gap: var(--space-1); height: calc(var(--space-5) - var(--space-1)); padding: 0 var(--space-1); background: var(--surface); border-radius: var(--radius-sm); color: var(--warn); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; pointer-events: none; }
 .rm-note.overdue { color: var(--danger); }
+.rm-note.status-ready .icon, .rm-note.status-done .icon { color: var(--ok); }
+.rm-note.status-in_progress .icon { color: var(--accent-text); }
+.rm-note.status-blocked .icon { color: var(--warn); }
+.rm-note.status-new .icon, .rm-note.status-dropped .icon { color: var(--text-2); }
 
 /* The look of each status (also on the legend's swatches): new is a plain bar, ready has a green
    outline, in progress is striped, blocked is hatched, done is solid green, dropped is dotted. */
