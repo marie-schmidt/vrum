@@ -5,13 +5,13 @@
 // text is saved.
 
 import { h } from './dom.js';
-import { KIND, isNodeKind, itemCode, kindIcon } from './labels.js';
+import { isNodeKind, itemCode, kindIcon, kindLabel } from './labels.js';
 import { loadTargets, refText } from './references.js';
-import { store } from './store.js';
+import { headlineOf, store } from './store.js';
 
 const SHOWN = 8;
 let counter = 0;
-const KINDS = ['epic', 'story', 'task', 'rule', 'decision', 'fact'];
+const KINDS = ['epic', 'story', 'task', 'rule', 'note'];
 const LETTERS = { e: 'epic', s: 'story', t: 'task' };
 
 const clip = (text, size = 70) => {
@@ -20,13 +20,12 @@ const clip = (text, size = 70) => {
 };
 
 // Every item a reference can name: { kind, number, title }, the number being the id for a
-// requirement, a decision or a fact.
+// acceptance criterion or a note.
 function everything() {
   const found = [];
   for (const node of store.nodes.values()) found.push({ kind: node.kind, number: node.number, title: node.title, created: node.created_at || '' });
   for (const rule of store.rules || []) found.push({ kind: 'rule', number: rule.id, title: rule.title });
-  for (const decision of store.decisions || []) found.push({ kind: 'decision', number: decision.id, title: decision.title });
-  for (const fact of store.facts || []) found.push({ kind: 'fact', number: fact.id, title: clip(fact.text) });
+  for (const note of store.notes || []) found.push({ kind: 'note', number: note.id, title: clip(headlineOf(note)) });
   return found;
 }
 
@@ -36,7 +35,7 @@ function everything() {
 export function offers(query) {
   const typed = query.trim().toLowerCase();
   const all = everything();
-  const byKind = /^(epic|story|task|rule|decision|fact)\s*:?\s*#?(\d*)$/.exec(typed);
+  const byKind = /^(epic|story|task|rule|note)\s*:?\s*#?(\d*)$/.exec(typed);
   const byCode = /^([est])(?:-(\d*)|(\d+))$/.exec(typed);
   let found;
   let digits = '';
@@ -51,7 +50,7 @@ export function offers(query) {
   } else {
     const words = typed.split(/\s+/);
     found = all.filter((item) => {
-      const hay = `${KIND[item.kind].label} ${item.kind} ${itemCode(item.kind, item.number)} ${item.title}`.toLowerCase();
+      const hay = `${kindLabel(item.kind)} ${item.kind} ${itemCode(item.kind, item.number)} ${item.title}`.toLowerCase();
       return words.every((word) => hay.includes(word));
     });
   }
@@ -98,7 +97,7 @@ export function withReferences(control) {
     const start = before.lastIndexOf('[[');
     const typed = start < 0 ? '' : before.slice(start);
     if (start < 0 || typed.includes(']]') || typed.includes('\n')) return hide();
-    // The requirements, decisions and facts are read the first time a `[[` is typed, and the
+    // The acceptance criteria and notes are read the first time a `[[` is typed, and the
     // list is drawn again with them.
     if (!asked) {
       asked = true;

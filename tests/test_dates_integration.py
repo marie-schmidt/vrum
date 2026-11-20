@@ -7,6 +7,7 @@ from mcp import Client
 
 from tests.helpers import (
     all_nodes,
+    connect_as,
     day,
     make_stories,
     make_tree,
@@ -15,7 +16,9 @@ from tests.helpers import (
     ok,
     refused,
     set_status,
+    unique_word,
 )
+from tests.world import HARNESS_AGENT
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -58,31 +61,33 @@ async def test_dates_are_set_changed_cleared_and_logged_with_before_and_after(
     assert (task["start_on"], task["target_on"]) == (day(2), day(10))
     assert node_core(await get(client, task)) == node_core(task)
 
-    moved = await ok(
-        client,
-        "update_node",
-        actor="ann",
-        node=task["ref"],
-        expected_version=1,
-        target_on=day(20),
-    )
-    assert (moved["start_on"], moved["target_on"], moved["version"]) == (day(2), day(20), 2)
+    # Who changed it is the agent whose key the change is made with.
+    word = unique_word()
+    ann, bob = f"ann-{word}", f"bob-{word}"
+    async with connect_as(ann) as by_ann, connect_as(bob) as by_bob:
+        moved = await ok(
+            by_ann,
+            "update_node",
+            node=task["ref"],
+            expected_version=1,
+            target_on=day(20),
+        )
+        assert (moved["start_on"], moved["target_on"], moved["version"]) == (day(2), day(20), 2)
 
-    cleared = await ok(
-        client,
-        "update_node",
-        actor="bob",
-        node=task["ref"],
-        expected_version=2,
-        clear_start_on=True,
-    )
+        cleared = await ok(
+            by_bob,
+            "update_node",
+            node=task["ref"],
+            expected_version=2,
+            clear_start_on=True,
+        )
     assert (cleared["start_on"], cleared["target_on"], cleared["version"]) == (None, day(20), 3)
 
     history = (await ok(client, "node_history", node=task["ref"]))["items"]
     assert [(e["action"], e["actor"]) for e in history] == [
-        ("create", "marie"),
-        ("update", "ann"),
-        ("update", "bob"),
+        ("create", HARNESS_AGENT),
+        ("update", ann),
+        ("update", bob),
     ]
     assert history[0]["after"]["start_on"] == day(2) and history[0]["after"]["target_on"] == day(10)
     assert history[1]["before"] == {"target_on": day(10), "version": 1}
@@ -440,7 +445,7 @@ async def test_dates_do_not_get_in_the_way_of_readiness_claims_or_moves(client: 
         target_on=day(200),
     )
     assert dated["status"] == "ready"
-    assert (await ok(client, "claim_node", actor="ann", node=task["ref"]))["actor"] == "ann"
+    assert (await ok(client, "claim_node", node=task["ref"]))["actor"] == HARNESS_AGENT
     moved = await ok(
         client,
         "move_node",

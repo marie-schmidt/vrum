@@ -2,9 +2,10 @@
 // reference (epic:3, story:12) everywhere here: in the options, in `openCreate` and in what is sent.
 
 import { call } from './api.js';
-import { actor, notify, ui } from './ctx.js';
+import { notify, openItem } from './ctx.js';
+import { dateField } from './datepicker.js';
 import { h } from './dom.js';
-import { dialogForm, field, fieldRow, openDialog } from './forms.js';
+import { dialogForm, field, fieldRow, openDialog, sizeSelect } from './forms.js';
 import { KIND, PRIORITIES, PRIORITY, codeOf, nodeWords } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { epics, store, sync } from './store.js';
@@ -52,12 +53,15 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
     { id: 'new-priority', name: 'priority', value: 'normal' },
     PRIORITIES.map((name) => h('option', { value: name }, PRIORITY[name].label)),
   );
-  const start = h('input', { id: 'new-start', name: 'start_on', type: 'date' });
-  const target = h('input', { id: 'new-target', name: 'target_on', type: 'date' });
+  const start = h('input', { id: 'new-start', name: 'start_on' });
+  const target = h('input', { id: 'new-target', name: 'target_on' });
+  const size = sizeSelect({ id: 'new-size' });
+  const sizeRow = field('Size', size);
 
   const fillParents = (selected) => {
     const wanted = kindField.value;
     parentRow.hidden = wanted === 'epic';
+    sizeRow.hidden = wanted === 'epic';
     parentRow.firstChild.textContent = wanted === 'task' ? 'In story' : 'In epic';
     parentField.replaceChildren(...parentChoices(wanted, selected).filter(Boolean));
     if (selected !== null) parentField.value = selected;
@@ -66,12 +70,11 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
   fillParents(parent);
 
   const { form } = dialogForm({
-    fields: [fieldRow(field('What is it', kindField), parentRow), field('Title', title), field('Details', body), fieldRow(field('Priority', priority), field('Start', start), field('Target', target))],
+    fields: [fieldRow(field('Kind', kindField), parentRow), field('Title', title), field('Details', body), fieldRow(field('Priority', priority), sizeRow), fieldRow(field('Start', dateField(start, 'Start')), field('Target', dateField(target, 'Target')))],
     submit: 'Create',
     work: async () => {
       const wanted = kindField.value;
       const args = {
-        actor: actor(),
         kind: wanted,
         title: title.value,
         body: body.value,
@@ -80,6 +83,7 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
         target_on: target.value || null,
       };
       if (wanted !== 'epic') args.parent = parentField.value || null;
+      if (wanted !== 'epic' && size.value) args.size = size.value;
       const made = await call('create_node', args);
       box.close();
       await sync();
@@ -88,7 +92,7 @@ export function openCreate({ kind = 'epic', parent = null } = {}) {
         `Created ${nodeWords(made.ref)}, “${made.title}”.` +
           (similar.length ? ` It looks like: ${similar.join('; ')}.` : ''),
       );
-      ui.navigate({ sel: made.ref, panel: null });
+      openItem(made.ref);
     },
   });
   const box = openDialog('New item', [form]);

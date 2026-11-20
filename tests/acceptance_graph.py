@@ -1,11 +1,13 @@
-"""Chapter 9 of the acceptance scenario: the Graph and the Roadmap (M10, M11 and M16), driven in a
-real headless browser against the real containers and checked against a real MCP client. The
+"""Chapter 9 of the acceptance scenario: the Graph and the Roadmap (M10, M11, M16 and M20), driven
+in a real headless browser against the real containers and checked against a real MCP client. The
 Graph is a presentation of the same work and context: Work, Context and Everything, each as a Map
-or a List, with one selection and one scope that survive every switch. The Roadmap schedules the
-same work with the dependency and date checks of the server. Table and Outline are gone: a
-item is changed in the detail panel, and moved with `move_node` there or from the Graph's list.
-An epic, story or task is named by its kind and number (`story:12`, shown as S-12) in every
-address, row and line, and an epic or a story has a page of its own (M19).
+or a List, with one chosen dot and one scope that survive every switch. A click on a dot chooses
+it, says what it is under the map and Open page leads to the full page of the record (nothing opens
+at the side), whose path keeps the Graph and brings it back as it was left. The Roadmap schedules
+the same work with the dependency and date checks of the server, a bar leading to the same pages.
+Table and Outline are gone: an item is changed on its own page, and moved with `move_node` there or
+from the Graph's list. An epic, story or task is named by its kind and number (`story:12`, shown
+as S-12) in every address, row and line, and every record has a page of its own (M19, M20).
 
 Most of it works in projects made for the purpose (an account, a project and an agent key, made as
 a person would), so that every list and count can be compared in full. The "Everything" proof needs
@@ -19,12 +21,15 @@ from mcp import Client
 from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
-from tests.acceptance_board import same_words
+from tests.acceptance_board import back_to_view, same_words
 from tests.acceptance_scenario import URL, Failed, chapter, clip, proof
 from tests.board_context import (
     ADA,
     REMOVED_WORDS,
     check_same_relationships,
+    choose_dot,
+    chosen,
+    chosen_box,
     context_world,
     dialog,
     dot,
@@ -36,7 +41,7 @@ from tests.board_context import (
     hash_params,
     list_as,
     listed,
-    panel,
+    open_chosen,
     refusal_in,
     server_edges,
     show,
@@ -49,11 +54,14 @@ from tests.board_helpers import (
     board_url,
     browser_page,
     cards_are,
+    crumbs,
     database_footprint,
     hold_back_news,
+    item_loaded,
+    item_page,
     made,
     on,
-    open_tray,
+    open_item,
     plain,
     roadmap_ids,
     timeline,
@@ -73,10 +81,11 @@ from tests.helpers import (
     unique_word,
 )
 from tests.second_stack import SecondStack
-from tests.test_board_graph_integration import Expect, pressed, same_as_the_boards_in
+from tests.test_board_graph_integration import Expect, pressed
 from tests.test_board_integration import twelve
 from tests.test_board_requirements_integration import (
     LIST,
+    choose_place,
     group,
     move_by_drag,
     rule_in,
@@ -98,7 +107,7 @@ async def graph() -> None:
         await everything()
         await the_roadmap()
         await dragging_bars()
-        await keys_and_tray()
+        await keys_on_bars()
         await addresses_store_nothing()
     except BrowserError as error:
         raise Failed(
@@ -186,15 +195,15 @@ async def selection_and_scope_stay() -> None:
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
             await graph_open(w, address)
-            card = panel(page).locator(f".card-detail[data-ref='{story}']")
-            await expect(card).to_be_visible(timeout=SLOW)
-            await card.evaluate("e => { e.dataset.mark = 'kept'; }")
+            await expect(chosen(page)).to_have_attribute("data-key", story, timeout=SLOW)
             steps = [("context", "map"), ("context", "list"), ("everything", "list")]
             steps += [("work", "list"), ("work", "map"), ("everything", "map")]
             for view, presentation in steps:
                 await show(page, view=view, presentation=presentation)
                 if presentation == "list" and view != "context":
                     await expect(listed(page, story)).to_have_attribute("aria-current", "true")
+                if presentation == "map" and view != "context":
+                    await expect(chosen(page)).to_have_attribute("data-key", story)
                 params = await hash_params(page)
                 assert (params["epic"], params["q"], params["sel"]) == (
                     epic_n,
@@ -204,26 +213,28 @@ async def selection_and_scope_stay() -> None:
                 assert (params["view"], params.get("as", "map")) == (view, presentation)
                 assert await pressed(page) == (view, presentation)
                 assert await page.locator("#graph-epic").input_value() == epic_n
-                kept = panel(page).locator(".card-detail[data-mark=kept]")
-                await expect(kept).to_have_count(1)
-            # The map marks the chosen record, and the choice made in the list is the map's.
-            await show(page, view="everything", presentation="list")
+            # The map marks the chosen record, and the list marks the one the map chose.
+            await show(page, view="everything", presentation="map")
             fact = f"fact:{ids['f1']}"
-            await listed(page, fact).locator(".record-title").click()
-            await expect(
-                panel(page).locator(f".record-detail[data-record='{fact}']")
-            ).to_be_visible(timeout=SLOW)
+            await choose_dot(page, fact)
+            await show(page, presentation="list")
+            await expect(listed(page, fact)).to_have_attribute("aria-current", "true")
             await show(page, presentation="map")
             await expect(dot(page, fact)).to_have_class(re.compile(r"\bchosen\b"))
+            # A trip to the chosen record's page and back by the crumb leaves the Graph as it was.
+            before = await hash_params(page)
+            await open_chosen(page, fact)
+            from_the_graph = (await crumbs(page))[2] == "Graph"
+            await back_to_view(page, "Graph")
+            await expect(dot(page, fact)).to_have_class(re.compile(r"\bchosen\b"), timeout=SLOW)
+            came_back = await hash_params(page) == before
             # The address alone brings the whole state back: reloaded, and in a page of its own.
             await show(page, view="context", presentation="list")
             again = await page.evaluate("location.hash")
             await page.reload()
             await expect(page.locator("#graph-list")).to_be_visible(timeout=SLOW)
             assert await pressed(page) == ("context", "list")
-            await expect(
-                panel(page).locator(f".record-detail[data-record='{fact}']")
-            ).to_be_visible(timeout=SLOW)
+            await expect(listed(page, fact)).to_have_attribute("aria-current", "true", timeout=SLOW)
             await list_as(page, want.by_view["context"][2])
             other = await page.context.new_page()
             await other.goto(f"{board}{again}")
@@ -231,6 +242,9 @@ async def selection_and_scope_stay() -> None:
             assert await other.evaluate("location.hash") == again
             await expect(other.locator("#graph-view-context")).to_have_attribute(
                 "aria-pressed", "true"
+            )
+            await expect(listed(other, fact)).to_have_attribute(
+                "aria-current", "true", timeout=SLOW
             )
             await other.close()
             # Around the chosen record, one step, in either presentation: the same records.
@@ -249,20 +263,21 @@ async def selection_and_scope_stay() -> None:
             assert w.problems == [], w.problems
     proof(
         "M16",
-        "the chosen record and the scope (epic, filter, one step around) survive six switches of "
-        "preset and presentation with the very same panel, the map marks what the list chose, and "
-        "the address alone brings the state back after a reload and in a second page",
-        len(stories) == 3,
+        "the chosen dot and the scope (epic, filter, one step around) survive six switches of "
+        "preset and presentation, the list marks the dot the map chose, a trip to the chosen "
+        "record's page and back by the crumb brings the Graph back as it was, and the address "
+        "alone brings the state back after a reload and in a second page",
+        len(stories) == 3 and from_the_graph and came_back,
         f"{len(steps)} switches, address {again.split('?')[1][:60]}",
     )
 
 
-# -- an unassigned requirement, and the coverage of the stories ----------------------------------
+# -- an unplaced acceptance criterion, and the coverage of the stories ---------------------------
 
 
 async def unassigned_requirements() -> None:
     async with fresh_project(URL) as (client, board, project):
-        epic = await made(client, "epic", "Requirements")
+        epic = await made(client, "epic", "Acceptance criteria")
         first = await made(client, "story", "First story", epic)
         second = await made(client, "story", "Second story", epic)
         await made(client, "story", "Third story", epic)
@@ -274,22 +289,34 @@ async def unassigned_requirements() -> None:
             await page.locator("#new-requirement").click()
             box = dialog(page)
             await box.locator("#requirement-title").fill("Created in the browser")
-            await box.get_by_role("button", name="Create the requirement").click()
+            await box.get_by_role("button", name="Add the acceptance criterion").click()
+            # A new acceptance criterion opens on a page of its own, which says it is not placed
+            # yet, and the Graph crumb brings the list back with it first among those not placed.
+            await expect(item_page(page)).to_have_attribute("data-kind", "rule", timeout=SLOW)
+            await expect(page.locator("#item-what")).to_contain_text(
+                "not placed on a story or task"
+            )
+            on_its_page = int((await item_page(page).get_attribute("data-ref") or "").split(":")[1])
+            await back_to_view(page, "Graph")
             newest = page.locator("#unplaced-group li.requirement").first
             await expect(newest).to_contain_text("Created in the browser", timeout=SLOW)
             rule = int(await newest.get_attribute("data-id") or 0)
             loose = await ok(client, "get_rule", rule_id=rule)
             after_new = await summary_says(page, client)
-            await newest.get_by_role("button", name="Put in a story…").click()
+            await newest.get_by_role("button", name="Put on a story or task…").click()
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(first)
-            await box.get_by_role("button", name="Put in the story").click()
-            await expect(rule_row(page, rule)).to_have_attribute("data-story", first, timeout=SLOW)
+            await choose_place(box, first)
+            await box.get_by_role("button", name="Put it there").click()
+            await expect(rule_row(page, rule)).to_have_attribute("data-node", first, timeout=SLOW)
             after_place = await summary_says(page, client)
-            await rule_row(page, rule).get_by_role("button", name="Move to another story…").click()
+            await (
+                rule_row(page, rule)
+                .get_by_role("button", name="Move to another story or task…")
+                .click()
+            )
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(second)
-            await box.get_by_role("button", name="Move to the story").click()
+            await choose_place(box, second)
+            await box.get_by_role("button", name="Move it there").click()
             await expect(group(page, second).locator(f"li[data-id='{rule}']")).to_be_visible(
                 timeout=SLOW
             )
@@ -303,25 +330,29 @@ async def unassigned_requirements() -> None:
             after_drag = await summary_says(page, client)
             # A blank title is refused as an agent's is, and writes nothing.
             blank = await refused(
-                client, "create_rule", actor="x", title="", body="", status="held"
+                client, "create_rule", actor="x", title="", body="", status="open"
             )
             total = (await ok(client, "list_rules", limit=1))["total"]
             await page.locator("#new-requirement").click()
             box = dialog(page)
             await box.locator("#requirement-body").fill("A body with no title")
-            await box.get_by_role("button", name="Create the requirement").click()
+            await box.get_by_role("button", name="Add the acceptance criterion").click()
             await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
             blank_words = await refusal_in(page).inner_text()
             kept = await box.locator("#requirement-body").input_value()
             await box.get_by_role("button", name="Cancel").click()
-            # Moving it to the story it is already in is refused in the server's words.
+            # Putting it on the story or task it is already on is refused in the server's words.
             same = await refused(
-                client, "move_rule", actor="x", rule_id=rule, expected_version=4, new_story=first
+                client, "place_rule", actor="x", rule_id=rule, expected_version=4, node=first
             )
-            await rule_row(page, rule).get_by_role("button", name="Move to another story…").click()
+            await (
+                rule_row(page, rule)
+                .get_by_role("button", name="Move to another story or task…")
+                .click()
+            )
             box = dialog(page)
-            await box.locator("#requirement-target").select_option(first)
-            await box.get_by_role("button", name="Move to the story").click()
+            await choose_place(box, first)
+            await box.get_by_role("button", name="Move it there").click()
             await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
             same_story_words = await refusal_in(page).inner_text()
             await box.get_by_role("button", name="Cancel").click()
@@ -330,15 +361,17 @@ async def unassigned_requirements() -> None:
         events = (await ok(client, "rule_history", rule_id=rule, limit=200))["items"]
         proof(
             "M16",
-            "a requirement written in the Graph's context list is unassigned and listed first, "
-            "placed in a story from a dialog, moved to another and dragged to a story that had "
-            "none, each in one step and each time the sentence above the list says what "
-            "coverage_report says; the history names the person",
-            loose["story"] is None
+            "an acceptance criterion written in the Graph's context list is not placed, opens on a "
+            "page of its own and is listed first when the Graph is back, placed on a story from a "
+            "dialog, moved to another and dragged to a story that had none, each in one step and "
+            "each time the sentence above the list says what coverage_report says; the history "
+            "names the person",
+            loose["node"] is None
+            and on_its_page == rule
             and after_new == (start[0] + 1, start[1])
             and after_place == (start[0], start[1] - 1)
             and after_drag == after_place
-            and (moved["story"], moved["version"]) == (first, 4)
+            and (moved["node"], moved["version"]) == (first, 4)
             and [(e["action"], e["actor"]) for e in events]
             == [
                 ("rule_created", ADA),
@@ -351,8 +384,9 @@ async def unassigned_requirements() -> None:
         )
         proof(
             "M16",
-            "a blank requirement title and a move to the story it is already in are refused in the "
-            "words of the tools that own them, what was typed stays, and nothing is written",
+            "a blank acceptance criterion title and a move to the story it is already on are "
+            "refused in the words of the tools that own them, what was typed stays, and nothing "
+            "is written",
             same_words(blank_words, blank)
             and same_words(same_story_words, same)
             and kept == "A body with no title"
@@ -391,32 +425,30 @@ async def connections_and_references() -> None:
             await expect(items).to_have_count(len(mentions["items"]), timeout=SLOW)
             shown = await items.evaluate_all("els => els.map(e => e.dataset.source)")
             await row.locator(f"li.mention[data-source='{fact_key}'] a.mention-link").click()
-            detail = panel(page).locator(f".record-detail[data-record='{fact_key}']")
-            await expect(detail).to_be_visible(timeout=SLOW)
+            await item_loaded(page, fact_key)
+            by_backlink = (await crumbs(page))[2] == "Graph" and "from=graph" in page.url
+            await back_to_view(page, "Graph")
             params = await hash_params(page)
             kept = (params["view"], params["as"], params["epic"]) == (
                 "everything",
                 "list",
                 str(epic_n),
             )
-            await same_as_the_boards_in(w, fact_key)
-            await w.go(f"#/graph?view=everything&as=list&epic={epic_n}&sel={fact_key}")
-            await expect(detail).to_be_visible(timeout=SLOW)
-            await detail.locator(f".record-text .reference[data-ref='{story}']").click()
-            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
-                timeout=SLOW
-            )
-            via_reference = (await hash_params(page))["sel"] == story
-            await same_as_the_boards_in(w, story)
-            await w.go(f"#/graph?view=everything&as=list&epic={epic_n}")
+            # A reference in the record's own words leads on to the page of what it names.
+            await listed(page, fact_key).locator(".record-title").click()
+            await item_loaded(page, fact_key)
+            await item_page(page).locator(f".record-text .reference[data-ref='{story}']").click()
+            await item_loaded(page, story)
+            via_reference = (await crumbs(page))[2] == "Graph" and "from=graph" in page.url
+            await back_to_view(page, "Graph")
             await listed(page, fact_key).locator("details.gv-connections summary").click()
             link = listed(page, fact_key).locator(
-                f"details.gv-connections li[data-other='{story}'] button.gv-link"
+                f"details.gv-connections li[data-other='{story}'] a.gv-link"
             )
             await link.click()
-            await expect(panel(page).locator(f".card-detail[data-ref='{story}']")).to_be_visible(
-                timeout=SLOW
-            )
+            await item_loaded(page, story)
+            via_connection = (await crumbs(page))[2] == "Graph" and "from=graph" in page.url
+            # On the map a neighbour is chosen first, and its Open page leads on.
             await w.go(f"#/graph?view=everything&epic={epic_n}&sel={fact_key}")
             await expect(dot(page, fact_key)).to_have_class(re.compile(r"\bchosen\b"), timeout=SLOW)
             near = page.locator("#graph-neighbours button[data-key]")
@@ -424,23 +456,33 @@ async def connections_and_references() -> None:
                 "els => els.map(e => [e.dataset.key, e.dataset.relation])"
             )
             await page.locator(f"#graph-neighbours button[data-key='{decision_key}']").click()
-            await expect(
-                panel(page).locator(f".record-detail[data-record='{decision_key}']")
-            ).to_be_visible(timeout=SLOW)
+            await expect(chosen(page)).to_have_attribute("data-key", decision_key, timeout=SLOW)
+            await open_chosen(page, decision_key)
             await (
-                panel(page).locator(f"[data-part=concerns] a.item-link[data-ref='{story}']").click()
+                item_page(page)
+                .locator(f"[data-part=concerns] tr.record-line[data-ref='{story}'] a.record-title")
+                .click()
             )
-            await expect(dot(page, story)).to_have_class(re.compile(r"\bchosen\b"))
+            await item_loaded(page, story)
+            from_a_decision = (await crumbs(page))[2] == "Graph"
+            await back_to_view(page, "Graph")
+            await expect(dot(page, decision_key)).to_have_class(
+                re.compile(r"\bchosen\b"), timeout=SLOW
+            )
             assert w.problems == [], w.problems
         proof(
             "M16",
-            "a backlink, a reference in a record's own words, a connection in the list and a "
-            "neighbour on the map each open the ordinary detail panel, the same one the Board "
-            "shows, with the Graph's preset, presentation and scope left as they were; the "
-            "backlinks are what find_mentions says",
+            "a backlink, a reference in a record's own words and a connection in the list each "
+            "open the page of the record they name, and a neighbour on the map is chosen and then "
+            "opened with Open page, every one with the Graph in the path (from=graph) and the "
+            "crumb bringing the Graph back with its preset, presentation and scope; the backlinks "
+            "are what find_mentions says",
             sorted(shown) == sorted(sources)
+            and by_backlink
             and kept
             and via_reference
+            and via_connection
+            and from_a_decision
             and sorted(joined) == sorted([[story, "concerns"], [decision_key, "concerns"]]),
             f"{len(sources)} mention of the decision",
         )
@@ -479,10 +521,10 @@ async def no_removed_taxonomy() -> None:
                 f"fact:{ids['f1']}",
                 f"fact:{ids['f_old']}",
             ):
-                await w.go(f"#/graph?view=context&as=list&epic={number_of(ids['E'])}&sel={key}")
-                await expect(panel(page).locator("h2").first).to_be_visible(timeout=SLOW)
+                await open_item(w, key, "graph")
                 await page.wait_for_load_state("networkidle")
-                assert not REMOVED_WORDS.search(await panel(page).text_content() or ""), key
+                assert not REMOVED_WORDS.search(await item_page(page).text_content() or ""), key
+            await graph_open(w, f"#/graph?view=context&as=list&epic={number_of(ids['E'])}")
             for button in ("#record-fact", "#record-decision", "#new-requirement"):
                 await page.locator(button).click()
                 await expect(dialog(page)).to_be_visible()
@@ -500,8 +542,8 @@ async def no_removed_taxonomy() -> None:
     proof(
         "M16",
         "no separate context store and no removed taxonomy appears in any of the six "
-        "presentations, the detail of each kind of record or the dialogs: only epics, stories, "
-        "tasks, requirements, decisions and facts, read from the same tables the tools read",
+        "presentations, the page of each kind of record or the dialogs: only epics, stories, "
+        "tasks, acceptance criteria, decisions and facts, read from the same tables the tools read",
         sorted(switches) == sorted(f"kind-{kind}" for kind in types) and stores == "",
         f"{looked} presentations read, no belief, principle or memory table",
     )
@@ -526,7 +568,7 @@ async def choosing_a_dot() -> None:
             target=sibling,
             link_type="relates_to",
         )
-        rule = (await ok(client, "create_rule", actor="a", title=f"A rule {word}", story=story))[
+        rule = (await ok(client, "create_rule", actor="a", title=f"A rule {word}", node=story))[
             "id"
         ]
         decision = await make_decision(client, f"A decision {word}", nodes=[story])
@@ -541,14 +583,19 @@ async def choosing_a_dot() -> None:
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
             await graph_open(w, f"#/graph?{everything}")
-            await dot(page, story).click()
-            card = panel(page).locator(".card-detail")
-            await expect(card).to_contain_text(f"{code_of(story)} Chosen story", timeout=SLOW)
-            await expect(card).to_contain_text("Target 2031-05-06")
-            await expect(card.locator("[data-section=facts] li.record")).to_contain_text(
+            await choose_dot(page, story)
+            box = await chosen_box(page)
+            says_what = (
+                box["title"] == f"Story {code_of(story)} Chosen story {word}"
+                and "Due 2031-05-06" in box["chips"]
+                and box["open"] == f"#/item?item={story}&from=graph"
+            )
+            await open_chosen(page, story)
+            here = item_page(page)
+            await expect(here.locator(".card-summary .target")).to_contain_text("2031-05-06")
+            await expect(here.locator("[data-section=facts] tr.record-line")).to_contain_text(
                 f"A fact {word}"
             )
-            await same_as_the_boards_in(w, story)
             await graph_open(w, f"#/graph?scope=local&sel={story}&{everything}")
             edges = {
                 line
@@ -564,10 +611,9 @@ async def choosing_a_dot() -> None:
             await show(page, presentation="map")
             await page.locator(f"#graph-neighbours button[data-key='{task}']").click()
             await expect(dot(page, task)).to_have_class(re.compile(r"\bchosen\b"))
-            await expect(page.locator("#card-title")).to_contain_text(
-                f"{code_of(task)} Chosen task"
-            )
-            # The keyboard: a dot takes the focus, Enter chooses it, P pins it and lets it go.
+            await expect(chosen(page)).to_contain_text(f"{code_of(task)} Chosen task")
+            # The keyboard: a dot takes the focus, Enter chooses it and Enter again opens its page,
+            # P pins it and lets it go.
             await graph_open(w, f"#/graph?{everything}")
             await dot(page, story).focus()
             await page.keyboard.press("p")
@@ -575,23 +621,28 @@ async def choosing_a_dot() -> None:
             await page.keyboard.press("p")
             await dot(page, f"fact:{fact['id']}").focus()
             await page.keyboard.press("Enter")
-            await expect(
-                panel(page).locator(f".record-detail[data-record='fact:{fact['id']}']")
-            ).to_be_visible(timeout=SLOW)
+            await expect(chosen(page)).to_have_attribute(
+                "data-key", f"fact:{fact['id']}", timeout=SLOW
+            )
+            await expect(item_page(page)).to_have_count(0)
+            await page.keyboard.press("Enter")
+            await item_loaded(page, f"fact:{fact['id']}")
+            await back_to_view(page, "Graph")
             await show(page, presentation="list")
             first = page.locator("#work-tree li[role=treeitem][tabindex='0']")
             await first.focus()
             await page.keyboard.press("Home")
             await page.keyboard.press("ArrowDown")
             await page.keyboard.press("Enter")
-            await expect(page.locator("#card-title")).to_be_focused(timeout=SLOW)
+            await expect(page.locator("#item-title")).to_be_focused(timeout=SLOW)
             assert w.problems == [], w.problems
     proof(
         "M10",
-        "choosing a dot opens the panel the Board opens, word for word, with its date and fact; "
-        "the local graph at one step is exactly the record's neighbours, as a map and as a list, "
-        "the neighbour list offers the same choices, and the keyboard reaches, chooses and pins",
-        sorted(near) == sorted(wanted - {story}),
+        "choosing a dot says what it is under the map (its code, title and due date), Open page "
+        "opens its page with the date and the fact; the local graph at one step is exactly the "
+        "record's neighbours, as a map and as a list, the neighbour list offers the same choices, "
+        "and the keyboard reaches, chooses, opens and pins",
+        says_what and sorted(near) == sorted(wanted - {story}),
         f"{len(wanted)} records around one story",
     )
 
@@ -775,7 +826,7 @@ async def the_roadmap() -> None:
         async with browser_page(board, token=project.key) as w:
             page = w.page
             await w.open(f"#/roadmap?q=epic:{number_of(epic)}")
-            everyone = await roadmap_ids(page, 8, 2)
+            everyone = await roadmap_ids(page, 8)
             line = await timeline(page)
             where_right = True
             for name, (s, e) in spans.items():
@@ -797,10 +848,10 @@ async def the_roadmap() -> None:
                 )
                 for n in (epic, story)
             ]
-            tray: list[str] = await page.locator(".tray-item").evaluate_all(
-                "els => els.map(e => e.dataset.ref)"
-            )
-            arrow = page.locator("path.dep")
+            left_off = [
+                await page.locator(f"#rm-scroll [data-ref='{ref}']").count() == 0 for ref in undated
+            ]
+            arrow = page.locator(".rm-deps path.dep")
             arrows = [
                 (
                     await arrow.nth(i).get_attribute("data-from"),
@@ -815,24 +866,38 @@ async def the_roadmap() -> None:
                 "els => els.map(e => e.dataset.ref)"
             )
             words = await page.locator(".rm-label .chip").all_inner_texts()
+            ruler_cells = await page.locator(".rm-day").count()
+            track_days = round(
+                await page.locator(".rm-track").evaluate("e => e.getBoundingClientRect().width")
+                / line["ppd"]
+            )
+            tails = page.locator(".rm-rows .rm-late")
+            tail_cells = [
+                (
+                    await tails.nth(i).get_attribute("data-ref"),
+                    await tails.nth(i).evaluate("e => parseFloat(e.style.width)") / line["ppd"],
+                )
+                for i in range(await tails.count())
+            ]
             same_filters = True
             epic_n = number_of(epic)
-            for text, dated, loose in (
-                (f"epic:{epic_n} target:{day(-30)}..{day(16)}", 4, 0),
-                (f"epic:{epic_n} is:overdue", 1, 0),
-                (f"epic:{epic_n} target:none kind:task", 0, 2),
+            for text, dated in (
+                (f"epic:{epic_n} target:{day(-30)}..{day(16)}", 4),
+                (f"epic:{epic_n} is:overdue", 1),
+                (f"epic:{epic_n} target:none kind:task", 0),
             ):
-                wanted = {n["ref"] for n in await all_nodes(client, query=text)}
+                found = await all_nodes(client, query=text)
+                wanted = {n["ref"] for n in found if n["span_start"] or n["span_end"]}
                 await apply_filter(page, text)
-                same_filters = same_filters and await roadmap_ids(page, dated, loose) == wanted
+                same_filters = same_filters and await roadmap_ids(page, dated) == wanted
     proof(
         "M11",
         "the Roadmap draws each of six bars at the pixels its dates give, the epic and story as "
-        "worked-out spans, and the two undated items in the tray",
-        everyone == {epic, story, *ids.values(), *undated}
+        "worked-out spans, and leaves off the two items that have no dates",
+        everyone == {epic, story, *ids.values()}
         and where_right
         and worked_out == [("true", day(-20), day(30))] * 2
-        and tray == undated,
+        and all(left_off),
         f"{line['ppd']:g} pixels a day, today {line['today']}",
     )
     proof(
@@ -845,6 +910,16 @@ async def the_roadmap() -> None:
         and any("Schedule conflict" in text for text in words)
         and any("Overdue" in text for text in words),
         ", ".join(sorted(words)),
+    )
+    proof(
+        "M32",
+        "the Roadmap has a ruler with a cell for every day, a bar fills whole cells so that the "
+        "days an item was meant to take can be counted, and work that is late has a tail with a "
+        "cell for each day it is late",
+        ruler_cells == track_days and where_right and tail_cells == [(ids["c"], -spans["c"][1])],
+        f"{ruler_cells} day cells, {tail_cells[0][1]:g} cells late"
+        if tail_cells
+        else f"{ruler_cells} day cells, no tail",
     )
     proof(
         "M11",
@@ -874,7 +949,7 @@ async def dragging_bars() -> None:
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
             await w.open(f"#/roadmap?q=epic:{number_of(epic)}")
-            await roadmap_ids(page, 6, 0)
+            await roadmap_ids(page, 6)
             await drag(page, moved, 5)
             await expect(bar_of(page, moved)).to_have_attribute("data-start", day(8), timeout=SLOW)
             await drag(page, ended, -3, "end")
@@ -935,7 +1010,7 @@ async def dragging_bars() -> None:
         )
 
 
-async def keys_and_tray() -> None:
+async def keys_on_bars() -> None:
     async with fresh_project(URL) as (client, board, project):
         word = unique_word()
         epic = await made(client, "epic", f"Keys {word}")
@@ -943,11 +1018,10 @@ async def keys_and_tray() -> None:
         keyed = await made(
             client, "task", f"Keyed {word}", story, start_on=day(3), target_on=day(12)
         )
-        loose = await made(client, "task", f"Loose {word}", story)
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
             await w.open(f"#/roadmap?q=epic:{number_of(epic)}")
-            await roadmap_ids(page, 3, 1)
+            await roadmap_ids(page, 3)
             await bar_of(page, keyed).focus()
             for _ in range(3):
                 await page.keyboard.press("ArrowRight")
@@ -955,27 +1029,14 @@ async def keys_and_tray() -> None:
             await bar_of(page, keyed).focus()
             await page.keyboard.press("Shift+ArrowLeft")
             await expect(bar_of(page, keyed)).to_have_attribute("data-start", day(-1), timeout=SLOW)
-            line = await timeline(page)
-            at = ((line["today"] - line["origin"]).days + 2) * line["ppd"] + line["ppd"] / 2
-            await open_tray(page)
-            await page.drag_and_drop(
-                f".tray-item[data-ref='{loose}'] .tray-drag",
-                ".rm-rows",
-                target_position={"x": at, "y": 60},
-            )
-            await expect(bar_of(page, loose)).to_be_visible(timeout=SLOW)
         history = await updates(client, keyed)
-        (given,) = await updates(client, loose)
         proof(
             "M11",
-            "keys shift a bar by a day or a week (three presses are one change), and an undated "
-            "item dropped on the timeline gets both dates, each shown by get_node and the history",
+            "keys shift a bar by a day or a week (three presses are one change), each shown by "
+            "get_node and the history",
             await dates(client, keyed) == (day(-1), day(8))
-            and [(e["actor"], e["after"]["version"]) for e in history] == [(ADA, 2), (ADA, 3)]
-            and await dates(client, loose) == (day(2), day(8))
-            and (given["actor"], given["before"]["version"], given["after"]["version"])
-            == (ADA, 1, 2),
-            f"{day(2)}..{day(8)}",
+            and [(e["actor"], e["after"]["version"]) for e in history] == [(ADA, 2), (ADA, 3)],
+            f"{day(-1)}..{day(8)}",
         )
 
 
@@ -987,66 +1048,73 @@ async def addresses_store_nothing() -> None:
         task = await made(
             client, "task", f"Kept task {word}", story, start_on=day(1), target_on=day(5)
         )
-        await made(client, "task", f"Undated {word}", story)
         await make_fact(client, f"About the kept task {word}", nodes=[task])
         await reindexed(client)
         epic_n = number_of(epic)
         async with browser_page(board, token=project.key) as first:
             await first.open(f"#/roadmap?q=epic:{epic_n}")
-            await roadmap_ids(first.page, 3, 1)
+            await roadmap_ids(first.page, 3)
             await first.page.locator("[data-zoom=quarter]").click()
             await expect(first.page.locator(".rm-track")).to_have_attribute("data-zoom", "quarter")
             await first.page.locator("#group").select_option("status")
             await expect(first.page.locator(".rm-group").first).to_be_visible(timeout=SLOW)
-            await first.page.locator(f".rm-label[data-ref='{task}'] button").click()
-            await expect(first.page.locator("#card-title")).to_contain_text(
-                f"{code_of(task)} ", timeout=SLOW
-            )
+            roadmap_address = first.page.url
+            # From the Roadmap a record has a page, and the search box leads to a page too: each
+            # of them is its address.
+            await first.page.locator(f".rm-label[data-ref='{task}'] a.rm-open").click()
+            await item_loaded(first.page, task)
+            item_address = first.page.url
             await first.page.locator("#global-search").fill(f"kept task {word}")
             await first.page.locator("#global-search-go").click()
-            await expect(first.page.locator("#search-results li.result").first).to_be_visible(
+            await expect(first.page.locator("#search-results tr.result").first).to_be_visible(
                 timeout=SLOW
             )
-            address = first.page.url
-            results = await first.page.locator("#search-results li.result").evaluate_all(
+            search_address = first.page.url
+            results = await first.page.locator("#search-results tr.result").evaluate_all(
                 "els => els.map(e => [e.dataset.type, e.dataset.ref])"
             )
             before = database_footprint()
             async with browser_page(board, token=project.key, name="Someone else") as second:
-                await second.page.goto(address)
-                await roadmap_ids(second.page, 3, 1)
+                await second.page.goto(roadmap_address)
+                await roadmap_ids(second.page, 3)
                 await expect(second.page.locator(".rm-track")).to_have_attribute(
                     "data-zoom", "quarter", timeout=SLOW
                 )
-                await expect(second.page.locator("#card-title")).to_contain_text(
-                    f"{code_of(task)} ", timeout=SLOW
-                )
-                await expect(second.page.locator("#drawer[data-drawer=search]")).to_be_visible()
-                await expect(second.page.locator("#search-results li.result").first).to_be_visible(
-                    timeout=SLOW
-                )
-                same = (
-                    sorted(
-                        await second.page.locator("#search-results li.result").evaluate_all(
-                            "els => els.map(e => [e.dataset.type, e.dataset.ref])"
-                        )
-                    )
-                    == sorted(results)
-                    and await second.page.locator("#filter").input_value() == f"epic:{epic_n}"
+                the_view = (
+                    await second.page.locator("#filter").input_value() == f"epic:{epic_n}"
                     and await second.page.locator("#group").input_value() == "status"
                 )
+                await second.page.goto(item_address)
+                await item_loaded(second.page, task)
+                trail = await crumbs(second.page)
+                its_page = trail[2] == "Roadmap" and trail[-1] == (
+                    f"{code_of(task)} Kept task {word}"
+                )
+                await second.page.goto(search_address)
+                await expect(second.page.locator("#search-results tr.result").first).to_be_visible(
+                    timeout=SLOW
+                )
+                same = sorted(
+                    await second.page.locator("#search-results tr.result").evaluate_all(
+                        "els => els.map(e => [e.dataset.type, e.dataset.ref])"
+                    )
+                ) == sorted(results)
                 assert second.problems == [], second.problems
             after = database_footprint()
         proof(
             "M11",
-            "a Roadmap's address, with its filter, zoom, grouping, chosen item and search drawer, "
-            "opened in a second browser shows the same, and the server stored nothing for it",
+            "a Roadmap's address (filter, zoom, grouping), the address of the page of a record "
+            "reached from it and the address of a search, each opened in a second browser, show "
+            "the same, and the server stored nothing for any of them",
             same
+            and the_view
+            and its_page
             and after == before
             and all(
-                part in address for part in (f"q=epic:{epic_n}", "zoom=quarter", "group=status")
+                part in roadmap_address
+                for part in (f"q=epic:{epic_n}", "zoom=quarter", "group=status")
             )
-            and f"sel={task}" in address
-            and "drawer=search" in address,
-            address.split("#", 1)[1][:90],
+            and item_address.endswith(f"#/item?item={task}&from=roadmap")
+            and "#/search?" in search_address,
+            roadmap_address.split("#", 1)[1][:90],
         )

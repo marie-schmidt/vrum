@@ -103,7 +103,7 @@ def in_days(days: int) -> str:
     return (today() + datetime.timedelta(days=days)).isoformat()
 
 
-async def populate(url: str, key: str) -> dict[str, int]:
+async def populate(url: str, key: str, person: Person, project_id: int) -> dict[str, int]:
     """A small pickup-ordering project for a bakery, made through the same MCP operations an
     agent or the board uses. Returns the numbers of the records the screenshots need."""
     headers = {"Authorization": f"Bearer {key}"}
@@ -113,41 +113,37 @@ async def populate(url: str, key: str) -> dict[str, int]:
     ):
         hosted = await call(
             client,
-            "record_decision",
-            actor=OWNER,
-            title="Use the payment provider's hosted checkout page",
-            text="Customers enter their card details on the payment provider's hosted page. "
+            "add_note",
+            text="Use the payment provider's hosted checkout page\n\n"
+            "Customers enter their card details on the payment provider's hosted page. "
             "The shop's own pages and servers never receive a card number.",
-            reason="It keeps card data out of the shop's systems and avoids a larger security "
+            why="It keeps card data out of the shop's systems and avoids a larger security "
             "review before launch.",
             decided_by=SHOP_MANAGER,
         )
         slots = await call(
             client,
-            "record_decision",
-            actor=OWNER,
-            title="Pickup slots are 15 minutes long",
-            text="A customer picks a 15 minute window, and the kitchen works through orders one "
+            "add_note",
+            text="Pickup slots are 15 minutes long\n\n"
+            "A customer picks a 15 minute window, and the kitchen works through orders one "
             "window at a time.",
-            reason="The kitchen bakes and packs in 15 minute rounds, so shorter slots would "
+            why="The kitchen bakes and packs in 15 minute rounds, so shorter slots would "
             "promise times it cannot keep.",
             decided_by=SHOP_MANAGER,
         )
         await call(
             client,
-            "record_decision",
-            actor=OWNER,
-            title="Prices include sales tax",
-            text="Every price shown to a customer includes sales tax, in the basket and on "
+            "add_note",
+            text="Prices include sales tax\n\n"
+            "Every price shown to a customer includes sales tax, in the basket and on "
             "receipts too.",
-            reason="Customers compare the website with the shop's price board, which includes tax.",
+            why="Customers compare the website with the shop's price board, which includes tax.",
             decided_by=SHOP_MANAGER,
             project_wide=True,
         )
         plan = await call(
             client,
             "create_plan",
-            actor=OWNER,
             items=[
                 {
                     "key": "epic",
@@ -171,7 +167,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
                     "kind": "story",
                     "title": "Choose a pickup time",
                     "body": "Offer only the time windows the kitchen can still fill, as decided "
-                    f"in [[decision:{slots['id']}]].",
+                    f"in [[note:{slots['id']}]].",
                     "parent": "epic",
                     "priority": "high",
                     "target_on": in_days(14),
@@ -189,7 +185,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
                     "kind": "story",
                     "title": "Pay by card",
                     "body": "Send the customer to the hosted checkout page, as decided in "
-                    f"[[decision:{hosted['id']}]], and mark the order paid when it confirms.",
+                    f"[[note:{hosted['id']}]], and mark the order paid when it confirms.",
                     "parent": "epic",
                     "priority": "high",
                     "target_on": in_days(21),
@@ -257,23 +253,23 @@ async def populate(url: str, key: str) -> dict[str, int]:
                     "title": "Every bake lists its allergens",
                     "body": "A customer can see the allergens of a bake before adding it to "
                     "the basket.",
-                    "story": "menu",
+                    "node": "menu",
                 },
                 {
                     "title": "A window closes when it is full",
                     "body": "A pickup window also closes 30 minutes before it starts.",
-                    "story": "slots",
+                    "node": "slots",
                 },
                 {
                     "title": "The pickup time is shown before payment",
                     "body": "The customer sees the day and time they chose on the last "
                     "screen before they pay.",
-                    "story": "basket",
+                    "node": "basket",
                 },
                 {
                     "title": "No card numbers reach the shop",
                     "body": "Card details are entered only on the payment provider's page.",
-                    "story": "pay",
+                    "node": "pay",
                 },
             ],
         )
@@ -281,57 +277,50 @@ async def populate(url: str, key: str) -> dict[str, int]:
         rules = [int(rule) for rule in plan["rule_ids"]]
         await call(
             client,
-            "link_decision",
-            actor=OWNER,
-            decision_id=hosted["id"],
+            "link_note",
+            note_id=hosted["id"],
             nodes=[made["pay"], made["redirect"]],
             rule_ids=[rules[3]],
         )
         await call(
             client,
-            "link_decision",
-            actor=OWNER,
-            decision_id=slots["id"],
+            "link_note",
+            note_id=slots["id"],
             nodes=[made["slots"], made["capacity"]],
             rule_ids=[rules[1]],
         )
         capacity = await call(
             client,
-            "retain_fact",
-            actor=OWNER,
+            "add_note",
             text="The kitchen can prepare at most 12 orders in each 15 minute window.",
-            source="The head baker, in the planning call on 4 November.",
+            why="The head baker, in the planning call on 4 November.",
             nodes=[made["slots"], made["capacity"]],
-            decision_ids=[slots["id"]],
+            note_ids=[slots["id"]],
         )
         await call(
             client,
-            "retain_fact",
-            actor=OWNER,
+            "add_note",
             text="Most customers look at the shop's website on a phone.",
-            source="The shop's analytics export for October.",
+            why="The shop's analytics export for October.",
             nodes=[made["menu"], made["page"]],
         )
-        await call(
-            client,
-            "set_confirmation",
-            actor=OWNER,
-            kind="decision",
-            record_id=slots["id"],
-            confirmation="confirmed",
-            person=OWNER,
-            quote="Agreed in the planning call.",
-        )
-        await call(
-            client,
-            "set_confirmation",
-            actor=OWNER,
-            kind="fact",
-            record_id=capacity["id"],
-            confirmation="confirmed",
-            person=SHOP_MANAGER,
-            quote="Checked with the kitchen on 5 November.",
-        )
+        # Only a person can confirm, so these go through the board as the signed-in owner.
+        for note, reviewer, quote in (
+            (slots, OWNER, "Agreed in the planning call."),
+            (capacity, SHOP_MANAGER, "Checked with the kitchen on 5 November."),
+        ):
+            confirmed = person.call(
+                "POST",
+                f"/board/api/projects/{project_id}/tool/set_confirmation",
+                {
+                    "note_id": note["id"],
+                    "confirmation": "confirmed",
+                    "person": reviewer,
+                    "quote": quote,
+                },
+            )
+            if confirmed.status != 200:
+                raise Stopped(f"The confirmation was refused: {confirmed.body}")
 
         # The agent's work as the guide describes it: take the next free piece of work, then end
         # it with a handoff note. Two tasks end done, one blocked, and the last stays under way.
@@ -339,7 +328,6 @@ async def populate(url: str, key: str) -> dict[str, int]:
             work = await call(
                 client,
                 "next_work",
-                actor=AGENT,
                 within_node=made[story],
                 lease_seconds=lease_seconds,
             )
@@ -350,7 +338,6 @@ async def populate(url: str, key: str) -> dict[str, int]:
             await call(
                 client,
                 "finish_work",
-                actor=AGENT,
                 node=made[task],
                 outcome=outcome,
                 note=note,
@@ -378,7 +365,7 @@ async def populate(url: str, key: str) -> dict[str, int]:
             "component is ready and waits for that data.",
         )
         await take("slots", "capacity", lease_seconds=3600)
-        return {"decision": int(slots["id"]), "fact": int(capacity["id"])}
+        return {"note": int(slots["id"])}
 
 
 async def settle(page: Page) -> None:
@@ -420,18 +407,18 @@ async def capture(base: str, person: Person, project_id: int, ids: dict[str, int
 
             await page.goto(f"{board}#/board")
             await settle(page)
+            # The embedding service indexes the work in the background after it is written; wait
+            # until it is done, so the pictures show the settled board and the filled meaning list.
+            await page.wait_for_selector("#index-state", state="hidden", timeout=180_000)
             await page.screenshot(path=OUT / "board.png")
 
-            chosen = f"decision:{ids['decision']}"
-            await page.goto(
-                f"{board}#/graph?view=everything&as=map&scope=local&depth=2&sel={chosen}"
-            )
+            chosen = f"note:{ids['note']}"
+            await page.goto(f"{board}#/graph?tab=around&focus={chosen}")
             await settle(page)
-            await page.wait_for_selector("#panel:not([hidden]) h2, #panel:not([hidden]) h1")
-            await page.wait_for_selector("#panel .loading", state="detached")
-            await page.wait_for_function("document.querySelectorAll('#dots > *').length > 0")
-            await page.wait_for_timeout(300)
-            # The panel's title has the focus after it opens; the picture shows no focus ring.
+            await page.wait_for_selector(f"#graph-hub[data-ref='{chosen}']")
+            await page.wait_for_selector("#graph-around-loading", state="detached")
+            await page.wait_for_timeout(500)
+            # Nothing has the focus in the picture, so no ring is drawn anywhere.
             await page.evaluate(
                 "document.activeElement instanceof HTMLElement && document.activeElement.blur()"
             )
@@ -453,10 +440,10 @@ async def main(url: str) -> None:
     if made.status != 201:
         raise Stopped(f"The project was refused: {made.body}")
     project_id = int(made.body["id"])
-    key = person.call("POST", f"/board/api/projects/{project_id}/keys", {"label": "screenshots"})
+    key = person.call("POST", f"/board/api/projects/{project_id}/keys", {"name": AGENT})
     if key.status != 201:
         raise Stopped(f"The key was refused: {key.body}")
-    ids = await populate(url, key.body["secret"])
+    ids = await populate(url, key.body["secret"], person, project_id)
     await capture(base, person, project_id, ids)
     for name in ("board.png", "graph.png"):
         size = (OUT / name).stat().st_size

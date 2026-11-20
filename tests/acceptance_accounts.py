@@ -15,7 +15,7 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, browser_page, made
+from tests.board_helpers import SLOW, browser_page, item_loaded, made
 from tests.helpers import (
     all_nodes,
     code_of,
@@ -453,13 +453,18 @@ async def switching() -> None:
         await ok(one, "retain_fact", actor="a", text=f"A first fact {word}", source="The first")
         await made(two, "epic", f"Only in the second {word}")
         async with browser_page(first.address, token=first.key, name=None, keep_bodies=True) as w:
-            # The first project's search drawer and detail panel are open when it is left.
-            await w.open(f"#/board?drawer=search&search=first+{word}&sel={story_one}")
-            await expect(w.page.locator("#card-title")).to_contain_text(
-                f"{code_of(story_one)} ", timeout=SLOW
-            )
-            await expect(w.page.locator("#search-results li.result").first).to_be_visible(
+            # The first project's Search page has been used and the page of one of its records is
+            # open when it is left.
+            await w.open(f"#/search?search=first+{word}")
+            await expect(w.page.locator("#search-results tr.result").first).to_be_visible(
                 timeout=SLOW
+            )
+            await w.page.locator(
+                f"#search-results tr.result[data-ref='{story_one}'] a.result-title"
+            ).click()
+            await item_loaded(w.page, story_one)
+            await expect(w.page.locator("#item-title")).to_contain_text(
+                f"{code_of(story_one)} ", timeout=SLOW
             )
             released = asyncio.Event()
             held_back: list[str] = []
@@ -502,16 +507,19 @@ async def switching() -> None:
                 and all(f"Only in the first {word}" not in text for text in second_bodies),
                 f"{len(held_back)} held back, {len(later)} requests after the switch",
             )
-            # M16: the drawers and the panel are part of that. Nothing of the first project shows in
-            # any view, drawer or panel of the second, however late its answers were.
+            # M20: the pages are part of that. Nothing of the first project shows on any page of the
+            # second (a view, Search, Activity, the coverage report or the page of a record),
+            # however late its answers were.
             leaked = []
             for address in (
                 "#/graph?view=everything",
                 "#/graph?view=context&as=list",
                 "#/roadmap",
-                "#/board?drawer=activity",
-                f"#/board?drawer=search&search=first+{word}",
-                f"#/board?sel={story_one}",
+                "#/activity",
+                f"#/search?search=first+{word}",
+                "#/coverage",
+                f"#/item?item={story_one}&from=board",
+                f"#/item?item={epic_one}&from=board",
             ):
                 await w.go(address)
                 await asyncio.sleep(1)
@@ -528,11 +536,12 @@ async def switching() -> None:
                 ]
             after = [text for url, text in w.bodies if f"/projects/{second.id}/" in url]
             proof(
-                "M16",
-                "the held-back answers of a project that was left reach none of the other "
-                "project's views, drawers or detail panel: the search drawer and a chosen item "
-                "of the first did not come along, and what the second received holds nothing "
-                "of the first",
+                "M20",
+                "the held-back answers of a project that was left reach none of the pages of the "
+                "other project: the Search page and the page of a record of the first did not come "
+                "along, and what the second received holds nothing of the first, on every view, "
+                "Search, Activity, the coverage report and the addresses of the first project's "
+                "records",
                 not leaked
                 and bool(after)
                 and all(f"First story {word}" not in text for text in after)

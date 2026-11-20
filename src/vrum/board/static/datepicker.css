@@ -1,0 +1,82 @@
+/* The calendar (datepicker.js) and the date field that opens it. The calendar is a panel over the page, so it
+   is never cut off by a table, a card or a dialog; it is drawn from the tokens in both themes, and its day
+   buttons are as big as a finger needs on a touch screen. This file is linked after the others, so that these
+   rules win a tie with the bare button. */
+
+/* -- the open calendar ------------------------------------------------------------------------------------- */
+
+.dp {
+  --dp-cell: 2.25rem;
+  position: fixed; z-index: 80; box-sizing: border-box;
+  width: calc(7 * var(--dp-cell) + 2 * var(--space-2)); max-width: calc(100vw - 2 * var(--space-2));
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: var(--space-2);
+  background: var(--surface); color: var(--text);
+  border: var(--border-w) solid var(--border); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm); line-height: 1.35;
+  animation: vselect-in 120ms ease-out;
+}
+.dp[data-placement="above"] { animation-name: vselect-in-above; }
+.dp:focus { outline: none; }
+@media (pointer: coarse) { .dp { --dp-cell: 2.5rem; } }
+
+.dp-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-1); }
+.dp-title { flex: 1 1 auto; min-width: 0; text-align: center; font-size: var(--text-md); font-weight: 650; }
+.dp .dp-step {
+  display: grid; place-items: center; flex: none; width: var(--control-h-sm); height: var(--control-h-sm); min-height: 0; padding: 0;
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-2);
+}
+.dp .dp-step:hover { background: var(--surface-3); color: var(--text); }
+@media (pointer: coarse) { .dp .dp-step { width: var(--dp-cell); height: var(--dp-cell); } }
+
+.dp-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.dp-weekday { display: grid; place-items: center; height: 1.75rem; color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.04em; }
+
+.dp .dp-day {
+  display: grid; place-items: center; width: 100%; height: var(--dp-cell); min-height: 0; padding: 0;
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text);
+  font-weight: 500; font-variant-numeric: tabular-nums;
+}
+.dp .dp-day:hover { background: var(--surface-3); }
+.dp .dp-day.dp-outside { color: var(--text-3); font-weight: 400; }
+/* A neighbour's ring is drawn over the day beside it. */
+.dp .dp-day:focus-visible { position: relative; z-index: 1; }
+/* Today has a ring, and the day that is chosen is filled. A day that is both keeps both. */
+.dp .dp-day[aria-current="date"] { box-shadow: inset 0 0 0 2px var(--accent); font-weight: 700; }
+.dp [aria-selected="true"] > .dp-day { background: var(--accent); color: var(--on-accent); font-weight: 650; }
+.dp [aria-selected="true"] > .dp-day:hover { background: var(--accent-hover); }
+.dp [aria-selected="true"] > .dp-day[aria-current="date"] { box-shadow: inset 0 0 0 2px var(--on-accent); }
+
+.dp-foot { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-2); padding-top: var(--space-2); border-top: var(--border-w) solid var(--border); }
+@media (pointer: coarse) { .dp-foot button { min-height: 2.5rem; } }
+
+/* -- the field: a text field with the calendar's button inside its right end ---------------------------------- */
+
+.date-field { position: relative; display: block; min-width: 0; }
+div.date-field > input.date-input[type="text"] { width: 100%; padding-right: calc(var(--control-h-sm) + var(--space-1)); font-variant-numeric: tabular-nums; }
+.date-input::placeholder { font-size: var(--text-sm); }
+.dp-open {
+  position: absolute; top: 1px; right: 1px; bottom: 1px; width: var(--control-h-sm); min-height: 0; padding: 0;
+  border: 0; border-radius: 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0;
+  background: transparent; color: var(--text-2);
+}
+.dp-open:hover, .dp-open[aria-expanded="true"] { background: var(--surface-3); color: var(--text); }
+/* A finger needs more than the button's own size to hit. */
+@media (pointer: coarse) { .dp-open::before { content: ""; position: absolute; inset: -0.25rem; } }
+
+/* -- a date written on a page that can be changed (the header of an item's page) ------------------------------ */
+
+button.date-value {
+  position: relative; min-height: 1.5rem; margin: 0 calc(-1 * var(--space-1)); padding: 0 var(--space-1); gap: var(--space-1);
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit;
+  font-weight: 400; font-variant-numeric: tabular-nums; text-align: left;
+}
+button.date-value:hover, button.date-value[aria-expanded="true"] { background: var(--surface-3); }
+button.date-value[aria-busy="true"] { cursor: progress; opacity: 0.7; }
+.date-mark { color: var(--text-2); opacity: 0; transition: opacity var(--ease); }
+button.date-value:hover .date-mark, button.date-value:focus-visible .date-mark, button.date-value[aria-expanded="true"] .date-mark { opacity: 1; }
+@media (hover: none), (pointer: coarse) {
+  .date-mark { opacity: 0.8; }
+  button.date-value::before { content: ""; position: absolute; inset: -0.6rem -0.25rem; }
+}

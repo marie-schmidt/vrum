@@ -1,43 +1,52 @@
-"""M16's search drawer against the running containers, driven in a real headless browser and checked
-against a real MCP client (see ./check.sh). Search is a drawer that opens over Board, Graph and
-Roadmap from the box in the top bar; a result opens the ordinary detail panel beside it. What the
-drawer lists is compared with what `search` returns (order, how each matched, the words it gives
-for why, which carry the scores, and the labels of decisions and facts), its counts with the
-server's own counts, and its paging with the server's. Every result names itself by its reference
-(`story:12`, `decision:7`): the drawer carries it as `data-ref`, the address as `sel=`, and the
-words show a code (S-12) for work and #7 for the rest. Titles carry a unique word, and each test
-looks only at what it made, since all tests share one database."""
+"""M20's Search page against the running containers, driven in a real headless browser and checked
+against a real MCP client (see ./check.sh). Search is a page (`#/search`) that the box in the top
+bar goes to from every other page; a result opens the record's own page, in the Search, and the way
+back is the search as it was left. What the page lists is compared with what `search` returns
+(order, how each matched, the words it gives for why, which carry the scores, and where each item
+stands), its counts with the server's own counts, and its paging with the server's.
+Every result names itself by its reference (`story:12`, `note:7`): the page carries it as
+`data-ref`, the record's address as `item=`, and the words show a code (S-12) for work and #7 for
+the rest. Titles carry a unique word, and each test looks only at what it made, since all tests
+share one database."""
 
-import re
 from typing import Any
 
 import pytest
 from mcp import Client
 from playwright.async_api import expect
 
-from tests.board_helpers import SLOW, board_url, browser_page, made, plain
+from tests.board_helpers import (
+    SLOW,
+    board_url,
+    browser_page,
+    crumbs,
+    current_address,
+    item_address,
+    item_loaded,
+    made,
+    no_panel_or_drawer,
+    on_page,
+    view_crumb,
+)
 from tests.board_search import (
     VIEWS,
     address,
     asked,
-    drawer,
     epic_of_each,
     facet,
     on_view,
     result_rows,
-    search_in_drawer,
+    search_on_page,
     shown_triples,
     triples,
     whole_list,
 )
 from tests.helpers import (
     code_of,
-    confirm,
+    confirm_on_board,
     embeddings_stopped,
-    make_decision,
-    make_fact,
+    make_note,
     ok,
-    refused,
     reindexed,
     the_token,
     unique_word,
@@ -56,39 +65,37 @@ def board(server_url: str) -> str:
 
 
 def code_shown(item: dict[str, Any]) -> str:
-    """What the drawer writes before a result's title: S-12 for work, #7 for the others."""
+    """What the page writes before a result's title: S-12 for work, #7 for the others."""
     return code_of(item["ref"]) if item["item_type"] in WORK else f"#{item['id']}"
 
 
 def same_as_server(rows: list[dict[str, Any]], items: list[dict[str, Any]]) -> None:
-    """The drawer lists what the server lists: the same items in the same order, each saying how it
-    matched and why (the words that carry the score), and a decision or a fact its label."""
+    """The page lists what the server lists: the same items in the same order, each saying how it
+    matched and why (the words that carry the score), and where it stands (its status chip)."""
     assert shown_triples(rows) == triples(items)
     for row, item in zip(rows, items, strict=True):
         assert row["chip"] == MATCHED[item["matched"]], item
         assert row["why"] == item["why"], item
         assert row["title"] == f"{code_shown(item)} {item['title']}", item
-        # Work is named by its reference alone; a requirement, decision or fact has its id too.
+        # Work is named by its reference alone; an acceptance criterion or a note has its id too.
         assert row["id"] == (None if item["item_type"] in WORK else item["id"]), item
-        assert row["label"] == (
-            item["label"] if item["item_type"] in {"decision", "fact"} else None
-        )
+        assert row["status"] == item["status"], item
 
 
 # -- exact words from every view, with the embedding service stopped -------------------------------
 
 
-async def test_exact_words_are_found_from_every_view_with_the_service_stopped_and_open_a_panel(
+async def test_exact_words_are_found_from_every_page_with_the_service_stopped_and_open_pages(
     client: Client, board: str
 ) -> None:
     word, later = unique_word(), unique_word()
     epic = await made(client, "epic", f"Billing {word}")
     story = await made(client, "story", f"Invoices {word}", epic)
     task = await made(client, "task", f"Send them {word}", story)
-    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", story=story)
-    decision = await make_decision(client, f"Decision {word}", nodes=[story])
-    fact = await make_fact(client, f"A fact {word}", nodes=[story])
-    await confirm(client, "fact", fact)
+    rule = await ok(client, "create_rule", title=f"Rule {word}", node=story)
+    decision = await make_note(client, f"Decision {word}", decided_by="Marie", nodes=[story])
+    note = await make_note(client, f"A note {word}", nodes=[story])
+    confirm_on_board("note", note)
     await reindexed(client)
     on_server = await asked(client, word, "words")
     assert {(i["item_type"], i["ref"]) for i in on_server["items"]} == {
@@ -96,12 +103,13 @@ async def test_exact_words_are_found_from_every_view_with_the_service_stopped_an
         ("story", story),
         ("task", task),
         ("rule", f"rule:{rule['id']}"),
-        ("decision", f"decision:{decision['id']}"),
-        ("fact", f"fact:{fact['id']}"),
+        ("note", f"note:{decision['id']}"),
+        ("note", f"note:{note['id']}"),
     }
-    # Work has no id of its own in the answer; the other three keep theirs next to the reference.
+    # Work has no id of its own in the answer; the other kinds keep theirs next to the reference.
     for item in on_server["items"]:
         assert ("id" in item) == (item["item_type"] not in WORK), item
+    titles = {item["ref"]: item["title"] for item in on_server["items"]}
     before = (await ok(client, "server_status"))["counts"]
     head = (await ok(client, "changes_since", after_event_id=0, limit=1))["latest_event_id"]
 
@@ -110,70 +118,85 @@ async def test_exact_words_are_found_from_every_view_with_the_service_stopped_an
         with embeddings_stopped():
             # A story made while the service is down waits to be indexed; words find it at once.
             late = await made(client, "story", f"Made while the service was down {later}", epic)
-            for view in VIEWS:
-                # A record is selected before searching, and searching leaves it selected.
-                await w.open(f"#/{view}?sel={story}")
-                await on_view(page, view)
-                await expect(page.locator("#panel #card-title")).to_contain_text(
-                    f"{code_of(story)} "
-                )
+            starts = [(view, f"#/{view}") for view in VIEWS]
+            starts.append(("a record's page", item_address(story, "roadmap")))
+            for place, start in starts:
+                # The box in the top bar goes to the Search page from wherever the person is.
+                await w.open(start)
+                if start.startswith("#/item"):
+                    await item_loaded(page, story)
+                else:
+                    await on_view(page, place)
                 await page.locator("#global-search").fill(later)
                 await page.keyboard.press("Enter")
-                await expect(drawer(page, "search")).to_be_visible(timeout=SLOW)
+                await on_page(page, "search")
                 name, choices = await address(page)
-                assert name == view and choices["drawer"] == "search"
-                assert choices["search"] == later and choices["sel"] == story
+                assert name == "search" and choices["search"] == later, (place, choices)
+                assert {"drawer", "sel", "panel", "item", "from"}.isdisjoint(choices), choices
+                await no_panel_or_drawer(page)
                 rows = await result_rows(page, 1)
                 assert shown_triples(rows) == [("story", late, "words")]
-                assert shown_triples(rows) == triples(
-                    (await asked(client, later, "words"))["items"]
-                )
+                on_the_server = await asked(client, later)
+                assert shown_triples(rows) == triples(on_the_server["items"])
                 assert (
-                    await page.locator("#search-results li.result mark").first.inner_text() == later
+                    await page.locator("#search-results tr.result mark").first.inner_text() == later
                 )
                 await expect(page.locator("#search-waiting")).to_contain_text(
                     "1 item waiting to be indexed"
                 )
                 await expect(page.locator("#index-state")).to_contain_text("1 waiting")
+                assert (await crumbs(page))[2:] == ["Search"], await crumbs(page)
+                # The search is always for words and meaning together. Meaning cannot be used now,
+                # so the page says so, in the server's words, and lists what the words found.
+                assert on_the_server["index"]["meaning"] == "service_unreachable"
+                await expect(page.locator("#search-note")).to_contain_text(
+                    on_the_server["index"]["note"], timeout=SLOW
+                )
+                assert await page.locator("#search-problem").inner_text() == ""
 
-                # By meaning it cannot be done now, and the drawer says so in the server's words.
+                # A question in other words finds only what its words find, and the page lists
+                # exactly what the server lists for the same words, with the same note.
                 paraphrase = "Clients get a bill by mail"
-                await search_in_drawer(page, paraphrase, "meaning")
-                await expect(page.locator("#search-problem")).to_contain_text(
-                    "Searching by meaning is not possible now", timeout=SLOW
+                await search_on_page(page, paraphrase)
+                by_both = await asked(client, paraphrase)
+                assert by_both["index"]["meaning"] == "service_unreachable"
+                await expect(page.locator("#search-note")).to_contain_text(
+                    by_both["index"]["note"], timeout=SLOW
                 )
-                plain(
-                    await page.locator("#search-problem").inner_text(),
-                    await refused(client, "search", query=paraphrase, mode="meaning"),
-                )
-                assert await page.locator("#search-results li.result").count() == 0
+                rows = await result_rows(page, by_both["total"])
+                assert shown_triples(rows) == triples(by_both["items"])
+                assert {how for _, _, how in shown_triples(rows)} <= {"words"}
+                assert await page.locator("#search-problem").inner_text() == ""
 
-                # Every kind of result: it opens in the ordinary detail panel, the drawer stays.
-                await search_in_drawer(page, word, "words")
-                rows = await result_rows(page, 6)
-                same_as_server(rows, on_server["items"])
-                for row in rows:
-                    result = f"#search-results li.result[data-ref='{row['ref']}']"
-                    await page.locator(f"{result} a.result-title").click()
-                    wanted = row["ref"]
-                    await expect(page).to_have_url(re.compile(rf"sel={wanted}(&|$)"))
-                    name, choices = await address(page)
-                    assert name == view and choices["sel"] == wanted
-                    assert choices["drawer"] == "search" and choices["search"] == word
-                    if row["type"] in WORK:
-                        await expect(page.locator("#panel #card-title")).to_contain_text(
-                            row["title"], timeout=SLOW
-                        )
-                    else:
-                        await expect(
-                            page.locator(f"#panel .record-detail[data-record='{wanted}']")
-                        ).to_be_visible(timeout=SLOW)
-                    assert len(await result_rows(page, 6)) == 6
-                await on_view(page, view)
-                await expect(drawer(page, "search")).to_be_visible()
-                await page.locator("#drawer-close").click()
-                await expect(page.locator("#drawer")).to_be_hidden()
-                assert "drawer" not in (await address(page))[1]
+            # Every kind of result opens its own page, in the Search; the way back is the search as
+            # it was left, with the same results. With the service stopped, the search for the
+            # word gives what the exact-words search gave before.
+            await search_on_page(page, word)
+            rows = await result_rows(page, 6)
+            now_on_server = await asked(client, word)
+            assert triples(now_on_server["items"]) == triples(on_server["items"])
+            same_as_server(rows, now_on_server["items"])
+            searched = await address(page)
+            for row in rows:
+                result = f"#search-results tr.result[data-ref='{row['ref']}']"
+                await page.locator(f"{result} a.result-title").click()
+                wanted = row["ref"]
+                await item_loaded(page, wanted)
+                name, choices = await address(page)
+                assert (name, choices["item"], choices["from"]) == ("item", wanted, "search")
+                await expect(page.locator("#item-title")).to_contain_text(titles[wanted])
+                assert (await crumbs(page))[2] == "Search"
+                await no_panel_or_drawer(page)
+                await view_crumb(page).click()
+                await on_page(page, "search")
+                assert await address(page) == searched
+                assert len(await result_rows(page, 6)) == 6
+            # A click on the row, away from the title, opens the page too.
+            await page.locator(f"#search-results tr.result[data-ref='{task}'] .cell-why").click()
+            await item_loaded(page, task)
+            await page.go_back()
+            await on_page(page, "search")
+            assert len(await result_rows(page, 6)) == 6
         await reindexed(client)
         # Searching only reads: nothing was written, and there was no change to hear of.
         assert (await ok(client, "server_status"))["counts"] == {
@@ -187,10 +210,10 @@ async def test_exact_words_are_found_from_every_view_with_the_service_stopped_an
         assert w.problems == []
 
 
-# -- meaning, the scores, the labels, the counts and the paging ------------------------------------
+# -- meaning, the scores, the statuses, the counts and the paging ----------------------------------
 
 
-async def test_meaning_results_equal_mcps_with_scores_labels_counts_and_paging_and_the_filters_stay(
+async def test_meaning_results_equal_mcps_with_scores_statuses_counts_paging_and_the_filters_stay(
     client: Client, board: str
 ) -> None:
     word = unique_word()
@@ -203,15 +226,14 @@ async def test_meaning_results_equal_mcps_with_scores_labels_counts_and_paging_a
     rule = await ok(
         client,
         "create_rule",
-        actor="a",
         title=f"The customer gets an invoice by email {word}",
-        story=story,
+        node=story,
     )
-    decision = await make_decision(
-        client, f"Invoices go to the customer by email {word}", nodes=[story]
+    decision = await make_note(
+        client, f"Invoices go to the customer by email {word}", decided_by="Marie", nodes=[story]
     )
-    await confirm(client, "decision", decision)
-    fact = await make_fact(client, f"Customers get their invoice by email {word}", nodes=[task])
+    confirm_on_board("note", decision)
+    note = await make_note(client, f"Customers get their invoice by email {word}", nodes=[task])
     for count in range(55):
         await made(client, "task", f"Filler {count} {word}", story)
     await reindexed(client)
@@ -221,32 +243,38 @@ async def test_meaning_results_equal_mcps_with_scores_labels_counts_and_paging_a
         page = w.page
         await w.open("#/roadmap")
         await page.locator("#global-search-go").click()
-        await expect(drawer(page, "search")).to_be_visible(timeout=SLOW)
-        await expect(page.locator("#search-waiting")).to_contain_text("0 items waiting")
+        await on_page(page, "search")
+        await expect(page.locator("#search-waiting")).to_have_attribute("data-waiting", "0")
 
-        # By meaning: the same items, in the same order, with the server's scores and labels.
-        await search_in_drawer(page, paraphrase, "meaning")
-        by_meaning = await asked(client, paraphrase, "meaning")
+        # In other words than the ones written: the same items, in the same order, with the
+        # server's scores and statuses.
+        await search_on_page(page, paraphrase)
+        by_meaning = await asked(client, paraphrase)
         mine = {i["ref"] for i in by_meaning["items"]}
         assert {
             story,
             other,
-            f"decision:{decision['id']}",
-            f"fact:{fact['id']}",
+            f"note:{decision['id']}",
+            f"note:{note['id']}",
             f"rule:{rule['id']}",
         } <= mine
         rows = await whole_list(page, by_meaning["total"])
         same_as_server(rows, by_meaning["items"])
-        assert all("similar in meaning (score " in row["why"] for row in rows)
-        assert all(row["matched"] == "meaning" for row in rows)
-        by_ref = {row["ref"]: row for row in rows}
-        assert by_ref[f"decision:{decision['id']}"]["label"].startswith(
-            "Decision, confirmed by Marie"
+        # Nothing written here has the words of the question, so what it finds is found by
+        # meaning (an item of another test that has all its words would be found both ways).
+        assert all(
+            ("similar in meaning (score " in row["why"]) == (row["matched"] != "words")
+            for row in rows
         )
-        assert by_ref[f"fact:{fact['id']}"]["label"].startswith("Fact, not confirmed by a person")
-        await expect(page.locator("#search-count")).to_have_text(f"{by_meaning['total']} results.")
+        by_ref = {row["ref"]: row for row in rows}
+        for ref in (story, other, f"note:{decision['id']}", f"note:{note['id']}"):
+            assert by_ref[ref]["matched"] == "meaning", by_ref[ref]
+        # A note has one status, read from its chip: confirmed by a person, or not yet.
+        assert by_ref[f"note:{decision['id']}"]["status_words"] == "Confirmed"
+        assert by_ref[f"note:{note['id']}"]["status_words"] == "Unconfirmed"
+        await expect(page.locator("#search-count")).to_have_text(f"{by_meaning['total']} results")
         # The counts by kind and by status are the server's, and the epics are the graph's: the
-        # drawer counts an epic by its number.
+        # page counts an epic by its number.
         assert await facet(page, "type") == by_meaning["counts_by_type"]
         assert await facet(page, "status") == by_meaning["counts_by_status"]
         per_epic: dict[str, int] = {}
@@ -256,14 +284,14 @@ async def test_meaning_results_equal_mcps_with_scores_labels_counts_and_paging_a
                 per_epic[str(number(found))] = per_epic.get(str(number(found)), 0) + 1
         assert await facet(page, "epic") == per_epic
 
-        # By words the drawer shows fifty and asks for the rest: the server's paging, walked in
+        # For the word the page shows fifty and asks for the rest: the server's paging, walked in
         # small pages, gives the same list.
-        await search_in_drawer(page, word, "words")
-        small = await asked(client, word, "words", size=20)
-        big = await asked(client, word, "words")
+        await search_on_page(page, word)
+        small = await asked(client, word, size=20)
+        big = await asked(client, word)
         assert small["items"] == big["items"] and small["total"] == big["total"] == 55 + 8
-        await expect(page.locator("#search-count")).to_have_text("63 results.", timeout=SLOW)
-        assert await page.locator("#search-results li.result").count() == 50
+        await expect(page.locator("#search-count")).to_have_text("63 results", timeout=SLOW)
+        assert await page.locator("#search-results tr.result").count() == 50
         await expect(page.locator("#show-more")).to_have_text("Show 13 more")
         same_as_server(await whole_list(page, 63), big["items"])
         assert await facet(page, "type") == big["counts_by_type"]
@@ -273,43 +301,59 @@ async def test_meaning_results_equal_mcps_with_scores_labels_counts_and_paging_a
         await page.locator("#search-facets [data-facet=type] button[data-value=task]").click()
         tasks = [i for i in big["items"] if i["item_type"] == "task"]
         assert len(tasks) == 56
-        await expect(page.locator("#search-count")).to_have_text("56 results of 63.", timeout=SLOW)
+        await expect(page.locator("#search-count")).to_have_text("56 results of 63", timeout=SLOW)
         assert (await address(page))[1]["search_type"] == "task"
         same_as_server(await whole_list(page, 56), tasks)
         # The counts of the other groups follow the choice.
         assert sum((await facet(page, "status")).values()) == 56
-        # The state is in the address: the same page opens again exactly so, with its mode.
+        # The state is in the address: the same page opens again exactly so.
         await page.reload()
-        await page.wait_for_selector("#search-results li.result", timeout=SLOW)
+        await page.wait_for_selector("#search-results tr.result", timeout=SLOW)
         await expect(page.locator("#search-box")).to_have_value(word)
-        await expect(page.locator("#search-mode")).to_have_value("words")
         await expect(page.locator("#search-facets [data-facet=type] button.on")).to_have_text(
             "Task (56)"
         )
         same_as_server(await whole_list(page, 56), tasks)
-        # Opening a result keeps the choice, and an epic narrows the list further.
+        # An epic narrows the list further, and the choice is taken off by choosing it again.
         await page.locator("#search-facets [data-facet=type] button.on").click()
-        await expect(page.locator("#search-count")).to_have_text("63 results.", timeout=SLOW)
+        await expect(page.locator("#search-count")).to_have_text("63 results", timeout=SLOW)
         epic_number = str(number(epic))
         await page.locator(
             f"#search-facets [data-facet=epic] button[data-value='{epic_number}']"
         ).click()
         under = [i for i in big["items"] if epics.get(i["ref"]) == epic]
         await expect(page.locator("#search-count")).to_have_text(
-            f"{len(under)} results of 63.", timeout=SLOW
+            f"{len(under)} results of 63", timeout=SLOW
         )
         same_as_server(await whole_list(page, len(under)), under)
         shown_now = {r["ref"] for r in await result_rows(page, len(under))}
         assert other not in shown_now and story in shown_now
-        # Decisions and facts belong to no epic, so the drawer says they are left out.
+        # Notes belong to no epic, so the page says they are left out.
         await expect(page.locator("#search-facets [data-facet=epic]")).to_contain_text(
-            "Decisions and facts belong to no epic"
+            "Notes belong to no epic"
         )
-        await page.locator(f"#search-results li.result[data-ref='{story}'] a.result-title").click()
-        await expect(page.locator("#panel #card-title")).to_contain_text(
+        # Opening a result goes to its page, in the Search; the way back keeps the choices.
+        await page.locator(f"#search-results tr.result[data-ref='{story}'] a.result-title").click()
+        await item_loaded(page, story)
+        await expect(page.locator("#item-title")).to_contain_text(
             f"{code_of(story)} Send the invoice", timeout=SLOW
         )
+        assert (await current_address(page))[1]["from"] == "search"
+        assert (await crumbs(page))[2] == "Search"
+        await view_crumb(page).click()
+        await on_page(page, "search")
         choices = (await address(page))[1]
-        assert choices["search_epic"] == epic_number and choices["sel"] == story
-        assert shown_triples(await result_rows(page, len(under))) == triples(under)
+        assert choices["search_epic"] == epic_number and "sel" not in choices
+        assert choices["search"] == word and "search_mode" not in choices
+        await expect(page.locator("#search-count")).to_have_text(
+            f"{len(under)} results of 63", timeout=SLOW
+        )
+        assert shown_triples(await whole_list(page, len(under))) == triples(under)
+        await no_panel_or_drawer(page)
+        # There is no choice of how to search, and an old address that names a mode is ignored:
+        # the search is the same one, for words and meaning together.
+        await expect(page.locator("#search-mode")).to_have_count(0)
+        await w.go(f"#/search?search={word}&search_mode=meaning")
+        await expect(page.locator("#search-count")).to_have_text("63 results", timeout=SLOW)
+        same_as_server(await whole_list(page, 63), big["items"])
         assert w.problems == []

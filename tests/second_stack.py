@@ -31,9 +31,14 @@ def _secret() -> str:
 class SecondStack:
     """With no arguments, a copy with a random database password of its own. `password` names the
     one to start it with; `nothing_set` starts it as on a new install, with no database password
-    given anywhere (and no .env read), so that Vrum makes its own."""
+    given anywhere (and no .env read), so that Vrum makes its own. `embeddings` starts it with the
+    embedding service that comes with Vrum (the sidecar of compose.yaml, with its model); without
+    it the copy has no embedding service at all, which keeps the tests that only destroy and load
+    databases light."""
 
-    def __init__(self, password: str | None = None, *, nothing_set: bool = False) -> None:
+    def __init__(
+        self, password: str | None = None, *, nothing_set: bool = False, embeddings: bool = False
+    ) -> None:
         port = os.environ.get("VRUM_RESTORE_TEST_PORT")
         if not port:
             pytest.fail(
@@ -41,6 +46,7 @@ class SecondStack:
             )
         self.base = f"http://127.0.0.1:{port}"
         self.url = f"{self.base}/mcp"
+        self.embeddings = embeddings
         # Made by up(), through this copy's own board API, once it is running.
         self.project: Project | None = None
         self.env = {
@@ -52,6 +58,13 @@ class SecondStack:
             "VRUM_BIND_ADDRESS": "127.0.0.1",
         }
         self.env.pop("VRUM_AGENT_KEY", None)
+        if embeddings:
+            # Nothing is set: the defaults of compose.yaml are what the copy runs with.
+            self.env.pop("EMBEDDING_BASE_URL", None)
+            self.env.pop("EMBEDDING_MODEL", None)
+        else:
+            self.env["EMBEDDING_BASE_URL"] = ""
+            self.env["EMBEDDING_MODEL"] = ""
         self.env_file: Path | None = None
         if nothing_set:
             self.env.pop("VRUM_DB_PASSWORD")
@@ -68,6 +81,9 @@ class SecondStack:
 
     def compose(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         before = ["--env-file", str(self.env_file)] if self.env_file else []
+        if not self.embeddings and arguments[:1] == ("up",):
+            # The embedding service is left out, and the app is told there is none.
+            arguments = (*arguments, "--scale", "embeddings=0")
         return subprocess.run(
             ["docker", "compose", *before, *arguments],
             cwd=REPO_ROOT,
@@ -75,7 +91,7 @@ class SecondStack:
             capture_output=True,
             text=True,
             check=False,
-            timeout=300,
+            timeout=600,
         )
 
     def run(self, *command: str | Path) -> subprocess.CompletedProcess[str]:

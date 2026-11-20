@@ -22,8 +22,19 @@ PAGES = [README_PATH, *sorted((ROOT / "docs").glob("*.md"))]
 AGENTS = (ROOT / "docs" / "agents.md").read_text(encoding="utf-8")
 ENV = {"VRUM_DB_HOST": "db", "VRUM_DB_PASSWORD": "a-password"}
 
-# Names in backticks that look like tools but are not: the statuses and the kinds of link.
-NOT_TOOLS = {"in_progress", "needs_first", "relates_to"}
+# Names in backticks that look like tools but are not: the statuses and the kinds of link, a claim
+# in an OpenID token, and the log line and reasons that the sign-in settings are written up with.
+NOT_TOOLS = {
+    "in_progress",
+    "needs_first",
+    "person_only",
+    "relates_to",
+    "email_verified",
+    "sso_login",
+    "certificate_not_accepted",
+    "directory_error",
+    "service_account_refused",
+}
 # Files the text names that are made when it is used, or that live in the reader's own project.
 NOT_IN_THE_REPOSITORY = {".env", ".mcp.json"}
 
@@ -158,7 +169,7 @@ def test_the_python_example_is_the_first_python_block_of_the_agent_page() -> Non
     found = re.search(r"```python\n(.*?)\n```", AGENTS, re.DOTALL)
     assert found, "docs/agents.md has no Python example"
     compile(found.group(1), "docs/agents.md", "exec")
-    assert "VRUM_AGENT_KEY" in found.group(1) and "server_status" in found.group(1)
+    assert "VRUM_AGENT_KEY" in found.group(1) and "list_nodes" in found.group(1)
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda path: path.name)

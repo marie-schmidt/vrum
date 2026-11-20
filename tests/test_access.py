@@ -9,6 +9,7 @@ import pytest
 from starlette.types import Message, Receive, Scope, Send
 
 from vrum.access import OPEN_PATHS, AccessGuard
+from vrum.accounts import KeyAccess
 from vrum.logs import Scrubber, configure_logging, event
 
 pytestmark = pytest.mark.anyio
@@ -21,10 +22,10 @@ class Keys:
     """Which keys reach which project. A key that is not here (a revoked one) reaches none."""
 
     def __init__(self) -> None:
-        self.held = {KEY: 7}
+        self.held = {KEY: KeyAccess(7, 1, "api-agent")}
         self.asked: list[str] = []
 
-    async def project_for_key(self, key: str) -> int | None:
+    async def project_for_key(self, key: str) -> KeyAccess | None:
         self.asked.append(key)
         return self.held.get(key)
 
@@ -336,6 +337,18 @@ def test_the_scrubber_removes_agent_keys_and_session_values_wherever_they_appear
     assert (
         scrubbed
         == "key [a Vrum agent key removed] cookie vrum_session=[a Vrum session removed] end"
+    )
+
+
+def test_the_scrubber_removes_an_invitation_token_even_inside_the_address_it_is_part_of() -> None:
+    token = "vri_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5vW7"
+
+    scrubbed = Scrubber([])(f"GET /board/invite/{token} and /board/api/invites/{token}/accept")
+
+    assert token not in scrubbed
+    assert scrubbed == (
+        "GET /board/invite/[a Vrum invitation removed] and "
+        "/board/api/invites/[a Vrum invitation removed]/accept"
     )
 
 

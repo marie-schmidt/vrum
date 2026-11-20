@@ -8,11 +8,18 @@
 export class Refusal extends Error {}
 // Nobody is signed in, or the session ended.
 export class NotSignedIn extends Refusal {}
+// The person is not in the project (any more): the owner took them out while the board was open.
+export class NotInProject extends Refusal {}
 // An answer for a project the board has left. It is dropped and never drawn.
 export class Stale extends Refusal {}
+// The server could not be reached at all, as opposed to answering no.
+export class Unreachable extends Refusal {}
 
 let csrf = '';
 let project = null; // the number of the project the board is on, or null
+let mail = false; // whether the server can send email (it says so to everyone, signed in or not)
+let providers = []; // the other ways to sign in that the server offers: { id, name, kind } (none unless it is set up)
+let createAccounts = true; // whether a first sign-in with a provider may make a new account
 
 export function setProject(id) {
   project = id;
@@ -33,7 +40,7 @@ async function send(path, options) {
       headers: { ...(options && options.headers), ...(changing && csrf ? { 'X-Vrum-CSRF': csrf } : {}) },
     });
   } catch {
-    throw new Refusal('The board cannot reach the server. Check that it is running, then try again.');
+    throw new Unreachable('The board cannot reach the server. Check that it is running, then try again.');
   }
   let body = null;
   try {
@@ -43,8 +50,15 @@ async function send(path, options) {
   }
   // The person may have moved to another project while this was on its way.
   if (mine !== project) throw new Stale('That answer was for a project the board has left.');
-  if (response.status === 401) {
+  // A wrong name or password for a directory is answered 401 with a code of its own: it is a refusal to
+  // show where it was typed, and says nothing about the session.
+  if (response.status === 401 && !(body && body.code === 'bad_credentials')) {
     throw new NotSignedIn((body && body.message) || 'You are not signed in, or your session has ended.');
+  }
+  // A project's own reads and tools answer 404 only when the person is not in it: a tool that fails
+  // for any other reason says so with a 400.
+  if (response.status === 404 && /\/(tool|try)\/|\/index$/.test(path)) {
+    throw new NotInProject((body && body.message) || 'That project is not one of yours.');
   }
   if (!response.ok) {
     throw new Refusal(
@@ -63,9 +77,29 @@ const scoped = (path) => `/board/api/projects/${project}${path}`;
 // Who this browser is signed in as, or null when nobody is.
 export async function loadSession() {
   const found = await send('/board/api/session', { method: 'GET' });
+  mail = found.mail === true;
+  providers = Array.isArray(found.providers) ? found.providers : [];
+  createAccounts = found.sso_create_accounts !== false;
   if (!found.account) return null;
   csrf = found.csrf;
   return found;
+}
+
+// Whether the server can send email. Without it there is no way to reset a password by email, to
+// send a verification or to email an invitation, so the board offers none of them.
+export const mailOn = () => mail;
+
+// The other ways to sign in the server offers, in the order it lists them. Without any, the board
+// draws nothing about them.
+export const providersOn = () => providers;
+// Whether signing in with a provider for the first time may make an account.
+export const createAccountsOn = () => createAccounts;
+
+// The signed-in person as the server has them now (their email may have been verified in another
+// tab since the page was drawn), or null.
+export async function currentAccount() {
+  const found = await send('/board/api/session', { method: 'GET' });
+  return found.account || null;
 }
 
 async function started(path, body) {
@@ -85,14 +119,73 @@ export async function signOut() {
   }
 }
 
+// -- signing in with a provider ------------------------------------------------------------------------
+
+// Ask where to send the browser to sign in with OpenID or GitHub (`intent` is signin, or link for a
+// signed-in person connecting one to their account). Answers { url }; the page goes there. The way
+// back is a redirect to `returnTo`, which the page reads in sso.js.
+export const startProvider = (id, intent, returnTo) => post(`/board/api/auth/${encodeURIComponent(id)}/start`, returnTo ? { intent, return_to: returnTo } : { intent });
+// Sign in with the name and password of a directory: the server checks them there. Same answer as signIn.
+export const ldapSignIn = (username, password) => started('/board/api/auth/ldap', { username, password });
+// How the signed-in person can sign in: { has_password, identities: [{ provider, name, display_name, email, linked_at }] }.
+export const identities = () => send('/board/api/account/identities', { method: 'GET' });
+// Connect a directory account to the signed-in person's account.
+export const linkLdap = (username, password) => post('/board/api/account/identities/ldap', { username, password });
+// Stop signing in with a provider. The server refuses to take away the last way in.
+export const unlinkIdentity = (id) => send(`/board/api/account/identities/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+// -- email: choosing a new password and confirming an address ---------------------------------------
+
+// Ask for a link to choose a new password. The answer is the same words for an address that has an
+// account and one that has not: { message }.
+export const requestPasswordReset = (email) => post('/board/api/password-reset', { email });
+// Whether the link from the email can still be used (the answer is { ok: true } or a refusal).
+export const checkPasswordReset = (token) => send(`/board/api/password-reset/${encodeURIComponent(token)}`, { method: 'GET' });
+export const resetPassword = (token, next) => post(`/board/api/password-reset/${encodeURIComponent(token)}`, { new: next });
+// Email the signed-in person a link to confirm their address. Answers { message }.
+export const sendVerification = () => post('/board/api/account/verify-email', {});
+// Use the link from that email. Opening the page never uses it: this does. Answers { ok, email }.
+export const verifyEmail = (token) => post(`/board/api/verify/${encodeURIComponent(token)}`, {});
+
 // -- projects and keys ------------------------------------------------------------------------------
 
 export const projects = async () => (await send('/board/api/projects', { method: 'GET' })).projects;
 export const createProject = (name) => post('/board/api/projects', { name });
 export const projectInfo = (id) => send(`/board/api/projects/${id}`, { method: 'GET' });
 export const keys = async () => (await send(scoped('/keys'), { method: 'GET' })).keys;
-export const createKey = (label) => post(scoped('/keys'), { label });
+// `tools` is the list of tool names the key may use, or null for the standard tools (the ones Vrum offers agents). Answers { key, secret }.
+export const createKey = (name, tools = null) => post(scoped('/keys'), tools ? { name, tools } : { name });
+// Change what a key may use, from the agent's next request on. Answers the key.
+export const changeKeyTools = async (id, tools) => (await send(scoped(`/keys/${id}`), { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ tools }) })).key;
 export const revokeKey = async (id) => (await send(scoped(`/keys/${id}`), { method: 'DELETE' })).key;
+
+// -- the signed-in person's own account ---------------------------------------------------------------
+
+// Change the name the person is shown as in every history. Answers with the account.
+export const renameAccount = (name) => send('/board/api/account', { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ name }) });
+// Change the password; the person's other sessions end.
+export const changePassword = (current, next) => post('/board/api/account/password', { current, new: next });
+// Set a first password for an account made by a provider, which has none to give.
+export const setPassword = (next) => post('/board/api/account/password', { new: next });
+
+// -- the people of a project and their invitations --------------------------------------------------
+
+export const members = async () => (await send(scoped('/members'), { method: 'GET' })).members;
+export const changeRole = async (accountId, role) => (await send(scoped(`/members/${accountId}`), { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ role }) })).member;
+// Take a person out of the project; `me` is the signed-in person leaving it.
+export const removeMember = async (accountId) => (await send(scoped(`/members/${accountId}`), { method: 'DELETE' })).member;
+export const invites = async () => (await send(scoped('/invites'), { method: 'GET' })).invites;
+// Answers { invite, token, emailed, email_problem }: the token is the one time the link can be made.
+// With an address, the server also emails the link to it (only when it can send email).
+export const createInvite = (role, email = '') => post(scoped('/invites'), email ? { role, email } : { role });
+// Make a new link for the same invitation (the old one stops working) and email it again. Answers
+// the same as createInvite.
+export const resendInvite = (id) => post(scoped(`/invites/${id}/resend`), {});
+export const revokeInvite = async (id) => (await send(scoped(`/invites/${id}`), { method: 'DELETE' })).invite;
+// What the signed-in person would join with this invitation, and why they could not, if they could not.
+export const previewInvite = async (token) => (await send(`/board/api/invites/${encodeURIComponent(token)}`, { method: 'GET' })).invite;
+// Join the project the invitation is for. Answers the project, with the role the person has in it.
+export const acceptInvite = async (token) => (await post(`/board/api/invites/${encodeURIComponent(token)}/accept`, {})).project;
 
 // -- a project's graph ---------------------------------------------------------------------------
 
@@ -150,7 +243,7 @@ export async function callPaged(tool, args) {
   }
 }
 
-// Every item of one list of the export (links, rules, decisions or facts), which is the one
+// Every item of one list of the export (links, rules or notes), which is the one
 // place that gives all the links at once.
 export async function exported(section) {
   const items = [];

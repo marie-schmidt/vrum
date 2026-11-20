@@ -10,66 +10,90 @@
 form.filter { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); flex: 1 1 22rem; max-width: 38rem; min-width: min(100%, 20rem); margin: 0; }
 form.filter .filter-field { position: relative; display: flex; align-items: center; flex: 1 1 10rem; min-width: 0; }
 form.filter .filter-field > .icon { position: absolute; left: var(--space-3); color: var(--text-3); pointer-events: none; }
-form.filter #filter { width: 100%; padding-left: calc(var(--space-3) + 16px + var(--space-2)); font-family: var(--font-mono); font-size: var(--text-sm); }
-form.filter .ghost { color: var(--text-2); }
-.filter-help { margin: 0; font-size: var(--text-sm); }
-.filter-help > summary { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--control-h-sm); cursor: pointer; color: var(--text-2); list-style: none; }
-.filter-help > summary::-webkit-details-marker { display: none; }
-.filter-help > summary .icon { transition: transform var(--ease); }
-.filter-help[open] > summary .icon { transform: rotate(90deg); }
-.filter-help[open] { flex-basis: 100%; margin-bottom: var(--space-3); padding: var(--space-2) var(--space-4) var(--space-3); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
-.filter-help p { margin: var(--space-2) 0; color: var(--text-2); }
-.filter-examples { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-2); }
-.filter-examples button.link { text-align: left; }
-.filter-examples code { font-size: var(--text-xs); overflow-wrap: anywhere; }
+form.filter #filter { width: 100%; padding-left: calc(var(--space-3) + 16px + var(--space-2)); padding-right: 2.25rem; font-family: var(--font-mono); font-size: var(--text-sm); text-overflow: ellipsis; }
+form.filter .filter-field input::-webkit-search-cancel-button, form.filter .filter-field input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; display: none; }
 
-/* -- chips that carry a status or a priority ---------------------------------------------------- */
-
-:is(.board-page, .roadmap-page, #drawer) .chip { gap: var(--space-1); }
-:is(.board-page, .roadmap-page, #drawer) .chip.priority-high { background: var(--warn-soft); color: var(--warn); }
-:is(.board-page, .roadmap-page, #drawer) .chip.priority-urgent { background: var(--danger-soft); color: var(--danger); }
-:is(.board-page, .roadmap-page, #drawer) .chip.status-in_progress { background: var(--accent-soft); color: var(--accent-text); }
-:is(.board-page, .roadmap-page, #drawer) .chip.status-ready,
-:is(.board-page, .roadmap-page, #drawer) .chip.status-done { background: var(--ok-soft); color: var(--ok); }
-:is(.board-page, .roadmap-page, #drawer) .chip.status-blocked { background: var(--warn-soft); color: var(--warn); }
-:is(.board-page, .roadmap-page, #drawer) .chip.status-dropped { background: transparent; color: var(--text-2); box-shadow: inset 0 0 0 var(--border-w) var(--border-strong); }
-
-/* -- what needs attention: a row of small linked numbers ----------------------------------------- */
-
-.attention { container: attention / inline-size; display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-1) var(--space-3); margin: 0 0 var(--space-3); }
-.attention-title { flex: none; margin: 0; padding-top: 0.375rem; font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
-.attention-list { display: flex; flex: 1 1 0; min-width: 0; flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin: 0; padding: 0; list-style: none; }
-.attention-note { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
-.attention-item {
-  display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--control-h-sm); padding: 0 var(--space-3);
-  background: var(--surface); color: var(--text); border: var(--border-w) solid var(--border); border-radius: 999px;
-  font-size: var(--text-sm); text-decoration: none; transition: background var(--ease), border-color var(--ease);
+/* The small round "i" at the end of the box: it opens the card that says how to filter. */
+.filter-info {
+  position: absolute; right: var(--space-1); top: 50%; transform: translateY(-50%);
+  display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem; min-height: 0; padding: 0;
+  border: 0; border-radius: 999px; background: transparent; color: var(--text-2); cursor: help;
 }
-.attention-item:hover { background: var(--surface-2); border-color: var(--border-strong); }
-.attention-item .number { font-weight: 700; font-variant-numeric: tabular-nums; }
-.attention-item.none { color: var(--text-2); background: transparent; border-color: transparent; }
-.attention-item.none:hover { background: var(--surface-2); border-color: var(--border); }
-.attention-item.none .number { font-weight: 500; }
-.attention-item[data-key="blocked"]:not(.none),
-.attention-item[data-key="overdue"]:not(.none),
-.attention-item[data-key="lapsed"]:not(.none) { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+.filter-info:hover, .filter-info:focus-visible, .filter-info:active { background: var(--surface-3); color: var(--text); }
 
-/* Where there is little room (a phone, or the page beside an open drawer) the numbers scroll
-   sideways in one line under their title, so the cards start higher up. */
-@container attention (max-width: 52rem) {
-  .attention-title { flex: 1 1 100%; padding-top: 0; }
-  .attention-list { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .attention-list > li { flex: none; }
-  .attention-item { white-space: nowrap; }
+/* What the card says: the forms and an example of each, then whole filters to start from. */
+.filter-forms { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 15rem); gap: 0 var(--space-4); margin: 0 0 var(--space-3); }
+.filter-forms > dt, .filter-forms > dd { margin: 0; padding: var(--space-1) 0; border-top: var(--border-w) solid var(--border); }
+.filter-forms > :nth-child(-n + 2) { border-top: 0; padding-top: 0; }
+.filter-forms > dt { color: var(--text-2); }
+.filter-forms > dt strong { color: var(--text); font-weight: 650; }
+.filter-forms > dd { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.filter-forms code { padding: 1px var(--space-1); background: var(--surface-2); border-radius: var(--radius-sm); color: var(--text); }
+.filter-forms.filter-tries { grid-template-columns: max-content minmax(0, 1fr); }
+.filter-tries > dt { color: var(--text); }
+.filter-tries > dd { display: block; color: var(--text-2); }
+.hovercard .filter-note { margin-top: var(--space-2); padding-top: var(--space-2); border-top: var(--border-w) solid var(--border); }
+@media (max-width: 699.98px) {
+  .filter-forms, .filter-forms.filter-tries { grid-template-columns: minmax(0, 1fr); }
+  .filter-forms > dd { border-top: 0; padding-top: 0; }
+  .filter-forms > dt:not(:first-child) { padding-top: var(--space-2); }
+  .filter-forms > :nth-child(-n + 2) { padding-top: 0; }
 }
+@media (pointer: coarse) {
+  /* A finger needs a target of 44 by 44, and the words in the box keep clear of it. */
+  form.filter #filter { padding-right: 2.75rem; }
+  .filter-info { right: 0; width: 2.75rem; height: 2.75rem; }
+}
+
+/* -- chips that carry a status or a priority (everywhere: the views, the pages of records, the lists) -- */
+
+.chip { gap: var(--space-1); }
+.chip.priority.priority-high { background: var(--warn-soft); color: var(--warn); }
+.chip.priority.priority-urgent { background: var(--danger-soft); color: var(--danger); }
+.chip.status.status-ready { background: var(--info-soft); color: var(--info); }
+.chip.status.status-in_progress { background: var(--progress-soft); color: var(--progress); }
+.chip.status.status-blocked { background: var(--danger-soft); color: var(--danger); }
+.chip.status.status-done { background: var(--ok-soft); color: var(--ok); }
+.chip.status.status-dropped { background: transparent; color: var(--text-2); box-shadow: inset 0 0 0 var(--border-w) var(--border-strong); }
+
+/* A link that looks like a button: for going to a page from the header of a view or from a box. */
+a.link-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); box-sizing: border-box;
+  min-height: var(--control-h); padding: 0 var(--space-3); background: var(--surface); color: var(--text);
+  border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md);
+  font-weight: 500; line-height: 1.2; text-decoration: none; transition: background var(--ease), border-color var(--ease);
+}
+a.link-button:hover { background: var(--surface-2); text-decoration: none; }
+a.link-button:active { background: var(--surface-3); }
+a.link-button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+a.link-button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+a.link-button.small { min-height: var(--control-h-sm); padding: 0 var(--space-2); font-size: var(--text-sm); }
 
 /* -- the toolbar -------------------------------------------------------------------------------- */
 
 .board-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-1); }
-.board-select select { max-width: 16rem; }
-.board-count { margin: 0 0 0 auto; color: var(--text-2); font-size: var(--text-sm); white-space: nowrap; }
-.board-help { flex: 1 1 12rem; min-width: 0; margin: 0; overflow: hidden; color: var(--text-2); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
+/* Room for the whole of the box's hint, so that it is never cut off (a phone has no room to spare). */
+@media (min-width: 700px) {
+  .board-toolbar form.filter { flex-basis: 24rem; }
+  .board-toolbar form.filter .filter-field { flex-basis: 14rem; }
+}
+/* On a phone the box has the whole row and Apply and Clear wrap under it, so its hint is never cut. */
+@media (max-width: 699.98px) {
+  form.filter .filter-field { flex-basis: 100%; }
+}
+.board-select select { max-width: 13rem; }
+/* The Key button is as tall as the controls beside it in the Board's toolbar. */
+.board-toolbar button.key-button { min-height: var(--control-h); }
 .board-notes { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-4); margin: 0 0 var(--space-2); }
+
+/* Show: Tasks | Stories | Both. The segmented control of the other views, as a radio group. */
+.board-show { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.board-show-label { color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
+.board-show-choice button[aria-checked="true"] { background: var(--surface-3); color: var(--text); font-weight: 650; }
+.board-show-choice button:disabled { opacity: 1; cursor: default; }
+.board-show-choice[aria-disabled="true"] button[aria-checked="false"] { color: var(--text-3); }
+.board-show-note { color: var(--text-2); font-size: var(--text-sm); }
+.board-hidden { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-sm); }
 
 /* -- the board: columns that scroll sideways inside their own region ----------------------------- */
 
@@ -95,16 +119,18 @@ form.filter .ghost { color: var(--text-2); }
 .column-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; font-size: var(--text-sm); }
 .column-head strong { font-weight: 600; }
 .column-count { color: var(--text-2); font-variant-numeric: tabular-nums; }
-.column-head .note { color: var(--text-3); font-size: var(--text-xs); }
 .column-head .icon { color: var(--text-2); }
-.column-head.status-ready .icon, .column-head.status-done .icon { color: var(--ok); }
-.column-head.status-in_progress .icon { color: var(--accent-text); }
-.column-head.status-blocked .icon { color: var(--warn); }
+.column-head.status-ready .icon { color: var(--info); }
+.column-head.status-done .icon { color: var(--ok); }
+.column-head.status-in_progress .icon { color: var(--progress); }
+.column-head.status-blocked .icon { color: var(--danger); }
 .column-head.status-dropped .icon { color: var(--text-3); }
 
 /* A lane is one epic: its head, then a cell for each status. */
 .lane { padding: var(--space-4) 0 var(--space-5); }
 .lane + .lane { border-top: var(--border-w) solid var(--border); }
+.lane.folded { padding-block: var(--space-2); }
+.lane.folded .lane-head { margin-bottom: 0; }
 .lane-head {
   position: sticky; left: var(--space-1); z-index: 2; box-sizing: border-box;
   display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3);
@@ -112,17 +138,21 @@ form.filter .ghost { color: var(--text-2); }
 }
 .lane-toggle { margin-left: calc(-1 * var(--space-2)); }
 .lane-icon { display: inline-flex; color: var(--accent-text); }
-.lane-title {
-  min-width: 0; max-width: calc(100% - 7rem); min-height: 0; padding: 0; border: 0; background: none; color: var(--text);
-  font-size: var(--text-md); font-weight: 650; text-align: left; overflow-wrap: anywhere;
+/* The epic's title is the heading of its lane (so the cards below it are not a skipped heading level). */
+.lane-heading { min-width: 0; max-width: calc(100% - 7rem); margin: 0; font: inherit; }
+a.lane-title {
+  min-width: 0; max-width: 100%; color: var(--text);
+  font-size: var(--text-md); font-weight: 650; text-decoration: none; overflow-wrap: anywhere;
 }
-.lane-title:hover { background: none; text-decoration: underline; text-underline-offset: 0.18em; }
-.lane.selected .lane-title { color: var(--accent-text); }
+a.lane-title:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 0.18em; }
 .lane .id { color: var(--text-2); font-size: var(--text-xs); }
+.lane a.lane-code { text-decoration: none; }
+.lane a.lane-code:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 0.18em; }
 .lane-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .lane-progress { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-2); font-size: var(--text-sm); white-space: nowrap; }
 .lane-progress .meter { width: 5rem; }
 .lane-empty { position: sticky; left: var(--space-1); margin: 0; color: var(--text-3); font-size: var(--text-sm); }
+.lane-empty > button.link { display: inline-flex; align-items: center; min-height: 1.5rem; font-size: inherit; }
 
 .cell { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 3rem; border-radius: var(--radius-md); }
 .cell.over { outline: 2px dashed var(--accent); outline-offset: 2px; background: var(--accent-soft); }
@@ -136,14 +166,22 @@ form.filter .ghost { color: var(--text-2); }
   background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md);
   box-shadow: var(--shadow); cursor: grab; transition: border-color var(--ease);
 }
-.board .card:hover { border-color: var(--border-strong); }
-.board .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.board .card:hover, .board .card:focus-within { border-color: var(--border-strong); }
 .board .card.dragging { opacity: 0.5; }
 .card-top { display: flex; align-items: center; gap: var(--space-2); color: var(--text-2); font-size: var(--text-xs); }
-.card .id { font-family: var(--font-mono); color: var(--text-2); }
-.card-kind { display: inline-flex; align-items: center; gap: var(--space-1); margin-left: auto; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-.card .move { flex: none; margin: -0.25rem -0.375rem -0.25rem 0; color: var(--text-2); }
+.card .id { font-family: var(--font-mono); color: var(--text-2); white-space: nowrap; }
+/* The code says the kind (E-, S-, T-), so the kind is only its sign here. */
+.card-kind { display: inline-flex; align-items: center; flex: none; }
+.card .fold { flex: none; margin: -0.25rem -0.375rem -0.25rem auto; color: var(--text-2); }
+/* A card folded away is its code and its whole title: the chips, what it is under and its notes go. */
+.board .card.folded { min-height: 0; gap: var(--space-1); }
+.card.folded :is(.card-chips, .card-context, .card-note) { display: none; }
+.card.folded .card-title { flex: none; }
 .card-title { flex: 1; font-size: var(--text-md); font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.card-title a { color: inherit; text-decoration: none; }
+.card-title a:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 0.18em; }
+.board .card:hover .card-title a { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 0.18em; }
+.board .card:hover .card-title a:hover { text-decoration-color: currentColor; }
 .card-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .card-chips .chip.danger, .card-chips .chip.warn { max-width: 100%; white-space: normal; }
 .card-context { margin: 0; min-height: 1.25rem; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
@@ -152,12 +190,31 @@ form.filter .ghost { color: var(--text-2); }
 .card-context .meter { width: 3.5rem; }
 .card-note { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; padding-top: var(--space-2); border-top: var(--border-w) solid var(--border); color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .card-note .icon { margin-top: 0.15em; }
-.card-note.waiting, .card-note.lapsed { color: var(--warn); }
+.card-note.lapsed { color: var(--warn); }
+.card-chips .card-waiting { cursor: default; }
+.chip.handoff-sign { background: var(--info-soft); color: var(--info); }
 
-/* The Move menu floats at its button, over whatever scrolls. */
-.menu.move-menu { position: fixed; z-index: 60; }
-.menu.move-menu button { justify-content: flex-start; }
-.menu.move-menu p { margin: var(--space-1) var(--space-3) var(--space-2); max-width: 16rem; }
+/* -- the Board's key: the card its Key button opens (key-button.js) --------------------------------- */
+.bk-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: var(--space-3) var(--space-5); width: min(38rem, calc(100vw - 3rem)); }
+.bk-group { min-width: 0; }
+.bk-group h3 { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+.bk-group ul { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.bk-group li { display: flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--text); font-size: var(--text-xs); line-height: 1.3; }
+.bk-mark { display: inline-flex; flex: none; align-items: center; width: 6.25rem; }
+.bk-words { display: flex; flex-direction: column; min-width: 0; }
+.bk-words .quiet { font-size: var(--text-xs); }
+.bk-group.is-status li { align-items: flex-start; }
+.bk-group.is-status .bk-mark { width: 1.25rem; padding-top: 1px; }
+.bk-status { display: inline-flex; color: var(--text-2); }
+.bk-status.status-ready { color: var(--info); }
+.bk-status.status-done { color: var(--ok); }
+.bk-status.status-in_progress { color: var(--progress); }
+.bk-status.status-blocked { color: var(--danger); }
+.bk-status.status-dropped { color: var(--text-3); }
+.bk-lock { display: inline-flex; align-items: center; color: var(--text-2); }
+@media (max-width: 599.98px) {
+  .bk-card { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* Nothing to show, or the filter is being read. */
 .board .empty { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding-block: var(--space-6); }
@@ -166,15 +223,17 @@ form.filter .ghost { color: var(--text-2); }
 .board .loading { margin: 0; }
 
 @media (max-width: 699.98px) {
-  .attention-list { margin-inline: calc(-1 * var(--space-3)); padding-inline: var(--space-3); }
   .board-select { flex: 1 1 8rem; }
   .board-select select { width: 100%; max-width: none; }
-  .board-help { display: none; }
+  .board-show { flex: 1 1 100%; }
+  .board-show-choice { flex: 1 1 0; }
+  .board-show-choice button { flex: 1 1 0; padding: 0 var(--space-1); }
+  .board-show-note { flex-basis: 100%; margin: 0; }
 }
 
 @media (pointer: coarse) {
   /* The id in front keeps these ahead of button.small and button.icon-only.small. */
-  #app .card button.move { width: 2.75rem; min-height: 2.75rem; margin: -1rem -0.875rem -1rem 0; }
-  #app button.lane-toggle, #app button.add-story, #app .attention-item, #app form.filter button, #app .scroll-hint button { min-height: 2.75rem; }
+  #app .card button.fold { width: 2.75rem; min-height: 2.75rem; margin: -1rem -0.875rem -1rem auto; }
+  #app button.lane-toggle, #app button.add-story, #app form.filter button:not(.filter-info), #app .scroll-hint button, #app a.link-button, #app .board-show-choice button { min-height: 2.75rem; }
   #app button.lane-toggle, #app .scroll-hint button { min-width: 2.75rem; }
 }

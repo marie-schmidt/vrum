@@ -1,145 +1,140 @@
-// The Graph's context list: the requirements, decisions and facts of the scope the Graph shows, as
-// three sections of text, so that context can be read and managed without finding dots. Each
-// section has filters that work over everything the board holds (status, confirmation, words), a
-// count, and the buttons to record something. Each row says what the record is, whether a person
-// confirmed it and whether it is still in force, and has the operations of the detail panel. The
-// lists keep no data of their own: they draw the same dots and lines the map draws.
+// The Lists page's context lists: the acceptance criteria and the notes of the scope the page shows, as two
+// sections, so that context can be read and managed without finding dots. The notes are one table. Each
+// section has filters that work over everything the board holds (status, words), a count, and the
+// button to add something. Each row says what the record is, where it stands (a note has one status:
+// Unconfirmed, Confirmed, Replaced or Withdrawn), links to its own page, and has the operations
+// (confirm, link, replace, withdraw) that page has, in the menu of its status chip. The lists keep no
+// data of their own: they draw the same dots and lines the work list draws.
 
-import { h } from './dom.js';
+import { can } from './ctx.js';
+import { recordsTable } from './entries.js';
+import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { mentionedInDetails } from './references.js';
-import { confirmationControl, linkDialog, recordDecisionDialog, recordFactDialog, recordRow, supersedeDialog, withdrawDialog } from './records.js';
+import { inForce } from './labels.js';
+import { addNoteDialog } from './records.js';
 import { createRequirements } from './requirements.js';
-import { connectionsDetails, matchesText, sectionFrame, selectOf, textInput, walkRows } from './list-parts.js';
+import { matchesText, sectionFrame, selectOf, textInput, walkRows } from './list-parts.js';
 
 // How many rows a section draws before it offers more.
 const FIRST = 100;
 
-const LIFECYCLE_FILTER = [
-  ['active', 'In force'],
+// The notes a status filter keeps: in force is unconfirmed and confirmed together.
+const STATUS_FILTER = [
+  ['all', 'All'],
+  ['in_force', 'In force'],
+  ['unconfirmed', 'Unconfirmed'],
+  ['confirmed', 'Confirmed'],
   ['superseded', 'Replaced'],
   ['withdrawn', 'Withdrawn'],
-  ['', 'All'],
-];
-const CONFIRMATION_FILTER = [
-  ['', 'Confirmed or not'],
-  ['confirmed', 'Confirmed'],
-  ['unconfirmed', 'Unconfirmed'],
 ];
 
-const KINDS = {
-  decision: {
-    name: 'decisions',
-    title: 'Decisions',
-    record: 'Record a decision',
-    open: () => recordDecisionDialog({}),
-    find: 'Words in a decision',
-    none: 'There are no decisions here yet. Record one with Record a decision.',
-    words: (decision) => [decision.id, decision.title, decision.text, decision.reason, decision.decided_by, decision.recorded_by],
-  },
-  fact: {
-    name: 'facts',
-    title: 'Facts',
-    record: 'Record a fact',
-    open: () => recordFactDialog({}),
-    find: 'Words in a fact',
-    none: 'There are no facts here yet. Record one with Record a fact.',
-    words: (fact) => [fact.id, fact.text, fact.source, fact.recorded_by],
-  },
-};
-
-// One section of decisions or of facts.
-function recordSection(kind) {
-  const spec = KINDS[kind];
-  const state = { status: 'active', confirmation: '', text: '', limit: FIRST };
+// The section of notes: one table of all of them, newest first.
+function notesSection() {
+  const state = { status: 'in_force', text: '', limit: FIRST };
   let last = null;
-  const status = selectOf(LIFECYCLE_FILTER, state.status);
-  const confirmation = selectOf(CONFIRMATION_FILTER, state.confirmation);
-  const text = textInput(spec.find);
+  const status = selectOf(STATUS_FILTER, state.status);
+  const text = textInput('Words in a note');
   const frame = sectionFrame({
-    name: spec.name,
-    title: spec.title,
-    buttons: [h('button', { type: 'button', id: `record-${kind}`, class: `small${kind === 'decision' ? ' primary' : ''}`, onclick: spec.open }, icon('plus', { size: 14 }), spec.record)],
+    name: 'notes',
+    title: 'Notes',
+    buttons: can('write') ? [h('button', { type: 'button', id: 'add-note', class: 'small', onclick: () => addNoteDialog({}) }, icon('plus', { size: 14 }), 'Add a note…')] : [],
     controls: [
       ['status', 'Status', status],
-      ['confirmation', 'Confirmation', confirmation],
       ['text', 'Find', text],
     ],
     onFilter: () => {
       state.status = status.value;
-      state.confirmation = confirmation.value;
       state.text = text.value;
       state.limit = FIRST;
       if (last) draw(last);
     },
   });
-  const list = h('ul', { class: 'plain ctx-rows', id: `ctx-${spec.name}-list` });
-  frame.body.append(list);
+  const list = h('div', { class: 'ctx-notes-list', id: 'ctx-notes-list' });
+  const leftOut = h('p', { class: 'ctx-left-out quiet', id: 'notes-left-out' });
+  frame.body.append(leftOut, list);
   walkRows(frame.element);
 
-  function row(dot, ctx) {
-    const record = dot.record;
-    const chosen = ctx.cfg.sel?.key === dot.key;
-    const done = () => last && draw(last);
-    const actions =
-      record.status === 'active'
-        ? h(
-            'div',
-            { class: 'row-actions' },
-            confirmationControl(record, done),
-            h('button', { type: 'button', class: 'link-record small', onclick: () => linkDialog(record) }, icon('link', { size: 14 }), 'Link…'),
-            h('button', { type: 'button', class: 'supersede-record small', onclick: () => supersedeDialog(record, { onDone: done }) }, 'Replace…'),
-            h('button', { type: 'button', class: 'withdraw-record small', onclick: () => withdrawDialog(record, { onDone: done }) }, 'Withdraw…'),
-          )
-        : null;
-    const item = recordRow(record, { actions });
-    Object.assign(item.dataset, { key: dot.key, id: String(record.id) });
-    item.classList.add('gv-record', 'ctx-row');
-    item.classList.toggle('selected', chosen);
-    if (chosen) item.setAttribute('aria-current', 'true');
-    for (const extra of [mentionedInDetails(kind, record.id), connectionsDetails(dot, ctx)]) if (extra) item.append(extra);
-    return item;
-  }
+  // What the words kept in the filter box keep, whatever the status.
+  const fitsWords = (record) => matchesText(state.text, record.id, record.text, record.why, record.decided_by, record.recorded_by);
 
+  // What the filters keep.
   function keeps(record) {
-    if (state.status && record.status !== state.status) return false;
-    if (state.confirmation && (record.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed') !== state.confirmation) return false;
-    return matchesText(state.text, ...spec.words(record));
+    const wanted = state.status;
+    const fits = wanted === 'all' || (wanted === 'in_force' ? inForce(record) : record.status === wanted);
+    return fits && fitsWords(record);
   }
 
   function draw(ctx) {
     last = ctx;
     const focused = frame.body.contains(document.activeElement) ? document.activeElement.closest('[data-key]')?.dataset.key : null;
-    const inScope = [...ctx.shown.dots.values()].filter((dot) => dot.type === kind);
+    const inScope = [...ctx.shown.dots.values()].filter((dot) => dot.type === 'note');
     const kept = inScope.filter((dot) => keeps(dot.record)).sort((a, b) => b.record.id - a.record.id); // the newest on top
     frame.setCount(kept.length, inScope.length);
+    // What the default of showing the notes in force leaves out is said, with the way to see it.
+    const ended = state.status === 'in_force' ? inScope.filter((dot) => !inForce(dot.record) && fitsWords(dot.record)).length : 0;
+    put(
+      leftOut,
+      ended ? `${plural(ended, 'replaced or withdrawn note')} ${ended === 1 ? 'is' : 'are'} not shown. ` : null,
+      ended
+        ? h(
+            'button',
+            {
+              type: 'button',
+              class: 'link show-left-out',
+              onclick: () => {
+                state.status = 'all';
+                status.value = 'all';
+                state.limit = FIRST;
+                if (last) draw(last);
+              },
+            },
+            ended === 1 ? 'Show it.' : 'Show them.',
+          )
+        : null,
+    );
+    leftOut.hidden = ended === 0;
     // The chosen record is always among the rows drawn.
     const at = kept.findIndex((dot) => dot.key === ctx.cfg.sel?.key);
     if (at >= state.limit) state.limit = at + 1;
-    const rows = kept.slice(0, state.limit).map((dot) => row(dot, ctx));
-    const more = kept.length > state.limit ? [h('li', { class: 'ctx-more' }, h('button', { type: 'button', class: 'show-more small', onclick: () => { state.limit += FIRST; draw(last); } }, `Show ${Math.min(FIRST, kept.length - state.limit)} more of ${kept.length - state.limit} left`))] : [];
-    list.replaceChildren(...(kept.length ? [...rows, ...more] : [h('li', { class: 'empty ctx-none' }, inScope.length ? 'None match the filters.' : spec.none)]));
+    if (!kept.length) {
+      put(list, h('p', { class: 'empty ctx-none' }, inScope.length ? 'None match the filters.' : 'None yet.'));
+      return;
+    }
+    const table = recordsTable(kept.slice(0, state.limit).map((dot) => dot.record), { caption: 'Notes' });
+    for (const row of table.element.querySelectorAll('tbody tr')) {
+      row.dataset.key = row.dataset.ref;
+      row.classList.toggle('selected', row.dataset.ref === ctx.cfg.sel?.key);
+      if (row.dataset.ref === ctx.cfg.sel?.key) row.setAttribute('aria-current', 'true');
+    }
+    const left = kept.length - state.limit;
+    put(
+      list,
+      table.element,
+      left > 0
+        ? h('p', { class: 'ctx-more' }, h('button', { type: 'button', class: 'show-more small', onclick: () => { state.limit += FIRST; draw(last); } }, `Show ${Math.min(FIRST, left)} more`))
+        : null,
+    );
     if (focused) list.querySelector(`[data-key="${focused}"] .record-title`)?.focus();
   }
 
   function mark(key) {
-    for (const item of list.querySelectorAll('.gv-record.selected')) {
-      item.classList.remove('selected');
-      item.removeAttribute('aria-current');
+    for (const row of list.querySelectorAll('tr.selected')) {
+      row.classList.remove('selected');
+      row.removeAttribute('aria-current');
     }
-    const item = key ? list.querySelector(`.gv-record[data-key="${key}"]`) : null;
-    item?.classList.add('selected');
-    item?.setAttribute('aria-current', 'true');
-    return item;
+    const row = key ? list.querySelector(`tr[data-key="${key}"]`) : null;
+    row?.classList.add('selected');
+    row?.setAttribute('aria-current', 'true');
+    return row;
   }
 
   return { element: frame.element, draw, select: mark };
 }
 
-// The three sections together. `parts` is what each section is called by the kind of dot it lists.
+// The two sections together. `parts` is what each section is called by the kind of dot it lists.
 export function createContextList() {
-  const parts = { rule: createRequirements(), decision: recordSection('decision'), fact: recordSection('fact') };
-  const element = h('div', { class: 'gv-context', id: 'context-list' }, parts.rule.element, parts.decision.element, parts.fact.element);
+  const parts = { rule: createRequirements(), note: notesSection() };
+  const element = h('div', { class: 'gv-context', id: 'context-list' }, parts.rule.element, parts.note.element);
   return {
     element,
     draw(ctx) {

@@ -1,25 +1,16 @@
 // What the board knows: the work (nodes and the links between them), and, once a page asks for
-// them, the requirements (rules), decisions and facts. It is a copy of what the server holds,
+// them, the acceptance criteria (rules) and the notes. It is a copy of what the server holds,
 // fetched with the same tools an agent uses and refreshed from the same change feed. The server is
 // the only place anything is kept.
 
 import { call, callAll, callPaged, exported, get, indexState } from './api.js';
-
-export const store = {
-  nodes: new Map(), // ref (story:12) -> node
-  links: [], // { id, source, target, link_type }
-  rules: null, // loaded when a page asks for them
-  decisions: null,
-  facts: null,
-  references: null, // every [[reference]] written in any text, loaded when the graph asks
-  info: { poll_seconds: 5 },
-  index: null, // what the index can do now, and how many items are waiting
-  cursor: 0, // the newest change event seen
-};
+import { isNodeKind, kindLabel, nodeCode } from './labels.js';
 
 const listeners = new Set();
 
-// fn({ events }) is called when the server's data changed, and fn({ index }) when the index did.
+// fn({ events }) is called when the server's data changed, fn({ index }) when the index did, and
+// fn({ node: 'story:12' }) when a page puts a newer copy of one item into the store itself (after a
+// save, say) without waiting for the next poll.
 export function onChange(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -29,10 +20,36 @@ function emit(change) {
   listeners.forEach((fn) => fn(change));
 }
 
+// The work, by reference. A page that writes an item into it (`store.nodes.set(ref, node)`) is
+// heard: the path, the tab's title and the navigator follow at once.
+class Nodes extends Map {
+  constructor(nodes) {
+    super();
+    for (const node of nodes) super.set(node.ref, node);
+  }
+
+  set(ref, node) {
+    const before = this.get(ref);
+    super.set(ref, node);
+    if (before !== node) emit({ node: ref });
+    return this;
+  }
+}
+
+export const store = {
+  nodes: new Nodes([]), // ref (story:12) -> node
+  links: [], // { id, source, target, link_type }
+  rules: null, // loaded when a page asks for them
+  notes: null,
+  references: null, // every [[reference]] written in any text, loaded when the graph asks
+  info: { poll_seconds: 5 },
+  index: null, // what the index can do now, and how many items are waiting
+  cursor: 0, // the newest change event seen
+};
+
 const LOADERS = {
   rules: () => callAll('list_rules', { detail: true }),
-  decisions: () => callAll('list_decisions', {}),
-  facts: () => callAll('list_facts', {}),
+  notes: () => callAll('list_notes', {}),
   references: async () => (await callPaged('find_mentions', {})).items,
 };
 
@@ -41,13 +58,13 @@ export async function ensure(name) {
   if (store[name] === null) store[name] = await LOADERS[name]();
 }
 
-// The requirements, decisions and facts, for what names them (the quick switcher, the feed, a
-// reference in a text).
-export const ensureContext = () => Promise.all([ensure('rules'), ensure('decisions'), ensure('facts')]);
+// The acceptance criteria and the notes, for what names them (the quick switcher, the feed, a reference in
+// a text).
+export const ensureContext = () => Promise.all([ensure('rules'), ensure('notes')]);
 
 async function reload() {
   const [nodes, links] = await Promise.all([callAll('list_nodes', {}), exported('links')]);
-  store.nodes = new Map(nodes.map((node) => [node.ref, node]));
+  store.nodes = new Nodes(nodes);
   store.links = links;
   for (const name of Object.keys(LOADERS)) {
     if (store[name] !== null) store[name] = await LOADERS[name]();
@@ -58,7 +75,7 @@ async function reload() {
 // again when one is due to, instead of waiting for news that never comes.
 export async function refreshWork() {
   const nodes = await callAll('list_nodes', {});
-  store.nodes = new Map(nodes.map((node) => [node.ref, node]));
+  store.nodes = new Nodes(nodes);
 }
 
 async function refreshIndex() {
@@ -102,24 +119,46 @@ export async function sync() {
 }
 
 let timer = null;
+let waking = null;
+
+// How soon to ask again after a check-in failed. One failure is usually a tab that was asleep or a slow moment, so
+// the board asks again at once and says it cannot reach the server only when it keeps failing (onTrouble is told
+// how many in a row).
+const RETRY_MS = 3000;
 
 export function keepSynced(onTrouble, onWell = () => {}) {
   stopSyncing();
+  let failures = 0;
   const tick = async () => {
+    let wait = store.info.poll_seconds * 1000;
     try {
       await sync();
+      failures = 0;
       onWell();
     } catch (error) {
-      onTrouble(error);
+      failures += 1;
+      onTrouble(error, failures);
+      wait = Math.min(wait, RETRY_MS);
     }
-    timer = setTimeout(tick, store.info.poll_seconds * 1000);
+    clearTimeout(timer);
+    timer = setTimeout(tick, wait);
   };
   timer = setTimeout(tick, store.info.poll_seconds * 1000);
+  // A tab that comes back to the front checks at once, instead of showing a note about the time it was away.
+  waking = () => {
+    if (document.visibilityState === 'visible' && timer !== null) {
+      clearTimeout(timer);
+      timer = setTimeout(tick, 0);
+    }
+  };
+  document.addEventListener('visibilitychange', waking);
 }
 
 export function stopSyncing() {
   if (timer !== null) clearTimeout(timer);
   timer = null;
+  if (waking !== null) document.removeEventListener('visibilitychange', waking);
+  waking = null;
 }
 
 // -- reading the work ---------------------------------------------------------------------------
@@ -136,14 +175,49 @@ export function epicOf(node) {
   return current || null;
 }
 
-// An epic, story or task from the top down: [epic, story, task] as far as `ref` goes.
-export function trailOf(ref) {
-  const trail = [];
-  for (let current = store.nodes.get(ref); current; current = store.nodes.get(current.parent)) trail.unshift(current);
-  return trail;
-}
-
 export function titleOf(ref) {
   const node = store.nodes.get(ref);
   return node ? node.title : 'not found';
+}
+
+const oneLine = (text, size = 80) => {
+  const line = String(text).replace(/\s+/g, ' ').trim();
+  return line.length > size ? `${line.slice(0, size - 1)}…` : line;
+};
+
+// What a note is called in a list or a path: the server's headline (the first line of its text), or,
+// for one that has none, its text on one line.
+export const headlineOf = (note) => note.headline || oneLine(note.text);
+
+// What follows the first line of a note's text, on one line: empty when the text is only that line.
+export function restOf(note) {
+  const lines = String(note.text ?? '').split('\n');
+  const first = lines.findIndex((line) => line.trim() !== '');
+  return first < 0 ? '' : lines.slice(first + 1).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// What the path and the browser's tab call any of the five kinds of record: { kind, number, name,
+// title, parent }. `name` is what is written before the title ("S-12", "Acceptance criterion #3", "Note #7");
+// `parent` is the story or task an acceptance criterion is on (the only
+// kind that has one besides the work itself). A note has no title, so the first line of its text
+// stands for one. Null when the record is not known (not found, or the acceptance criteria and notes are
+// not read yet).
+export function describeItem(ref) {
+  const found = /^(epic|story|task|rule|note):([1-9][0-9]*)$/.exec(String(ref ?? ''));
+  if (!found) return null;
+  const kind = found[1];
+  const number = Number(found[2]);
+  if (isNodeKind(kind)) {
+    const node = store.nodes.get(ref);
+    return node ? { kind, number, name: nodeCode(kind, number), title: node.title, parent: node.parent || null } : null;
+  }
+  const record = (store[{ rule: 'rules', note: 'notes' }[kind]] || []).find((one) => one.id === number);
+  if (!record) return null;
+  return {
+    kind,
+    number,
+    name: `${kindLabel(kind)} #${number}`,
+    title: kind === 'note' ? headlineOf(record) : record.title,
+    parent: kind === 'rule' ? record.node || null : null,
+  };
 }

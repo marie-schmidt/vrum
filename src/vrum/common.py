@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BeforeValidator
 
+from vrum.identity import current_identity
 from vrum.secret_formats import find_secret_in
 
 MAX_PAGE_SIZE = 200
@@ -34,15 +35,6 @@ def refuse_secrets(value: object) -> None:
         )
 
 
-def clean_actor(actor: str) -> str:
-    cleaned = actor.strip()
-    if not cleaned:
-        raise Refusal(
-            "Say who is making this change: actor must be the name of a person or an agent."
-        )
-    return cleaned
-
-
 def check_choice(label: str, value: str, allowed: tuple[str, ...], extra: str = "") -> str:
     if value not in allowed:
         raise Refusal(f"{label} must be one of {', '.join(allowed)}, but it is {value!r}{extra}.")
@@ -61,7 +53,7 @@ def unique_ids(ids: list[int] | None) -> list[int]:
 
 
 # An epic, story or task is named by its kind and its number within that kind in its project:
-# `epic:3`, `story:12`, `task:40`. There is no other identity for them (rules, decisions and facts
+# `epic:3`, `story:12`, `task:40`. There is no other identity for them (rules and notes
 # keep their own numbers; links and events keep theirs).
 NODE_KINDS = ("epic", "story", "task")
 _NODE_REF = re.compile(r"(epic|story|task):([1-9][0-9]{0,17})")
@@ -152,7 +144,7 @@ def split_page(
 def stale_version(
     label: str, reader: str, item_id: int | str, current: int, expected: int
 ) -> Refusal:
-    """`item_id` is a number for a rule, decision or fact (named with `label`), or the reference
+    """`item_id` is a number for a rule or note (named with `label`), or the reference
     of an epic, story or task, which names itself."""
     name = item_id if isinstance(item_id, str) else f"{label} {item_id}"
     return Refusal(
@@ -206,7 +198,7 @@ async def require_link_targets(
     conn: AsyncConnection, nodes: list[str], rule_ids: list[int], subject: str
 ) -> None:
     """Refuse in plain words unless every node (by reference) and rule exists, so that `subject`
-    (such as "the decision") can be linked to them."""
+    (such as "the note") can be linked to them."""
     if nodes:
         found = {
             row["ref"]
@@ -227,8 +219,8 @@ async def require_link_targets(
         missing_rules = [str(item) for item in rule_ids if item not in found_rules]
         if missing_rules:
             raise Refusal(
-                f"There is no rule with id {', '.join(missing_rules)}, so {subject} cannot be "
-                "linked to it. Use list_rules to find the id you want."
+                f"There is no acceptance criterion with id {', '.join(missing_rules)}, so "
+                f"{subject} cannot be linked to it. Use list_rules to find the id you want."
             )
 
 
@@ -264,27 +256,32 @@ async def record_event(
     node: str | None = None,
     other_node: str | None = None,
     rule_id: int | None = None,
-    decision_id: int | None = None,
-    fact_id: int | None = None,
+    note_id: int | None = None,
+    other_note_id: int | None = None,
 ) -> None:
-    """Append to the event log. It shows in the history of every node, rule, decision and fact it
-    names: `other_node` is the second node of a link, or the story a rule has just left.
+    """Append to the event log. It shows in the history of every node, rule and note it names:
+    `other_node` is the second node of a link, or the story a rule has just left, and
+    `other_note_id` is the note a note has just been linked to or unlinked from.
+
+    `actor` is the name of whoever is making the change (the server passes the name of the call's
+    identity, see identity.py), and the kind, person or agent, is read from that same identity.
 
     Every write records an event with the text it wrote, so this is where text with a secret in a
     well-known format is refused whatever path it came by. The refusal rolls the whole write
     back."""
     refuse_secrets({"actor": actor, **after})
     await conn.execute(
-        "INSERT INTO events (node, other_node, rule_id, decision_id, fact_id, action, "
-        "actor, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO events (node, other_node, rule_id, note_id, other_note_id, action, "
+        "actor, actor_kind, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             node,
             other_node,
             rule_id,
-            decision_id,
-            fact_id,
+            note_id,
+            other_note_id,
             action,
             actor,
+            current_identity().kind,
             None if before is None else Jsonb(before),
             Jsonb(after),
         ),

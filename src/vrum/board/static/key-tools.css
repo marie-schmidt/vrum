@@ -1,0 +1,69 @@
+/* What an agent key may do: the quick choices, the count, and the tools by area (key-tools.js). It is
+   used in the form that makes a key and in the dialog that changes one. Colours, sizes and spacing
+   come from tokens.css; the checkboxes are drawn by base.css. */
+
+.key-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-width: 0; justify-items: stretch; }
+
+/* The five quick choices (four when two are the same tools), and Custom once the boxes were ticked by hand. When they do not fit in one row they go on to a second. */
+.kt-choice { flex-wrap: wrap; justify-self: start; max-width: 100%; }
+.kt-choice button { padding-inline: var(--space-3); white-space: nowrap; }
+.kt-choice button[aria-checked="true"] { background: var(--surface-3); color: var(--text); font-weight: 650; }
+.kt-says { margin: 0; color: var(--text-2); font-size: var(--text-sm); }
+
+/* How many tools are allowed, and the way to open the list. */
+.kt-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); padding-top: var(--space-3); border-top: var(--border-w) solid var(--border); }
+.kt-count { margin: 0; font-size: var(--text-md); font-weight: 600; font-variant-numeric: tabular-nums; }
+.kt-count[data-empty="true"] { color: var(--danger); }
+.kt-toggle-chevron { transition: transform var(--ease); }
+.kt-toggle[aria-expanded="true"] .kt-toggle-chevron { transform: rotate(90deg); }
+
+/* The list: a search, then every area with its tools. */
+.kt-panel { display: grid; gap: var(--space-3); min-width: 0; }
+.kt-search-field { position: relative; display: flex; align-items: center; max-width: 24rem; }
+.kt-search-field > .icon { position: absolute; left: var(--space-3); color: var(--text-3); pointer-events: none; }
+.key-tools .kt-panel .kt-search-field input.kt-search { width: 100%; padding-left: 2.25rem; padding-right: 2.25rem; appearance: none; -webkit-appearance: none; }
+.kt-search::-webkit-search-cancel-button, .kt-search::-webkit-search-decoration { -webkit-appearance: none; appearance: none; display: none; }
+.kt-clear { position: absolute; right: 2px; }
+.kt-none { margin: 0; }
+.kt-list { min-width: 0; overflow: hidden; border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.kt-group + .kt-group { border-top: var(--border-w) solid var(--border); }
+.kt-group-head { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2); background: var(--surface-2); }
+.kt-fold-chevron { transition: transform var(--ease); }
+.kt-fold[aria-expanded="true"] .kt-fold-chevron { transform: rotate(90deg); }
+/* The section of tools that are not offered to agents: its heading is the button that opens it. */
+button.kt-fold-named { flex: 1 1 auto; min-width: 0; justify-content: flex-start; gap: var(--space-1); padding-inline: var(--space-1); font-size: var(--text-md); font-weight: 600; text-align: left; }
+.kt-fold-named .kt-group-name { min-width: 0; }
+.kt-more-note { margin: 0; padding: var(--space-2) var(--space-3); }
+.kt-area { background: var(--surface-3); color: var(--text-2); font-weight: 500; }
+.key-tools label.kt-group-label { flex: 1 1 auto; min-width: 0; margin: 0; font-weight: 600; cursor: pointer; }
+.kt-group-name { min-width: 0; overflow-wrap: anywhere; }
+.kt-group-count { flex: none; color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* In a dialog the list scrolls inside the dialog, so that the choices, the count and the buttons stay in view. */
+dialog.modal .kt-list { max-height: min(26rem, 48vh); overflow: hidden auto; overscroll-behavior: contain; }
+dialog.modal .kt-group-head { position: sticky; top: 0; z-index: 1; }
+.key-tools input[type="checkbox"]:indeterminate { background: var(--accent); border-color: var(--accent); }
+.key-tools input[type="checkbox"]:indeterminate::after { content: ""; width: 0.5rem; height: 0; border-top: 2px solid var(--on-accent); }
+
+/* A tool: its box, its name with a word for what it does, and one line about it. */
+.kt-tool { border-top: var(--border-w) solid var(--border); }
+.key-tools label.kt-tool-label { align-items: flex-start; gap: var(--space-3); min-height: 0; margin: 0; padding: var(--space-2) var(--space-3); font-size: var(--text-md); }
+.key-tools label.kt-tool-label:hover { background: var(--surface-2); }
+.key-tools label.kt-tool-label:has(input:focus-visible) { background: var(--surface-2); }
+.kt-tool-label > input { margin-top: 0.15rem; }
+.kt-tool-text { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; flex: 1 1 auto; min-width: 0; }
+.kt-tool-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.settings-page .kt-tool-line code { padding: 0; background: none; font-size: var(--text-sm); font-weight: 650; }
+.kt-tool-desc { display: block; overflow: hidden; color: var(--text-2); font-size: var(--text-sm); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.kt-mark { font-weight: 500; }
+.kt-tool.people-only .kt-tool-line code { color: var(--text-2); }
+.key-tools .kt-tool.people-only label.kt-tool-label { cursor: not-allowed; }
+.key-tools .kt-tool.people-only label.kt-tool-label:hover { background: none; }
+
+@media (max-width: 40rem) {
+  /* A narrow window: the choices in two columns, and a description may take two lines. */
+  .kt-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-self: stretch; }
+  .kt-choice button { padding-inline: var(--space-2); white-space: normal; text-align: center; line-height: 1.25; min-height: var(--control-h); }
+  .kt-choice button:is([data-choice="standard"], [data-choice="record"], [data-choice="everything"], [data-choice="custom"]) { grid-column: 1 / -1; }
+  .kt-search-field { max-width: none; }
+  .kt-tool-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; white-space: normal; }
+}

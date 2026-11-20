@@ -1,6 +1,6 @@
 /* Base styles: the elements and small components every page shares. Colours, sizes and spacing come
    from tokens.css, so a page never picks its own. Page layouts are in board.css, records.css and
-   graph-views.css. */
+   lists.css. */
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -14,7 +14,7 @@ body {
 }
 h1, h2, h3, h4 { margin: 0; line-height: var(--leading-tight); letter-spacing: -0.01em; font-weight: 650; }
 h1 { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -0.02em; }
-h2 { font-size: var(--text-xl); }
+h2 { font-size: var(--text-lg); }
 h3 { font-size: var(--text-lg); }
 h4 { font-size: var(--text-md); }
 p { margin: var(--space-2) 0; }
@@ -24,14 +24,35 @@ code, kbd, .mono { font-family: var(--font-mono); font-size: 0.92em; }
 kbd { border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-sm); padding: 0 var(--space-1); background: var(--surface-2); color: var(--text-2); }
 hr { border: 0; border-top: var(--border-w) solid var(--border); margin: var(--space-4) 0; }
 .quiet { color: var(--text-2); font-size: var(--text-sm); }
+/* A count after a heading: quieter than the heading, in the same place on every page. */
+.heading-count { color: var(--text-2); font-size: var(--text-sm); font-weight: 500; }
+/* The Key button of a page (key-button.js): its marks open in a hover card. */
+.key-holder { display: inline-flex; }
+@media (pointer: coarse) {
+  button.small.key-button { min-height: 2.75rem; }
+}
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .skip { position: absolute; left: -999px; top: var(--space-2); z-index: 100; padding: var(--space-2) var(--space-4); background: var(--surface); color: var(--text); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); }
 .skip:focus { left: var(--space-2); }
 .icon { flex: none; vertical-align: -0.2em; }
 
+/* Who did something or holds something: the name with a sign before it, a person or an agent (a
+   robot head), so that they are told apart by shape as well as by colour. */
+.actor { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
+.actor .icon { margin-right: 0.3em; color: var(--text-2); }
+.actor-agent .icon { color: var(--info); }
+/* In a warning (a claim that ran out) the sign takes the warning's colour, like the words. */
+.lapsed .actor .icon { color: inherit; }
+
 /* Focus: always visible, in a colour that clears 3:1 on every surface in both themes. */
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* An element with no corners of its own gets small ones, so its ring is not square. One that has its own
+   (a button, a field, a card) keeps them: this rule has no weight, so any rule that sets a radius wins,
+   and a control does not change shape when it takes the focus (a click on a label did that to a select). */
+:where(:focus-visible) { border-radius: var(--radius-sm); }
 :focus:not(:focus-visible) { outline: none; }
+/* A ring is for the keyboard. After a mouse or touch (shell.js sets data-input), nothing is drawn. */
+html[data-input="pointer"] :focus-visible { outline: none; }
 
 /* Buttons. A plain button is quiet; `primary` is the one thing a page most wants done. */
 button, select, input, textarea { font: inherit; color: inherit; }
@@ -67,11 +88,28 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
   max-width: 100%;
 }
 select { padding-right: var(--space-2); }
+/* The small field: the height and the type of a small button, for a row of controls (a role in a list, a filter above a table). */
+select.small, input.small:not([type="checkbox"], [type="radio"]) { min-height: var(--control-h-sm); padding-block: 0; font-size: var(--text-sm); }
 textarea { width: 100%; min-height: 6rem; resize: vertical; line-height: var(--leading); }
 ::placeholder { color: var(--text-3); opacity: 1; }
-input[type="checkbox"], input[type="radio"] { width: 1rem; height: 1rem; accent-color: var(--accent); margin: 0; }
+/* Checkboxes and radio buttons are drawn here, from the tokens, so that they look the same in every
+   browser and in both themes. The real input stays in place, so the keyboard, the label and a
+   screen reader work as they always did. */
+input[type="checkbox"], input[type="radio"] {
+  appearance: none; -webkit-appearance: none; position: relative; flex: none;
+  display: inline-grid; place-content: center; width: 1.125rem; height: 1.125rem; margin: 0;
+  background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-sm);
+  cursor: pointer; transition: background var(--ease), border-color var(--ease);
+}
+input[type="radio"] { border-radius: 50%; }
+input[type="checkbox"]:hover, input[type="radio"]:hover { border-color: var(--text-2); background: var(--surface-2); }
+input[type="checkbox"]:checked, input[type="radio"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::after { content: ""; width: 0.3125rem; height: 0.5625rem; margin-top: -0.0625rem; border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+input[type="radio"]:checked::after { content: ""; width: 0.4375rem; height: 0.4375rem; border-radius: 50%; background: var(--on-accent); }
+input[type="checkbox"]:disabled, input[type="radio"]:disabled { cursor: not-allowed; }
+input[type="checkbox"]:checked:hover, input[type="radio"]:checked:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 label { display: block; font-size: var(--text-sm); font-weight: 600; color: var(--text-2); margin-bottom: var(--space-1); }
-label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { display: flex; align-items: center; gap: var(--space-2); font-weight: 400; color: var(--text); font-size: var(--text-md); }
+label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { display: flex; align-items: center; gap: var(--space-2); min-height: 1.5rem; font-weight: 400; color: var(--text); font-size: var(--text-md); cursor: pointer; }
 .field { margin: var(--space-3) 0; }
 .field > .hint { color: var(--text-2); font-size: var(--text-sm); margin-top: var(--space-1); }
 fieldset { border: var(--border-w) solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); margin: var(--space-3) 0; min-width: 0; }
@@ -88,6 +126,12 @@ legend { padding: 0 var(--space-1); font-size: var(--text-sm); font-weight: 600;
 .chip.info { background: var(--info-soft); color: var(--info); }
 .chip.danger { background: var(--danger-soft); color: var(--danger); }
 .chip.accent { background: var(--accent-soft); color: var(--accent-text); }
+/* A size: its letter (XS to XL), or what a story or epic adds up to; a rollup with nothing sized has a dashed edge. */
+.chip.size { justify-content: center; min-width: 1.75rem; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.chip.size-none { background: transparent; border: var(--border-w) dashed var(--border-strong); color: var(--text-2); }
+/* Two quiet chips: a check only a person can judge, and work that has no size yet (it is not a button, and is fainter than a size). */
+.chip.person-only { background: transparent; border: var(--border-w) solid var(--border); color: var(--text-2); font-weight: 500; }
+.chip.no-size { background: transparent; border: var(--border-w) dashed var(--border); color: var(--text-3); font-weight: 500; }
 
 /* A segmented control: one choice out of a few, side by side. */
 .segmented { display: inline-flex; border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); padding: 2px; gap: 2px; }
@@ -125,15 +169,32 @@ dialog.modal .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); jus
 /* Tables. */
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: var(--border-w) solid var(--border); vertical-align: top; }
-th { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); font-weight: 650; }
+th { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--caps-tracking); color: var(--text-2); font-weight: 650; }
 
 /* Menus (the Settings menu and the like). */
 .menu { position: absolute; z-index: 40; min-width: 12rem; padding: var(--space-1); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); }
 .menu a, .menu button { display: flex; width: 100%; align-items: center; gap: var(--space-2); min-height: var(--control-h); padding: 0 var(--space-3); border: 0; background: none; border-radius: var(--radius-sm); color: var(--text); text-decoration: none; text-align: left; font-weight: 500; }
 .menu a:hover, .menu button:hover, .menu a:focus-visible, .menu button:focus-visible { background: var(--surface-3); }
 
-/* Scrollbars follow the theme where the browser lets them. */
-* { scrollbar-color: var(--border-strong) transparent; }
+/* A disclosure ("Mentioned in", "Fields", "Try it") shows a chevron drawn here, not the browser's
+   triangle. The ones that carry an icon of their own are left as they are. */
+summary:not(:has(> .icon)) { list-style: none; }
+summary:not(:has(> .icon))::-webkit-details-marker { display: none; }
+summary:not(:has(> .icon))::before { content: ""; display: inline-block; width: 0.4rem; height: 0.4rem; margin-right: 0.6rem; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); vertical-align: 0.08em; transition: transform var(--ease); }
+details[open] > summary:not(:has(> .icon))::before { transform: translateY(-0.1rem) rotate(45deg); }
+
+/* Scrollbars follow the theme: thin, in the border colour. Where the browser has no standard
+   property for it (older Safari), the same look is drawn with its own pseudo-elements. */
+* { scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar { width: 0.75rem; height: 0.75rem; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); background-clip: padding-box; border: 3px solid transparent; border-radius: 999px; }
+}
+
+/* A browser's autofill paints a field blue or yellow; here it keeps the field's own colours. */
+input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus { -webkit-box-shadow: 0 0 0 100px var(--surface) inset; -webkit-text-fill-color: var(--text); caret-color: var(--text); }
+input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible { outline-offset: 2px; }
 
 /* People who ask for less motion get none. */
 @media (prefers-reduced-motion: reduce) {

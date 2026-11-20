@@ -19,6 +19,10 @@ from tests.helpers import unique_word
 
 SESSION_COOKIE = "vrum_session"
 
+# The name of the agent key every project of the harness is made with (`the_token()`,
+# `project.key`): who the history says made what a test does through that key.
+HARNESS_AGENT = "tests"
+
 
 @dataclass
 class Reply:
@@ -139,10 +143,15 @@ _shared: Project | None = None
 
 def register(base: str | None = None, name: str | None = None) -> Person:
     """A new account with an address and a password of its own, registered and signed in."""
+    return register_as(f"{unique_word()}@example.test", base, name)
+
+
+def register_as(email: str, base: str | None = None, name: str | None = None) -> Person:
+    """A new account with this address (and a password and name of its own), registered and signed
+    in, as a person registers on the board."""
     base = base or server_base()
     word = unique_word()
     shown = name or f"Tester {word}"
-    email = f"{word}@example.test"
     password = f"correct-horse-{word}"
     reply = api(
         base, "POST", "/board/api/accounts", {"email": email, "name": shown, "password": password}
@@ -153,18 +162,75 @@ def register(base: str | None = None, name: str | None = None) -> Person:
     )
 
 
+_all_tools: dict[str, list[str]] = {}
+
+
+def every_tool_a_key_can_have(owner: Person) -> list[str]:
+    """Every tool the server has except the ones only a person can use. The keys the test harness
+    makes are given all of them, as a key made for administration is, so that a test is not limited
+    to the tools agents are offered; a test about what an agent is offered makes a standard key
+    with `make_limited_key(project, name, None)`."""
+    if owner.base not in _all_tools:
+        reply = owner.call("GET", "/board/api/tools")
+        assert reply.status == 200, f"the tool list was refused: {reply.body}"
+        _all_tools[owner.base] = sorted(
+            tool["name"] for tool in reply.body["tools"] if not tool["people_only"]
+        )
+    return _all_tools[owner.base]
+
+
 def make_project(owner: Person, name: str | None = None) -> Project:
-    """A project of this person's, with an agent key for it."""
+    """A project of this person's, with an agent key for it (one that may use every tool)."""
     reply = owner.call("POST", "/board/api/projects", {"name": name or f"Project {unique_word()}"})
     assert reply.status == 201, f"the project was refused: {reply.body}"
     made = reply.body
-    key = owner.call("POST", f"/board/api/projects/{made['id']}/keys", {"label": "tests"})
+    key = owner.call(
+        "POST",
+        f"/board/api/projects/{made['id']}/keys",
+        {"name": HARNESS_AGENT, "tools": every_tool_a_key_can_have(owner)},
+    )
     assert key.status == 201, f"the key was refused: {key.body}"
     project = Project(
         made["id"], made["name"], key.body["secret"], owner, owner.base, [key.body["secret"]]
     )
     _projects[(owner.base, project.id)] = project
     return project
+
+
+def make_key(project: Project, name: str) -> str:
+    """Another agent key for the project, named for the agent that will use it (the name is who
+    the agent is in the history), made the way its owner makes one, and allowed every tool.
+    Returns the key itself."""
+    reply = project.owner.call(
+        "POST",
+        f"/board/api/projects/{project.id}/keys",
+        {"name": name, "tools": every_tool_a_key_can_have(project.owner)},
+    )
+    assert reply.status == 201, f"the key was refused: {reply.body}"
+    project.keys.append(reply.body["secret"])
+    return str(reply.body["secret"])
+
+
+def make_limited_key(project: Project, name: str, tools: list[str] | None) -> str:
+    """An agent key that may use only the tools named (the tools Vrum offers agents when `tools`
+    is None), made the way its owner makes one on the Users page. Returns the key itself."""
+    reply = project.owner.call(
+        "POST", f"/board/api/projects/{project.id}/keys", {"name": name, "tools": tools}
+    )
+    assert reply.status == 201, f"the key was refused: {reply.body}"
+    project.keys.append(reply.body["secret"])
+    return str(reply.body["secret"])
+
+
+def join_project(project: Project, role: str, name: str | None = None) -> Person:
+    """A new person who joins the project as an editor or a viewer the way a person does: its owner
+    makes an invitation, the person registers (with `name`, or one of their own) and accepts it."""
+    made = project.owner.call("POST", f"/board/api/projects/{project.id}/invites", {"role": role})
+    assert made.status == 201, f"the invitation was refused: {made.body}"
+    person = register(project.base, name)
+    accepted = person.call("POST", f"/board/api/invites/{made.body['token']}/accept")
+    assert accepted.status == 200, f"the invitation was not accepted: {accepted.body}"
+    return person
 
 
 def the_project() -> Project:

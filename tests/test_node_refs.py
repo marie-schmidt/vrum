@@ -95,7 +95,12 @@ def item(key: str, kind: str, parent: str | None = None) -> PlanItem:
 def test_a_plan_names_its_own_items_by_keys_and_existing_ones_by_reference() -> None:
     items = [item("e", "epic"), item("s", "story", "e"), item("t", "task", "story:7")]
     links = [PlanLink(source="t", target="Task:2", link_type="needs_first")]
-    rules = [PlanRule(title="A rule", story="s"), PlanRule(title="Another", story="story:7")]
+    rules = [
+        PlanRule(title="A rule", node="s"),
+        PlanRule(title="On a task", node="t"),
+        PlanRule(title="Another", node="story:7"),
+        PlanRule(title="On an old task", node="task:2"),
+    ]
     assert _plan_problems(items, links, rules, {"story:7", "task:2"}, set()) == []
 
 
@@ -118,7 +123,7 @@ def test_a_plan_says_what_is_wrong_with_each_reference_in_plain_words() -> None:
         PlanLink(source="t", target="task:99", link_type="needs_first"),
         PlanLink(source="12", target="t", link_type="relates_to"),
     ]
-    rules = [PlanRule(title="R", story="epic:3"), PlanRule(title="S", story="story:99")]
+    rules = [PlanRule(title="R", node="epic:3"), PlanRule(title="S", node="story:99")]
     problems = _plan_problems(items, links, rules, {"story:7", "epic:3"}, set())
     text = "\n".join(problems)
     assert "story:7 is a story, but a story belongs under an epic" in text
@@ -128,7 +133,7 @@ def test_a_plan_says_what_is_wrong_with_each_reference_in_plain_words() -> None:
     assert "A task needs a parent story" in text
     assert "there is no task 99 in this project for the target" in text
     assert "the source '12' is not the key of any item in this plan" in text
-    assert "epic:3 is not a story, and a rule belongs to a story" in text
+    assert "epic:3 is an epic, and an acceptance criterion belongs to a story or a task" in text
     assert "there is no story 99 in this project to hold it" in text
 
 

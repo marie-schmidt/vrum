@@ -1,0 +1,10 @@
+# What ./demo.sh adds on top of compose.yaml and compose.check.yaml (it sets COMPOSE_FILE to all
+# three). The demo keeps the checks' stand-ins for mail, OpenID and GitHub, but search by meaning in
+# it runs on the real embedding service that comes with Vrum (the `embeddings` service, which
+# demo.sh turns on with COMPOSE_PROFILES=real-embeddings), so what it finds is what a person would
+# really get and not what a scripted stand-in knows.
+services:
+  app:
+    environment:
+      EMBEDDING_BASE_URL: http://embeddings:8080/v1
+      EMBEDDING_MODEL: all-MiniLM-L6-v2

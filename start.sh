@@ -19,5 +19,5 @@ port="${port##*:}"
 echo
 echo "Vrum is now live."
 echo "  Open the board:  http://localhost:${port}/board"
-echo "  Agents connect:  http://localhost:${port}/mcp  (with a key from Settings & tools > Agent access)"
+echo "  Agents connect:  http://localhost:${port}/mcp  (with a key from Settings & tools > Users)"
 echo "  Stop it:         docker compose down   (add --volumes to also delete the data)"

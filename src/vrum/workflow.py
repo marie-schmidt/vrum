@@ -15,6 +15,7 @@ import psycopg
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
+from vrum.checks import checks_of, refuse_while_unticked
 from vrum.claims import (
     HANDOFF_OUTCOMES,
     Claim,
@@ -28,7 +29,6 @@ from vrum.common import (
     Ref,
     Refusal,
     check_choice,
-    clean_actor,
     fetch_all,
     fetch_one,
     is_node_ref,
@@ -41,12 +41,12 @@ from vrum.common import (
     split_page,
 )
 from vrum.db import Database
-from vrum.decisions import require_decision
-from vrum.facts import require_fact
+from vrum.definition_of_done import read_definition
 from vrum.graph import (
     EVENT_COLUMNS,
     KINDS,
     PRIORITIES,
+    SIZES,
     Event,
     Graph,
     Handoff,
@@ -59,8 +59,16 @@ from vrum.graph import (
     node_state,
     require_node,
 )
+from vrum.lineage import (
+    CRITERIA_IN_FORCE,
+    CRITERIA_ORDER,
+    chain_of,
+    criteria_holders,
+    note_in_chain,
+)
 from vrum.links import LINK_TYPES, insert_link
-from vrum.records import label_of
+from vrum.notes import require_note
+from vrum.records import IN_FORCE
 from vrum.rules import RULE_STATUSES, insert_rule, require_rule
 from vrum.search import Searcher, SearchResult
 
@@ -87,13 +95,12 @@ _SIMILAR_WANTED = 5
 # What each section is called in the sentence that says what was left out.
 _SECTION_NAMES = {
     "parents": "parents",
-    "rules": "requirements",
+    "acceptance_criteria": "acceptance criteria",
     "handoffs": "handoff notes",
     "prerequisites": "prerequisites",
-    "active_decisions": "decisions",
-    "project_wide_decisions": "project-wide decisions",
-    "facts": "facts",
-    "past_decisions": "past decisions",
+    "notes": "notes",
+    "project_wide_notes": "project-wide notes",
+    "past_notes": "past notes",
     "unblocks": "items it unblocks",
     "similar": "similar items",
 }
@@ -106,6 +113,9 @@ class Brief(BaseModel):
     kind: str = Field(description="epic, story or task.")
     title: str
     status: str
+    size: str | None = Field(
+        default=None, description="Its size (xs, s, m, l or xl), when someone has said."
+    )
 
 
 class ContextParent(BaseModel):
@@ -113,57 +123,55 @@ class ContextParent(BaseModel):
     kind: str
     title: str
     status: str
+    size: str | None = Field(
+        description="Its size (xs, s, m, l or xl), when someone has said. An epic has none."
+    )
     body_preview: str = Field(description="The first characters of its body.")
     body_chars: int = Field(description="How long its whole body is. Read it with get_node.")
 
 
-class ContextRule(BaseModel):
+class DefinitionCheck(BaseModel):
+    item: str = Field(description="The check's key: what set_check takes.")
+    text: str = Field(description="What the check says: do this before the item is done.")
+    person_only: bool = Field(
+        description="True when only a person can judge this check: do not tick it. Say in your "
+        "handoff note what they should look at."
+    )
+    checked: bool = Field(description="True when it is already ticked on this item.")
+
+
+class ContextCriterion(BaseModel):
     id: int
+    on: str = Field(
+        description="The reference of the story or task it is placed on, such as story:12 or "
+        "task:40."
+    )
     title: str
-    status: str = Field(description="held or settled. Dropped rules are not shown.")
+    status: str = Field(description="open or met. Dropped acceptance criteria are not shown.")
     body: str = Field(description="Its body, cut if it is long.")
     body_chars: int = Field(description="How long the whole body is.")
 
 
-class ContextDecision(BaseModel):
+class ContextNote(BaseModel):
     id: int
-    label: str = Field(
-        description="What this is, in plain words: whether it is in force and whether a person "
-        "confirmed it."
-    )
-    title: str
     text: str
-    reason: str
-    decided_by: str = Field(description="The person who made it.")
-    decided_on: date
+    why: str = Field(description="Why it is so, or why it was chosen.")
+    decided: bool = Field(description="True when a person decided it.")
+    decided_by: str | None = Field(description="The person who decided it, if one did.")
+    decided_on: date | None
     project_wide: bool = Field(description="True when it applies throughout the project.")
-    status: str = Field(description="active, superseded or withdrawn.")
-    superseded_by_id: int | None
-    confirmation: str = Field(
-        description="confirmed once a named person has reviewed it, otherwise unconfirmed."
+    status: str = Field(
+        description="unconfirmed or confirmed (in force; confirmed means a person reviewed it), "
+        "superseded or withdrawn."
     )
+    superseded_by_id: int | None
+    status_reason: str | None = Field(description="Why it was withdrawn.")
     confirmed_by: str | None = Field(description="The person who confirmed it.")
+    recorded_by: str = Field(description="The name of the person or agent that recorded it.")
+    recorded_by_kind: str = Field(description="person or agent (unknown in an old import).")
     linked_to: list[str] = Field(
         description="Which of this item and its parents it is linked to, by reference. Empty for a "
-        "project-wide decision that is not linked to any of them."
-    )
-
-
-class ContextFact(BaseModel):
-    id: int
-    label: str = Field(
-        description="What this is, in plain words: whether it is in force and whether a person "
-        "confirmed it, and where it came from."
-    )
-    text: str
-    source: str = Field(description="Where it came from.")
-    recorded_by: str
-    confirmation: str = Field(
-        description="confirmed once a named person has reviewed it, otherwise unconfirmed."
-    )
-    confirmed_by: str | None = Field(description="The person who confirmed it.")
-    linked_to: list[str] = Field(
-        description="Which of this item and its parents it is linked to, by reference."
+        "project-wide note that is not linked to any of them."
     )
 
 
@@ -185,31 +193,48 @@ class WorkContext(BaseModel):
     parents: list[ContextParent] = Field(
         description="The epic and story it belongs to, top first, with the start of their bodies."
     )
-    rules: list[ContextRule] = Field(description="The rules of its story.")
+    acceptance_criteria: list[ContextCriterion] = Field(
+        description="The acceptance criteria that apply to it: its own, and for a task its "
+        "story's too, each saying which item it is on. Finish it only when they are met."
+    )
+    definition_of_done: str = Field(
+        description="What every story or task of the project must satisfy before it is done, on "
+        "top of its own acceptance criteria. Empty when nobody has set one. Cut to fit; "
+        "definition_of_done_chars says how long it is in all."
+    )
+    definition_of_done_chars: int = Field(
+        description="How long the whole definition of done is. More than the text shown when it "
+        "was cut (see cut_note)."
+    )
+    definition_checks: list[DefinitionCheck] = Field(
+        description="The checks of the definition of done (its list lines) for this item, each "
+        "ticked or not. Before you finish it as done, do what each says (run the tests, and so "
+        "on), then tick each one with set_check, saying how you checked. A check with "
+        "person_only is not yours to tick: finish the item as blocked and say in the handoff "
+        "note what a person should look at."
+    )
     handoffs: list[Handoff] = Field(
         description="Notes left by earlier holders of this very item, oldest first."
     )
     prerequisites: list[Prerequisite] = Field(
         description="What it needs first (needs_first), with the notes left on each."
     )
-    active_decisions: list[ContextDecision] = Field(
-        description="Decisions in force, linked to this item or its parents, other than "
-        "project-wide ones. Each says whether a person confirmed it."
+    notes: list[ContextNote] = Field(
+        description="Notes in force linked to this item or its parents, other than project-wide "
+        "ones. Notes a person decided come first. Each has a status that says whether a person "
+        "confirmed it."
     )
-    project_wide_decisions: list[ContextDecision] = Field(
-        description="Every project-wide decision in force. They apply throughout the project."
+    project_wide_notes: list[ContextNote] = Field(
+        description="Every project-wide note in force. They apply throughout the project. "
+        "Notes a person decided come first."
     )
-    facts: list[ContextFact] = Field(
-        description="Active facts linked to this item or its parents, with where each came from "
-        "and whether a person confirmed it."
-    )
-    past_decisions: list[ContextDecision] = Field(
-        description="Decisions linked to this item or its parents that were superseded or "
+    past_notes: list[ContextNote] = Field(
+        description="Notes linked to this item or its parents that were superseded or "
         "withdrawn. Shown so you can see what changed. They are not in force."
     )
     unblocks: list[Dependent] = Field(description="What is waiting for this item to be done.")
     similar: list[SearchResult] = Field(
-        description="Existing stories, decisions and facts alike in meaning. Suggestions only: "
+        description="Existing stories and notes alike in meaning. Suggestions only: "
         "they were found by similarity, not by any link."
     )
     similar_note: str | None = Field(
@@ -234,6 +259,9 @@ class NextWork(BaseModel):
     taken_over_from: str | None = Field(
         description="Set when someone claimed this earlier and let the claim run out with no "
         "handoff note. They may have left it half done: check its history and its state."
+    )
+    taken_over_from_kind: str | None = Field(
+        description="person or agent: what that earlier holder is. Empty when taken_over_from is."
     )
     context: WorkContext | None
 
@@ -268,6 +296,11 @@ class PlanItem(BaseModel):
     title: str
     body: str = ""
     priority: str = Field(default="normal", description="low, normal, high or urgent.")
+    size: str | None = Field(
+        default=None,
+        description="xs, s, m, l or xl: how big a story or task is, effort and context "
+        "together. Not for an epic, which adds up.",
+    )
     start_on: str | None = Field(default=None, description="YYYY-MM-DD.")
     target_on: str | None = Field(default=None, description="YYYY-MM-DD.")
     parent: Ref | None = Field(
@@ -289,13 +322,13 @@ class PlanLink(BaseModel):
 
 
 class PlanRule(BaseModel):
-    title: str
+    title: str = Field(description="The acceptance criterion, stated briefly.")
     body: str = ""
-    status: str = Field(default="held", description="held, settled or dropped.")
-    story: Ref | None = Field(
+    status: str = Field(default="open", description="open, met or dropped.")
+    node: Ref | None = Field(
         default=None,
-        description="The story that owns it: a key in this plan, or the reference (such as "
-        "story:12) of an existing story. Leave empty to place it later.",
+        description="The story or task it is on: a key in this plan, or the reference (such as "
+        "story:12 or task:40) of an existing one. Not an epic. Leave empty to place it later.",
     )
 
 
@@ -315,7 +348,9 @@ class PlanSimilar(BaseModel):
 class PlanResult(BaseModel):
     created: list[PlannedItem] = Field(description="Every node created, with its new reference.")
     link_ids: list[int] = Field(description="The new links, in the order you gave them.")
-    rule_ids: list[int] = Field(description="The new rules, in the order you gave them.")
+    rule_ids: list[int] = Field(
+        description="The new acceptance criteria (rules), in the order you gave them."
+    )
     counts: dict[str, int]
     similar: list[PlanSimilar] = Field(
         description="For the epics and stories that look like something that already exists: "
@@ -333,10 +368,14 @@ class NodeChange(BaseModel):
         default=None, description="new, in_progress, blocked, done or dropped."
     )
     priority: str | None = Field(default=None, description="low, normal, high or urgent.")
+    size: str | None = Field(
+        default=None, description="xs, s, m, l or xl. Not for an epic, which adds up."
+    )
     start_on: str | None = Field(default=None, description="YYYY-MM-DD.")
     target_on: str | None = Field(default=None, description="YYYY-MM-DD.")
     clear_start_on: bool = False
     clear_target_on: bool = False
+    clear_size: bool = False
 
 
 class ChangeResult(BaseModel):
@@ -424,6 +463,16 @@ def _plan_problems(
                 f"{where}: priority must be one of {', '.join(PRIORITIES)}, but it is "
                 f"{item.priority!r}."
             )
+        if item.size is not None:
+            if item.kind == "epic":
+                problems.append(
+                    f"{where}: an epic has no size of its own: it adds up the size of what is in "
+                    "it. Leave size out."
+                )
+            elif item.size not in SIZES:
+                problems.append(
+                    f"{where}: size must be one of {', '.join(SIZES)}, but it is {item.size!r}."
+                )
         try:
             check_dates(
                 parse_day("start_on", item.start_on), parse_day("target_on", item.target_on)
@@ -499,30 +548,30 @@ def _plan_problems(
             problems.append(f"{where}: the same link is given more than once.")
         seen.add(pair)
     for position, rule in enumerate(rules, start=1):
-        where = f"Rule {position} ({rule.title.strip()[:40]!r})"
+        where = f"Acceptance criterion {position} ({rule.title.strip()[:40]!r})"
         if not rule.title.strip():
-            problems.append(f"Rule {position}: title cannot be empty.")
+            problems.append(f"Acceptance criterion {position}: title cannot be empty.")
         if rule.status not in RULE_STATUSES:
             problems.append(
                 f"{where}: status must be one of {', '.join(RULE_STATUSES)}, but it is "
                 f"{rule.status!r}."
             )
-        if rule.story is None:
+        if rule.node is None:
             continue
-        reference = _existing(rule.story)
+        reference = _existing(rule.node)
+        holds = "an acceptance criterion belongs to a story or a task"
         if reference is None:
-            found = kinds.get(rule.story)
+            found = kinds.get(rule.node)
             if found is None:
                 problems.append(
-                    f"{where}: story {rule.story!r} is not the key of any item in this plan. "
-                    "If you meant an existing story, give its reference, such as story:12."
+                    f"{where}: node {rule.node!r} is not the key of any item in this plan. "
+                    "If you meant an existing story or task, give its reference, such as "
+                    "story:12 or task:40."
                 )
-            elif found != "story":
-                problems.append(
-                    f"{where}: {rule.story!r} is not a story, and a rule belongs to a story."
-                )
-        elif split_node_ref(reference)[0] != "story":
-            problems.append(f"{where}: {reference} is not a story, and a rule belongs to a story.")
+            elif found == "epic":
+                problems.append(f"{where}: {rule.node!r} is an epic, and {holds}.")
+        elif split_node_ref(reference)[0] == "epic":
+            problems.append(f"{where}: {reference} is an epic, and {holds}.")
         elif reference not in existing:
             problems.append(
                 f"{where}: there is no {node_words(reference)} in this project to hold it."
@@ -603,6 +652,7 @@ class Workflow:
         parent: str | None,
         body: str,
         priority: str,
+        size: str | None,
         start_on: date | None,
         target_on: date | None,
     ) -> CreatedNode:
@@ -613,6 +663,7 @@ class Workflow:
             parent=parent,
             body=body,
             priority=priority,
+            size=size,
             start_on=start_on,
             target_on=target_on,
         )
@@ -640,16 +691,17 @@ class Workflow:
         links: list[PlanLink],
         rules: list[PlanRule],
     ) -> PlanResult:
-        actor = clean_actor(actor)
         if not items and not links and not rules:
-            raise Refusal("The plan is empty: give at least one item, link or rule.")
+            raise Refusal(
+                "The plan is empty: give at least one item, link or acceptance criterion."
+            )
         referenced = sorted(
             {
                 reference
                 for value in (
                     *(item.parent for item in items),
                     *(end for link in links for end in (link.source, link.target)),
-                    *(rule.story for rule in rules),
+                    *(rule.node for rule in rules),
                 )
                 if value is not None and (reference := _existing(value)) is not None
             }
@@ -744,6 +796,7 @@ class Workflow:
                     parent=None if item.parent is None else resolve(item.parent),
                     body=item.body,
                     priority=item.priority,
+                    size=item.size,
                     start_on=parse_day("start_on", item.start_on),
                     target_on=parse_day("target_on", item.target_on),
                 )
@@ -771,7 +824,7 @@ class Workflow:
                 title=rule.title.strip(),
                 body=rule.body,
                 status=rule.status,
-                story=None if rule.story is None else resolve(rule.story),
+                node=None if rule.node is None else resolve(rule.node),
             )
             rule_ids.append(int(rule_row["id"]))
         return created, link_ids, rule_ids
@@ -779,7 +832,6 @@ class Workflow:
     # -- changing many at once ----------------------------------------------------------------
 
     async def update_nodes(self, *, actor: str, changes: list[NodeChange]) -> UpdateNodesResult:
-        actor = clean_actor(actor)
         if not changes:
             raise Refusal("There is nothing to change: give at least one change.")
         nodes = [parse_node_ref(change.node, "node") for change in changes]
@@ -794,11 +846,13 @@ class Workflow:
                     body=change.body,
                     status=change.status,
                     priority=change.priority,
+                    size=change.size,
                     parent=None,
                     start_on=parse_day("start_on", change.start_on),
                     target_on=parse_day("target_on", change.target_on),
                     clear_start_on=change.clear_start_on,
                     clear_target_on=change.clear_target_on,
+                    clear_size=change.clear_size,
                 )
             except Refusal as refusal:
                 results.append(
@@ -828,8 +882,7 @@ class Workflow:
         actor: str | None,
         node: str | None,
         rule_id: int | None,
-        decision_id: int | None,
-        fact_id: int | None,
+        note_id: int | None,
         limit: int,
         newest: bool = False,
         before_event_id: int | None = None,
@@ -845,15 +898,14 @@ class Workflow:
             for name, value in (
                 ("node", node),
                 ("rule_id", rule_id),
-                ("decision_id", decision_id),
-                ("fact_id", fact_id),
+                ("note_id", note_id),
             )
             if value is not None
         ]
         if len(given) > 1:
             raise Refusal(
-                "Give at most one of node, rule_id, decision_id or fact_id: the one item to "
-                "follow. Leave them all out to see every change."
+                "Give at most one of node, rule_id or note_id: the one item to follow. Leave "
+                "them all out to see every change."
             )
         async with self._database.transaction(snapshot=True) as conn:
             # One snapshot for the page and for latest_event_id: an event that finishes in
@@ -862,10 +914,8 @@ class Workflow:
                 await require_node(conn, node)
             if rule_id is not None:
                 await require_rule(conn, rule_id)
-            if decision_id is not None:
-                await require_decision(conn, decision_id)
-            if fact_id is not None:
-                await require_fact(conn, fact_id)
+            if note_id is not None:
+                await require_note(conn, note_id)
             cursor = {"xid": "0", "id": 0}
             if after_event_id:
                 found = await fetch_one(
@@ -906,8 +956,8 @@ class Workflow:
                 "AND (%(node)s::text IS NULL OR e.node = %(node)s "
                 "OR e.other_node = %(node)s) "
                 "AND (%(rule)s::bigint IS NULL OR e.rule_id = %(rule)s) "
-                "AND (%(decision)s::bigint IS NULL OR e.decision_id = %(decision)s) "
-                "AND (%(fact)s::bigint IS NULL OR e.fact_id = %(fact)s) "
+                "AND (%(note)s::bigint IS NULL OR e.note_id = %(note)s "
+                "OR e.other_note_id = %(note)s) "
                 f"ORDER BY e.xid {order}, e.id {order} LIMIT %(fetch)s",
                 {
                     **cursor,
@@ -915,8 +965,7 @@ class Workflow:
                     "actor": actor.strip() if actor and actor.strip() else None,
                     "node": node,
                     "rule": rule_id,
-                    "decision": decision_id,
-                    "fact": fact_id,
+                    "note": note_id,
                     "fetch": limit + 1,
                 },
             )
@@ -944,7 +993,6 @@ class Workflow:
     # -- ending work --------------------------------------------------------------------------
 
     async def finish_work(self, *, actor: str, node: str, outcome: str, note: str) -> FinishResult:
-        actor = clean_actor(actor)
         check_choice("outcome", outcome, HANDOFF_OUTCOMES)
         note = clean_note(note)
         async with self._database.transaction() as conn:
@@ -952,6 +1000,14 @@ class Workflow:
             await release_in(
                 conn, actor=actor, node=node, outcome=outcome, note=note, verb="finish"
             )
+            if outcome == "done":
+                await refuse_while_unticked(
+                    conn,
+                    node,
+                    instead="finish it as released or blocked, and say why in the note",
+                    person_instead="finish it as blocked, saying in the handoff note what the "
+                    "person should look at; a person then judges it on the board and marks it done",
+                )
             # Released work goes back to not started, if it was in progress. The other outcomes
             # are the status itself.
             status = (
@@ -967,7 +1023,7 @@ class Workflow:
                 Brief.model_validate(row)
                 for row in await fetch_all(
                     conn,
-                    "SELECT s.ref, s.kind, s.title, s.status FROM links l "
+                    "SELECT s.ref, s.kind, s.title, s.status, s.size FROM links l "
                     "JOIN node_state s ON s.ref = l.source "
                     "WHERE l.target = %s AND l.link_type = 'needs_first' "
                     "AND s.status = 'ready' ORDER BY s.kind_rank, s.number",
@@ -987,7 +1043,6 @@ class Workflow:
         lease_seconds: int,
         context_chars: int,
     ) -> NextWork:
-        actor = clean_actor(actor)
         lease_seconds = lease_seconds_ok(lease_seconds)
         if not 1000 <= context_chars <= 1_000_000:
             raise Refusal(
@@ -995,6 +1050,7 @@ class Workflow:
                 f"{context_chars}."
             )
         taken_over_from: str | None = None
+        taken_over_from_kind: str | None = None
         async with self._database.transaction() as conn:
             if within_node is not None:
                 await require_node(conn, within_node)
@@ -1034,6 +1090,7 @@ class Workflow:
                 claim = Claim.model_validate(claim_row)
                 if lapsed is not None:
                     taken_over_from = lapsed["actor"]
+                    taken_over_from_kind = lapsed["actor_kind"]
                 break
             work = await node_state(conn, ref)
             parts = await self._exact_context(conn, work)
@@ -1059,6 +1116,7 @@ class Workflow:
             work=work,
             claim=claim,
             taken_over_from=taken_over_from,
+            taken_over_from_kind=taken_over_from_kind,
             context=context,
         )
 
@@ -1107,6 +1165,7 @@ class Workflow:
             work=None,
             claim=None,
             taken_over_from=None,
+            taken_over_from_kind=None,
             context=None,
         )
 
@@ -1114,86 +1173,54 @@ class Workflow:
 
     async def _exact_context(self, conn: AsyncConnection, work: Node) -> dict[str, Any]:
         """Everything in a work item's context that comes by exact link."""
-        chain: list[Node] = []
-        parent = work.parent
-        while parent is not None:
-            above = await node_state(conn, parent)
-            chain.append(above)
-            parent = above.parent
-        chain.reverse()
-        chain_refs = [work.ref, *(node.ref for node in chain)]
-        story = work.ref if work.kind == "story" else work.parent
+        refs = await chain_of(conn, work.ref)
+        chain = [await node_state(conn, ref) for ref in reversed(refs[1:])]
+        chain_refs = refs
         parents = [
             ContextParent(
                 ref=node.ref,
                 kind=node.kind,
                 title=node.title,
                 status=node.status,
+                size=node.size,
                 body_preview=(node.body or "")[:_PARENT_BODY_CHARS],
                 body_chars=node.body_chars,
             )
             for node in chain
         ]
-        rules = [
-            ContextRule(
+        criteria = [
+            ContextCriterion(
                 id=row["id"],
+                on=row["node"],
                 title=row["title"],
                 status=row["status"],
                 body=row["body"][:_RULE_BODY_CHARS],
                 body_chars=len(row["body"]),
             )
-            for row in (
-                await fetch_all(
-                    conn,
-                    "SELECT id, title, body, status FROM rules "
-                    "WHERE story = %s AND status <> 'dropped' ORDER BY id",
-                    (story,),
-                )
-                if story is not None
-                else []
+            for row in await fetch_all(
+                conn,
+                "SELECT id, node, title, body, status FROM rules WHERE "
+                f"{CRITERIA_IN_FORCE} ORDER BY {CRITERIA_ORDER}",
+                {"holders": criteria_holders(chain_refs)},
             )
         ]
-        decision_rows = await fetch_all(
+        note_rows = await fetch_all(
             conn,
-            "SELECT d.id, d.title, d.text, d.reason, d.decided_by, d.decided_on, d.project_wide, "
-            "d.status, d.superseded_by_id, d.status_reason, d.confirmed_by, d.confirmed_at, "
-            "ARRAY(SELECT dn.node FROM decision_nodes dn "
-            "WHERE dn.decision_id = d.id AND dn.node = ANY(%(chain)s)) "
-            "AS linked_to FROM decisions d WHERE EXISTS (SELECT 1 FROM decision_nodes dn "
-            "WHERE dn.decision_id = d.id AND dn.node = ANY(%(chain)s)) "
-            "OR (d.project_wide AND d.status = 'active') ORDER BY d.id",
+            "SELECT n.id, n.text, n.why, n.decided, n.decided_by, n.decided_on, n.project_wide, "
+            "n.status, n.superseded_by_id, n.status_reason, n.confirmed_by, n.confirmed_at, "
+            "n.recorded_by, n.recorded_by_kind, "
+            "ARRAY(SELECT nn.node FROM note_nodes nn "
+            "WHERE nn.note_id = n.id AND nn.node = ANY(%(chain)s)) AS linked_to "
+            "FROM note_state n WHERE " + note_in_chain("n.id") + " "
+            "OR (n.project_wide AND n.status IN ('unconfirmed', 'confirmed')) "
+            "ORDER BY (NOT n.decided), n.id",
             {"chain": chain_refs},
         )
-        decisions = [
-            ContextDecision.model_validate(
-                {
-                    **row,
-                    "linked_to": sorted(row["linked_to"], key=node_order),
-                    "label": label_of("decision", row),
-                    "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
-                }
+        notes = [
+            ContextNote.model_validate(
+                {**row, "linked_to": sorted(row["linked_to"], key=node_order)}
             )
-            for row in decision_rows
-        ]
-        fact_rows = await fetch_all(
-            conn,
-            "SELECT f.id, f.text, f.source, f.recorded_by, f.status, f.confirmed_by, "
-            "f.confirmed_at, ARRAY(SELECT fn.node FROM fact_nodes fn WHERE fn.fact_id = f.id "
-            "AND fn.node = ANY(%(chain)s)) AS linked_to "
-            "FROM facts f WHERE f.status = 'active' AND EXISTS (SELECT 1 FROM fact_nodes "
-            "fn WHERE fn.fact_id = f.id AND fn.node = ANY(%(chain)s)) ORDER BY f.id",
-            {"chain": chain_refs},
-        )
-        facts = [
-            ContextFact.model_validate(
-                {
-                    **row,
-                    "linked_to": sorted(row["linked_to"], key=node_order),
-                    "label": f"{label_of('fact', row)}. Source: {row['source']}",
-                    "confirmation": "confirmed" if row["confirmed_by"] else "unconfirmed",
-                }
-            )
-            for row in fact_rows
+            for row in note_rows
         ]
         prerequisites = [
             Prerequisite(
@@ -1201,7 +1228,7 @@ class Workflow:
             )
             for row in await fetch_all(
                 conn,
-                "SELECT t.ref, t.kind, t.title, t.status FROM links l "
+                "SELECT t.ref, t.kind, t.title, t.status, t.size FROM links l "
                 "JOIN node_state t ON t.ref = l.target "
                 "WHERE l.source = %s AND l.link_type = 'needs_first' "
                 "ORDER BY t.kind_rank, t.number",
@@ -1215,7 +1242,8 @@ class Workflow:
             )
             for row in await fetch_all(
                 conn,
-                "SELECT s.ref, s.kind, s.title, s.status, NOT EXISTS (SELECT 1 FROM links l2 "
+                "SELECT s.ref, s.kind, s.title, s.status, s.size, "
+                "NOT EXISTS (SELECT 1 FROM links l2 "
                 "JOIN nodes t2 ON t2.ref = l2.target WHERE l2.source = s.ref "
                 "AND l2.link_type = 'needs_first' AND l2.target <> %(work)s "
                 "AND t2.status <> 'done') AS becomes_ready_when_done "
@@ -1228,22 +1256,26 @@ class Workflow:
         shown = {
             *((node.kind, node.number) for node in chain),
             (work.kind, work.number),
-            *(("decision", d.id) for d in decisions),
-            *(("fact", f.id) for f in facts),
+            *(("note", n.id) for n in notes),
         }
         return {
             "parents": parents,
-            "rules": rules,
+            "acceptance_criteria": criteria,
+            "definition_of_done": (await read_definition(conn)).body,
+            "definition_checks": [
+                DefinitionCheck(
+                    item=check.item,
+                    text=check.text,
+                    person_only=check.person_only,
+                    checked=check.checked,
+                )
+                for check in await checks_of(conn, work.ref)
+            ],
             "handoffs": await handoffs_of(conn, work.ref),
             "prerequisites": prerequisites,
-            "active_decisions": [
-                d for d in decisions if d.status == "active" and not d.project_wide
-            ],
-            "project_wide_decisions": [
-                d for d in decisions if d.status == "active" and d.project_wide
-            ],
-            "facts": facts,
-            "past_decisions": [d for d in decisions if d.status != "active"],
+            "notes": [n for n in notes if n.status in IN_FORCE and not n.project_wide],
+            "project_wide_notes": [n for n in notes if n.status in IN_FORCE and n.project_wide],
+            "past_notes": [n for n in notes if n.status not in IN_FORCE],
             "unblocks": dependents,
             "shown": shown,
         }
@@ -1255,7 +1287,7 @@ class Workflow:
         context. Suggestions, and never worth waiting for: it says so when it cannot be had."""
         found, _, note = await self._searcher.similar(
             node=work.ref,
-            wanted_types=["story", "decision", "fact"],
+            wanted_types=["story", "note"],
             exclude=parts["shown"],
             limit=_SIMILAR_WANTED,
             timeout=5.0,
@@ -1269,13 +1301,17 @@ class Workflow:
         similar_note: str | None,
         max_chars: int,
     ) -> WorkContext:
-        """Put the context together within the size limit. The sections are filled in order and
-        what does not fit is left out, and counted."""
+        """Put the context together within the size limit. The definition of done comes first, cut
+        to at most a quarter of the room, with its checks, which are never cut, and then the
+        sections are filled in order; what does not fit is left out, and counted."""
         sections: dict[str, list[Any]] = {
             name: list(parts.get(name, [])) for name in _SECTION_ORDER if name != "similar"
         }
         sections["similar"] = similar
-        used = 0
+        definition: str = parts["definition_of_done"]
+        checks: list[DefinitionCheck] = parts["definition_checks"]
+        shown_definition = definition[: max_chars // 4]
+        used = len(shown_definition) + sum(len(check.model_dump_json()) for check in checks)
         full = False
         kept: dict[str, list[Any]] = {}
         left_out: dict[str, int] = {}
@@ -1292,19 +1328,28 @@ class Workflow:
             kept[name] = keep
             if len(keep) < len(sections[name]):
                 left_out[name] = len(sections[name]) - len(keep)
-        cut_note = None
+        cut_words = []
         if left_out:
-            cut_note = (
+            cut_words.append(
                 f"To stay within {max_chars:,} characters, this left out "
                 + ", ".join(f"{count} {_SECTION_NAMES[name]}" for name, count in left_out.items())
                 + ". Use recall for the item to read them all, or ask again with a larger "
                 "context_chars."
             )
+        if len(shown_definition) < len(definition):
+            cut_words.append(
+                f"The definition of done is {len(definition):,} characters and only the first "
+                f"{len(shown_definition):,} are shown: ask again with a larger context_chars to "
+                "read all of it."
+            )
         return WorkContext(
             **kept,
+            definition_of_done=shown_definition,
+            definition_of_done_chars=len(definition),
+            definition_checks=checks,
             similar_note=similar_note,
             characters=used,
             max_characters=max_chars,
             left_out=left_out,
-            cut_note=cut_note,
+            cut_note=" ".join(cut_words) or None,
         )

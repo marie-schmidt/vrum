@@ -5,7 +5,7 @@ asks for no embedding or language-model service. Then, on the real stack with it
 service stopped, a person registers in a real browser, sees no demo records, makes a project, adds
 an epic, a story and a task with the Board's own dialog, and makes an agent key whose secret is
 shown once; the Python example from docs/agents.md and a real MCP client use that key to claim the
-task and finish it with a handoff note; and the Board and its Activity drawer show what the agent
+task and finish it with a handoff note; and the Board and its Activity page show what the agent
 did, equal to the server's own feed.
 
 The chapter makes its own account, project and key, so it needs nothing from the chapters before
@@ -24,11 +24,14 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import Page, expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, browser_page, create_in_browser
+from tests.board_helpers import SLOW, browser_page, on_page, sidebar_current
 from tests.board_m14 import events_of, feed_becomes, feed_row, spoken
 from tests.helpers import REPO_ROOT, code_of, connect, embeddings_stopped, ok, unique_word
 from tests.second_stack import SecondStack
-from tests.test_board_accounts_integration import register_in_the_browser
+from tests.test_board_accounts_integration import (
+    create_in_the_browser,
+    register_in_the_browser,
+)
 from tests.world import Person, server_base
 
 README = REPO_ROOT / "README.md"
@@ -243,10 +246,14 @@ async def first_minutes(base: str) -> None:
             f"{len(listed_before)} projects before; {len(listed)} after, {nodes['total']} items",
         )
 
-        # New item, three times: an epic, a story in it and a task in the story.
-        epic = await create_in_browser(page, "epic", f"Accounts {word}")
-        story = await create_in_browser(page, "story", f"Sign in {word}", epic)
-        task = await create_in_browser(page, "task", f"Login form {word}", story)
+        # New item, three times: an epic, a story in it and a task in the story. Each is made from
+        # the Board and opens the page of the new item.
+        epic = await create_in_the_browser(w, "epic", f"Accounts {word}")
+        story = await create_in_the_browser(w, "story", f"Sign in {word}", epic)
+        task = await create_in_the_browser(w, "task", f"Login form {word}", story)
+        on_new_page = page.url.endswith(f"#/item?item={task}&from=board") and await sidebar_current(
+            page
+        ) == ["board"]
         await page.locator("#settings-menu").click()
         await page.locator("#settings-access").click()
         await page.locator("#key-label").fill("my first agent")
@@ -264,12 +271,15 @@ async def first_minutes(base: str) -> None:
                 for node in (await ok(agent, "list_nodes"))["items"]
             }
         proof(
-            "M18",
-            "with New item the newcomer makes an epic, a story in it and a task in the story, then "
-            "makes an agent key from Settings & tools: the secret is shown once (the page shows "
-            "only its label and start afterwards), and an MCP client with it sees the same three "
-            "items with the references (epic:1, story:1, task:1) and titles the dialog gave",
+            "M20",
+            "with New item on the Board the newcomer makes an epic, a story in it and a task in "
+            "the story, each opening the page of the new item (still in the Board, as its "
+            "breadcrumb and the sidebar say), then makes an agent key from Settings and tools: the "
+            "secret is shown once (the page shows only its label and start afterwards), and an "
+            "MCP client with it sees the same three items with the references (epic:1, story:1, "
+            "task:1) and titles the dialog gave",
             key.startswith("vrk_")
+            and on_new_page
             and gone_from_page
             and seen
             == {
@@ -340,7 +350,7 @@ async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None
     done = page.locator(f".cell[data-status='done'] .card[data-ref='{task}']")
     await expect(done).to_be_visible(timeout=NEWS)
     await page.locator("#activity-open").click()
-    await expect(page.locator("#drawer[data-drawer=activity]")).to_be_visible(timeout=SLOW)
+    await on_page(page, "activity")
     finished = feed_row(page, f"finished their work on task {code_of(task)}")
     await expect(finished).to_contain_text(AGENT, timeout=NEWS)
     async with connect(f"{base}/mcp", key) as agent:
@@ -356,11 +366,12 @@ async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None
         "claim": await claimed_row.inner_text(),
     }
     proof(
-        "M18",
-        "the Board shows the task in its Done column, and the Activity drawer opened from the "
+        "M20",
+        "the Board shows the task in its Done column, and the Activity page opened from the "
         "sidebar shows the agent's name, its claim and its handoff note in full, newest first, "
         "with the same events as the server's own change feed",
-        "drawer=activity" in page.url
+        page.url.endswith("#/activity")
+        and await sidebar_current(page) == ["activity"]
         and said["note"] == NOTE
         and said["actor"] == AGENT
         and AGENT in said["claim"]

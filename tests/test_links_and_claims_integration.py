@@ -5,7 +5,18 @@ import anyio
 import pytest
 from mcp import Client
 
-from tests.helpers import make_tasks, make_tree, needs_first, ok, refused, set_status
+from tests.helpers import (
+    connect_as,
+    connect_each,
+    make_tasks,
+    make_tree,
+    needs_first,
+    ok,
+    refused,
+    set_status,
+    unique_word,
+)
+from tests.world import HARNESS_AGENT
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -107,9 +118,6 @@ async def test_links_that_make_no_sense_are_refused_in_plain_words(client: Clien
         target="task:987654321",
         link_type="relates_to",
     )
-    assert "actor must be the name" in await refused(
-        client, "add_link", link_type="relates_to", **{**link, "actor": " "}
-    )
 
     await ok(client, "add_link", link_type="supersedes", **link)
     assert "already linked" in await refused(client, "add_link", link_type="supersedes", **link)
@@ -205,21 +213,22 @@ async def test_links_can_be_listed_filtered_paged_and_removed(client: Client) ->
 async def test_a_link_shows_in_the_history_of_both_nodes(client: Client) -> None:
     waiting, first = await make_tasks(client, 2)
     await needs_first(client, waiting, first)
-    await ok(
-        client,
-        "remove_link",
-        actor="ann",
-        source=waiting["ref"],
-        target=first["ref"],
-        link_type="needs_first",
-    )
+    ann = f"ann-{unique_word()}"
+    async with connect_as(ann) as by_ann:
+        await ok(
+            by_ann,
+            "remove_link",
+            source=waiting["ref"],
+            target=first["ref"],
+            link_type="needs_first",
+        )
 
     for node in (waiting, first):
         history = (await ok(client, "node_history", node=node["ref"]))["items"]
         events = [e for e in history if e["action"].startswith("link_")]
         assert [(e["action"], e["actor"]) for e in events] == [
-            ("link_added", "marie"),
-            ("link_removed", "ann"),
+            ("link_added", HARNESS_AGENT),
+            ("link_removed", ann),
         ]
         assert events[0]["node"] == waiting["ref"] and events[0]["other_node"] == first["ref"]
         assert events[0]["before"] is None
@@ -355,15 +364,19 @@ async def test_ten_parallel_claimers_on_one_ready_task_produce_exactly_one_winne
 ) -> None:
     (task,) = await make_tasks(client, 1)
     results: dict[str, tuple[bool, str]] = {}
+    word = unique_word()
 
-    async def claim(actor: str) -> None:
-        result = await client.call_tool("claim_node", {"actor": actor, "node": task["ref"]})
-        text = " ".join(getattr(block, "text", "") for block in result.content)
-        results[actor] = (not result.is_error, text)
+    # Each claimer is an agent of its own: a claim is held by whoever its key is named for.
+    async with connect_each(*(f"agent-{number}-{word}" for number in range(10))) as agents:
 
-    async with anyio.create_task_group() as group:
-        for number in range(10):
-            group.start_soon(claim, f"agent-{number}")
+        async def claim(actor: str, agent: Client) -> None:
+            result = await agent.call_tool("claim_node", {"node": task["ref"]})
+            text = " ".join(getattr(block, "text", "") for block in result.content)
+            results[actor] = (not result.is_error, text)
+
+        async with anyio.create_task_group() as group:
+            for number, agent in enumerate(agents):
+                group.start_soon(claim, f"agent-{number}-{word}", agent)
 
     winners = [actor for actor, (won, _) in results.items() if won]
     assert len(results) == 10 and len(winners) == 1
@@ -381,73 +394,67 @@ async def test_ten_parallel_claimers_on_one_ready_task_produce_exactly_one_winne
 
 async def test_an_expired_lease_can_be_claimed_by_another_actor(client: Client) -> None:
     (task,) = await make_tasks(client, 1)
-    first = await ok(client, "claim_node", actor="ann", node=task["ref"], lease_seconds=2)
-    assert first["node"] == task["ref"]
+    ann, bob = f"ann-{unique_word()}", f"bob-{unique_word()}"
+    async with connect_each(ann, bob) as (by_ann, by_bob):
+        first = await ok(by_ann, "claim_node", node=task["ref"], lease_seconds=2)
+        assert first["node"] == task["ref"]
 
-    message = await refused(client, "claim_node", actor="bob", node=task["ref"])
-    assert "claimed by ann until" in message
-    await anyio.sleep(2.6)
+        message = await refused(by_bob, "claim_node", node=task["ref"])
+        assert f"claimed by {ann} until" in message
+        await anyio.sleep(2.6)
 
-    lapsed = await ok(client, "get_node", node=task["ref"])
-    assert (lapsed["claimed_by"], lapsed["claim_expires_at"]) == (None, None)
-    assert task["ref"] in await all_ready_refs(client)
-    assert "lapsed" in await refused(client, "renew_claim", actor="ann", node=task["ref"])
+        lapsed = await ok(client, "get_node", node=task["ref"])
+        assert (lapsed["claimed_by"], lapsed["claim_expires_at"]) == (None, None)
+        assert task["ref"] in await all_ready_refs(client)
+        assert "lapsed" in await refused(by_ann, "renew_claim", node=task["ref"])
 
-    second = await ok(client, "claim_node", actor="bob", node=task["ref"], lease_seconds=60)
-    assert second["actor"] == "bob" and second["expires_at"] > first["expires_at"]
-    held = await ok(client, "get_node", node=task["ref"])
-    assert held["claimed_by"] == "bob"
+        second = await ok(by_bob, "claim_node", node=task["ref"], lease_seconds=60)
+        assert second["actor"] == bob and second["expires_at"] > first["expires_at"]
+        held = await ok(client, "get_node", node=task["ref"])
+        assert held["claimed_by"] == bob
 
     history = (await ok(client, "node_history", node=task["ref"]))["items"]
     claimed = [e for e in history if e["action"] == "claimed"]
-    assert [e["actor"] for e in claimed] == ["ann", "bob"]
-    assert claimed[1]["before"]["actor"] == "ann"
-    assert claimed[1]["after"]["actor"] == "bob"
+    assert [e["actor"] for e in claimed] == [ann, bob]
+    assert claimed[1]["before"]["actor"] == ann
+    assert claimed[1]["after"]["actor"] == bob
 
 
 async def test_the_holder_can_renew_and_release_and_nobody_else_can(client: Client) -> None:
     (task,) = await make_tasks(client, 1)
-    claim = await ok(client, "claim_node", actor="ann", node=task["ref"], lease_seconds=60)
-    assert "already hold the claim" in await refused(
-        client, "claim_node", actor="ann", node=task["ref"]
-    )
+    ann, bob = f"ann-{unique_word()}", f"bob-{unique_word()}"
+    async with connect_each(ann, bob) as (by_ann, by_bob):
+        claim = await ok(by_ann, "claim_node", node=task["ref"], lease_seconds=60)
+        assert "already hold the claim" in await refused(by_ann, "claim_node", node=task["ref"])
 
-    assert "claimed by ann, not by you" in await refused(
-        client, "renew_claim", actor="bob", node=task["ref"]
-    )
-    assert "claimed by ann, not by you" in await refused(
-        client, "release_claim", actor="bob", node=task["ref"], note="Not mine to release."
-    )
+        assert f"claimed by {ann}, not by you" in await refused(
+            by_bob, "renew_claim", node=task["ref"]
+        )
+        assert f"claimed by {ann}, not by you" in await refused(
+            by_bob, "release_claim", node=task["ref"], note="Not mine to release."
+        )
 
-    renewed = await ok(client, "renew_claim", actor="ann", node=task["ref"], lease_seconds=3600)
-    assert renewed["expires_at"] > claim["expires_at"]
-    assert (await ok(client, "get_node", node=task["ref"]))["claim_expires_at"] == renewed[
-        "expires_at"
-    ]
+        renewed = await ok(by_ann, "renew_claim", node=task["ref"], lease_seconds=3600)
+        assert renewed["expires_at"] > claim["expires_at"]
+        assert (await ok(client, "get_node", node=task["ref"]))["claim_expires_at"] == renewed[
+            "expires_at"
+        ]
 
-    await ok(
-        client,
-        "release_claim",
-        actor="ann",
-        node=task["ref"],
-        note="Paused: back to the pool.",
-    )
-    assert (await ok(client, "get_node", node=task["ref"]))["claimed_by"] is None
-    assert "nothing to release" in await refused(
-        client, "release_claim", actor="ann", node=task["ref"], note="Again."
-    )
-    assert "do not hold a claim" in await refused(
-        client, "renew_claim", actor="ann", node=task["ref"]
-    )
-    await ok(client, "claim_node", actor="bob", node=task["ref"])
+        await ok(by_ann, "release_claim", node=task["ref"], note="Paused: back to the pool.")
+        assert (await ok(client, "get_node", node=task["ref"]))["claimed_by"] is None
+        assert "nothing to release" in await refused(
+            by_ann, "release_claim", node=task["ref"], note="Again."
+        )
+        assert "do not hold a claim" in await refused(by_ann, "renew_claim", node=task["ref"])
+        await ok(by_bob, "claim_node", node=task["ref"])
 
     history = (await ok(client, "node_history", node=task["ref"]))["items"]
     assert [(e["action"], e["actor"]) for e in history if e["action"] != "create"] == [
-        ("claimed", "ann"),
-        ("claim_renewed", "ann"),
-        ("handoff", "ann"),
-        ("claim_released", "ann"),
-        ("claimed", "bob"),
+        ("claimed", ann),
+        ("claim_renewed", ann),
+        ("handoff", ann),
+        ("claim_released", ann),
+        ("claimed", bob),
     ]
 
 
@@ -459,28 +466,23 @@ async def test_work_that_cannot_be_done_now_cannot_be_claimed(client: Client) ->
     await set_status(client, finished, "done")
 
     assert "Only stories and tasks can be claimed" in await refused(
-        client, "claim_node", actor="ann", node=epic["ref"]
+        client, "claim_node", node=epic["ref"]
     )
-    message = await refused(client, "claim_node", actor="ann", node=waiting["ref"])
+    message = await refused(client, "claim_node", node=waiting["ref"])
     assert f"needs {prerequisite['ref']} first" in message
-    assert "is marked blocked" in await refused(
-        client, "claim_node", actor="ann", node=blocked["ref"]
-    )
+    assert "is marked blocked" in await refused(client, "claim_node", node=blocked["ref"])
     assert "is done, so there is nothing left to claim" in await refused(
-        client, "claim_node", actor="ann", node=finished["ref"]
+        client, "claim_node", node=finished["ref"]
     )
     for seconds in (0, 86401):
         assert "lease_seconds must be a whole number from 1 to 86400" in await refused(
-            client, "claim_node", actor="ann", node=story["ref"], lease_seconds=seconds
+            client, "claim_node", node=story["ref"], lease_seconds=seconds
         )
-    assert "actor must be the name" in await refused(
-        client, "claim_node", actor="", node=story["ref"]
-    )
     assert "There is no task 987654321 in this project" in await refused(
-        client, "claim_node", actor="ann", node="task:987654321"
+        client, "claim_node", node="task:987654321"
     )
 
-    await ok(client, "claim_node", actor="ann", node=story["ref"])
+    await ok(client, "claim_node", node=story["ref"])
     # Once its prerequisite is done, a waiting task can be claimed.
     await set_status(client, prerequisite, "done")
-    await ok(client, "claim_node", actor="ann", node=waiting["ref"])
+    await ok(client, "claim_node", node=waiting["ref"])

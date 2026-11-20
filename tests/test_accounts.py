@@ -5,12 +5,39 @@ import pytest
 
 from vrum.accounts import (
     AccessRefusal,
+    clean_agent_name,
+    clean_display_name,
     clean_email,
     digest_of,
     hash_password,
     password_matches,
 )
 from vrum.ratelimit import AttemptLimiter
+
+A_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0" * 2
+
+
+def test_an_agent_key_is_named_for_its_agent_in_one_to_a_hundred_characters() -> None:
+    assert clean_agent_name("  api-agent ") == "api-agent"
+    assert clean_agent_name("x" * 100) == "x" * 100
+    for typed in ("", "   ", "x" * 101):
+        with pytest.raises(AccessRefusal, match="Give the key the name of the agent"):
+            clean_agent_name(typed)
+
+
+def test_a_name_that_is_a_secret_is_refused_without_repeating_it() -> None:
+    with pytest.raises(AccessRefusal, match="looks like a secret") as agent:
+        clean_agent_name(A_TOKEN)
+    with pytest.raises(AccessRefusal, match="looks like a secret") as person:
+        clean_display_name(f"Ada {A_TOKEN}")
+    assert A_TOKEN not in str(agent.value) and A_TOKEN not in str(person.value)
+
+
+def test_a_person_is_shown_by_a_name_of_one_to_a_hundred_characters() -> None:
+    assert clean_display_name("  Lena Okafor ") == "Lena Okafor"
+    for typed in ("", "  ", "n" * 101):
+        with pytest.raises(AccessRefusal, match="Say what to call you"):
+            clean_display_name(typed)
 
 
 def test_a_password_is_kept_as_a_salted_slow_hash_that_only_the_password_matches() -> None:

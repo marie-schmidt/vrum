@@ -125,7 +125,6 @@ async def story(client: Client, epic: str, text: tuple[str, str]) -> str:
     made = await call(
         client,
         "create_node",
-        actor="real-embeddings-check",
         kind="story",
         title=text[0],
         body=text[1],
@@ -142,14 +141,12 @@ async def main(url: str) -> None:
         epic_a = await call(
             client,
             "create_node",
-            actor="real-embeddings-check",
             kind="epic",
             title=f"Real-model check A ({stamp})",
         )
         epic_b = await call(
             client,
             "create_node",
-            actor="real-embeddings-check",
             kind="epic",
             title=f"Real-model check B ({stamp})",
         )

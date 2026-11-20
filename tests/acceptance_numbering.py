@@ -1,16 +1,17 @@
-"""Chapter 17 of the acceptance scenario: numbering (M19). Epics, stories and tasks are numbered on
-their own, and each is named by its kind and number (`epic:3`, `story:12`, `task:40`, shown as E-3,
-S-12 and T-40) in every tool, answer, address, export and database column; a story has a page.
+"""Chapter 17 of the acceptance scenario: numbering (M19, and its pages in M20). Epics, stories and
+tasks are numbered on their own, and each is named by its kind and number (`epic:3`, `story:12`,
+`task:40`, shown as E-3, S-12 and T-40) in every tool, answer, address, export and database column;
+a story has a page, and an epic, story or task has previous and next.
 
 The chapter makes its own account, project and key, so it needs nothing from the chapters before
 it. A real MCP client makes three epics, four stories and five tasks and sees each kind count from
 1; a second project starts again; no answer or database column holds an integer id; a bad
 reference, one that names nothing and one of the wrong kind are refused in plain words; the
 board's own New item goes on from each kind's highest number; the Board, the Graph's list and the
-Roadmap show the codes the server's references give; `sel=story:1` opens the panel and
-`#/item?item=story:1` the page, whose table of tasks is what `list_nodes` lists; and an export
-loads into a second copy of Vrum with every number, which then goes on from the highest of each
-kind."""
+Roadmap show the codes the server's references give; `#/item?item=story:1` is the page of a story,
+whose table of tasks is what `list_nodes` lists and whose previous and next go through the stories
+of its epic; and an export loads into a second copy of Vrum with every number, which then goes on
+from the highest of each kind."""
 
 import re
 import tempfile
@@ -21,15 +22,14 @@ from mcp import Client
 from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
+from tests.acceptance_board import create_here
 from tests.acceptance_scenario import Failed, chapter, clip, proof
 from tests.board_helpers import (
     SLOW,
     Watched,
     board_url,
     browser_page,
-    create_in_browser,
     item_rows,
-    open_tray,
 )
 from tests.helpers import (
     all_nodes,
@@ -188,7 +188,7 @@ async def refusals(project: Project, client: Client) -> None:
 
 
 async def dates_for_the_roadmap(client: Client) -> None:
-    """Dates on three of the items, so that the Roadmap draws bars as well as its tray."""
+    """Dates on three of the items: the Roadmap draws nothing without them."""
     for step, ref in enumerate(("epic:1", "story:1", "task:1"), start=1):
         node = await ok(client, "get_node", node=ref)
         await ok(
@@ -209,15 +209,15 @@ async def the_board_goes_on(w: Watched, client: Client, word: str) -> None:
     page = w.page
     await w.open("#/board")
     await expect(page.locator("#new-item")).to_be_visible(timeout=SLOW)
-    epic = await create_in_browser(page, "epic", f"Board epic {word}")
-    story = await create_in_browser(page, "story", f"Board story {word}", epic)
-    task = await create_in_browser(page, "task", f"Board task {word}", story)
-    shown = words(await page.locator("#card-title").inner_text())
+    epic = await create_here(page, "epic", f"Board epic {word}")
+    story = await create_here(page, "story", f"Board story {word}", epic)
+    task = await create_here(page, "task", f"Board task {word}", story)
+    shown = words(await page.locator("#item-title").inner_text())
     made = await ok(client, "get_node", node=task)
     proof(
         "M19",
         "the Board's own New item goes on from each kind's own highest number: after 3 epics, "
-        "4 stories and 5 tasks it makes epic 4, story 5 and task 6, the panel names the new task "
+        "4 stories and 5 tasks it makes epic 4, story 5 and task 6, the new task's page names it "
         "T-6, and the server has it under story:5",
         (epic, story, task) == ("epic:4", "story:5", "task:6")
         and shown == f"T-6 Board task {word}"
@@ -234,7 +234,7 @@ IN_THE_LIST = """() => Object.fromEntries(
     [...document.querySelectorAll('#work-tree li[role=treeitem]')]
         .map((e) => [e.dataset.ref, e.querySelector(':scope > .gv-row .id').innerText.trim()]))"""
 ON_THE_ROADMAP = """() => Object.fromEntries(
-    [...document.querySelectorAll('.rm-bar[data-ref], .tray-item[data-ref]')]
+    [...document.querySelectorAll('.rm-label[data-ref]')]
         .map((e) => [e.dataset.ref, (/\\b[EST]-\\d+\\b/.exec(e.innerText) || [''])[0]]))"""
 
 
@@ -253,38 +253,42 @@ async def codes_equal_references(w: Watched, client: Client) -> None:
     in_list = await page.evaluate(IN_THE_LIST)
     await w.open("#/roadmap")
     await expect(page.locator(".rm-bar")).to_have_count(3, timeout=SLOW)
-    await open_tray(page)
     on_roadmap = await page.evaluate(ON_THE_ROADMAP)
     proof(
         "M19",
         "the Board, the Graph's list and the Roadmap show E-, S- and T- codes that equal the "
-        "server's references (epic:4 is E-4, story:5 is S-5, task:6 is T-6), for every item the "
-        "server lists",
-        on_board == in_list == on_roadmap == wanted and len(wanted) == 15,
-        f"{len(wanted)} items on each of the three pages",
+        "server's references (epic:4 is E-4, story:5 is S-5, task:6 is T-6): the Board and the "
+        "list for every item the server lists, the Roadmap for the three that have dates",
+        on_board == in_list == wanted
+        and len(wanted) == 15
+        and on_roadmap == {ref: wanted[ref] for ref in ("epic:1", "story:1", "task:1")},
+        f"{len(wanted)} items on the Board and in the list, {len(on_roadmap)} on the Roadmap",
     )
 
 
 async def addresses(w: Watched, client: Client) -> None:
     page = w.page
     story = await ok(client, "get_node", node="story:1")
-    await w.open("#/board?sel=story:1")
-    await expect(page.locator("#panel #card-title")).to_be_visible(timeout=SLOW)
-    opened = words(await page.locator("#panel #card-title").inner_text())
+    await w.open("#/item?item=story:1")
+    await expect(page.locator("#item-title")).to_contain_text("S-1 ", timeout=SLOW)
+    opened = words(await page.locator("#item-title").inner_text())
     await w.open("#/board")
     await expect(page.locator(".card[data-ref='story:1']")).to_be_visible(timeout=SLOW)
-    await page.locator(".card[data-ref='story:1']").click()
-    await expect(page.locator("#panel #card-title")).to_be_visible(timeout=SLOW)
+    await page.locator(".card[data-ref='story:1'] .card-title a").click()
+    await expect(page.locator("#item-page")).to_have_attribute("data-ref", "story:1", timeout=SLOW)
     clicked = page.url
-    await w.open("#/board?sel=node:1")
-    await expect(page.locator("#panel")).to_contain_text("does not name something", timeout=SLOW)
-    nothing_shown = await page.locator("#panel .card-detail").count() == 0
+    await w.open("#/item?item=node:1")
+    await expect(page.locator("#item-page")).to_contain_text("does not name", timeout=SLOW)
+    nothing_shown = await page.locator("#item-page .card-detail").count() == 0
     proof(
         "M19",
-        "an address names an item by kind and number: sel=story:1 opens the detail panel on S-1 "
-        "with the server's title, choosing a card writes sel=story:1 in the address, and the old "
-        "sel=node:1 says in plain words that it names nothing",
-        opened == f"S-1 {story['title']}" and "sel=story:1" in clicked and nothing_shown,
+        "an address names an item by kind and number: item=story:1 opens the page of S-1 with the "
+        "server's title, choosing a card on the Board writes item=story:1 (and the Board as where "
+        "it came from) in the address, and the old node:1 says in plain words that it names "
+        "nothing",
+        opened == f"S-1 {story['title']}"
+        and clicked.endswith("#/item?item=story:1&from=board")
+        and nothing_shown,
         f'"{opened}"',
     )
 
@@ -323,34 +327,86 @@ async def the_page(w: Watched, client: Client) -> None:
         "epic lists its stories with the progress the server gives",
         title == f"S-1 {story['title']}"
         and rows == [t["ref"] for t in story_tasks] == ["task:1", "task:5"]
-        and count == "2 tasks"
+        and count == "(2)"
         and epic_rows == [s["ref"] for s in stories] == ["story:1", "story:4"]
         and progress == done,
         f"{title}: {', '.join(rows)}",
     )
 
-    await w.open("#/board?epic=1&sel=story:1")
-    await expect(page.locator("#panel a.open-page")).to_be_visible(timeout=SLOW)
-    await page.locator("#panel a.open-page").click()
-    await expect(page.locator("#item-page")).to_have_attribute("data-ref", "story:1", timeout=SLOW)
-    by_button = "sel=" not in page.url
+    # Previous and next stay among its siblings, and the view the person came from goes along.
+    siblings = {
+        "story:1": [s["ref"] for s in sorted(stories, key=lambda n: n["number"])],
+        "epic:1": [n["ref"] for n in await all_nodes(client, query="kind:epic")],
+        "task:1": [t["ref"] for t in sorted(story_tasks, key=lambda n: n["number"])],
+    }
+    seen: dict[str, str] = {}
+    at_the_ends = []
+
+    async def is_at(ref: str) -> None:
+        await expect(page.locator("#item-page")).to_have_attribute("data-ref", ref, timeout=SLOW)
+
+    for start in ("story:1", "epic:1", "task:1"):
+        row = siblings[start]
+        await w.open(f"#/item?item={start}&from=graph")
+        await is_at(start)
+        await expect(page.locator("#item-position")).to_have_text(f"1 of {len(row)}", timeout=SLOW)
+        at_the_ends.append(await page.locator("#item-prev").is_disabled())
+        await page.locator("#item-next").click()
+        await is_at(row[1])
+        seen[start] = words(await page.locator("#item-position").inner_text())
+        await page.keyboard.press("[")
+        await is_at(start)
+    await w.open("#/item?item=story:4&from=graph")
+    await is_at("story:4")
+    at_the_ends.append(await page.locator("#item-next").is_disabled())
+    await page.keyboard.press("]")
+    await expect(page.locator("#item-next")).to_be_disabled()
+    kept = page.url.endswith("#/item?item=story:4&from=graph")
+    in_the_graph = words(await page.locator("nav.crumbs .crumb-view").inner_text()) == "Graph"
+    proof(
+        "M20",
+        "the page of an epic, a story and a task has previous and next among its siblings, the "
+        "epics of the project, the stories of its epic and the tasks of its story, in the order of "
+        "their numbers: it says its place (1 of 2 for S-1 and T-1, 1 of 4 for E-1), Next goes to "
+        "the next by number and the [ key back, the buttons are off at the ends, and the view the "
+        "person came from (from=graph) is still in the path after every step",
+        seen
+        == {
+            "story:1": f"2 of {len(siblings['story:1'])}",
+            "epic:1": f"2 of {len(siblings['epic:1'])}",
+            "task:1": f"2 of {len(siblings['task:1'])}",
+        }
+        and siblings["story:1"] == ["story:1", "story:4"]
+        and siblings["task:1"] == ["task:1", "task:5"]
+        and all(at_the_ends)
+        and kept
+        and in_the_graph,
+        f"{len(siblings['epic:1'])} epics, {len(siblings['story:1'])} stories under E-1",
+    )
+
+    await w.open("#/board?epic=1")
+    await expect(page.locator(".card[data-ref='story:1']")).to_be_visible(timeout=SLOW)
+    await page.locator(".card[data-ref='story:1'] .card-title a").click()
+    await is_at("story:1")
+    by_card = page.url.endswith("#/item?item=story:1&from=board")
     await w.open("#/graph?view=work&as=list&epic=1")
     tree = page.locator("#work-tree")
     await expect(tree.locator("li[data-key='story:1']")).to_be_visible(timeout=SLOW)
     await tree.locator("li[data-key='story:1'] > .gv-row a.gv-title").click()
-    await expect(page.locator("#item-page")).to_have_attribute("data-ref", "story:1", timeout=SLOW)
-    by_title = page.url.endswith("#/item?item=story:1")
+    await is_at("story:1")
+    by_title = page.url.endswith("#/item?item=story:1&from=graph")
     await w.open("#/graph?view=work&as=list&epic=1")
     await expect(tree.locator("li[data-key='task:1']")).to_be_visible(timeout=SLOW)
-    await tree.locator("li[data-key='task:1'] > .gv-row .gv-label").click()
-    await expect(page.locator("#panel #card-title")).to_contain_text("T-1", timeout=SLOW)
-    task_opens_the_panel = "sel=task:1" in page.url and "#/graph" in page.url
+    await tree.locator("li[data-key='task:1'] > .gv-row a.gv-title").click()
+    await is_at("task:1")
+    task_has_a_page = page.url.endswith("#/item?item=task:1&from=graph")
     proof(
         "M19",
-        "the detail panel's Open full page button and the title of a story in the Graph's Work "
-        "list reach that page, and a task's title in the list still opens the panel",
-        by_button and by_title and task_opens_the_panel and w.problems == [],
-        "story:1's page by the button and by the title",
+        "a card on the Board and the title of a story or a task in the Graph's Work list each "
+        "open that item's own page, and the address says which view it came from (from=board, "
+        "from=graph)",
+        by_card and by_title and task_has_a_page and w.problems == [],
+        "story:1's page from the Board and from the Graph, task:1's from the Graph",
     )
 
 

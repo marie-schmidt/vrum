@@ -9,7 +9,9 @@ import { REFERENCE_PATTERN, renderReference } from './references.js';
 
 // -- inline: code, references, links, emphasis ------------------------------------------------------
 
-const INLINE = [
+// Built on first use, because references.js (which gives the pattern) and this file need each other.
+let rules = null;
+const inlineRules = () => (rules ??= [
   { name: 'code', re: /`([^`\n]+)`/g },
   { name: 'reference', re: new RegExp(REFERENCE_PATTERN, 'g') },
   { name: 'image', re: /!\[([^\]\n]*)\]\(([^)\s]*)\)/g },
@@ -18,7 +20,7 @@ const INLINE = [
   { name: 'strong', re: /\*\*([^\s*](?:[^*\n]*[^\s*])?)\*\*|__([^\s_](?:[^_\n]*[^\s_])?)__/g },
   { name: 'em', re: /\*([^\s*](?:[^*\n]*[^\s*])?)\*|\b_([^\s_](?:[^_\n]*[^\s_])?)_\b/g },
   { name: 'del', re: /~~([^\s~](?:[^~\n]*[^\s~])?)~~/g },
-];
+]);
 
 const external = (url, ...children) => h('a', { class: 'external', href: url, target: '_blank', rel: 'noopener noreferrer' }, ...children);
 
@@ -28,7 +30,7 @@ export function inline(text, links = true) {
   let at = 0;
   while (at < text.length) {
     let best = null;
-    for (const pattern of INLINE) {
+    for (const pattern of inlineRules()) {
       if (!links && (pattern.name === 'link' || pattern.name === 'url' || pattern.name === 'reference')) continue;
       pattern.re.lastIndex = at;
       const found = pattern.re.exec(text);
@@ -194,4 +196,23 @@ export function blocks(lines) {
 export function renderMarkdown(source, { className = 'markdown' } = {}) {
   const text = String(source ?? '').replace(/\r\n?/g, '\n').replace(/\x00/g, '');
   return h('div', { class: className }, ...blocks(text.split('\n')));
+}
+
+// What the Markdown says as plain words on one line, for a place that cannot show it as Markdown (a
+// cell of a table, a title). It is what renderMarkdown shows, read back as text, so only the marks
+// the renderer turns into formatting go: an unpaired or in-word `_` or `*` stays, a link is its words
+// and a reference is its code and title. Only the start is read, which is all such a place shows.
+const BLOCKS = new Set(['P', 'LI', 'UL', 'OL', 'PRE', 'BLOCKQUOTE', 'BR', 'HR', 'H4', 'H5', 'H6', 'DIV']);
+export function plainText(source) {
+  const words = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) words.push(node.data);
+    else {
+      if (BLOCKS.has(node.tagName)) words.push(' ');
+      node.childNodes.forEach(walk);
+      if (BLOCKS.has(node.tagName)) words.push(' ');
+    }
+  };
+  walk(renderMarkdown(String(source ?? '').slice(0, 4000)));
+  return words.join('').replace(/\s+/g, ' ').trim();
 }

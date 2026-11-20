@@ -22,6 +22,7 @@ def _tokens() -> list[tuple[str, str]]:
             "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
         ),
         ("a GitLab token", "glpat-" + "abcdefghij0123456789"),
+        ("a Vrum invitation", "vri_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5"),
     ]
 
 

@@ -29,9 +29,9 @@ from vrum.embeddings import BATCH_SIZE, EmbeddingRejected, EmbeddingUnavailable,
 from vrum.graph import require_node
 from vrum.indexing import Indexer, IndexSnapshot, snapshot
 from vrum.items import NamedItem, named
-from vrum.records import label_of
+from vrum.records import headline_of
 
-ITEM_TYPES = ("epic", "story", "task", "rule", "decision", "fact")
+ITEM_TYPES = ("epic", "story", "task", "rule", "note")
 # Every status any of them can have, so a filter can be checked in plain words.
 STATUSES = (
     "new",
@@ -40,9 +40,10 @@ STATUSES = (
     "blocked",
     "done",
     "dropped",
-    "held",
-    "settled",
-    "active",
+    "open",
+    "met",
+    "unconfirmed",
+    "confirmed",
     "superseded",
     "withdrawn",
 )
@@ -62,7 +63,7 @@ class IndexNote(BaseModel):
         description="How meaning was used: used; not_requested (you asked for words only); "
         "not_configured (no embedding service is set up); service_unreachable (it could not be "
         "reached, so only exact words were used); or index_not_ready (the index is not built yet "
-        "or was built with another model; run reindex)."
+        "or was built with another model: wait a few seconds, or ask whoever runs the server)."
     )
     note: str = Field(description="In plain words, what that means for these results.")
     waiting_to_index: int = Field(
@@ -73,18 +74,13 @@ class IndexNote(BaseModel):
 
 class SearchResult(NamedItem):
     title: str
-    label: str = Field(
-        description="What this is, in plain words. For a decision or fact it says whether it is "
-        "in force and whether a person confirmed it."
+    status: str = Field(
+        description="Its status now, read from the graph. For a note: unconfirmed, confirmed, "
+        "superseded or withdrawn."
     )
-    confirmation: str | None = Field(
-        description="For a decision or fact: confirmed or unconfirmed. Empty for work and "
-        "requirements."
-    )
-    status: str = Field(description="Its status now, read from the graph.")
     parent: str | None = Field(
-        description="Its parent now, as a ref: the epic of a story, the story of a task or a "
-        "requirement."
+        description="Its parent now, as a ref: the epic of a story, the story of a task, or the "
+        "story or task an acceptance criterion is on."
     )
     parent_kind: str | None
     parent_title: str | None
@@ -123,8 +119,8 @@ class OverlapItem(NamedItem):
     title: str
     status: str
     epic: str | None = Field(
-        description="The ref of its epic (itself, for an epic). Empty for a requirement that is "
-        "not placed in a story."
+        description="The ref of its epic (itself, for an epic). Empty for an acceptance "
+        "criterion that is not placed on a story or task."
     )
     epic_title: str | None
 
@@ -219,15 +215,19 @@ class Searcher:
 
     async def index_state(self) -> IndexNote:
         """Whether search by meaning can be used right now, and how many items are waiting to be
-        indexed: what every search says about the index, for whoever wants only that."""
+        indexed: what every search says about the index, for whoever wants only that. A service
+        that the background job could not reach the last time it tried counts as out of reach."""
         client = self._indexer.client
         async with self._database.transaction() as conn:
             state = await snapshot(conn, client.model if client else None)
         if client is None:
             return self._index_note(state, "not_configured")
-        return self._index_note(
-            state, "used" if state.usable_with(client.model) else "index_not_ready"
-        )
+        if not state.usable_with(client.model):
+            return self._index_note(state, "index_not_ready")
+        last = self._indexer.last_run
+        if last is not None and last.error:
+            return self._index_note(state, "service_unreachable")
+        return self._index_note(state, "used")
 
     def _index_note(self, state: IndexSnapshot, meaning: str, note: str | None = None) -> IndexNote:
         notes = {
@@ -237,7 +237,7 @@ class Searcher:
             "service_unreachable": "The embedding service could not be reached, so only exact "
             "words were searched.",
             "index_not_ready": "The index is not ready for this model, so only exact words were "
-            "searched. Run reindex, or wait a few seconds.",
+            "searched. Wait a few seconds, or ask whoever runs the server.",
         }
         text = note or notes[meaning]
         if state.waiting and meaning == "used":
@@ -347,8 +347,7 @@ class Searcher:
         *,
         node: str | None,
         rule_id: int | None,
-        decision_id: int | None,
-        fact_id: int | None,
+        note_id: int | None,
         text: str | None,
         types: list[str] | None,
         min_similarity: float | None,
@@ -363,16 +362,15 @@ class Searcher:
             for name, value in (
                 ("node", node),
                 ("rule_id", rule_id),
-                ("decision_id", decision_id),
-                ("fact_id", fact_id),
+                ("note_id", note_id),
                 ("text", text),
             )
             if value is not None
         ]
         if len(given) != 1:
             raise Refusal(
-                "Give exactly one of node, rule_id, decision_id, fact_id or text: the thing "
-                "to find similar items for."
+                "Give exactly one of node, rule_id, note_id or text: the thing to find similar "
+                "items for."
             )
         if node is not None:
             node = parse_node_ref(node, "node")
@@ -381,13 +379,12 @@ class Searcher:
         found = await self._similar(
             node=node,
             rule_id=rule_id,
-            decision_id=decision_id,
-            fact_id=fact_id,
+            note_id=note_id,
             text=_clean_query(text, "text") if text is not None else None,
             wanted_types=wanted_types,
             floor=floor,
             exclude=set(),
-            active_only=False,
+            in_force_only=False,
             required=True,
         )
         candidates, details, statuses_of, note = found
@@ -421,13 +418,12 @@ class Searcher:
         found = await self._similar(
             node=node,
             rule_id=rule_id,
-            decision_id=None,
-            fact_id=None,
+            note_id=None,
             text=None,
             wanted_types=wanted_types,
             floor=self._min_similarity,
             exclude=exclude,
-            active_only=True,
+            in_force_only=True,
             required=False,
             timeout=timeout,
         )
@@ -443,13 +439,12 @@ class Searcher:
         *,
         node: str | None,
         rule_id: int | None,
-        decision_id: int | None,
-        fact_id: int | None,
+        note_id: int | None,
         text: str | None,
         wanted_types: list[str] | None,
         floor: float,
         exclude: set[tuple[str, int]],
-        active_only: bool,
+        in_force_only: bool,
         required: bool,
         timeout: float | None = None,
     ) -> tuple[
@@ -462,7 +457,7 @@ class Searcher:
         model = client.model if client else None
         async with self._database.transaction() as conn:
             state = await snapshot(conn, model)
-            source = await _source(conn, node, rule_id, decision_id, fact_id, text)
+            source = await _source(conn, node, rule_id, note_id, text)
             stored = None
             if source.item is not None and state.usable_with(model or ""):
                 stored = await _stored_vector(conn, source.item)
@@ -490,9 +485,9 @@ class Searcher:
                 for rank, (item_type, item_id, similarity) in enumerate(neighbours, start=1)
                 if (item_type, item_id) != source.item and (item_type, item_id) not in exclude
             ]
-            if active_only:
-                active = await _active(conn, [(c.item_type, c.id) for c in candidates])
-                candidates = [c for c in candidates if (c.item_type, c.id) in active]
+            if in_force_only:
+                in_force = await _in_force(conn, [(c.item_type, c.id) for c in candidates])
+                candidates = [c for c in candidates if (c.item_type, c.id) in in_force]
             pairs = [(c.item_type, c.id) for c in candidates]
             statuses_of = await _statuses(conn, pairs)
             details = await _details(conn, pairs, None)
@@ -741,24 +736,22 @@ _STATUS_QUERIES = (
         "SELECT kind AS item_type, number AS id, status FROM node_state WHERE ref = ANY(%(refs)s)",
     ),
     (("rule",), "SELECT 'rule' AS item_type, id, status FROM rules WHERE id = ANY(%(ids)s)"),
-    (
-        ("decision",),
-        "SELECT 'decision' AS item_type, id, status FROM decisions WHERE id = ANY(%(ids)s)",
-    ),
-    (("fact",), "SELECT 'fact' AS item_type, id, status FROM facts WHERE id = ANY(%(ids)s)"),
+    (("note",), "SELECT 'note' AS item_type, id, status FROM notes WHERE id = ANY(%(ids)s)"),
 )
 
 
-async def _active(conn: AsyncConnection, pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
-    """Which of these are in force: an active decision or fact, and any work or requirement."""
+async def _in_force(conn: AsyncConnection, pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
+    """Which of these are in force: a note that is unconfirmed or confirmed, and any work or
+    acceptance criterion."""
     keep: set[tuple[str, int]] = set()
-    for kind, table in (("decision", "decisions"), ("fact", "facts")):
-        ids = [i for item_kind, i in pairs if item_kind == kind]
-        if ids:
-            for row in await fetch_all(
-                conn, f"SELECT id FROM {table} WHERE id = ANY(%s) AND status = 'active'", (ids,)
-            ):
-                keep.add((kind, row["id"]))
+    ids = [i for kind, i in pairs if kind == "note"]
+    if ids:
+        for row in await fetch_all(
+            conn,
+            "SELECT id FROM notes WHERE id = ANY(%s) AND status IN ('unconfirmed', 'confirmed')",
+            (ids,),
+        ):
+            keep.add(("note", row["id"]))
     keep.update(pair for pair in pairs if pair[0] in ("epic", "story", "task", "rule"))
     return keep
 
@@ -791,7 +784,7 @@ _DETAIL_QUERIES = (
     (
         _NODE_TYPES,
         "SELECT s.kind AS item_type, s.number AS id, s.title, s.status, s.parent, "
-        "p.kind AS parent_kind, p.title AS parent_title, initcap(s.kind) AS label, "
+        "p.kind AS parent_kind, p.title AS parent_title, "
         "s.title || E'\\n' || s.body AS content, "
         + _HEADLINE.format(search="n.search", content="s.title || E'\\n' || s.body")
         + " AS headline FROM node_state s JOIN nodes n ON n.ref = s.ref "
@@ -799,45 +792,22 @@ _DETAIL_QUERIES = (
     ),
     (
         ("rule",),
-        "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.story AS parent, "
-        "'story' AS parent_kind, p.title AS parent_title, 'Requirement' AS label, "
+        "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.node AS parent, "
+        "p.kind AS parent_kind, p.title AS parent_title, "
         "r.title || E'\\n' || r.body AS content, "
         + _HEADLINE.format(search="r.search", content="r.title || E'\\n' || r.body")
-        + " AS headline FROM rules r LEFT JOIN nodes p ON p.ref = r.story "
+        + " AS headline FROM rules r LEFT JOIN nodes p ON p.ref = r.node "
         "WHERE r.id = ANY(%(ids)s)",
     ),
     (
-        ("decision",),
-        "SELECT 'decision' AS item_type, d.id, d.title, d.status, NULL::text AS parent, "
-        "NULL::text AS parent_kind, NULL::text AS parent_title, d.project_wide, "
-        "d.confirmed_by, d.confirmed_at, "
-        "d.title || E'\\n' || d.text || E'\\n' || d.reason AS content, "
-        + _HEADLINE.format(
-            search="d.search", content="d.title || E'\\n' || d.text || E'\\n' || d.reason"
-        )
-        + " AS headline FROM decisions d WHERE d.id = ANY(%(ids)s)",
-    ),
-    (
-        ("fact",),
-        "SELECT 'fact' AS item_type, f.id, left(f.text, 90) AS title, f.status, "
-        "NULL::text AS parent, NULL::text AS parent_kind, NULL::text AS parent_title, "
-        "f.source, f.confirmed_by, f.confirmed_at, f.text AS content, "
-        + _HEADLINE.format(search="f.search", content="f.text")
-        + " AS headline FROM facts f WHERE f.id = ANY(%(ids)s)",
+        ("note",),
+        "SELECT 'note' AS item_type, n.id, n.text AS title, n.status, NULL::text AS parent, "
+        "NULL::text AS parent_kind, NULL::text AS parent_title, "
+        "n.text || E'\\n' || n.why AS content, "
+        + _HEADLINE.format(search="n.search", content="n.text || E'\\n' || n.why")
+        + " AS headline FROM notes n WHERE n.id = ANY(%(ids)s)",
     ),
 )
-
-
-def _label_and_confirmation(row: dict[str, Any]) -> tuple[str, str | None]:
-    item_type = row["item_type"]
-    if item_type == "decision":
-        return label_of("decision", row), "confirmed" if row["confirmed_by"] else "unconfirmed"
-    if item_type == "fact":
-        return (
-            f"{label_of('fact', row)}. Source: {row['source']}",
-            "confirmed" if row["confirmed_by"] else "unconfirmed",
-        )
-    return row["label"], None
 
 
 def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
@@ -847,7 +817,7 @@ def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
     matched = candidate.matched
     if matched != "meaning" and not headline:
         # It matched by words, but only in a part of the text that has nothing to highlight, such
-        # as a fact's source.
+        # as a note's reason.
         words_matched = []
     why_parts = []
     if matched in ("words", "both"):
@@ -857,14 +827,11 @@ def _result(row: dict[str, Any], candidate: _Candidate) -> SearchResult:
     if matched in ("meaning", "both") and candidate.similarity is not None:
         why_parts.append(f"similar in meaning (score {candidate.similarity:.2f})")
     item_type = row["item_type"]
-    label, confirmation = _label_and_confirmation(row)
     snippet = _squash(headline) if headline else _short(row["content"], 200)
-    title = _short(row["title"], 90) if item_type == "fact" else row["title"]
+    title = headline_of(row["title"]) if item_type == "note" else row["title"]
     return SearchResult(
         **named(item_type, row["id"]),
         title=title,
-        label=label,
-        confirmation=confirmation,
         status=row["status"],
         parent=row["parent"],
         parent_kind=row["parent_kind"],
@@ -888,8 +855,7 @@ async def _source(
     conn: AsyncConnection,
     node: str | None,
     rule_id: int | None,
-    decision_id: int | None,
-    fact_id: int | None,
+    note_id: int | None,
     text: str | None,
 ) -> _Source:
     """The item or text that similar items are wanted for, as one text. The item is named as the
@@ -914,29 +880,20 @@ async def _source(
             (rule_id,),
         )
         missing = (
-            f"There is no requirement with id {rule_id}. Use list_rules to find the id you want."
-        )
-    elif decision_id is not None:
-        row = await fetch_one(
-            conn,
-            "SELECT 'decision' AS item_type, btrim(title || E'\\n' || text || E'\\n' || reason) "
-            "AS content FROM decisions WHERE id = %s",
-            (decision_id,),
-        )
-        missing = (
-            f"There is no decision with id {decision_id}. Use list_decisions to find the id you "
-            "want."
+            f"There is no acceptance criterion with id {rule_id}. Use list_rules to find the id "
+            "you want."
         )
     else:
         row = await fetch_one(
             conn,
-            "SELECT 'fact' AS item_type, btrim(text) AS content FROM facts WHERE id = %s",
-            (fact_id,),
+            "SELECT 'note' AS item_type, btrim(text || E'\\n' || why) AS content FROM notes "
+            "WHERE id = %s",
+            (note_id,),
         )
-        missing = f"There is no fact with id {fact_id}. Use list_facts to find the id you want."
+        missing = f"There is no note with id {note_id}. Use list_notes to find the id you want."
     if row is None:
         raise Refusal(missing)
-    item_id = rule_id or decision_id or fact_id
+    item_id = rule_id or note_id
     assert item_id is not None
     return _Source((row["item_type"], item_id), row["content"])
 
@@ -975,12 +932,14 @@ _OVERLAP_ITEMS = {
         "WHERE i.item_type = 'story' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "rule": (
-        "SELECT i.item_id AS id, i.embedding, p.parent AS epic FROM semantic_index i "
+        "SELECT i.item_id AS id, i.embedding, "
+        "CASE p.kind WHEN 'story' THEN p.parent ELSE ps.parent END AS epic FROM semantic_index i "
         "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
         "AND s.id = i.item_id "
         "AND s.content_hash = i.content_hash JOIN rules r ON r.project_id = i.project_id "
         "AND r.id = i.item_id "
-        "LEFT JOIN nodes p ON p.project_id = r.project_id AND p.ref = r.story "
+        "LEFT JOIN nodes p ON p.project_id = r.project_id AND p.ref = r.node "
+        "LEFT JOIN nodes ps ON ps.project_id = p.project_id AND ps.ref = p.parent "
         "WHERE i.item_type = 'rule' AND (%(dropped)s OR r.status <> 'dropped')"
     ),
 }
@@ -1012,9 +971,11 @@ async def _overlap_items(
         return {}
     if item_type == "rule":
         sql = (
-            "SELECT r.id, r.title, r.status, p.parent AS epic, e.title AS epic_title "
-            "FROM rules r LEFT JOIN nodes p ON p.ref = r.story "
-            "LEFT JOIN nodes e ON e.ref = p.parent WHERE r.id = ANY(%(numbers)s)"
+            "SELECT r.id, r.title, r.status, e.ref AS epic, e.title AS epic_title "
+            "FROM rules r LEFT JOIN nodes p ON p.ref = r.node "
+            "LEFT JOIN nodes ps ON ps.ref = p.parent "
+            "LEFT JOIN nodes e ON e.ref = CASE p.kind WHEN 'story' THEN p.parent "
+            "ELSE ps.parent END WHERE r.id = ANY(%(numbers)s)"
         )
     else:
         sql = (

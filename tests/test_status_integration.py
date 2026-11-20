@@ -10,6 +10,7 @@ import pytest
 from mcp import Client
 
 from tests.helpers import (
+    connect_as,
     embeddings_stopped,
     make_decision,
     make_fact,
@@ -26,7 +27,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
     _, story, _ = await make_tree(client)
-    await ok(client, "create_rule", actor="marie", title="A rule", story=story["ref"])
+    await ok(client, "create_rule", actor="marie", title="A rule", node=story["ref"])
     await make_decision(client, "A decision")
     await make_decision(client, "A project-wide decision", project_wide=True)
     await make_fact(client, "A fact")
@@ -41,20 +42,19 @@ async def test_the_sizes_are_what_the_list_tools_count(client: Client) -> None:
         "tasks",
         "links",
         "rules",
-        "decisions",
-        "facts",
+        "notes",
         "events",
     }
     for name, kind in (("epics", "epic"), ("stories", "story"), ("tasks", "task")):
         assert counts[name] == (await ok(client, "list_nodes", kind=kind, limit=1))["total"], name
     assert counts["rules"] == (await ok(client, "list_rules", limit=1))["total"]
-    assert counts["decisions"] == (await ok(client, "list_decisions", limit=1))["total"]
-    assert counts["facts"] == (await ok(client, "list_facts", limit=1))["total"]
-    assert counts["decisions"] >= 2 and counts["facts"] >= 1
+    assert counts["notes"] == (await ok(client, "list_notes", limit=1))["total"]
+    # Decisions and facts are counted together: they are both notes.
+    assert counts["notes"] >= 3
     exported = (await ok(client, "export_graph", limit=1))["counts"]
     assert counts["links"] == exported["links"] and counts["events"] == exported["events"]
     assert counts["epics"] + counts["stories"] + counts["tasks"] == exported["nodes"]
-    assert (counts["decisions"], counts["facts"]) == (exported["decisions"], exported["facts"])
+    assert counts["notes"] == exported["notes"]
 
 
 async def test_the_index_state_equals_what_search_says_and_is_never_a_secret(
@@ -128,19 +128,24 @@ async def test_who_is_working_says_who_holds_what_who_lapsed_and_who_finished(
         for number in range(3)
     ]
     # Names that only this test uses: other tests' agents are in the same list.
+    # Who an agent is comes from its key, so each of the three has a key named for them.
     word = unique_word()
     working, lapsing, finishing = (f"{name}-{word}" for name in ("ann", "bob", "cy"))
-    await ok(client, "claim_node", actor=working, node=tasks[0]["ref"], lease_seconds=600)
-    await ok(client, "claim_node", actor=lapsing, node=tasks[1]["ref"], lease_seconds=1)
-    await ok(client, "claim_node", actor=finishing, node=tasks[2]["ref"])
-    await ok(
-        client,
-        "finish_work",
-        actor=finishing,
-        node=tasks[2]["ref"],
-        outcome="done",
-        note="All of it is done.\nSecond line.",
-    )
+    async with (
+        connect_as(working) as ann,
+        connect_as(lapsing) as bob,
+        connect_as(finishing) as cy,
+    ):
+        await ok(ann, "claim_node", node=tasks[0]["ref"], lease_seconds=600)
+        await ok(bob, "claim_node", node=tasks[1]["ref"], lease_seconds=1)
+        await ok(cy, "claim_node", node=tasks[2]["ref"])
+        await ok(
+            cy,
+            "finish_work",
+            node=tasks[2]["ref"],
+            outcome="done",
+            note="All of it is done.\nSecond line.",
+        )
     await anyio.sleep(1.6)
 
     result = await ok(client, "who_is_working")

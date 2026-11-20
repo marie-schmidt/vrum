@@ -22,11 +22,13 @@ from tests.acceptance_accounts import accounts
 from tests.acceptance_appearance import appearance
 from tests.acceptance_board import board
 from tests.acceptance_context import context
+from tests.acceptance_demo import demo
 from tests.acceptance_finding import finding
 from tests.acceptance_graph import graph
 from tests.acceptance_hardening import hardening
 from tests.acceptance_moving import moving
 from tests.acceptance_numbering import numbering
+from tests.acceptance_pages import pages
 from tests.acceptance_quickstart import quickstart
 from tests.acceptance_scenario import (
     PROOFS,
@@ -42,7 +44,8 @@ from tests.acceptance_search import searching
 from tests.acceptance_utilities import utilities
 from tests.board_helpers import SLOW
 
-# `moving` is last: it destroys the database it started with.
+# `moving` is last: it destroys the database it started with. `demo` runs ./demo.sh, which is a
+# separate stack of its own, and so needs nothing from the walk's stack.
 CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "arriving": arriving,
     "planning": planning,
@@ -56,10 +59,12 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "context": context,
     "searching": searching,
     "utilities": utilities,
+    "pages": pages,
     "accounts": accounts,
     "appearance": appearance,
     "quickstart": quickstart,
     "numbering": numbering,
+    "demo": demo,
     "moving": moving,
 }
 

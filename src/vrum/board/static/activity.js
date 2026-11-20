@@ -1,26 +1,34 @@
-// Activity, in the drawer: everything that happens, newest first, in plain words, and above it who
-// is working on what. The feed is the server's change feed (the newest changes first, and older
-// ones when asked for), filtered by who, what kind of change, which item and when; the actor and
-// the item are asked of the server and the kind and the days are worked out here on what was
-// read. The claims are `who_is_working`: every claim in force with a countdown to its lease, the
-// claims that ran out, each person's or agent's state, and buttons to take, renew or release work
-// under the name the person typed, which are the same operations an agent calls. The filters are
-// in the address, with the prefix act_ (act_actor, act_kind, act_item, act_from, act_to).
+// The Activity page (#/activity): everything that happens, newest first, in plain words, and beside
+// it who is working on what. The feed is the server's change feed (the newest changes first, and
+// older ones when asked for), filtered by who, what kind of change, which item and when; the
+// actor and the item are asked of the server and the kind and the days are worked out here on what
+// was read. The claims are `who_is_working`: every claim in force with a countdown to its lease,
+// the claims that ran out, each person's or agent's state, and buttons to take work as the person
+// signed in and to renew or release the claims they hold, which are the same operations an agent
+// calls. The filters
+// are in the address, with the prefix act_ (act_actor, act_kind, act_item, act_from, act_to).
 
 import { Refusal, call } from './api.js';
-import { actor, notify, recordLink, ui } from './ctx.js';
+import { account, can, isMe, itemLink, notify, ui } from './ctx.js';
+import { dateField } from './datepicker.js';
 import { clear, h, moment, plural, put } from './dom.js';
-import { CHANGE_KINDS, aboutItem, eventRow, kindOfAction } from './events.js';
-import { dialogForm, field, openDialog } from './forms.js';
+import { CHANGE_KINDS, aboutItem, dayKey, dayLabel, eventRow, kindOfAction } from './events.js';
 import { icon } from './icons.js';
-import { codeOf, kindIcon, nodeRef, parseNodeRef } from './labels.js';
+import { actorLabel, codeOf, kindIcon, nodeRef } from './labels.js';
+import { pageHeader } from './page.js';
+import { releaseDialog } from './records.js';
 import { ensureContext, sync } from './store.js';
 
 const PAGE = 100;
 const WANT = 50; // rows to show before a filter on the kind or the days stops reading back
 const MOST_PAGES = 40; // and the most pages it reads for one look, so it cannot run away
 const DEFAULT_LEASE = 900;
+const FREE_PAGE = 10; // free work is read this many at a time, and "Show more" reads this many more
+const MOST_FREE = 200; // the most one read can give
 const FILTERS = ['act_actor', 'act_kind', 'act_item', 'act_from', 'act_to'];
+// On a phone the claims fold away; on a wide window they sit beside the changes (see mount).
+const NARROW = matchMedia('(max-width: 699.98px)');
+const WIDE = matchMedia('(min-width: 1280px)');
 
 let root = null;
 let params = new URLSearchParams();
@@ -29,20 +37,25 @@ let events = []; // what has been read, newest first
 let older = null; // the event to read back from, or null when nothing older is left
 let working = null; // the last answer of who_is_working
 let free = []; // ready work nobody holds
+let freeTotal = 0; // how much there is in all, of which `free` is the first of
+let freeLimit = FREE_PAGE; // how many of it to read
+const opened = new Set(); // the changes whose "Show what changed" is open, kept across a redraw
 let skew = 0; // the server's clock minus this one's, in milliseconds
 let loadedFor = '';
 let shownFilters = ''; // the filters the boxes were last filled from
 let generation = 0; // the feed that is wanted now
-let life = 0; // this showing of the drawer, so that a late answer for an earlier one is dropped
+let life = 0; // this showing of the page, so that a late answer for an earlier one is dropped
 let ticker = null;
+let keepOpen = () => {}; // the claims cannot be folded on a wide window
 let refetching = false;
+let loadingOlder = false; // an older page is being read, so "Show older changes" waits
 let drawn = null; // what the claims were last drawn from
 let typed = { lease: String(DEFAULT_LEASE), code: '' }; // what is in its boxes, kept across a redraw
 
 // -- the filters --------------------------------------------------------------------------------------
 
-// An item as typed or in the address: S-12, story:12, story 12, requirement 3, rule:3, decision:7,
-// fact 5. A piece of work comes back as { ref }, a requirement, decision or fact as { kind, id },
+// An item as typed or in the address: S-12, story:12, story 12, criterion 3, rule:3, note:7,
+// note 7. A piece of work comes back as { ref }, an acceptance criterion or a note as { kind, id },
 // and anything else as null. A bare number names nothing, since each kind is numbered on its own.
 const LETTERS = { e: 'epic', s: 'story', t: 'task' };
 
@@ -50,14 +63,14 @@ export function parseItem(text) {
   const words = String(text || '').trim().toLowerCase();
   const code = /^([est])-(\d+)$/.exec(words);
   if (code) return { ref: nodeRef(LETTERS[code[1]], Number(code[2])) };
-  const named = /^(epic|story|task|rule|requirement|decision|fact)\s*:?\s*#?(\d+)$/.exec(words);
+  const named = /^(epic|story|task|rule|requirement|acceptance criterion|criterion|note)\s*:?\s*#?(\d+)$/.exec(words);
   if (!named) return null;
   const number = Number(named[2]);
   if (['epic', 'story', 'task'].includes(named[1])) return { ref: nodeRef(named[1], number) };
-  return { kind: named[1] === 'requirement' ? 'rule' : named[1], id: number };
+  return { kind: named[1] === 'note' ? 'note' : 'rule', id: number };
 }
 
-const ITEM_HELP = 'Name an item by its code or its kind and number, such as S-12, story 12, requirement 3, decision 7 or fact 5.';
+const ITEM_HELP = 'Name an item by its code or its kind and number, such as S-12, story 12, criterion 3 or note 7.';
 
 function filters() {
   const text = (params.get('act_item') || '').trim();
@@ -90,7 +103,7 @@ function keeps(event, f) {
   return true;
 }
 
-// -- the drawer -----------------------------------------------------------------------------------
+// -- the page -------------------------------------------------------------------------------------
 
 export async function mount(element, initial) {
   root = element;
@@ -98,31 +111,48 @@ export async function mount(element, initial) {
   params = initial;
   events = [];
   older = null;
+  loadingOlder = false;
   working = null;
   drawn = null;
   typed = { lease: String(DEFAULT_LEASE), code: '' };
   free = [];
+  freeTotal = 0;
+  freeLimit = FREE_PAGE;
+  opened.clear();
   loadedFor = '';
   const control = (name, tag, props = {}, ...children) => h(tag, { id: `a-${name}`, name, ...props }, ...children);
   parts = {
     actor: control('actor', 'input', { type: 'text', list: 'a-who', autocomplete: 'off', placeholder: 'a name' }),
     kind: control('kind', 'select', {}, [['', 'Everything'], ...CHANGE_KINDS.map(([value, label]) => [value, label])].map(([value, label]) => h('option', { value }, label))),
-    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: 'S-12, requirement 3, decision 7, fact 5' }),
-    from: control('from', 'input', { type: 'date' }),
-    to: control('to', 'input', { type: 'date' }),
+    item: control('item', 'input', { type: 'text', autocomplete: 'off', placeholder: 'S-12, criterion 3, note 7' }),
+    from: control('from', 'input'),
+    to: control('to', 'input'),
     who: h('datalist', { id: 'a-who' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'activity-problem' }),
     itemProblem: h('p', { class: 'problem', role: 'alert', id: 'activity-item-problem' }),
     summary: h('p', { class: 'count', id: 'activity-count', role: 'status' }),
     feed: h('div', { id: 'feed' }),
-    side: h('section', { id: 'working', 'aria-label': 'Who is working on what' }),
+    sideCount: h('span', { class: 'side-count quiet' }),
+    sideBody: h('div', { class: 'working-body' }),
   };
+  // On a phone the claims start folded away, so that the changes are not a screen further down; on
+  // a wide window they sit beside the changes and cannot be folded.
+  const fold = h('summary', {}, icon('chevron_right', { size: 16, className: 'fold-chevron' }), h('h2', {}, 'Who is working on what'), parts.sideCount);
+  parts.side = h('details', { id: 'working', class: 'activity-side', open: !NARROW.matches }, fold, parts.sideBody);
+  keepOpen = () => {
+    if (WIDE.matches) parts.side.open = true;
+    // Folding does nothing there, so the keyboard passes it by.
+    fold.tabIndex = WIDE.matches ? -1 : 0;
+  };
+  parts.side.addEventListener('toggle', keepOpen);
+  WIDE.addEventListener('change', keepOpen);
+  keepOpen();
   const label = (name, text) => h('label', { for: `a-${name}` }, text);
   const labelled = (name, text, control, ...more) => h('div', { class: `field act-${name}` }, label(name, text), control, ...more);
   const form = h(
     'form',
     {
-      class: 'drawer-form activity-filter',
+      class: 'filter-form activity-filter',
       id: 'activity-filter',
       role: 'search',
       onsubmit: (event) => {
@@ -142,22 +172,30 @@ export async function mount(element, initial) {
       labelled('actor', 'Who', parts.actor, parts.who),
       labelled('kind', 'Kind of change', parts.kind),
       labelled('item', 'About', parts.item),
-      labelled('from', 'From day', parts.from),
-      labelled('to', 'To day', parts.to),
-    ),
-    h(
-      'div',
-      { class: 'buttons' },
-      h('button', { type: 'submit', class: 'primary', id: 'apply-activity' }, 'Apply'),
-      h('button', { type: 'button', id: 'clear-activity', onclick: () => ui.navigate(Object.fromEntries(FILTERS.map((name) => [name, null]))) }, 'Clear'),
-      h('span', { class: 'quiet' }, 'Days are UTC days.'),
+      labelled('from', 'From day (UTC)', dateField(parts.from, 'From day')),
+      labelled('to', 'To day (UTC)', dateField(parts.to, 'To day')),
+      h(
+        'div',
+        { class: 'buttons act-buttons' },
+        h('button', { type: 'submit', id: 'apply-activity' }, 'Apply'),
+        h('button', { type: 'button', id: 'clear-activity', onclick: () => ui.navigate(Object.fromEntries(FILTERS.map((name) => [name, null]))) }, icon('clear', { size: 16 }), 'Clear'),
+      ),
     ),
   );
-  put(parts.side, h('h3', {}, 'Who is working on what'), h('p', { class: 'loading', role: 'status' }, 'Reading the claims…'));
+  put(parts.sideBody, h('p', { class: 'loading', role: 'status' }, 'Reading the claims…'));
   put(
     root,
-    parts.side,
-    h('section', { id: 'feed-section', 'aria-label': 'Changes, newest first' }, h('h3', {}, 'Changes'), form, parts.problem, parts.itemProblem, parts.summary, parts.feed),
+    h(
+      'div',
+      { class: 'activity-page' },
+      pageHeader('Activity'),
+      h(
+        'div',
+        { class: 'activity-layout' },
+        h('section', { id: 'feed-section', class: 'activity-feed', 'aria-label': 'Changes, newest first' }, h('h2', {}, 'Changes'), form, parts.problem, parts.itemProblem, parts.summary, parts.feed),
+        parts.side,
+      ),
+    ),
   );
   fillForm();
   try {
@@ -177,6 +215,7 @@ export function unmount() {
   root = null;
   clearInterval(ticker);
   ticker = null;
+  WIDE.removeEventListener('change', keepOpen);
 }
 
 export function update(next) {
@@ -231,7 +270,9 @@ async function fill(want) {
     if (shown >= want || (f.from && oldest && oldest < f.from)) return;
     const page = await readBack(older);
     if (mine !== generation || !root) return;
-    events.push(...[...page.items].reverse());
+    // A page that was read twice must never be drawn twice: an event is kept once, by its id.
+    const have = new Set(events.map((event) => event.id));
+    events.push(...[...page.items].reverse().filter((event) => !have.has(event.id)));
     older = page.next_before_id;
     pages += 1;
   }
@@ -266,18 +307,28 @@ async function loadFeed(fresh) {
   drawFeed();
 }
 
+// "Show older changes": one read at a time. A second press while the first is still being read does
+// nothing (the button is disabled meanwhile), so a page is never added twice.
 async function showOlder() {
+  if (loadingOlder) return;
+  loadingOlder = true;
+  const mine = generation;
   const before = events.length;
   const f = filters();
   const shown = events.filter((event) => keeps(event, f)).length;
+  parts.feed.querySelector('#show-older')?.setAttribute('disabled', '');
   try {
     await fill(shown + 25);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     parts.problem.textContent = error.message;
+  } finally {
+    loadingOlder = false;
   }
-  if (root && events.length === before) older = null;
-  if (root) drawFeed();
+  // Other filters were asked for in the meantime: this feed is not the one that was wanted.
+  if (!root || mine !== generation) return;
+  if (events.length === before) older = null;
+  drawFeed();
 }
 
 function updateWho() {
@@ -287,18 +338,44 @@ function updateWho() {
 
 function drawFeed() {
   const f = filters();
-  const rows = events.filter((event) => keeps(event, f));
+  // Each event once, by its id, whatever was read.
+  const seen = new Set();
+  const rows = events.filter((event) => keeps(event, f) && !seen.has(event.id) && seen.add(event.id));
   parts.itemProblem.textContent = f.text && !f.item ? ITEM_HELP : '';
   updateWho();
-  parts.summary.textContent = rows.length
-    ? `${plural(rows.length, 'change')}, newest first${older !== null ? '. Older changes have not been read yet' : ''}.`
-    : events.length || older !== null
-      ? `Nothing read so far matches these filters${older !== null ? ', and there are older changes to look through' : ''}.`
-      : 'Nothing has happened yet.';
+  parts.summary.textContent = `${plural(rows.length, 'change')}${older !== null ? '. Older changes have not been read yet' : ''}`;
+  // The day is said once above the rows of it, so that each row needs only the time.
+  const lines = [];
+  let day = null;
+  for (const event of rows) {
+    if (dayKey(event.at) !== day) {
+      day = dayKey(event.at);
+      lines.push(h('li', { class: 'feed-day' }, h('h3', {}, dayLabel(event.at))));
+    }
+    lines.push(eventRow(event, { opened }));
+  }
   put(
     parts.feed,
-    rows.length ? h('ul', { class: 'plain feed' }, rows.map(eventRow)) : null,
-    older !== null ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-older', onclick: showOlder }, 'Show older changes')) : null,
+    rows.length ? h('ul', { class: 'plain feed' }, lines) : emptyFeed(),
+    older !== null ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-older', disabled: loadingOlder, onclick: showOlder }, 'Show older changes')) : null,
+  );
+}
+
+// Nothing to list: the page says why, and what to do about it, in a block rather than a bare line.
+function emptyFeed() {
+  const filtered = FILTERS.some((name) => params.get(name));
+  const unread = events.length > 0 || older !== null;
+  const words = filtered
+    ? unread
+      ? 'None of the changes read so far match these filters.'
+      : 'No changes match these filters.'
+    : 'Nothing has happened in this project yet.';
+  return h(
+    'div',
+    { class: 'empty feed-empty' },
+    icon(filtered ? 'filter' : 'activity', { size: 20 }),
+    h('p', {}, words),
+    filtered ? h('button', { type: 'button', class: 'small', onclick: () => ui.navigate(Object.fromEntries(FILTERS.map((name) => [name, null]))) }, icon('clear', { size: 14 }), 'Clear the filters') : null,
   );
 }
 
@@ -307,20 +384,21 @@ function drawFeed() {
 async function loadWorking() {
   const mine = life;
   try {
-    const [answer, ready] = await Promise.all([call('who_is_working', {}), call('ready_work', { limit: 10 })]);
+    const [answer, ready] = await Promise.all([call('who_is_working', {}), call('ready_work', { limit: freeLimit })]);
     if (!root || mine !== life) return;
     working = answer;
     free = ready.items;
+    freeTotal = ready.total ?? ready.items.length;
     skew = Date.parse(answer.as_of) - Date.now();
     // Drawn again only when something in it changed, so that what a person is typing in it stays.
-    const seen = JSON.stringify([answer.agents, ready.items.map((node) => node.ref), actor()]);
+    const seen = JSON.stringify([answer.agents, ready.items.map((node) => node.ref), freeTotal, account.name]);
     if (seen !== drawn) {
       drawn = seen;
       drawWorking();
     }
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    if (root) put(parts.side, h('h3', {}, 'Who is working on what'), h('p', { class: 'problem', role: 'alert' }, error.message));
+    if (root) put(parts.sideBody, h('p', { class: 'problem', role: 'alert' }, error.message));
   }
 }
 
@@ -358,15 +436,14 @@ function tick() {
   }
 }
 
-const STATE = { working: 'Working', lapsed: 'Lapsed', finished: 'Finished, with a handoff note' };
+const STATE = { working: 'Working', lapsed: 'Lapsed', finished: 'Left a handoff note' };
 
-// A piece of work as a link to the detail panel: "story S-12 “Log in”".
-function itemLink(ref, kind, title) {
-  const at = parseNodeRef(ref);
-  return recordLink(at.kind, at.number, { class: 'item-link', dataset: { ref } }, `${kind} ${codeOf(ref)} “${title}”`);
+// A piece of work as a link to its page: "story S-12 “Log in”".
+function workLink(ref, kind, title) {
+  return itemLink(ref, { class: 'item-link', dataset: { ref } }, `${kind} ${codeOf(ref)} “${title}”`);
 }
 
-const nodeLink = (work) => itemLink(work.node, work.kind, work.title);
+const nodeLink = (work) => workLink(work.node, work.kind, work.title);
 
 async function attempt(job, done) {
   try {
@@ -380,59 +457,47 @@ async function attempt(job, done) {
   }
 }
 
-function releaseDialog(work, holder) {
-  const note = h('textarea', { id: 'release-note', name: 'note', rows: 4 });
-  const { form } = dialogForm({
-    fields: [h('p', {}, `Release ${work.kind} ${codeOf(work.node)} “${work.title}” as ${actor()}. The note is what whoever takes it next will read. ${holder !== actor() ? `It is held by ${holder}, so only ${holder} can release it.` : ''}`), field('Handoff note', note, 'What was done, how far it got, and what is left.')],
-    submit: 'Release it',
-    work: async () => {
-      await call('release_claim', { actor: actor(), node: work.node, note: note.value });
-      form.closest('dialog')?.close();
-      notify(`Released ${codeOf(work.node)}.`);
-      await sync();
-      await loadWorking();
-    },
-  });
-  openDialog('Release a claim', [form]);
-  note.focus();
-}
-
 function claimRow(agent, work, live) {
+  // Only the one who holds a claim can renew or release it, so the buttons are there only for the
+  // person's own.
+  const mine = isMe(agent.actor, agent.kind);
   return h(
     'li',
-    { class: `claim${live ? '' : ' lapsed'}`, dataset: { node: work.node, actor: agent.actor, live: live ? '1' : '0' } },
+    { class: `claim${live ? '' : ' lapsed'}`, dataset: { node: work.node, actor: agent.actor, actorKind: agent.kind || '', live: live ? '1' : '0' } },
     h('div', { class: 'claim-main' }, kindIcon(work.kind, 14), nodeLink(work)),
     h(
       'div',
       { class: 'claim-meta' },
-      h('span', { class: 'holder' }, icon('user', { size: 13 }), `held by ${agent.actor}`),
+      h('span', { class: 'holder' }, 'held by ', actorLabel(agent.actor, agent.kind, { size: 13 })),
       h('span', { class: 'claim-time' }, icon(live ? 'clock' : 'alert', { size: 13 }), countdown(work.expires_at, live)),
     ),
-    h(
-      'span',
-      { class: 'buttons' },
-      live ? h('button', { type: 'button', class: 'renew small', onclick: () => attempt(() => call('renew_claim', { actor: actor(), node: work.node }), `Kept ${codeOf(work.node)} for longer.`) }, 'Renew') : null,
-      h('button', { type: 'button', class: 'release small', onclick: () => releaseDialog(work, agent.actor) }, 'Release…'),
-    ),
+    mine && can('write')
+      ? h(
+          'span',
+          { class: 'buttons' },
+          live ? h('button', { type: 'button', class: 'renew small', onclick: () => attempt(() => call('renew_claim', { node: work.node }), `Kept ${codeOf(work.node)} for longer.`) }, 'Renew') : null,
+          h('button', { type: 'button', class: 'release small', onclick: () => releaseDialog(work, loadWorking) }, 'Release…'),
+        )
+      : null,
   );
 }
 
 function drawWorking() {
   if (!root || !working) return;
+  const writes = can('write');
   const live = working.agents.flatMap((agent) => agent.holding.map((work) => [agent, work]));
   const lapsed = working.agents.flatMap((agent) => agent.lapsed.map((work) => [agent, work]));
-  const lease = h('input', { type: 'number', id: 'lease', min: 1, max: 86400, step: 1, value: typed.lease, 'aria-describedby': 'lease-help', oninput: () => { typed.lease = lease.value; } });
+  const lease = h('input', { type: 'number', id: 'lease', min: 1, max: 86400, step: 1, value: typed.lease, oninput: () => { typed.lease = lease.value; } });
   const claimId = h('input', { type: 'text', id: 'claim-id', autocomplete: 'off', placeholder: 'S-12', value: typed.code, oninput: () => { typed.code = claimId.value; } });
+  parts.sideCount.textContent = plural(live.length, 'claim');
   put(
-    parts.side,
-    h('h3', {}, 'Who is working on what'),
-    h('p', { class: 'quiet', id: 'acting-as' }, actor() ? `Buttons act as ${actor()}.` : 'Give your name first: the buttons act under it.'),
-    h('section', { id: 'claims-live' }, h('h4', {}, `Claims in force (${live.length})`), live.length ? h('ul', { class: 'plain claims' }, live.map(([agent, work]) => claimRow(agent, work, true))) : h('p', { class: 'quiet' }, 'Nobody holds anything right now.')),
-    lapsed.length ? h('section', { id: 'claims-lapsed' }, h('h4', {}, `Claims that ran out (${lapsed.length})`), h('p', { class: 'quiet' }, 'These ran out with no handoff note. Anyone can take the work again; the holder can still release it with a note.'), h('ul', { class: 'plain claims' }, lapsed.map(([agent, work]) => claimRow(agent, work, false)))) : null,
+    parts.sideBody,
+    h('section', { id: 'claims-live' }, h('h3', {}, `Claims in force (${live.length})`), live.length ? h('ul', { class: 'plain claims' }, live.map(([agent, work]) => claimRow(agent, work, true))) : h('p', { class: 'quiet' }, 'No claims in force.')),
+    lapsed.length ? h('section', { id: 'claims-lapsed' }, h('h3', {}, `Claims that ran out (${lapsed.length})`), h('ul', { class: 'plain claims' }, lapsed.map(([agent, work]) => claimRow(agent, work, false)))) : null,
     h(
       'section',
       { id: 'agents' },
-      h('h4', {}, `People and agents (${working.agents.length})`),
+      h('h3', {}, `People and agents (${working.agents.length})`),
       working.agents.length
         ? h('ul', { class: 'plain agents' }, working.agents.map(agentRow))
         : h('p', { class: 'quiet' }, 'Nobody has taken work yet.'),
@@ -440,28 +505,30 @@ function drawWorking() {
     h(
       'section',
       { id: 'free' },
-      h('h4', {}, `Free to take (${free.length}${free.length === 10 ? ' or more' : ''})`),
-      h('p', { class: 'quiet', id: 'lease-help' }, 'Ready work that nobody holds, oldest first. A claim lasts this many seconds unless it is renewed.'),
-      h(
-        'div',
-        { class: 'free-controls' },
-        h('div', { class: 'field lease-field' }, h('label', { for: 'lease' }, 'Lease in seconds'), lease),
-        h(
-          'form',
-          {
-            id: 'claim-by-id',
-            class: 'claim-by-id',
-            onsubmit: (event) => {
-              event.preventDefault();
-              const text = claimId.value.trim();
-              // A code or a ref is sent as the ref; anything else as typed, so that the server says what is wrong with it.
-              const ref = parseItem(text)?.ref ?? text;
-              attempt(() => call('claim_node', { actor: actor(), node: ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(ref)}.`);
-            },
-          },
-          h('div', { class: 'field' }, h('label', { for: 'claim-id' }, 'Or take a story or task by its code'), h('div', { class: 'claim-by-id-row' }, claimId, h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'))),
-        ),
-      ),
+      h('h3', {}, `Free to take (${freeTotal})`),
+      writes ? h('p', { class: 'quiet', id: 'claiming-as' }, 'Claiming as ', actorLabel(account.name, 'person')) : null,
+      writes
+        ? h(
+            'div',
+            { class: 'free-controls' },
+            h('div', { class: 'field lease-field' }, h('label', { for: 'lease' }, 'Claim lasts (seconds)'), lease),
+            h(
+              'form',
+              {
+                id: 'claim-by-id',
+                class: 'claim-by-id',
+                onsubmit: (event) => {
+                  event.preventDefault();
+                  const text = claimId.value.trim();
+                  // A code or a ref is sent as the ref; anything else as typed, so that the server says what is wrong with it.
+                  const ref = parseItem(text)?.ref ?? text;
+                  attempt(() => call('claim_node', { node: ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(ref)}.`);
+                },
+              },
+              h('div', { class: 'field' }, h('label', { for: 'claim-id' }, 'Claim by code'), h('div', { class: 'claim-by-id-row' }, claimId, h('button', { type: 'submit', id: 'claim-by-id-go' }, 'Claim'))),
+            ),
+          )
+        : null,
       free.length
         ? h(
             'ul',
@@ -470,12 +537,31 @@ function drawWorking() {
               h(
                 'li',
                 { class: 'claim', dataset: { node: node.ref } },
-                h('div', { class: 'claim-main' }, kindIcon(node.kind, 14), itemLink(node.ref, node.kind, node.title)),
-                h('button', { type: 'button', class: 'take small', onclick: () => attempt(() => call('claim_node', { actor: actor(), node: node.ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(node.ref)}.`) }, 'Claim'),
+                h('div', { class: 'claim-main' }, kindIcon(node.kind, 14), workLink(node.ref, node.kind, node.title)),
+                writes ? h('button', { type: 'button', class: 'take small', onclick: () => attempt(() => call('claim_node', { node: node.ref, lease_seconds: Number(lease.value) }), `Took ${codeOf(node.ref)}.`) }, 'Claim') : null,
               ),
             ),
           )
-        : h('p', { class: 'quiet' }, 'No ready work is free.'),
+        : h('p', { class: 'quiet' }, 'Nothing is free to take.'),
+      free.length < freeTotal && freeLimit < MOST_FREE
+        ? h(
+            'p',
+            { class: 'more' },
+            h(
+              'button',
+              {
+                type: 'button',
+                id: 'show-more-free',
+                class: 'small',
+                onclick: () => {
+                  freeLimit = Math.min(freeLimit + FREE_PAGE, MOST_FREE);
+                  loadWorking();
+                },
+              },
+              `Show ${Math.min(FREE_PAGE, freeTotal - free.length)} more`,
+            ),
+          )
+        : null,
     ),
   );
   updateWho();
@@ -487,8 +573,8 @@ function agentRow(agent) {
   const note = agent.last_handoff;
   return h(
     'li',
-    { class: `agent state-${agent.state}`, dataset: { actor: agent.actor, state: agent.state } },
-    h('div', { class: 'agent-line' }, icon('user', { size: 14 }), h('strong', {}, agent.actor), h('span', { class: `chip state state-${agent.state}` }, icon(STATE_ICONS[agent.state] || 'info', { size: 13 }), STATE[agent.state])),
+    { class: `agent state-${agent.state}`, dataset: { actor: agent.actor, actorKind: agent.kind || '', state: agent.state } },
+    h('div', { class: 'agent-line' }, actorLabel(agent.actor, agent.kind), h('span', { class: `chip state state-${agent.state}` }, icon(STATE_ICONS[agent.state] || 'info', { size: 13 }), STATE[agent.state])),
     agent.state === 'working' ? h('span', { class: 'quiet' }, `On ${agent.holding.map((work) => codeOf(work.node)).join(', ')}`) : null,
     agent.state === 'lapsed' ? h('span', { class: 'quiet' }, `On ${agent.lapsed.map((work) => codeOf(work.node)).join(', ')}`) : null,
     note ? h('div', { class: 'quiet' }, `Last handoff: ${note.outcome}${note.node ? ` on ${codeOf(note.node)}` : ''}, ${moment(note.at)}.`) : null,

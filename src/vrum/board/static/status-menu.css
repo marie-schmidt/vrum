@@ -1,0 +1,64 @@
+/* Chips that open a menu (status-menu.js). A chip that can be changed is a <button> that keeps the look of
+   the chip it replaces: the same classes, size and colours, with a small chevron after its words. The
+   chevron appears on hover, on the keyboard's focus and while the menu is open, and is always there where
+   there is no hover (a finger). Its room is kept, so nothing moves when it appears. Colours come from
+   tokens.css. This file is linked after the others, so that these rules win a tie with the bare button. */
+
+button.chip {
+  position: relative;
+  min-height: 1.5rem; padding: 0 var(--space-1) 0 var(--space-2);
+  border: 0; border-radius: var(--radius-sm);
+  background: var(--neutral-soft); color: var(--text);
+  font-weight: 600; text-align: left; cursor: pointer;
+}
+/* The base button lights its whole face on hover and press: a chip keeps its own colour and is tinted. */
+button.chip:hover, button.chip:active { background: var(--neutral-soft); }
+button.chip::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  background: currentColor; opacity: 0; pointer-events: none; transition: opacity var(--ease);
+}
+button.chip:hover::after, button.chip[aria-expanded="true"]::after { opacity: 0.1; }
+button.chip:active::after { opacity: 0.16; }
+button.chip[aria-busy="true"] { cursor: progress; opacity: 0.7; }
+
+.chip-chevron { margin-left: -1px; opacity: 0; transition: opacity var(--ease); }
+button.chip:hover .chip-chevron, button.chip:focus-visible .chip-chevron, button.chip[aria-expanded="true"] .chip-chevron { opacity: 0.85; }
+@media (hover: none), (pointer: coarse) {
+  .chip-chevron { opacity: 0.7; }
+  /* A finger needs more than the chip's own height to hit. */
+  button.chip::before { content: ""; position: absolute; inset: -0.6rem -0.25rem; }
+}
+
+/* The chips that are a menu in a page that gives them a cell or a grid column keep to it. */
+.cell-status button.chip, .cell-priority button.chip { max-width: 100%; }
+
+/* -- the open menu: the shared dropdown (controls.css) with a mark before each row ------------------------------ */
+
+.vmenu { min-width: 11rem; }
+.vmenu:focus { outline: none; }
+.vmenu-option { text-decoration: none; color: var(--text); }
+.vmenu-option:focus { outline: none; }
+.vmenu-option:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+html[data-input="pointer"] .vmenu-option:focus-visible { outline: none; }
+.vmenu-option[aria-checked="true"] { font-weight: 650; }
+.vmenu-option[aria-disabled="true"] { cursor: default; }
+a.vmenu-option:hover { text-decoration: none; }
+
+.vmenu-mark { display: inline-flex; flex: none; color: var(--text-2); }
+.tone-status-ready .vmenu-mark { color: var(--info); }
+.tone-status-done .vmenu-mark, .tone-confirmed .vmenu-mark, .tone-rule-met .vmenu-mark { color: var(--ok); }
+.tone-status-in_progress .vmenu-mark { color: var(--progress); }
+.tone-status-blocked .vmenu-mark { color: var(--danger); }
+.tone-priority-high .vmenu-mark, .tone-unconfirmed .vmenu-mark { color: var(--warn); }
+.tone-priority-urgent .vmenu-mark, .tone-danger .vmenu-mark { color: var(--danger); }
+.tone-rule-open .vmenu-mark { color: var(--info); }
+.tone-status-dropped .vmenu-mark, .tone-rule-dropped .vmenu-mark { color: var(--text-3); }
+
+.vmenu-separator { height: 0; margin: var(--space-1) 0; border-top: var(--border-w) solid var(--border); }
+.vmenu-note { display: flex; align-items: flex-start; gap: var(--space-2); max-width: 16rem; padding: var(--space-2) var(--space-3); color: var(--text-2); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
+
+/* The size chip with no size is dashed, and keeps that when it is a button. In the menu a size is its letters. */
+button.chip.size-none { border: var(--border-w) dashed var(--border-strong); background: transparent; color: var(--text-2); }
+button.chip.size-none:hover { background: transparent; }
+.size-mark { display: inline-block; min-width: 1.5rem; color: var(--text); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.02em; }
+.cell-size button.chip { max-width: 100%; }

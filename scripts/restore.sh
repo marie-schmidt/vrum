@@ -38,7 +38,7 @@ fi
 
 held=0
 if [ "$(psql_db -d vrum -c "SELECT to_regclass('public.nodes') IS NOT NULL")" = "t" ]; then
-  held="$(psql_db -d vrum -c "SELECT (SELECT count(*) FROM nodes) + (SELECT count(*) FROM rules) + (SELECT count(*) FROM decisions) + (SELECT count(*) FROM facts) + (SELECT count(*) FROM events)")"
+  held="$(psql_db -d vrum -c "SELECT (SELECT count(*) FROM nodes) + (SELECT count(*) FROM rules) + (SELECT count(*) FROM notes) + (SELECT count(*) FROM events)")"
 fi
 if [ "$held" != "0" ] && [ "$replace" != "--replace" ]; then
   echo "The database already holds data, and a restore replaces all of it. Nothing was changed." >&2
@@ -79,5 +79,5 @@ if ! docker compose up --detach --build --wait; then
   echo "by another version of Vrum: check out the version that made it." >&2
   exit 1
 fi
-counts="$(psql_db -d vrum -c "SELECT (SELECT count(*) FROM nodes) || ' nodes, ' || (SELECT count(*) FROM rules) || ' rules, ' || (SELECT count(*) FROM decisions) || ' decisions, ' || (SELECT count(*) FROM facts) || ' facts, ' || (SELECT count(*) FROM events) || ' events'")"
+counts="$(psql_db -d vrum -c "SELECT (SELECT count(*) FROM nodes) || ' nodes, ' || (SELECT count(*) FROM rules) || ' rules, ' || (SELECT count(*) FROM notes) || ' notes, ' || (SELECT count(*) FROM events) || ' events'")"
 echo "Restored from $file: $counts."

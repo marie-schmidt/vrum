@@ -1,114 +1,211 @@
-// The coverage report: requirements that are in no story, and stories that have no requirement. It
-// only reads. It is shown in the side panel (panel=coverage) and, in full, in Graph's list of
-// requirements, so the lists are built here.
+// The coverage report (#/coverage): the acceptance criteria that are placed nowhere, and the stories that have
+// none (on the story or on any of its tasks), as two tables across the whole page. It only reads, and the buttons
+// in the rows are the same operations the acceptance criterion pages and dialogs use (put one on a story or
+// task, add one to a story), so a refusal reads as it does for an agent. The page reads the report again whenever
+// the server has news.
 
-import { call } from './api.js';
-import { ui } from './ctx.js';
-import { clear, h, plural, put } from './dom.js';
-import { kindIcon } from './labels.js';
-import { closeButton, loadingView } from './records.js';
-import { nodeLink, openLink } from './references.js';
+import { Refusal, call } from './api.js';
+import { h, plural, put } from './dom.js';
+import { dataTable, opens, ruleStatusChip } from './entries.js';
+import { refuse } from './forms.js';
+import { icon } from './icons.js';
+import { codeOf, criteriaCount, kindIcon } from './labels.js';
+import { can, itemLink } from './ctx.js';
+import { pageHeader } from './page.js';
+import { loadingView, placeRequirementDialog, requirementDialog } from './records.js';
+import { nodeLink } from './references.js';
+import { titleOf } from './store.js';
 
-function list(title, key, items, render, total, more) {
-  return h(
-    'section',
-    { class: 'part', dataset: { part: key } },
-    h('h3', {}, `${title} (${total})`),
-    items.length ? h('ul', { class: 'plain coverage-list' }, items.map(render)) : h('p', { class: 'quiet' }, 'None.'),
-    more,
-  );
-}
-
-async function section(name, args) {
-  return call('coverage_report', { show: name, limit: 200, ...args });
-}
-
-// The lists, drawn into `into`. A story with no requirement can be dropped on: data-drop-story
-// marks it. Returns the counts, so that a page can say them in a sentence.
-export async function drawCoverage(into) {
-  const report = await call('coverage_report', { show: 'both', limit: 200 });
-  const unplaced = [...report.unplaced_rules];
-  const stories = [...report.stories_without_rules];
-  const rules = h('div', { id: 'unplaced-rules' });
-  const without = h('div', { id: 'stories-without-rules' });
-  const drawRules = () =>
-    rules.replaceChildren(
-      list(
-        'Requirements in no story',
-        'unplaced-requirements',
-        unplaced,
-        (rule) => h('li', { 'data-rule': rule.id }, openLink('rule', rule.id, `Requirement #${rule.id} (${rule.status}): ${rule.title}`, kindIcon('rule', 14))),
-        report.unplaced_rule_count,
-        report.next_unplaced_after_id && unplaced.length < report.unplaced_rule_count
-          ? h(
-              'button',
-              {
-                type: 'button',
-                class: 'small',
-                onclick: async () => {
-                  const more = await section('unplaced_rules', { unplaced_after_id: report.next_unplaced_after_id });
-                  unplaced.push(...more.unplaced_rules);
-                  report.next_unplaced_after_id = more.next_unplaced_after_id;
-                  drawRules();
-                },
-              },
-              'Show more',
-            )
-          : null,
-      ),
-    );
-  const drawStories = () =>
-    without.replaceChildren(
-      list(
-        'Stories with no requirement',
-        'stories-without-requirements',
-        stories,
-        (story) => h('li', { 'data-story': story.ref, 'data-drop-story': story.ref }, kindIcon('story', 14), nodeLink(story.ref)),
-        report.story_without_rules_count,
-        report.next_stories_after && stories.length < report.story_without_rules_count
-          ? h(
-              'button',
-              {
-                type: 'button',
-                class: 'small',
-                onclick: async () => {
-                  const more = await section('stories_without_rules', { stories_after: report.next_stories_after });
-                  stories.push(...more.stories_without_rules);
-                  report.next_stories_after = more.next_stories_after;
-                  drawStories();
-                },
-              },
-              'Show more',
-            )
-          : null,
-      ),
-    );
-  drawRules();
-  drawStories();
-  into.replaceChildren(rules, without);
-  return { unplacedRules: report.unplaced_rule_count, storiesWithoutRules: report.story_without_rules_count };
-}
+const quiet = (text) => h('span', { class: 'quiet' }, text);
+const section = (name, args) => call('coverage_report', { show: name, limit: 200, ...args });
 
 export const coverageWords = ({ unplacedRules, storiesWithoutRules }) =>
-  `${plural(unplacedRules, 'requirement')} ${unplacedRules === 1 ? 'is' : 'are'} in no story. ${plural(storiesWithoutRules, 'story', 'stories')} ${storiesWithoutRules === 1 ? 'has' : 'have'} no requirement.`;
+  `${criteriaCount(unplacedRules)} ${unplacedRules === 1 ? 'is' : 'are'} placed nowhere. ${plural(storiesWithoutRules, 'story', 'stories')} ${storiesWithoutRules === 1 ? 'has' : 'have'} no acceptance criterion.`;
 
-export async function renderCoverage(root) {
-  if (!root.querySelector('.coverage')) put(root, loadingView());
-  const lists = h('div', { class: 'coverage-lists' });
-  const view = h(
-    'article',
-    { class: 'coverage detail' },
-    h(
-      'header',
-      { class: 'detail-head' },
-      h('p', { class: 'detail-label' }, kindIcon('rule', 14), h('span', {}, 'Requirements / report')),
-      h('h2', { id: 'coverage-title', class: 'detail-title', tabindex: -1 }, 'Coverage'),
-      closeButton('Close the coverage report', () => ui.navigate({ panel: null })),
-    ),
-    h('p', { class: 'quiet' }, 'What is not matched up yet. Dropped requirements and dropped stories are left out.'),
-    lists,
+let root = null;
+let generation = 0;
+let drawn = null; // the places of the page that is on show
+
+// Acceptance criteria placed nowhere: each with the way to put it on a story or task.
+function unplacedTable(rules) {
+  return dataTable({
+    caption: 'Acceptance criteria placed nowhere',
+    className: 'coverage-table',
+    columns: [
+      {
+        key: 'id',
+        label: 'Criterion',
+        cell: (rule) => h('th', { scope: 'row', class: 'cell-id' }, itemLink(`rule:${rule.id}`, { class: 'item-code-link', 'data-focus-key': `open:rule:${rule.id}` }, kindIcon('rule', 14), h('span', { class: 'item-code' }, `#${rule.id}`))),
+      },
+      { key: 'title', label: 'Title', cell: (rule) => h('td', { class: 'cell-clamp cell-title' }, h('span', { class: 'clamp', title: rule.title }, itemLink(`rule:${rule.id}`, { class: 'record-title', tabindex: -1 }, rule.title))) },
+      { key: 'status', label: 'Status', cell: (rule) => h('td', { class: 'cell-status' }, ruleStatusChip(rule)) },
+      ...(can('write')
+        ? [
+            {
+              key: 'place',
+              label: h('span', { class: 'sr-only' }, 'Action'),
+              cell: (rule) => h('td', { class: 'cell-action' }, h('button', { type: 'button', class: 'small put-requirement', 'data-focus-key': `put:${rule.id}`, onclick: () => placeRequirementDialog(rule) }, 'Put on a story or task…')),
+            },
+          ]
+        : []),
+    ],
+    rows: rules,
+    row: (rule) => ({ class: 'record-line', dataset: { rule: rule.id, kind: 'rule', ref: `rule:${rule.id}`, status: rule.status }, onclick: opens(`rule:${rule.id}`) }),
+  });
+}
+
+// Stories with no acceptance criterion: each with the way to write one on it.
+function bareTable(stories) {
+  return dataTable({
+    caption: 'Stories with no acceptance criterion',
+    className: 'coverage-table',
+    columns: [
+      {
+        key: 'id',
+        label: 'Story',
+        cell: (story) => h('th', { scope: 'row', class: 'cell-id' }, itemLink(story.ref, { class: 'item-code-link', 'data-focus-key': `open:${story.ref}` }, kindIcon('story', 14), h('span', { class: 'item-code' }, codeOf(story.ref)))),
+      },
+      { key: 'title', label: 'Title', cell: (story) => h('td', { class: 'cell-clamp cell-title' }, h('span', { class: 'clamp', title: story.title }, itemLink(story.ref, { class: 'record-title', tabindex: -1 }, story.title))) },
+      { key: 'epic', label: 'Epic', cell: (story) => h('td', { class: 'cell-clamp cell-held' }, h('span', { class: 'clamp', title: titleOf(story.parent) }, story.parent ? nodeLink(story.parent) : null)) },
+      ...(can('write')
+        ? [
+            {
+              key: 'add',
+              label: h('span', { class: 'sr-only' }, 'Action'),
+              cell: (story) =>
+                h('td', { class: 'cell-action' }, h('button', { type: 'button', class: 'small add-requirement', 'data-focus-key': `add:${story.ref}`, onclick: () => requirementDialog({ node: story.ref, onDone: () => load() }) }, icon('plus', { size: 14 }), 'Add an acceptance criterion…')),
+            },
+          ]
+        : []),
+    ],
+    rows: stories,
+    row: (story) => ({ class: 'record-line', dataset: { story: story.ref, dropStory: story.ref, kind: 'story', ref: story.ref }, onclick: opens(story.ref) }),
+  });
+}
+
+// A heading with how many there are, the table, and a button for the rest when there are more than
+// a page. `read` asks for the next page and gives { rows, next }.
+function listSection({ id, part, title, total, more, none, make, first, read }) {
+  const table = first.length ? make(first) : null;
+  const rest = h('p', { class: 'recall-more' });
+  let next = more;
+  let have = first.length;
+  const button = () =>
+    put(
+      rest,
+      next !== null && next !== undefined && have < total
+        ? h(
+            'button',
+            {
+              type: 'button',
+              class: 'show-more small',
+              onclick: async () => {
+                try {
+                  const page = await read(next);
+                  table.add(page.rows);
+                  have += page.rows.length;
+                  next = page.next;
+                  button();
+                } catch (error) {
+                  if (!(error instanceof Refusal)) throw error;
+                  refuse(rest, error.message);
+                }
+              },
+            },
+            `Show more (${total - have} not shown)`,
+          )
+        : null,
+    );
+  button();
+  return h(
+    'div',
+    { id },
+    h('section', { class: 'part coverage-part', dataset: { part } }, h('h2', {}, title, h('span', { class: 'heading-count' }, ` (${total})`)), table ? table.element : h('p', { class: 'quiet none' }, none), rest),
   );
-  await drawCoverage(lists);
-  clear(root).append(view);
-  return { focus: () => root.querySelector('#coverage-title').focus() };
+}
+
+async function draw(mine) {
+  const report = await call('coverage_report', { show: 'both', limit: 200 });
+  if (mine !== generation) return;
+  const { summary, lists } = drawn;
+  put(summary, coverageWords({ unplacedRules: report.unplaced_rule_count, storiesWithoutRules: report.story_without_rules_count }));
+  summary.dataset.unplaced = String(report.unplaced_rule_count);
+  summary.dataset.storiesWithout = String(report.story_without_rules_count);
+  const keep = document.activeElement && lists.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+  put(
+    lists,
+    listSection({
+      id: 'unplaced-rules',
+      part: 'unplaced-requirements',
+      title: 'Acceptance criteria placed nowhere',
+      total: report.unplaced_rule_count,
+      more: report.next_unplaced_after_id,
+      none: 'Every acceptance criterion is placed.',
+      make: unplacedTable,
+      first: report.unplaced_rules,
+      read: async (after) => {
+        const page = await section('unplaced_rules', { unplaced_after_id: after });
+        return { rows: page.unplaced_rules, next: page.next_unplaced_after_id };
+      },
+    }),
+    listSection({
+      id: 'stories-without-rules',
+      part: 'stories-without-requirements',
+      title: 'Stories with no acceptance criterion',
+      total: report.story_without_rules_count,
+      more: report.next_stories_after,
+      none: 'Every story has an acceptance criterion.',
+      make: bareTable,
+      first: report.stories_without_rules,
+      read: async (after) => {
+        const page = await section('stories_without_rules', { stories_after: after });
+        return { rows: page.stories_without_rules, next: page.next_stories_after };
+      },
+    }),
+  );
+  if (keep) [...lists.querySelectorAll('[data-focus-key]')].find((one) => one.dataset.focusKey === keep)?.focus();
+}
+
+async function load() {
+  const mine = ++generation;
+  try {
+    await draw(mine);
+  } catch (error) {
+    if (mine !== generation) return;
+    if (!(error instanceof Refusal)) throw error;
+    put(drawn.summary);
+    put(drawn.lists, h('p', { class: 'notice refusal', role: 'alert' }, icon('alert', { size: 16 }), h('span', {}, error.message)));
+  }
+}
+
+export function mount(element) {
+  root = element;
+  const summary = h('p', { class: 'sr-only', id: 'coverage-summary', role: 'status' });
+  const lists = h('div', { class: 'coverage-lists' }, loadingView());
+  drawn = { summary, lists };
+  put(
+    root,
+    h(
+      'div',
+      { class: 'coverage-page item-page', id: 'coverage-page' },
+      pageHeader('Coverage'),
+      summary,
+      lists,
+    ),
+  );
+  load();
+}
+
+export function unmount() {
+  generation += 1;
+  root = null;
+  drawn = null;
+}
+
+export function update() {}
+
+// News: the report is read again, which is how an acceptance criterion put on a story leaves the first table.
+export async function refresh() {
+  if (!drawn) return;
+  await load();
 }

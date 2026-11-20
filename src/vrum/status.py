@@ -20,17 +20,17 @@ class ItemCounts(BaseModel):
     stories: int
     tasks: int
     links: int
-    rules: int
-    decisions: int
-    facts: int
+    rules: int = Field(description="How many acceptance criteria (rules) the project holds.")
+    notes: int
     events: int = Field(description="How many changes the history holds.")
 
 
 class IndexStatus(BaseModel):
     meaning: str = Field(
         description="How meaning can be used now: used, not_configured (no embedding service is "
-        "set up) or index_not_ready (the index is not built yet, or was built with another model). "
-        "This is what every search says about the index."
+        "set up), service_unreachable (the embedding service did not answer the last time the "
+        "index was brought up to date) or index_not_ready (the index is not built yet, or was "
+        "built with another model). This is what every search says about the index."
     )
     note: str = Field(description="In plain words, what that means for searches.")
     waiting_to_index: int = Field(description="How many items are new or changed and not indexed.")
@@ -65,8 +65,7 @@ SELECT
   (SELECT count(*) FROM nodes WHERE kind = 'task') AS tasks,
   (SELECT count(*) FROM links) AS links,
   (SELECT count(*) FROM rules) AS rules,
-  (SELECT count(*) FROM decisions) AS decisions,
-  (SELECT count(*) FROM facts) AS facts,
+  (SELECT count(*) FROM notes) AS notes,
   (SELECT count(*) FROM events) AS events,
   now() AS checked_at
 """

@@ -5,10 +5,10 @@ import os
 import random
 import subprocess
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import pytest
@@ -16,6 +16,9 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import CallToolResult, TextContent
+
+if TYPE_CHECKING:
+    from tests.world import Project
 
 
 @asynccontextmanager
@@ -35,6 +38,28 @@ def the_token() -> str:
     from tests.world import the_project
 
     return the_project().key
+
+
+@asynccontextmanager
+async def connect_as(name: str, project: "Project | None" = None) -> AsyncIterator[Client]:
+    """A client of the shared project (or of `project`) that is the agent called `name`: it makes
+    a key with that name, which is who the server records the client as. A name is the name of one
+    key in force at a time, so a test uses a name of its own."""
+    from tests.world import make_key, the_project
+
+    chosen = project or the_project()
+    async with connect(chosen.mcp_url, make_key(chosen, name)) as client:
+        yield client
+
+
+@asynccontextmanager
+async def connect_each(
+    *names: str, project: "Project | None" = None
+) -> AsyncIterator[list[Client]]:
+    """One client for each name (see `connect_as`), connected together: `async with connect_each(
+    "ann", "bob") as (ann, bob)`."""
+    async with AsyncExitStack() as stack:
+        yield [await stack.enter_async_context(connect_as(name, project)) for name in names]
 
 
 def _text(result: CallToolResult) -> str:
@@ -58,7 +83,14 @@ async def refused(client: Client, tool: str, **arguments: Any) -> str:
     return _text(result)
 
 
-_NODE_EXTRAS = {"similar", "similar_checked", "similar_note", "handoff_count", "last_handoff"}
+_NODE_EXTRAS = {
+    "similar",
+    "similar_checked",
+    "similar_note",
+    "handoff_count",
+    "last_handoff",
+    "checks",
+}
 
 # The list tools that page over nodes: they are continued by `after` (the reference of the last
 # node of a page) and say `next_after`. Every other list is continued by `after_id`.
@@ -70,7 +102,7 @@ _LETTER_KIND = {letter: kind for kind, letter in _CODE_LETTER.items()}
 
 def ref_of(kind: str, number: int) -> str:
     """The reference of an epic, story or task, as every tool and address names it: story:12. Any
-    of the six kinds makes the key the board uses for it (rule:3, decision:7, fact:5)."""
+    of the five kinds makes the key the board uses for it (rule:3, note:7)."""
     return f"{kind}:{number}"
 
 
@@ -190,7 +222,8 @@ async def make_stories(client: Client, count: int) -> list[dict[str, Any]]:
 
 
 async def make_rule(client: Client, title: str = "A rule", **arguments: Any) -> dict[str, Any]:
-    """A rule (pass `story=` with the reference of a story to place it)."""
+    """An acceptance criterion (a rule): pass `node=` with the reference of a story or task to
+    place it."""
     return await ok(client, "create_rule", actor="marie", title=title, **arguments)
 
 
@@ -303,6 +336,23 @@ async def race_mixed(
     return results
 
 
+async def race_agents(
+    clients: list[Client], tool: str, arguments: dict[str, Any]
+) -> list[tuple[bool, str]]:
+    """Every client makes this call at the same moment; each is an agent of its own, so each is who
+    the history says made its call. For each: was it accepted, and what did it say."""
+    results: list[tuple[bool, str]] = []
+
+    async def call(agent: Client) -> None:
+        result = await agent.call_tool(tool, arguments)
+        results.append((not result.is_error, _text(result)))
+
+    async with anyio.create_task_group() as group:
+        for agent in clients:
+            group.start_soon(call, agent)
+    return results
+
+
 async def race_results(
     client: Client, tool: str, calls: list[dict[str, Any]]
 ) -> list[tuple[bool, str]]:
@@ -315,17 +365,23 @@ async def race(client: Client, tool: str, calls: list[dict[str, Any]]) -> list[b
     return [accepted for accepted, _ in await race_results(client, tool, calls)]
 
 
+async def make_note(
+    client: Client, text: str = "A note", why: str = "Because", **arguments: Any
+) -> dict[str, Any]:
+    """A note, recorded through add_note. A note someone decided names them in `decided_by`."""
+    return await ok(client, "add_note", **{"text": text, "why": why, **arguments})
+
+
 async def make_decision(
     client: Client, title: str = "A decision", **arguments: Any
 ) -> dict[str, Any]:
-    fields: dict[str, Any] = {
-        "actor": "agent-1",
-        "title": title,
-        "text": f"{title}: what was decided",
-        "reason": "Because",
-        "decided_by": "Marie",
-    }
-    return await ok(client, "record_decision", **{**fields, **arguments})
+    """A note that a person decided (Marie, unless `decided_by` says otherwise). The title is the
+    first line of its text, which is how a note has a headline."""
+    body = arguments.pop("text", f"{title}: what was decided")
+    why = arguments.pop("reason", "Because")
+    return await make_note(
+        client, f"{title}\n\n{body}", **{"why": why, "decided_by": "Marie", **arguments}
+    )
 
 
 def day(offset: int = 0) -> str:
@@ -334,28 +390,65 @@ def day(offset: int = 0) -> str:
 
 
 async def make_fact(client: Client, text: str = "A fact", **arguments: Any) -> dict[str, Any]:
-    fields: dict[str, Any] = {"actor": "agent-1", "text": text, "source": "The team call"}
-    return await ok(client, "retain_fact", **{**fields, **arguments})
+    """A note that nobody decided: what is known, and where it came from."""
+    why = arguments.pop("source", "The team call")
+    if "decision_ids" in arguments:
+        arguments["note_ids"] = arguments.pop("decision_ids")
+    return await make_note(client, text, why, **arguments)
 
 
 async def confirm(
     client: Client, kind: str, record: dict[str, Any], person: str = "Marie", **arguments: Any
 ) -> dict[str, Any]:
-    """A named person confirms a fact or a decision. Returns the record as it is afterwards."""
-    answer = await ok(
+    """A named person confirms a note. Returns the note as it is afterwards. (`kind` is what the
+    note used to be called, a fact or a decision, and no longer matters.) Only a person can, so
+    `client` must be one: an agent's call is refused (see `confirm_on_board`)."""
+    return await ok(
         client,
         "set_confirmation",
-        **{
-            "actor": "agent-1",
-            "kind": kind,
-            "record_id": record["id"],
-            "confirmation": "confirmed",
-            "person": person,
-            **arguments,
-        },
+        **{"note_id": record["id"], "confirmation": "confirmed", "person": person, **arguments},
     )
-    changed: dict[str, Any] = answer[kind]
-    return changed
+
+
+def on_board(tool: str, *, project: "Project | None" = None, **arguments: Any) -> dict[str, Any]:
+    """Do what a person does on the board: call the tool as the person signed in, who owns the
+    project (by default the shared test project, whose owner is "Shared tester"). The change is
+    recorded as that person, and it is refused in the board's own words when the tool refuses."""
+    from tests.world import the_project
+
+    chosen = project or the_project()
+    reply = chosen.owner.call("POST", f"/board/api/projects/{chosen.id}/tool/{tool}", arguments)
+    assert reply.status == 200, f"{tool} was refused on the board: {reply.body}"
+    return dict(reply.body)
+
+
+def confirm_on_board(
+    kind: str,
+    record: dict[str, Any],
+    person: str = "Marie",
+    *,
+    project: "Project | None" = None,
+    **arguments: Any,
+) -> dict[str, Any]:
+    """A person confirms a note on the board, which is the only place it can be done: an agent's
+    call to set_confirmation is refused. `person` is the name of whoever reviewed it (it needs no
+    account). `kind` is what the note used to be called and no longer matters. Returns the note as
+    it is afterwards."""
+    return on_board(
+        "set_confirmation",
+        project=project,
+        **{"note_id": record["id"], "confirmation": "confirmed", "person": person, **arguments},
+    )
+
+
+def set_definition_on_board(body: str, *, project: "Project | None" = None) -> dict[str, Any]:
+    """A person sets the project's definition of done on the board, which is the only place it can
+    be done: an agent's call to set_definition_of_done is refused. Returns it as it is
+    afterwards."""
+    current = on_board("get_definition_of_done", project=project)
+    return on_board(
+        "set_definition_of_done", project=project, body=body, expected_version=current["version"]
+    )
 
 
 def unique_word() -> str:
@@ -387,7 +480,7 @@ async def reindexed(client: Client) -> dict[str, Any]:
 async def export_everything(client: Client, limit: int = 200) -> dict[str, Any]:
     """The whole export: every page of export_graph, put together."""
     document: dict[str, Any] = {"format": None, "version": None, "counts": None}
-    for section in ("nodes", "links", "rules", "decisions", "facts", "events"):
+    for section in ("nodes", "links", "rules", "notes", "definition_of_done", "checks", "events"):
         document[section] = []
     after: str | None = None
     while True:
@@ -402,12 +495,14 @@ async def export_everything(client: Client, limit: int = 200) -> dict[str, Any]:
             return document
 
 
-async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
+async def rich_world(client: Client, project: "Project | None" = None) -> dict[str, dict[str, Any]]:
     """One of everything the graph holds, made through the tools: all three kinds of node with
-    dates, every kind of link, a rule placed and one not, a decision that was replaced, one that
-    was withdrawn and a project-wide one, facts that were replaced, withdrawn and confirmed, a
-    handoff, and a claim. Returns each by a short name (a node has `ref`; a rule, decision or fact
-    has `id`)."""
+    dates and sizes, every kind of link, a rule placed and one not, a decision that was replaced,
+    one that was withdrawn and a project-wide one, notes nobody decided that were replaced,
+    withdrawn and confirmed (confirmed on the board, as a person, in `project`: the shared one by
+    default), a handoff, and a claim. In a project of its own (not the shared one) the definition
+    of done has checks, ticked by an agent and by a person, and one unticked. Returns each by a
+    short name (a node has `ref`; a rule or note has `id`)."""
     word = unique_word()
     epic = await ok(
         client,
@@ -431,10 +526,10 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
             **more,
         )
 
-    story1 = await node("story", "Log in with email", epic, body="Body of story one.")
+    story1 = await node("story", "Log in with email", epic, body="Body of story one.", size="l")
     story2 = await node("story", "Log in with a code", epic, priority="high")
-    task1 = await node("task", "Build the form", story1, start_on="2026-12-02")
-    task2 = await node("task", "Check the password", story1, target_on="2026-12-10")
+    task1 = await node("task", "Build the form", story1, start_on="2026-12-02", size="s")
+    task2 = await node("task", "Check the password", story1, target_on="2026-12-10", size="m")
     task3 = await node("task", "Send the code", story2)
     await ok(
         client, "update_node", actor="ann", node=task1["ref"], expected_version=1, status="done"
@@ -465,7 +560,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     await ok(client, "claim_node", actor="bob", node=task3["ref"])
 
     rule1 = await ok(
-        client, "create_rule", actor="ann", title=f"Rule one {word}", story=story1["ref"]
+        client, "create_rule", actor="ann", title=f"Rule one {word}", node=story1["ref"]
     )
     rule2 = await ok(
         client, "create_rule", actor="ann", title=f"Rule two {word}", body="Not placed."
@@ -476,52 +571,56 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         actor="ann",
         rule_id=rule2["id"],
         expected_version=1,
-        status="settled",
+        status="met",
     )
+    rule3 = await ok(
+        client, "create_rule", actor="ann", title=f"Rule three {word}", node=task1["ref"]
+    )
+    # The shared project (the default) gets a definition of done with no list lines: an agent
+    # cannot finish work as done while a check of its project is unticked, and every test shares
+    # that project. A project of its own gets checks, and some of them ticked.
+    if project is None:
+        set_definition_on_board(f"Tests pass, and a person can try it {word}")
+    else:
+        set_definition_on_board(
+            f"- Tests pass\n- A person can try it {word}\n- Docs are updated", project=project
+        )
+        checks = (await ok(client, "get_definition_of_done"))["items"]
+        tests, tried, docs = (check["item"] for check in checks)
+        await ok(client, "set_check", node=task1["ref"], item=tests, evidence="212 tests pass")
+        on_board("set_check", project=project, node=task1["ref"], item=tried, checked=True)
+        await ok(client, "set_check", node=task1["ref"], item=tried, checked=False)
+        on_board(
+            "set_check",
+            project=project,
+            node=task1["ref"],
+            item=docs,
+            checked=True,
+            evidence="Read it through",
+        )
+        on_board("set_check", project=project, node=story1["ref"], item=tests, checked=True)
 
     decision1 = await make_decision(
         client, f"Use email {word}", nodes=[story1["ref"]], rule_ids=[rule1["id"]]
     )
-    await ok(
-        client,
-        "set_confirmation",
-        actor="ann",
-        kind="decision",
-        record_id=decision1["id"],
-        confirmation="confirmed",
-        person="Marie",
-    )
-    decision2 = await ok(
-        client,
-        "supersede_decision",
-        actor="ann",
-        decision_id=decision1["id"],
-        title=f"Use email and a code {word}",
-        text="Both ways of logging in.",
-        reason="Marie changed her mind.",
-        decided_by="Marie",
-        said_by="Marie",
-        quote="Let us have both.",
-    )
+    confirm_on_board("decision", decision1, project=project)
+    decision2 = (
+        await ok(
+            client,
+            "supersede_note",
+            replaces=[decision1["id"]],
+            text=f"Use email and a code {word}\n\nBoth ways of logging in.",
+            why="Marie changed her mind.",
+            decided_by="Marie",
+            said_by="Marie",
+            quote="Let us have both.",
+        )
+    )["replacement"]
     decision3 = await make_decision(client, f"Use a password manager {word}")
-    decision3 = await ok(
-        client,
-        "withdraw_decision",
-        actor="ann",
-        decision_id=decision3["id"],
-        reason="Not needed after all.",
-    )
+    await ok(client, "withdraw_note", note_ids=[decision3["id"]], reason="Not needed after all.")
+    decision3 = await ok(client, "get_note", note_id=decision3["id"])
     wide = await make_decision(client, f"Keep it simple {word}", project_wide=True)
-    await ok(
-        client,
-        "set_confirmation",
-        actor="ann",
-        kind="decision",
-        record_id=wide["id"],
-        confirmation="confirmed",
-        person="Marie",
-        quote="Yes, keep it simple.",
-    )
+    confirm_on_board("decision", wide, project=project, quote="Yes, keep it simple.")
 
     fact1 = await make_fact(
         client,
@@ -530,45 +629,26 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         rule_ids=[rule1["id"]],
         decision_ids=[decision2["id"]],
     )
-    await ok(
-        client,
-        "set_confirmation",
-        actor="ann",
-        kind="fact",
-        record_id=fact1["id"],
-        confirmation="confirmed",
-        person="Marie",
-    )
+    confirm_on_board("fact", fact1, project=project)
     fact2 = await make_fact(client, f"Codes arrive in 5 seconds {word}")
     fact3 = await make_fact(client, f"Codes arrive in 10 seconds {word}")
     fact4 = (
         await ok(
             client,
-            "supersede_fact",
-            actor="ann",
+            "supersede_note",
             replaces=[fact3["id"]],
-            reason="Measured again.",
             text=f"Codes arrive in 3 seconds {word}",
-            source="A measurement",
+            why="A measurement",
         )
     )["replacement"]
     fact5 = await make_fact(client, f"The office has a dog {word}")
-    await ok(client, "withdraw_fact", actor="ann", fact_ids=[fact5["id"]], reason="It is a cat.")
+    await ok(client, "withdraw_note", note_ids=[fact5["id"]], reason="It is a cat.")
     fact6 = await make_fact(client, f"Codes never expire {word}")
+    confirm_on_board("fact", fact6, project=project)
     await ok(
         client,
-        "set_confirmation",
-        actor="ann",
-        kind="fact",
-        record_id=fact6["id"],
-        confirmation="confirmed",
-        person="Marie",
-    )
-    await ok(
-        client,
-        "withdraw_fact",
-        actor="ann",
-        fact_ids=[fact6["id"]],
+        "withdraw_note",
+        note_ids=[fact6["id"]],
         reason="They expire in an hour.",
         said_by="Marie",
         quote="No, they expire.",
@@ -582,6 +662,7 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
         "task3": task3,
         "rule1": rule1,
         "rule2": rule2,
+        "rule3": rule3,
         "decision1": decision1,
         "decision2": decision2,
         "decision3": decision3,
@@ -595,4 +676,4 @@ async def rich_world(client: Client) -> dict[str, dict[str, Any]]:
     }
 
 
-M19_HELPERS_READY = True
+M20_HELPERS_READY = True

@@ -1,0 +1,45 @@
+/* Signing in with another provider: the buttons under the sign-in and create-account forms, the
+   Sign-in methods setting of the Users page, and the Sign-in section of the Status page. They exist only
+   when the server is set up for a provider. Colours, sizes and spacing come from tokens.css. */
+
+/* Under the form: a quiet "or", and one button for each provider. */
+.sso { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
+.sso-divider { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-1); color: var(--text-2); font-size: var(--text-sm); }
+.sso-divider::before, .sso-divider::after { content: ""; flex: 1 1 0; border-top: var(--border-w) solid var(--border); }
+.sso-way { display: grid; gap: var(--space-2); }
+button.sso-button { width: 100%; }
+.sso-button .icon { color: var(--text-2); }
+.sso-button[aria-expanded="true"] { background: var(--surface-3); border-color: var(--text-2); }
+.sso .problem { margin: 0; }
+
+/* What a provider's sign-in came back with, above the form it is not about. */
+.entry .sso-notice { margin: 0 0 var(--space-3); padding: var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); }
+
+/* A directory asks for its username and password here, in place, under its button. */
+.sso-form { margin: 0; padding: var(--space-1) var(--space-3) var(--space-3); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
+.sso-form .field { margin: var(--space-2) 0 0; }
+.sso-form .field > .hint { margin-top: var(--space-1); }
+
+/* The Users page: the password and each provider, one line each. The buttons sit under the words, in
+   their column, and go to the right of them when the setting is wide enough to hold both. */
+.methods-control { container-type: inline-size; display: grid; gap: var(--space-2); width: 100%; min-width: 0; }
+.methods { display: grid; width: 100%; margin: 0; }
+.method { display: grid; grid-template-columns: 2rem minmax(0, 1fr); align-items: start; gap: var(--space-2) var(--space-3); padding: var(--space-3) 0; border-top: var(--border-w) solid var(--border); }
+.method:first-child { border-top: 0; padding-top: 0; }
+.method:last-child { padding-bottom: 0; }
+.method-icon { display: inline-grid; place-items: center; width: 2rem; height: 2rem; border-radius: var(--radius-md); background: var(--surface-2); color: var(--text-2); }
+.method-main { display: grid; gap: 2px; min-width: 0; align-self: center; }
+.method-main p { margin: 0; overflow-wrap: anywhere; }
+.method-title { font-weight: 600; }
+.method-state { font-size: var(--text-sm); }
+.method-quiet { color: var(--text-2); font-size: var(--text-sm); }
+.method-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+@container (min-width: 34rem) {
+  .method { grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; }
+  .method-actions { grid-column: 3; grid-row: 1; justify-content: flex-end; }
+}
+
+/* The Status page: the Sign-in section is as wide as the sections above it, and says in quiet words
+   under each way who may use it. */
+.status-grid > #sign-in { grid-column: 1 / -1; }
+#sign-in .value-note { display: block; margin-top: 2px; color: var(--text-2); font-size: var(--text-sm); font-weight: 400; }

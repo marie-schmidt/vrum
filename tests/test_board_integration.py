@@ -1,7 +1,8 @@
-"""M10 against the running containers: the Board, its cards and the shared detail panel, driven in
-a real headless browser and checked against a real MCP client (see ./check.sh). What a person does
-on the board is checked by reading the graph back through the tools; what an agent does through
-the tools is checked by looking at the board."""
+"""M10 against the running containers: the Board, its cards and the full page every card opens,
+driven in a real headless browser and checked against a real MCP client (see ./check.sh). What a
+person does on the board is checked by reading the graph back through the tools; what an agent does
+through the tools is checked by looking at the board. Nothing opens at the side of a page: a card, a
+lane, a result and a record all open the item's own page."""
 
 import asyncio
 import json
@@ -25,22 +26,28 @@ from tests.board_helpers import (
     cards_are,
     cell,
     create_in_browser,
+    crumbs,
     database_footprint,
     http,
     item_rows,
+    lane,
     made,
+    no_panel_or_drawer,
+    on_page,
     open_editor,
+    open_item,
     plain,
 )
 from tests.helpers import (
     all_nodes,
     code_of,
-    confirm,
+    confirm_on_board,
     connect,
+    connect_as,
+    connect_each,
     day,
     embeddings_stopped,
-    make_decision,
-    make_fact,
+    make_note,
     make_rule,
     number_of,
     ok,
@@ -63,6 +70,14 @@ def board(server_url: str) -> str:
 
 async def node(client: Client, ref: str) -> dict[str, Any]:
     return await ok(client, "get_node", node=ref)
+
+
+async def create_on_board(w: Watched, kind: str, title: str, parent: str | None = None) -> str:
+    """Make an item with the Board's own form. The form's button is on the Board, and it goes to the
+    page of the new item, so each one starts from the Board again."""
+    await w.go("#/board")
+    await on_page(w.page, "board")
+    return await create_in_browser(w.page, kind, title, parent)
 
 
 async def history(client: Client, ref: str) -> list[dict[str, Any]]:
@@ -98,7 +113,7 @@ async def test_every_data_call_needs_a_signed_in_owner_and_the_pages_themselves_
         ("GET", f"{mine}/index", None),
         ("GET", f"{mine}/keys", None),
         ("POST", f"{mine}/tool/list_nodes", {}),
-        ("POST", f"{mine}/tool/update_node", {"actor": "x", "node": epic}),
+        ("POST", f"{mine}/tool/update_node", {"node": epic}),
         ("POST", f"{mine}/try/list_nodes", {}),
     ]
     for method, path, body in calls:
@@ -113,7 +128,7 @@ async def test_every_data_call_needs_a_signed_in_owner_and_the_pages_themselves_
     assert reply.status == 200 and "poll_seconds" in reply.body
     # A change also needs the session's own secret and the server's own address as its origin, so
     # that a page of another website cannot make this browser change anything.
-    change = {"actor": "x", "node": epic, "expected_version": 1, "title": f"Changed {word}"}
+    change = {"node": epic, "expected_version": 1, "title": f"Changed {word}"}
     path = f"{mine}/tool/update_node"
     for csrf, origin_sent, extra in (
         (None, "same", None),
@@ -183,10 +198,11 @@ async def test_a_person_signs_in_with_email_and_password_and_the_session_stays_o
         await w.page.locator("#account-password").fill(owner.password)
         assert await submit(w, "#sign-in-submit") == 200
         await expect(w.page.locator("h1")).to_have_text("Board", timeout=SLOW)
-        await expect(w.page.locator("#who")).to_contain_text(owner.name)
-        await expect(w.page.locator("#account")).to_have_text(owner.name)
+        await expect(w.page.locator("#account")).to_contain_text(owner.name)
         await expect(w.page.locator("#project-switcher")).to_have_value(str(project.id))
-        assert await w.page.evaluate("localStorage.getItem('vrum.actor')") == owner.name
+        # Who makes a change is the account, which the server knows from the session: the page
+        # keeps no name of its own to type or to store.
+        assert await w.page.evaluate("localStorage.getItem('vrum.actor')") is None
 
         # The session is a cookie that a script on the page cannot read, that is not sent to
         # another site, and that goes only to the board's own addresses.
@@ -265,7 +281,7 @@ async def test_a_person_registers_makes_a_project_switches_signs_out_and_back_in
         await expect(w.page.locator("h1")).to_have_text("Board", timeout=SLOW)
         assert re.fullmatch(r"/board/p/\d+", urlparse(w.page.url).path)
         first = int(urlparse(w.page.url).path.rsplit("/", 1)[1])
-        await expect(w.page.locator("#who")).to_contain_text(shown)
+        await expect(w.page.locator("#account")).to_contain_text(shown)
         await expect(w.page.locator("#project-switcher")).to_have_value(str(first))
         assert await w.page.locator("#project-switcher option").all_inner_texts() == [
             f"First {word}", "All projects…"
@@ -332,24 +348,22 @@ async def test_what_agents_do_through_mcp_shows_on_the_board_within_ten_seconds_
     client: Client, board: str
 ) -> None:
     word = unique_word()
-    async with browser_page(board, token=the_token()) as w:
-        await w.open("#/board")
+    one, two = f"agent-1-{word}", f"agent-2-{word}"
+    async with (
+        connect_each(one, two) as (by_one, by_two),
+        browser_page(board, token=the_token()) as w,
+    ):
+        await w.open("#/board?show=both")
         await expect(w.page.locator(".board")).to_be_visible()
         marker = await w.page.evaluate("window.__same = 'same page'; window.__same")
 
-        epic = await made(client, "epic", f"Billing {word}")
-        story = await made(client, "story", f"Invoices {word}", epic)
-        first = await made(client, "task", f"Template {word}", story)
-        second = await made(client, "task", f"Send it {word}", story)
-        await ok(
-            client, "add_link", actor="agent-1", source=second, target=first,
-            link_type="needs_first",
-        )  # fmt: skip
-        await ok(client, "claim_node", actor="agent-2", node=first)
-        await ok(
-            client, "update_node", actor="agent-2", node=first, expected_version=1,
-            status="in_progress",
-        )  # fmt: skip
+        epic = await made(by_one, "epic", f"Billing {word}")
+        story = await made(by_one, "story", f"Invoices {word}", epic)
+        first = await made(by_one, "task", f"Template {word}", story)
+        second = await made(by_one, "task", f"Send it {word}", story)
+        await ok(by_one, "add_link", source=second, target=first, link_type="needs_first")
+        await ok(by_two, "claim_node", node=first)
+        await ok(by_two, "update_node", node=first, expected_version=1, status="in_progress")
 
         started = time.monotonic()
         lane = w.page.locator(f"section.lane[data-ref='{epic}']")
@@ -358,9 +372,15 @@ async def test_what_agents_do_through_mcp_shows_on_the_board_within_ten_seconds_
             cell(w.page, epic, "ready").locator(f".card[data-ref='{story}']")
         ).to_be_visible()
         working = cell(w.page, epic, "in_progress").locator(f".card[data-ref='{first}']")
-        await expect(working).to_contain_text("Held by agent-2")
+        await expect(working).to_contain_text(f"Held by {two}")
         waiting = cell(w.page, epic, "new").locator(f".card[data-ref='{second}']")
-        await expect(waiting).to_contain_text(f"Waiting for {code_of(first)} Template {word}")
+        # A card that waits says one word, Waiting, and the hover card says what it waits for.
+        await expect(waiting.locator(".card-waiting")).to_have_text("Waiting")
+        await waiting.locator(".card-waiting").hover()
+        await expect(w.page.locator(".hovercard:visible")).to_contain_text(
+            f"{code_of(first)} Template {word}"
+        )
+        await w.page.mouse.move(0, 0)
         assert time.monotonic() - started < 10 + 2
 
         # It is the same page: nothing was loaded again.
@@ -380,8 +400,8 @@ async def test_progress_counts_the_tasks_that_are_done_out_of_those_not_dropped(
     done = await made(client, "task", f"Task 0 {word}", story)
     open_ = await made(client, "task", f"Task 1 {word}", story)
     dropped = await made(client, "task", f"Task 2 {word}", story)
-    await ok(client, "update_node", actor="a", node=done, expected_version=1, status="done")
-    await ok(client, "update_node", actor="a", node=dropped, expected_version=1, status="dropped")
+    await ok(client, "update_node", node=done, expected_version=1, status="done")
+    await ok(client, "update_node", node=dropped, expected_version=1, status="dropped")
 
     by_ref = {item["ref"]: item for item in (await ok(client, "list_nodes", parent=epic))["items"]}
     assert (await node(client, story))["progress_done"] == by_ref[story]["progress_done"] == 1
@@ -392,58 +412,65 @@ async def test_progress_counts_the_tasks_that_are_done_out_of_those_not_dropped(
     assert (await node(client, open_))["progress_done"] is None
 
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}")
+        await w.open(f"#/board?epic={number_of(epic)}&show=both")
         await expect(w.page.locator(f"section.lane[data-ref='{epic}']")).to_contain_text(
             "1 of 2 tasks done"
         )
         await expect(card(w.page, story)).to_contain_text("1 of 2 tasks done")
-        await expect(card(w.page, other)).to_contain_text("0 of 0 tasks done")
+        await expect(card(w.page, other)).to_contain_text("No tasks yet")
         assert w.problems == [], w.problems
 
 
 # -- 3. what a person does on the board is what the graph then holds -------------------------------
 
 
-async def test_what_a_person_does_on_the_board_is_in_the_graph_with_their_name_and_the_versions(
-    client: Client, board: str
-) -> None:
+async def test_what_a_person_does_on_the_board_is_in_the_graph_under_their_name() -> None:
     word = unique_word()
-    async with browser_page(board, token=the_token(), name=None) as w:
+    # The person is the account they are signed in with: every change is recorded under its name.
+    project = make_project(register(name="Ada Lovelace"), f"Ada's {word}")
+    async with (
+        connect(project.mcp_url, project.key) as client,
+        browser_page(project.address, token=project.key) as w,
+    ):
         await w.open("#/board")
-        # With no name chosen yet, changes are recorded under the account's own name, until the
-        # person says otherwise.
-        await expect(w.page.locator("#who")).to_contain_text(project_at(board).owner.name)
-        await w.page.locator("#who").click()
-        who = w.page.locator("dialog.modal #name")
-        await expect(who).to_be_visible()
-        await who.fill("Ada Lovelace")
-        await w.page.locator("dialog.modal").get_by_role("button", name="Save").click()
-        await expect(w.page.locator("#who")).to_contain_text("Ada Lovelace")
+        await expect(w.page.locator("#account")).to_contain_text("Ada Lovelace")
 
-        epic = await create_in_browser(w.page, "epic", f"Portal {word}")
-        story = await create_in_browser(w.page, "story", f"Sign in {word}", epic)
-        other_story = await create_in_browser(w.page, "story", f"Profile {word}", epic)
-        task = await create_in_browser(w.page, "task", f"Login form {word}", story)
-        friend = await create_in_browser(w.page, "task", f"Logout {word}", story)
+        epic = await create_on_board(w, "epic", f"Portal {word}")
+        story = await create_on_board(w, "story", f"Sign in {word}", epic)
+        other_story = await create_on_board(w, "story", f"Profile {word}", epic)
+        task = await create_on_board(w, "task", f"Login form {word}", story)
+        friend = await create_on_board(w, "task", f"Logout {word}", story)
+        # Each item the form made opened on its own page, which is in the Board.
+        assert "from=board" in w.page.url and f"item={friend}" in w.page.url
 
-        await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
-        await expect(w.page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
+        # The title of a card is the link to its page, and the page is "in" the Board.
+        scope = f"#/board?epic={number_of(epic)}"
+        await w.go(scope)
+        await card(w.page, task).locator("h3.card-title a").click()
+        await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
+        assert f"item={task}" in w.page.url and "from=board" in w.page.url
+        await expect(w.page.locator("#item-title")).to_contain_text(f"{code_of(task)} ")
         await open_editor(w.page)
         await w.page.locator("#edit-title").fill(f"Login form, better {word}")
         await w.page.locator("#edit-body").fill("Email and password, then a code.")
         await w.page.locator("#edit-priority").select_option("high")
         await w.page.get_by_role("button", name="Save changes").click()
-        await expect(w.page.locator("#panel .card-detail")).to_contain_text("Email and password")
+        await expect(w.page.locator("#item-details .body-text")).to_contain_text(
+            "Email and password"
+        )
 
-        # Drag it to in progress, then to done: the same two changes an agent would make. With the
-        # panel open the columns are wider than the room, so the target is scrolled into view first.
+        # The way back is the Board as it was left, still scoped to the epic.
+        await w.page.locator("nav.crumbs .crumb-view a").click()
+        await expect(card(w.page, task)).to_be_visible(timeout=SLOW)
+        assert w.page.url.endswith(scope)
+
+        # Drag it to in progress, then to done: the same two changes an agent would make.
         await w.page.drag_and_drop(
             f".card[data-ref='{task}']", f".cell[data-epic='{epic}'][data-status='in_progress']"
         )
         await expect(
             cell(w.page, epic, "in_progress").locator(f".card[data-ref='{task}']")
         ).to_be_visible()
-        await cell(w.page, epic, "done").scroll_into_view_if_needed()
         await w.page.drag_and_drop(
             f".card[data-ref='{task}']", f".cell[data-epic='{epic}'][data-status='done']"
         )
@@ -451,57 +478,68 @@ async def test_what_a_person_does_on_the_board_is_in_the_graph_with_their_name_a
             cell(w.page, epic, "done").locator(f".card[data-ref='{task}']")
         ).to_be_visible()
 
-        # Move it to the other story, then add a link to its sibling and take it away again. The
-        # card shows it is done first, as a person would see before going on.
-        await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
-        await expect(w.page.locator("#panel .card-detail .chips")).to_contain_text("Done")
+        # Open it again, this time by pressing the card (not its title): the page shows it is done,
+        # and says where it is, as a person would see before going on.
+        await card(w.page, task).locator(".card-context").click()
+        await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
+        await expect(w.page.locator(".card-summary .chips")).to_contain_text("Done")
+        # The path names the epic, the story and the task by their codes alone; the titles are in
+        # each step's tooltip and in the page's heading.
+        assert await crumbs(w.page) == [
+            "Projects", project.name, "Board", code_of(epic), code_of(story), code_of(task),
+        ]  # fmt: skip
+        assert await w.page.locator("#crumb-page").get_attribute("title") == (
+            f"{code_of(task)} Login form, better {word}"
+        )
+
+        # Move it to the other story, then add a link to its sibling and take it away again.
         await w.page.locator("#move-parent").select_option(other_story)
         await w.page.get_by_role("button", name="Move", exact=True).click()
-        await expect(
-            w.page.locator("#panel .card-detail > p", has_text="In story")
-        ).to_contain_text(f"{code_of(other_story)} Profile")
+        await expect(w.page.locator("nav.crumbs li.crumb-item a").last).to_have_attribute(
+            "title", re.compile(rf"^{re.escape(code_of(other_story))} Profile\b"), timeout=SLOW
+        )
+        assert (await crumbs(w.page))[-2] == code_of(other_story)
         await w.page.locator("#link-relation").select_option("relates_to:out")
         await w.page.locator("#link-target").fill(code_of(friend))
         await w.page.get_by_role("button", name="Add", exact=True).click()
-        removal = w.page.locator("#panel .remove-link")
+        removal = w.page.locator("#item-page .remove-link")
         await expect(removal).to_have_count(1)
         await removal.click()
         await expect(removal).to_have_count(0)
         assert w.problems == [], w.problems
 
-    # Through MCP, the graph holds exactly that.
-    final = await node(client, task)
-    assert (final["title"], final["body"], final["priority"], final["status"]) == (
-        f"Login form, better {word}", "Email and password, then a code.", "high", "done",
-    )  # fmt: skip
-    assert (final["parent"], final["version"]) == (other_story, 5)
-    assert (await node(client, epic))["title"] == f"Portal {word}"
-    assert [n["ref"] for n in (await ok(client, "list_nodes", parent=other_story))["items"]] == [
-        task
-    ]
-    events = await history(client, task)
-    assert [(e["action"], e["actor"]) for e in events] == [
-        ("create", "Ada Lovelace"), ("update", "Ada Lovelace"), ("update", "Ada Lovelace"),
-        ("update", "Ada Lovelace"), ("move", "Ada Lovelace"), ("link_added", "Ada Lovelace"),
-        ("link_removed", "Ada Lovelace"),
-    ]  # fmt: skip
-    edit, started, finished, moved = events[1:5]
-    assert set(edit["after"]) == {"title", "body", "priority", "version"}
-    assert edit["before"]["title"] == f"Login form {word}" and edit["before"]["version"] == 1
-    assert edit["after"]["priority"] == "high" and edit["after"]["version"] == 2
-    assert (started["before"], started["after"]) == (
-        {"status": "new", "version": 2}, {"status": "in_progress", "version": 3},
-    )  # fmt: skip
-    assert (finished["before"], finished["after"]) == (
-        {"status": "in_progress", "version": 3}, {"status": "done", "version": 4},
-    )  # fmt: skip
-    assert (moved["before"], moved["after"]) == (
-        {"parent": story, "version": 4}, {"parent": other_story, "version": 5},
-    )  # fmt: skip
-    assert (await ok(client, "list_links", node=task))["items"] == []
+        # Through MCP, the graph holds exactly that.
+        final = await node(client, task)
+        assert (final["title"], final["body"], final["priority"], final["status"]) == (
+            f"Login form, better {word}", "Email and password, then a code.", "high", "done",
+        )  # fmt: skip
+        assert (final["parent"], final["version"]) == (other_story, 5)
+        assert (await node(client, epic))["title"] == f"Portal {word}"
+        listed = (await ok(client, "list_nodes", parent=other_story))["items"]
+        assert [n["ref"] for n in listed] == [task]
+        events = await history(client, task)
+        assert [(e["action"], e["actor"]) for e in events] == [
+            ("create", "Ada Lovelace"), ("update", "Ada Lovelace"), ("update", "Ada Lovelace"),
+            ("update", "Ada Lovelace"), ("move", "Ada Lovelace"), ("link_added", "Ada Lovelace"),
+            ("link_removed", "Ada Lovelace"),
+        ]  # fmt: skip
+        edit, started, finished, moved = events[1:5]
+        assert set(edit["after"]) == {"title", "body", "priority", "version"}
+        assert edit["before"]["title"] == f"Login form {word}" and edit["before"]["version"] == 1
+        assert edit["after"]["priority"] == "high" and edit["after"]["version"] == 2
+        assert (started["before"], started["after"]) == (
+            {"status": "new", "version": 2}, {"status": "in_progress", "version": 3},
+        )  # fmt: skip
+        assert (finished["before"], finished["after"]) == (
+            {"status": "in_progress", "version": 3}, {"status": "done", "version": 4},
+        )  # fmt: skip
+        assert (moved["before"], moved["after"]) == (
+            {"parent": story, "version": 4}, {"parent": other_story, "version": 5},
+        )  # fmt: skip
+        assert (await ok(client, "list_links", node=task))["items"] == []
 
 
-async def test_the_coverage_panel_shows_what_the_coverage_report_says(
+async def test_the_boards_coverage_link_leads_to_the_coverage_page_that_shows_what_the_report_says(
     client: Client, board: str
 ) -> None:
     word = unique_word()
@@ -509,36 +547,55 @@ async def test_the_coverage_panel_shows_what_the_coverage_report_says(
     bare = await made(client, "story", f"Bare story {word}", epic)
     covered = await made(client, "story", f"Covered story {word}", epic)
     await make_rule(client, f"Unplaced rule {word}")
-    await make_rule(client, f"Placed rule {word}", story=covered)
+    await make_rule(client, f"Placed rule {word}", node=covered)
     report = await ok(client, "coverage_report", limit=1)
 
     async with browser_page(board, token=the_token()) as w:
         await w.open("#/board")
-        await w.page.locator("#show-coverage").click()
-        panel = w.page.locator("#panel .coverage")
-        assert "panel=coverage" in w.page.url
-        await expect(panel).to_contain_text(
-            f"Requirements in no story ({report['unplaced_rule_count']})"
+        link = w.page.locator("#show-coverage")
+        await expect(link).to_have_attribute("href", "#/coverage")
+        await link.click()
+        await on_page(w.page, "coverage")
+        assert w.page.url.endswith("#/coverage")
+        coverage = w.page.locator("#coverage-page")
+        await expect(w.page.locator("#coverage-summary")).to_have_attribute(
+            "data-unplaced", str(report["unplaced_rule_count"]), timeout=SLOW
         )
-        await expect(panel).to_contain_text(
-            f"Stories with no requirement ({report['story_without_rules_count']})"
+        await expect(w.page.locator("#coverage-summary")).to_have_attribute(
+            "data-stories-without", str(report["story_without_rules_count"])
+        )
+        await expect(coverage).to_contain_text(
+            f"Acceptance criteria placed nowhere ({report['unplaced_rule_count']})"
+        )
+        await expect(coverage).to_contain_text(
+            f"Stories with no acceptance criterion ({report['story_without_rules_count']})"
         )
         # Every page of both lists, as the report gives them.
-        more = panel.get_by_role("button", name="Show more")
+        more = coverage.get_by_role("button", name="Show more")
         for _ in range(100):
             if not await more.count():
                 break
             await more.first.click()
             await w.page.wait_for_timeout(300)
-        assert await panel.locator("li[data-story]").count() == report["story_without_rules_count"]
-        assert await panel.locator("li[data-rule]").count() == report["unplaced_rule_count"]
-        await expect(panel.locator(f"[data-story='{bare}']")).to_have_count(1)
-        assert await panel.locator(f"[data-story='{covered}']").count() == 0
-        await expect(
-            panel.locator(f"li[data-rule]:has-text('Unplaced rule {word}')")
-        ).to_have_count(1)
-        # A requirement is a rule in the database and the tools, and a Requirement on the board.
-        assert "Rules in no story" not in await panel.inner_text()
+        stories = coverage.locator("#stories-without-rules tr[data-story]")
+        rules = coverage.locator("#unplaced-rules tr[data-rule]")
+        assert await stories.count() == report["story_without_rules_count"]
+        assert await rules.count() == report["unplaced_rule_count"]
+        await expect(coverage.locator(f"tr[data-story='{bare}']")).to_have_count(1)
+        assert await coverage.locator(f"tr[data-story='{covered}']").count() == 0
+        await expect(rules.filter(has_text=f"Unplaced rule {word}")).to_have_count(1)
+        # An acceptance criterion is a rule in the database and the tools, never on the board.
+        assert "Rules placed nowhere" not in await coverage.inner_text()
+        assert "equirement" not in await coverage.inner_text()
+
+        # A row opens the page of its story, which is still "in" the coverage report, and the way
+        # back is that report.
+        await coverage.locator(f"tr[data-story='{bare}'] a.record-title").click()
+        await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", bare, timeout=SLOW)
+        assert "from=coverage" in w.page.url
+        assert (await crumbs(w.page))[2] == "Coverage"
+        await w.page.locator("nav.crumbs .crumb-view a").click()
+        await on_page(w.page, "coverage")
         assert w.problems == [], w.problems
 
 
@@ -553,20 +610,16 @@ async def test_nothing_can_be_dropped_on_ready_and_the_refusal_is_the_one_mcp_gi
     story = await made(client, "story", f"Story {word}", epic)
     first = await made(client, "task", f"First {word}", story)
     second = await made(client, "task", f"Second {word}", story)
-    await ok(client, "add_link", actor="a", source=second, target=first, link_type="needs_first")
+    await ok(client, "add_link", source=second, target=first, link_type="needs_first")
     before = (await node(client, second), len(await history(client, second)))
-    said = await refused(
-        client, "update_node", actor="x", node=second, expected_version=1, status="ready"
-    )
+    said = await refused(client, "update_node", node=second, expected_version=1, status="ready")
 
     async with browser_page(board, token=the_token()) as w:
         await w.open(f"#/board?epic={number_of(epic)}")
         await expect(
             cell(w.page, epic, "new").locator(f".card[data-ref='{second}']")
         ).to_be_visible()
-        await expect(w.page.locator(".column-head.status-ready")).to_contain_text(
-            "nothing can be dropped"
-        )
+        await expect(w.page.locator(".column-head.status-ready")).to_contain_text("Ready")
         await w.page.drag_and_drop(
             f".card[data-ref='{second}']", f".cell[data-epic='{epic}'][data-status='ready']"
         )
@@ -588,18 +641,16 @@ async def test_a_link_that_would_make_a_cycle_is_refused_in_the_words_mcp_uses(
     story = await made(client, "story", f"Story {word}", epic)
     first = await made(client, "task", f"First {word}", story)
     second = await made(client, "task", f"Second {word}", story)
-    await ok(client, "add_link", actor="a", source=second, target=first, link_type="needs_first")
+    await ok(client, "add_link", source=second, target=first, link_type="needs_first")
     before = (await ok(client, "list_links", node=first))["items"]
-    said = await refused(
-        client, "add_link", actor="x", source=first, target=second, link_type="needs_first"
-    )
+    said = await refused(client, "add_link", source=first, target=second, link_type="needs_first")
 
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={first}")
+        await open_item(w, first)
         await w.page.locator("#link-relation").select_option("needs_first:out")
         await w.page.locator("#link-target").fill(f"{code_of(second)} Second {word}")
         await w.page.get_by_role("button", name="Add", exact=True).click()
-        problem = w.page.locator("#panel .inline-form .problem").last
+        problem = w.page.locator("#item-page form.add-link .problem")
         await expect(problem).not_to_be_empty()
         plain(await problem.inner_text(), said)
         # What was typed is still there.
@@ -616,27 +667,28 @@ async def test_a_stale_edit_is_refused_keeps_what_was_typed_and_offers_the_curre
     epic = await made(client, "epic", f"Stale {word}")
     story = await made(client, "story", f"Original title {word}", epic)
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_item(w, story)
         await open_editor(w.page)
         title = w.page.locator("#edit-title")
         await expect(title).to_have_value(f"Original title {word}")
         await title.fill(f"My title {word}")
 
         # An agent changes it meanwhile. The board does not overwrite the form being typed in.
-        await ok(
-            client, "update_node", actor="agent-1", node=story, expected_version=1,
-            title=f"Agent title {word}",
-        )  # fmt: skip
-        changed = w.page.locator("#panel .notice.changed")
+        async with connect_as(f"agent-1-{word}") as by_agent:
+            await ok(
+                by_agent, "update_node", node=story, expected_version=1,
+                title=f"Agent title {word}",
+            )  # fmt: skip
+        changed = w.page.locator("#item-page .notice.changed")
         await expect(changed).to_be_visible(timeout=SLOW)
-        await expect(changed).to_contain_text("agent-1")
+        await expect(changed).to_contain_text(f"agent-1-{word}")
         assert await title.input_value() == f"My title {word}"
 
         said = await refused(
-            client, "update_node", actor="x", node=story, expected_version=1, title="whatever"
+            client, "update_node", node=story, expected_version=1, title="whatever"
         )
         await w.page.get_by_role("button", name="Save changes").click()
-        problem = w.page.locator("#panel .edit .problem")
+        problem = w.page.locator("#item-page form.edit .problem")
         await expect(problem.locator(".refusal-text")).to_be_visible()
         plain(await problem.locator(".refusal-text").inner_text(), said)
         assert await title.input_value() == f"My title {word}"
@@ -645,30 +697,6 @@ async def test_a_stale_edit_is_refused_keeps_what_was_typed_and_offers_the_curre
         await problem.locator(".load-current").click()
         await expect(w.page.locator("#edit-title")).to_have_value(f"Agent title {word}")
         assert w.problems == [], w.problems
-
-
-async def test_a_blank_name_is_refused_in_the_words_mcp_uses_and_changes_nothing(
-    client: Client, board: str
-) -> None:
-    word = unique_word()
-    epic = await made(client, "epic", f"Nameless {word}")
-    story = await made(client, "story", f"Story {word}", epic)
-    before = (await node(client, story), len(await history(client, story)))
-    said = await refused(
-        client, "update_node", actor="  ", node=story, expected_version=1, title="whatever"
-    )
-    async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
-        await w.page.evaluate("localStorage.setItem('vrum.actor', '   ')")
-        await open_editor(w.page)
-        await w.page.locator("#edit-title").fill(f"Changed {word}")
-        await w.page.get_by_role("button", name="Save changes").click()
-        problem = w.page.locator("#panel .edit .problem .refusal-text")
-        await expect(problem).to_be_visible()
-        plain(await problem.inner_text(), said)
-        assert "who is making this change" in await problem.inner_text()
-        assert await w.page.locator("#edit-title").input_value() == f"Changed {word}"
-    assert (await node(client, story), len(await history(client, story))) == before
 
 
 # -- 5. the index follows the graph -----------------------------------
@@ -695,16 +723,19 @@ async def test_an_edit_on_the_board_is_searchable_at_once_and_indexed_without_a_
     await reindexed(client)
 
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
+        await open_item(w, story)
         await open_editor(w.page)
         await w.page.locator("#edit-body").fill(f"The phrase {word} appears here")
         await w.page.get_by_role("button", name="Save changes").click()
-        await expect(w.page.locator("#panel .card-detail")).to_contain_text(f"The phrase {word}")
+        await expect(w.page.locator("#item-details .body-text")).to_contain_text(
+            f"The phrase {word}"
+        )
 
         found = await ok(client, "search", query=word, mode="words")
         assert [item["ref"] for item in found["items"] if item["item_type"] == "story"] == [story]
         await wait_for_zero(client)
-        await expect(w.page.locator("#index-state")).to_have_text("Index: 0 waiting", timeout=SLOW)
+        # With nothing waiting the top bar says nothing about the index.
+        await expect(w.page.locator("#index-state")).to_be_hidden(timeout=SLOW)
 
         # With the embedding service gone the edit still saves, and one item waits.
         with embeddings_stopped():
@@ -712,19 +743,19 @@ async def test_an_edit_on_the_board_is_searchable_at_once_and_indexed_without_a_
             await open_editor(w.page)
             await w.page.locator("#edit-body").fill(f"The second phrase {later} appears here")
             await w.page.get_by_role("button", name="Save changes").click()
-            await expect(w.page.locator("#panel .card-detail")).to_contain_text(
+            await expect(w.page.locator("#item-details .body-text")).to_contain_text(
                 f"second phrase {later}"
             )
             assert f"second phrase {later}" in (await node(client, story))["body"]
             assert await waiting(client) == before + 1
             await expect(w.page.locator("#index-state")).to_have_text(
-                "Index: 1 waiting", timeout=SLOW
+                "Search by meaning is not answering: 1 waiting", timeout=SLOW
             )
             assert [i["ref"] for i in (await ok(client, "search", query=later))["items"]] == [story]
 
         # When it is back the count falls to zero by itself and the story is found by meaning too.
         await wait_for_zero(client)
-        await expect(w.page.locator("#index-state")).to_have_text("Index: 0 waiting", timeout=SLOW)
+        await expect(w.page.locator("#index-state")).to_be_hidden(timeout=SLOW)
         again = await ok(
             client, "search", query=f"Indexed story {word} The second phrase {later} appears here"
         )
@@ -742,17 +773,17 @@ async def test_titles_with_markup_are_shown_as_text_nothing_runs_and_nothing_lea
     markup = f'<img src=x onerror="window.__ran=1"><script>window.__ran=2</script> {word}'
     epic = await made(client, "epic", markup, body="<b>bold</b> <script>window.__ran=3</script>")
     story = await made(client, "story", f"<i>{word}</i>", epic)
-    fact = await make_fact(
+    note = await make_note(
         client,
-        f'<img src=x onerror="window.__ran=4"> a fact {word}',
-        source=f"<b>the source</b> {word}",
+        f'<img src=x onerror="window.__ran=4"> a note {word}',
+        f"<b>the source</b> {word}",
         nodes=[story],
     )
-    decision = await make_decision(
+    decision = await make_note(
         client,
-        f"<u>A decision</u> {word}",
-        text="<script>window.__ran=5</script> what was decided",
-        reason='<img src=x onerror="window.__ran=6"> why',
+        f"<u>A decision</u> {word}\n\n<script>window.__ran=5</script> what was decided",
+        '<img src=x onerror="window.__ran=6"> why',
+        decided_by="Ada",
         nodes=[story],
     )
 
@@ -765,37 +796,67 @@ async def test_titles_with_markup_are_shown_as_text_nothing_runs_and_nothing_lea
 
     async with browser_page(board, token=the_token()) as w:
         scope = number_of(epic)
-        await w.open(f"#/board?epic={scope}")
+        await w.open(f"#/board?epic={scope}&show=both")
         await expect(w.page.locator(f"section.lane[data-ref='{epic}']")).to_contain_text(markup)
-        await w.page.locator(".lane-title").click()
-        await expect(w.page.locator("#panel .body-text")).to_contain_text("<b>bold</b> <script>")
-        await card(w.page, story).click()
-        await expect(w.page.locator("#card-title")).to_contain_text(f"<i>{word}</i>")
-        # What concerns the story is shown as text too: in its card, in the panel of each record,
-        # in the search drawer and in the activity drawer.
-        context = w.page.locator("#panel [data-part=context]")
-        await expect(context.locator("li.record[data-kind=fact]")).to_contain_text(
-            f'<img src=x onerror="window.__ran=4"> a fact {word}'
+        await w.page.locator("a.lane-title").click()
+        await expect(w.page.locator("#item-details .body-text")).to_contain_text(
+            "<b>bold</b> <script>"
         )
-        # Other tests may have made project-wide decisions, which every recall shows too.
-        await expect(
-            context.locator("li.record[data-kind=decision][data-project-wide=false]")
-        ).to_contain_text("<script>window.__ran=5</script> what was decided")
-        await w.go(f"#/board?epic={scope}&sel=fact:{fact['id']}")
-        await expect(w.page.locator("#panel .record-detail .source")).to_contain_text(
+        await w.page.locator("nav.crumbs .crumb-view a").click()
+        await card(w.page, story).locator("h3.card-title a").click()
+        await expect(w.page.locator("#item-title")).to_contain_text(f"<i>{word}</i>")
+        assert f"<i>{word}</i>" in (
+            await w.page.locator("#crumb-page").get_attribute("title") or ""
+        )
+        # What concerns the story is shown as text too: in the tables of its page, on the page of
+        # each record, on the search page, on the activity page and in the Graph.
+        context = w.page.locator("#item-page [data-part=context]")
+        # A table cell shows the statement as plain words (its Markdown marks are dropped), and
+        # the cell's title holds it whole, as written.
+        note_row = context.locator(
+            f"tr.record-line[data-ref='note:{note['id']}'][data-project-wide=false]"
+        )
+        await expect(note_row).to_contain_text(
+            f'<img src=x onerror="window.__ran=4"> a note {word}'
+        )
+        await expect(note_row.locator("td.cell-title .clamp")).to_have_attribute(
+            "title", re.compile(rf'<img src=x onerror="window\.__ran=4"> a note {word}')
+        )
+        # Other tests may have made project-wide notes, which every recall shows too.
+        decision_row = context.locator(
+            f"tr.record-line[data-ref='note:{decision['id']}'][data-project-wide=false]"
+        )
+        await expect(decision_row).to_contain_text(
+            "<script>window.__ran=5</script> what was decided"
+        )
+        await expect(decision_row.locator("td.cell-title .clamp")).to_have_attribute(
+            "title", re.compile(r"<script>window\.__ran=5</script> what was decided")
+        )
+        await note_row.locator("a.record-title").click()
+        await expect(w.page.locator("#item-page")).to_have_attribute(
+            "data-ref", f"note:{note['id']}", timeout=SLOW
+        )
+        await expect(w.page.locator("#item-page [data-part=why]")).to_contain_text(
             f"<b>the source</b> {word}"
         )
-        await w.go(f"#/board?epic={scope}&sel=decision:{decision['id']}")
-        await expect(w.page.locator("#panel .record-detail .reason")).to_contain_text(
+        await w.page.go_back()
+        await decision_row.locator("a.record-title").click()
+        await expect(w.page.locator("#item-page")).to_have_attribute(
+            "data-ref", f"note:{decision['id']}", timeout=SLOW
+        )
+        await expect(w.page.locator("#item-page [data-part=why]")).to_contain_text(
             '<img src=x onerror="window.__ran=6"> why'
         )
-        await w.go(f"#/board?epic={scope}&drawer=search&search={word}&search_mode=words")
-        await expect(w.page.locator("#search-results li.result")).to_have_count(4, timeout=SLOW)
+        await w.go(f"#/search?search={word}")
+        await expect(w.page.locator("#search-results tr.result")).to_have_count(4, timeout=SLOW)
         await expect(w.page.locator("#search-results")).to_contain_text("<img src=x")
-        await w.go(f"#/board?epic={scope}&drawer=activity")
-        await expect(w.page.locator("#feed")).to_contain_text(f"a fact {word}", timeout=SLOW)
-        await w.go(f"#/graph?epic={scope}")
-        await expect(w.page.locator(f".dot[data-key='{epic}']")).to_be_visible()
+        await w.go("#/activity")
+        await expect(w.page.locator("#feed")).to_contain_text(f"a note {word}", timeout=SLOW)
+        await w.go(f"#/graph?tab=around&focus={story}")
+        await expect(w.page.locator("#graph-hub")).to_contain_text(f"<i>{word}</i>", timeout=SLOW)
+        await expect(
+            w.page.locator(f".graph-around button.graph-node[data-ref='note:{note['id']}']")
+        ).to_contain_text("<img src=x", timeout=SLOW)
 
         assert await w.page.evaluate("typeof window.__ran") == "undefined"
         assert await w.page.locator("img[src='x'], script:not([src]), b, u").count() == 0
@@ -806,7 +867,7 @@ async def test_titles_with_markup_are_shown_as_text_nothing_runs_and_nothing_lea
 # -- the keyboard -----------------------------------
 
 
-async def test_a_card_can_be_opened_closed_and_moved_from_the_keyboard_alone(
+async def test_a_card_can_be_opened_and_folded_from_the_keyboard_alone(
     client: Client, board: str
 ) -> None:
     word = unique_word()
@@ -817,42 +878,83 @@ async def test_a_card_can_be_opened_closed_and_moved_from_the_keyboard_alone(
         await w.open(f"#/board?epic={number_of(epic)}")
         target = card(w.page, task)
         await expect(target).to_be_visible()
-        await target.focus()
+        # The card is not a stop of its own: its fold button and then its title (a link) are, and a
+        # card has no menu to move it: a status is changed by dragging the card to another column.
+        assert await target.get_attribute("tabindex") is None
+        assert await target.locator("button.move").count() == 0
+        link = target.locator("h3.card-title a")
+        await target.locator(".fold").focus()
         await w.page.keyboard.press("Enter")
-        await expect(w.page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
-        assert f"sel={task}" in w.page.url
-        await expect(w.page.locator("#card-title")).to_be_focused()
-
-        # The panel's own way to the item's page comes first, and then the panel closes with the
-        # keyboard too, and the card has the focus again.
-        await w.page.keyboard.press("Tab")
-        await expect(w.page.get_by_role("link", name="Open full page")).to_be_focused()
-        await w.page.keyboard.press("Tab")
-        await expect(w.page.get_by_role("button", name="Close the details")).to_be_focused()
-        await w.page.keyboard.press("Enter")
-        await expect(w.page.locator("#panel")).to_be_hidden()
-        assert "sel=" not in w.page.url
-        await expect(target).to_be_focused()
+        await expect(target).to_have_class(re.compile(r"\bfolded\b"))
         await w.page.keyboard.press("Space")
-        await expect(w.page.locator("#card-title")).to_contain_text(f"{code_of(task)} ")
-
-        await target.locator(".move").focus()
+        await expect(target).not_to_have_class(re.compile(r"\bfolded\b"))
+        await w.page.keyboard.press("Tab")
+        await expect(link).to_be_focused()
+        await expect(link).to_have_attribute("href", f"#/item?item={task}&from=board")
         await w.page.keyboard.press("Enter")
-        menu = w.page.locator(".menu.move-menu[role=menu]")
-        await expect(menu).to_be_visible()
-        assert await menu.get_by_role("menuitem").all_inner_texts() == [
-            "In progress", "Blocked", "Done", "Dropped"
-        ]  # fmt: skip
-        assert "Ready is worked out" in await menu.inner_text()
-        await w.page.keyboard.press("Enter")  # the first choice has the focus: in progress
-        await expect(
-            cell(w.page, epic, "in_progress").locator(f".card[data-ref='{task}']")
-        ).to_be_visible()
-        assert (await node(client, task))["status"] == "in_progress"
+        await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
+        assert w.page.url.endswith(f"#/item?item={task}&from=board")
+        await expect(w.page.locator("#item-title")).to_contain_text(f"{code_of(task)} ")
+        await expect(w.page.locator("#item-title")).to_be_focused()
+        await no_panel_or_drawer(w.page)
+
+        # The way back is a link in the path, reached and used with the keyboard too, and the
+        # keyboard carries on from the page.
+        back = w.page.locator("#back-to-view")
+        await back.focus()
+        await w.page.keyboard.press("Enter")
+        await expect(target).to_be_visible(timeout=SLOW)
+        assert w.page.url.endswith(f"#/board?epic={number_of(epic)}")
+        await expect(w.page.locator("main#page")).to_be_focused()
         assert w.problems == [], w.problems
 
 
-async def test_the_panel_leads_to_the_full_page_of_an_epic_a_story_and_a_task(
+async def test_a_card_folds_away_to_its_title_and_stays_folded_when_the_board_redraws(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Folds {word}")
+    story = await made(client, "story", f"Story {word}", epic)
+    task = await made(client, "task", f"Folding task {word}", story)
+    other = await made(client, "task", f"Other task {word}", story)
+    async with browser_page(board, token=the_token()) as w:
+        await w.open(f"#/board?epic={number_of(epic)}")
+        target = card(w.page, task)
+        fold = target.locator("button.fold")
+        await expect(target).to_be_visible()
+        # Open, it says what a click does, and the chips and the story it is under show.
+        await expect(fold).to_have_attribute("aria-expanded", "true")
+        await expect(fold).to_have_attribute("aria-label", f"Fold away {code_of(task)}")
+        await expect(target.locator(".card-context")).to_be_visible()
+
+        # A click folds this card and no other, and does not open its page.
+        await fold.click()
+        await expect(target).to_have_class(re.compile(r"\bfolded\b"))
+        await expect(fold).to_have_attribute("aria-expanded", "false")
+        await expect(fold).to_have_attribute("aria-label", f"Show {code_of(task)}")
+        await expect(target.locator(".card-context")).to_be_hidden()
+        await expect(target.locator("h3.card-title a")).to_be_visible()
+        await expect(card(w.page, other)).not_to_have_class(re.compile(r"\bfolded\b"))
+        assert w.page.url.endswith(f"#/board?epic={number_of(epic)}")
+
+        # What an agent does redraws the board, and the card stays folded.
+        version = (await node(client, task))["version"]
+        await ok(
+            client, "update_node", node=task, expected_version=version, title=f"Renamed {word}"
+        )
+        await expect(target.locator("h3.card-title a")).to_contain_text(
+            f"Renamed {word}", timeout=SLOW
+        )
+        await expect(target).to_have_class(re.compile(r"\bfolded\b"))
+
+        # A second click on the fold shows the card again.
+        await fold.click()
+        await expect(target).not_to_have_class(re.compile(r"\bfolded\b"))
+        await expect(target.locator(".card-context")).to_be_visible()
+        assert w.problems == [], w.problems
+
+
+async def test_a_lane_and_the_cards_of_a_story_and_a_task_open_their_full_pages_in_the_board(
     client: Client, board: str
 ) -> None:
     word = unique_word()
@@ -860,108 +962,142 @@ async def test_the_panel_leads_to_the_full_page_of_an_epic_a_story_and_a_task(
     story = await made(client, "story", f"Paged story {word}", epic)
     first = await made(client, "task", f"First paged task {word}", story)
     second = await made(client, "task", f"Second paged task {word}", story)
+    scope = f"#/board?epic={number_of(epic)}&show=both"
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        for ref in (epic, story, first):
-            await w.open(f"#/board?epic={number_of(epic)}&sel={ref}")
-            await expect(page.locator("#card-title")).to_contain_text(f"{code_of(ref)} ")
-            link = page.get_by_role("link", name="Open full page")
-            await expect(link).to_have_attribute("href", f"#/item?item={ref}")
+        opening = {
+            epic: lane(page, epic).locator("a.lane-title"),
+            story: card(page, story).locator("h3.card-title a"),
+            first: card(page, first).locator("h3.card-title a"),
+        }
+        for ref, link in opening.items():
+            await w.open(scope)
+            await expect(link).to_be_visible(timeout=SLOW)
+            await expect(link).to_have_attribute("href", f"#/item?item={ref}&from=board")
             await link.click()
-            # The page names the same item, and the panel does not come along.
+            # The page names the same item, is in the Board, and nothing opens beside it.
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", ref, timeout=SLOW
             )
-            assert page.url.endswith(f"#/item?item={ref}")
+            assert page.url.endswith(f"#/item?item={ref}&from=board")
             await expect(page.locator("#item-title")).to_contain_text(f"{code_of(ref)} ")
-            await expect(page.locator("#panel")).to_be_hidden()
+            await no_panel_or_drawer(page)
+            assert (await crumbs(page))[2] == "Board"
+            await expect(page.locator("#main-nav a[data-page=board]")).to_have_attribute(
+                "aria-current", "page"
+            )
             if ref == story:
                 # What is under the story is what MCP says is under it, by number.
                 wanted = [n["ref"] for n in (await ok(client, "list_nodes", parent=story))["items"]]
                 assert wanted == [first, second]
+                await expect(page.locator("#item-table tbody tr")).to_have_count(
+                    len(wanted), timeout=SLOW
+                )
                 assert await item_rows(page) == wanted
             if ref == first:
-                # A task has no table: it is part of its story.
+                # A task has no table of what is under it: it is part of its story.
                 assert await page.locator("#item-table").count() == 0
                 await expect(page.locator("#item-part-title")).to_contain_text(code_of(story))
         assert w.problems == [], w.problems
 
 
-async def test_the_facts_and_decisions_of_a_story_show_in_its_card_as_recall_says(
+async def test_the_notes_of_a_story_show_on_its_page_as_recall_says(
     client: Client, board: str
 ) -> None:
     word = unique_word()
     epic = await made(client, "epic", f"Known {word}")
     story = await made(client, "story", f"Story {word}", epic, target_on="2031-05-06")
-    unconfirmed = await make_fact(
-        client, f"An unconfirmed fact {word}", source=f"The call {word}", nodes=[story]
+    unconfirmed = await make_note(
+        client, f"An unconfirmed note {word}", f"The call {word}", nodes=[story]
     )
-    reviewed = await confirm(
-        client,
-        "fact",
-        await make_fact(client, f"A reviewed fact {word}", nodes=[story]),
-        person="Marie",
-    )
-    gone = await make_fact(client, f"A wrong fact {word}", nodes=[story])
-    await ok(
-        client,
-        "withdraw_fact",
-        actor="agent-1",
-        fact_ids=[gone["id"]],
-        reason=f"It was wrong {word}",
-    )
-    decision = await make_decision(
+    reviewed = await make_note(client, f"A reviewed note {word}", nodes=[story])
+    confirm_on_board("note", reviewed, "Marie")
+    gone = await make_note(client, f"A wrong note {word}", nodes=[story])
+    await ok(client, "withdraw_note", note_ids=[gone["id"]], reason=f"It was wrong {word}")
+    decision = await make_note(
         client,
         f"Use Postgres {word}",
-        reason=f"It is what we run {word}",
+        f"It is what we run {word}",
         decided_by="Ada",
         nodes=[story],
     )
-    wide = await make_decision(client, f"Always review {word}", project_wide=True)
+    wide = await make_note(client, f"Always review {word}", decided_by="Marie", project_wide=True)
     recalled = await ok(client, "recall", node=story, limit=50)
 
     def held(section: str) -> list[int]:
-        return [(item.get("fact") or item["decision"])["id"] for item in recalled[section]["items"]]
+        return [item["note"]["id"] for item in recalled[section]["items"]]
 
-    assert held("facts") == [unconfirmed["id"], reviewed["id"]]
-    assert held("past_facts") == [gone["id"]] and held("active_decisions") == [decision["id"]]
-    assert wide["id"] in held("project_wide_decisions")
+    # What binds comes first: the decision, then the plain notes by their numbers.
+    assert held("notes") == [decision["id"], unconfirmed["id"], reviewed["id"]]
+    assert held("past_notes") == [gone["id"]]
+    assert wide["id"] in held("project_wide_notes")
 
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
-        detail = w.page.locator("#panel .card-detail")
-        await expect(detail).to_contain_text("Target 2031-05-06")
-        await expect(detail.locator("[data-section=facts] li.record")).to_have_count(2)
+        await open_item(w, story)
+        page = w.page
+        summary = page.locator("#item-page .card-summary")
+        await expect(summary).to_contain_text("Target")
+        await expect(summary).to_contain_text("2031-05-06")
+        context = page.locator("#item-page [data-part=context]")
+        await expect(context.locator("[data-section=notes] tr.record-line")).to_have_count(3)
 
         async def shown(section: str) -> list[int]:
-            rows = detail.locator(f"[data-section={section}] li.record")
-            numbers = await rows.evaluate_all(
-                "els => els.map(e => Number(e.dataset.record.split(':')[1]))"
-            )
+            rows = context.locator(f"[data-section={section}] tr.record-line")
+            numbers = await rows.evaluate_all("els => els.map(e => Number(e.dataset.id))")
             return list(numbers)
 
         # Every section holds exactly what recall holds, and nothing else.
-        for section in ("facts", "past_facts", "active_decisions", "project_wide_decisions"):
+        for section in ("notes", "past_notes", "project_wide_notes"):
             assert await shown(section) == held(section), section
+        # A section with fewer than five entries is open; with more it waits closed.
+        for name in ("past_notes", "project_wide_notes"):
+            folded = context.locator(f"details[data-disclosure={name}]")
+            assert (await folded.get_attribute("open") is not None) == (
+                recalled[name]["count"] < 5
+            ), name
 
-        # Confirmation and lifecycle are in words and fields, so an unconfirmed fact is never
-        # shown as confirmed, and a withdrawn one is visibly ended, with its reason.
-        row = detail.locator(f"li.record[data-record='fact:{unconfirmed['id']}']")
-        await expect(row).to_have_attribute("data-confirmation", "unconfirmed")
-        await expect(row).to_contain_text("Not confirmed")
-        await expect(row).to_contain_text(f"Source: The call {word}")
-        row = detail.locator(f"li.record[data-record='fact:{reviewed['id']}']")
-        await expect(row).to_have_attribute("data-confirmation", "confirmed")
-        await expect(row).to_contain_text("Confirmed by Marie")
-        row = detail.locator(f"li.record[data-record='fact:{gone['id']}']")
+        # One status says where each note stands, in words and in a field, so an unconfirmed note is
+        # never shown as confirmed, and a withdrawn one is visibly ended.
+        row = context.locator(f"tr.record-line[data-ref='note:{unconfirmed['id']}']")
+        await expect(row).to_have_attribute("data-status", "unconfirmed")
+        await expect(row.locator(".chip.note-status")).to_have_text("Unconfirmed")
+        await expect(row.locator("td.cell-decided")).to_have_text("")
+        await expect(row.locator("td.cell-title")).to_contain_text(f"Why: The call {word}")
+        row = context.locator(f"tr.record-line[data-ref='note:{reviewed['id']}']")
+        await expect(row).to_have_attribute("data-status", "confirmed")
+        chip = row.locator(".chip.note-status")
+        await expect(chip).to_have_text("Confirmed")
+        assert "Confirmed by Marie" in (await chip.get_attribute("title") or "")
+        row = context.locator(f"tr.record-line[data-ref='note:{gone['id']}']")
         await expect(row).to_have_attribute("data-status", "withdrawn")
-        await expect(row).to_contain_text(f"It was wrong {word}")
-        row = detail.locator(f"li.record[data-record='decision:{decision['id']}']")
-        await expect(row).to_contain_text("Decided by Ada")
-        await expect(row).to_contain_text(f"It is what we run {word}")
-        row = detail.locator(f"li.record[data-record='decision:{wide['id']}']")
+        await expect(row.locator(".chip.note-status")).to_have_text("Withdrawn")
+        row = context.locator(f"tr.record-line[data-ref='note:{decision['id']}']")
+        await expect(row.locator("td.cell-decided")).to_contain_text("Ada")
+        await expect(row.locator("td.cell-title")).to_contain_text(f"Use Postgres {word}")
+        row = context.locator(f"tr.record-line[data-ref='note:{wide['id']}']")
         await expect(row).to_have_attribute("data-project-wide", "true")
-        await expect(row).to_contain_text("Project-wide")
+        await expect(row.locator("td.cell-applies")).to_contain_text("Whole project")
+
+        # A row opens the page of its note, which says what the table cannot: why it was
+        # withdrawn, and why a note was written.
+        withdrawn = context.locator(f"tr.record-line[data-ref='note:{gone['id']}']")
+        past = context.locator("details[data-disclosure=past_notes]")
+        if await past.get_attribute("open") is None:
+            await past.locator("summary").click()
+        await withdrawn.locator("a.record-title").click()
+        await expect(page.locator("#item-page")).to_have_attribute(
+            "data-ref", f"note:{gone['id']}", timeout=SLOW
+        )
+        await expect(page.locator("#item-page [data-part=lifecycle]")).to_contain_text(
+            f"It was wrong {word}"
+        )
+        await page.go_back()
+        await context.locator(
+            f"tr.record-line[data-ref='note:{decision['id']}'] a.record-title"
+        ).click()
+        await expect(page.locator("#item-page [data-part=why]")).to_contain_text(
+            f"It is what we run {word}"
+        )
         assert w.problems == [], w.problems
 
 
@@ -989,26 +1125,14 @@ async def twelve(client: Client) -> dict[str, str]:
         ids[name] = await made(
             client, "task", f"Task {name} {word}", ids[story], priority=priority, **extra
         )
-    await ok(client, "claim_node", actor="ann", node=ids["t1"])
-    await ok(
-        client,
-        "update_node",
-        actor="a",
-        node=ids["t1"],
-        expected_version=1,
-        status="in_progress",
-    )
-    await ok(client, "update_node", actor="a", node=ids["t3"], expected_version=1, status="done")
-    await ok(client, "update_node", actor="a", node=ids["t4"], expected_version=1, status="blocked")
-    await ok(client, "claim_node", actor="bob", node=ids["t7"])
-    await ok(
-        client,
-        "add_link",
-        actor="a",
-        source=ids["t5"],
-        target=ids["t2"],
-        link_type="needs_first",
-    )
+    ids["ann"], ids["bob"] = f"ann-{word}", f"bob-{word}"
+    async with connect_each(ids["ann"], ids["bob"]) as (by_ann, by_bob):
+        await ok(by_ann, "claim_node", node=ids["t1"])
+        await ok(by_bob, "claim_node", node=ids["t7"])
+    await ok(client, "update_node", node=ids["t1"], expected_version=1, status="in_progress")
+    await ok(client, "update_node", node=ids["t3"], expected_version=1, status="done")
+    await ok(client, "update_node", node=ids["t4"], expected_version=1, status="blocked")
+    await ok(client, "add_link", source=ids["t5"], target=ids["t2"], link_type="needs_first")
     return ids
 
 
@@ -1019,7 +1143,7 @@ async def test_the_board_filter_is_the_one_list_nodes_reads_and_a_bad_one_is_ref
     epic = number_of(ids["epic"])
     async with browser_page(board, token=the_token()) as w:
         page = w.page
-        await w.open(f"#/board?q=epic:{epic}")
+        await w.open(f"#/board?q=epic:{epic}&show=both")
         everything = await all_nodes(client, query=f"epic:{epic}")
         assert len(everything) == 12
         cards = {n["ref"] for n in everything if n["kind"] != "epic"}
@@ -1041,7 +1165,7 @@ async def test_the_board_filter_is_the_one_list_nodes_reads_and_a_bad_one_is_ref
 
         # Held, dated and waiting work: each term of the language, against list_nodes.
         for term in (
-            "claimed:ann,bob",
+            f"claimed:{ids['ann']},{ids['bob']}",
             "is:overdue",
             "status:blocked",
             "no:target kind:task",
@@ -1065,7 +1189,7 @@ async def test_the_board_filter_is_the_one_list_nodes_reads_and_a_bad_one_is_ref
         assert w.problems == [], w.problems
 
 
-async def test_the_graph_work_list_keeps_the_nodes_the_same_filter_asks_for(
+async def test_the_lists_work_outline_keeps_the_nodes_the_same_filter_asks_for(
     client: Client, board: str
 ) -> None:
     ids = await twelve(client)
@@ -1074,7 +1198,7 @@ async def test_the_graph_work_list_keeps_the_nodes_the_same_filter_asks_for(
     wanted = {n["ref"] for n in await all_nodes(client, query=text)}
     assert 0 < len(wanted) < 10
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/graph?view=work&as=list&q={text.replace(' ', '+')}")
+        await w.open(f"#/lists?view=work&q={text.replace(' ', '+')}")
         rows = w.page.locator("#work-tree li[role=treeitem]")
         await expect(rows.first).to_be_visible(timeout=SLOW)
         keys = await rows.evaluate_all("els => els.map(e => e.dataset.key)")
@@ -1091,12 +1215,12 @@ async def test_the_graph_work_list_keeps_the_nodes_the_same_filter_asks_for(
         assert w.problems == [], w.problems
 
 
-async def test_a_boards_address_opens_the_same_view_in_a_second_browser_and_stores_nothing(
+async def test_the_addresses_of_a_view_and_of_a_page_open_the_same_thing_in_a_second_browser(
     client: Client, board: str
 ) -> None:
     ids = await twelve(client)
     epic = number_of(ids["epic"])
-    fact = await make_fact(client, f"Kept in the address {epic}", nodes=[ids["t2"]])
+    note = await make_note(client, f"Kept in the address {epic}", nodes=[ids["t2"]])
     text = f"epic:{epic} kind:task -claimed priority:high,urgent"
     wanted = {n["ref"] for n in await all_nodes(client, query=text) if n["kind"] != "epic"}
     async with browser_page(board, token=the_token()) as first:
@@ -1104,28 +1228,44 @@ async def test_a_boards_address_opens_the_same_view_in_a_second_browser_and_stor
         await first.page.locator("#epic-filter").select_option(str(epic))
         await apply_filter(first.page, text)
         await cards_are(first.page, wanted)
-        await card(first.page, ids["t2"]).click()
-        await expect(first.page.locator("#card-title")).to_contain_text(f"{code_of(ids['t2'])} ")
+        view = first.page.url
+        assert f"epic={epic}" in view and "q=" in view and "item=" not in view
+        await card(first.page, ids["t2"]).locator("h3.card-title a").click()
+        await expect(first.page.locator("#item-title")).to_contain_text(f"{code_of(ids['t2'])} ")
         await expect(
-            first.page.locator(f"#panel li.record[data-record='fact:{fact['id']}']")
-        ).to_be_visible()
-        address = first.page.url
-        assert f"epic={epic}" in address and f"sel={ids['t2']}" in address and "q=" in address
-        assert the_token() not in address
+            first.page.locator(f"#item-page tr.record-line[data-ref='note:{note['id']}']")
+        ).to_be_visible(timeout=SLOW)
+        page_address = first.page.url
+        assert page_address.endswith(f"#/item?item={ids['t2']}&from=board")
+        # The way back is the view as it was left, with its filter and its epic.
+        back = first.page.locator("nav.crumbs .crumb-view a")
+        assert await back.get_attribute("href") == view.split(board)[1]
+        assert the_token() not in view and the_token() not in page_address
         before = database_footprint()
 
-        # A second browser, which has never seen this view: it signs in and opens the address.
+        # A second browser, which has never seen this view: it signs in and opens the address of
+        # the view, and then the address of the page.
         async with browser_page(board, token=the_token(), name="Someone else") as second:
-            await second.page.goto(address)
+            await second.page.goto(view)
             await cards_are(second.page, wanted)
             assert await second.page.locator("#filter").input_value() == text
             assert await second.page.locator("#epic-filter").input_value() == str(epic)
-            await expect(second.page.locator("#card-title")).to_contain_text(
-                f"{code_of(ids['t2'])} ", timeout=SLOW
+            await second.page.goto(page_address)
+            await second.page.reload()
+            await expect(second.page.locator("#item-page")).to_have_attribute(
+                "data-ref", ids["t2"], timeout=SLOW
+            )
+            await expect(second.page.locator("#item-title")).to_contain_text(
+                f"{code_of(ids['t2'])} "
             )
             await expect(
-                second.page.locator(f"#panel li.record[data-record='fact:{fact['id']}']")
-            ).to_be_visible()
+                second.page.locator(f"#item-page tr.record-line[data-ref='note:{note['id']}']")
+            ).to_be_visible(timeout=SLOW)
+            assert (await crumbs(second.page))[2] == "Board"
+            # It is still in the Board, but nothing in memory says which choices the view had, so
+            # the way back is the plain Board.
+            link = second.page.locator("nav.crumbs .crumb-view a")
+            assert await link.get_attribute("href") == "#/board"
             assert second.problems == [], second.problems
         assert database_footprint() == before
         assert not [name for name in before[0].split(",") if "view" in name or "saved" in name]
@@ -1149,6 +1289,8 @@ async def test_a_story_or_task_made_with_no_parent_is_refused_in_the_words_mcp_u
 
         async def attempt(kind: str, title: str) -> str:
             """Fill the New item form with no parent to choose from, and give what it says."""
+            await w.go("#/board")
+            await on_page(w.page, "board")
             await w.page.locator("#new-item").click()
             dialog = w.page.locator("dialog.modal")
             await dialog.locator("#new-kind").select_option(kind)
@@ -1162,34 +1304,32 @@ async def test_a_story_or_task_made_with_no_parent_is_refused_in_the_words_mcp_u
             return words
 
         # A story needs an epic, and the project has none; the words are the tool's own.
-        said = await refused(agent, "create_node", actor="x", kind="story", title="Orphan")
+        said = await refused(agent, "create_node", kind="story", title="Orphan")
         plain(await attempt("story", f"Orphan story {word}"), said)
-        epic = await create_in_browser(w.page, "epic", f"The only epic {word}")
+        epic = await create_on_board(w, "epic", f"The only epic {word}")
         # A task needs a story, and the epic has none.
-        said = await refused(agent, "create_node", actor="x", kind="task", title="Orphan")
+        said = await refused(agent, "create_node", kind="task", title="Orphan")
         plain(await attempt("task", f"Orphan task {word}"), said)
         titles = {n["title"] for n in (await ok(agent, "list_nodes"))["items"]}
         assert titles == {f"The only epic {word}"}, (titles, epic)
         assert w.problems == [] or all("status of 400" in p for p in w.problems), w.problems
 
 
-async def test_a_start_date_after_the_target_typed_in_the_card_is_refused_in_the_words_mcp_uses(
+async def test_a_start_date_after_the_target_typed_on_the_page_is_refused_in_the_words_mcp_uses(
     client: Client, board: str
 ) -> None:
     word = unique_word()
     epic = await made(client, "epic", f"Dates {word}")
     story = await made(client, "story", f"Story {word}", epic)
     task = await made(client, "task", f"Dated {word}", story, start_on=day(2), target_on=day(9))
-    said = await refused(
-        client, "update_node", actor="x", node=task, expected_version=1, start_on=day(12)
-    )
+    said = await refused(client, "update_node", node=task, expected_version=1, start_on=day(12))
     before = (await node(client, task), len(await history(client, task)))
     async with browser_page(board, token=the_token()) as w:
-        await w.open(f"#/board?epic={number_of(epic)}&sel={task}")
+        await open_item(w, task)
         await open_editor(w.page)
         await w.page.locator("#edit-start").fill(day(12))
         await w.page.get_by_role("button", name="Save changes").click()
-        problem = w.page.locator("#panel .edit .problem .refusal-text")
+        problem = w.page.locator("#item-page form.edit .problem .refusal-text")
         await expect(problem).to_be_visible(timeout=SLOW)
         plain(await problem.inner_text(), said)
         assert "Work cannot start after" in await problem.inner_text()

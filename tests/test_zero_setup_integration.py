@@ -56,7 +56,7 @@ async def test_it_starts_with_nothing_set_and_keeps_its_own_password_and_its_dat
     assert password not in logs, "the database password is in a log"
     async with stack.client() as client:
         assert (await ok(client, "server_status"))["postgres_version"]
-        made = await ok(client, "create_node", actor="agent-1", kind="epic", title="Kept")
+        made = await ok(client, "create_node", kind="epic", title="Kept")
 
     # Stopping and starting again keeps the password and everything in the database.
     start_again(stack)

@@ -83,7 +83,7 @@ async def finding() -> None:
         )  # fmt: skip
         rule = await ok(
             client, "create_rule", actor="a", title="A rule", body=f"Never skip {word}.",
-            story=story["ref"],
+            node=story["ref"],
         )  # fmt: skip
         decision = await make_decision(client, "A decision", text=f"We choose {word}.")
         decision = await confirm(client, "decision", decision, "Marie")

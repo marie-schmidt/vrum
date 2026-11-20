@@ -1,4 +1,4 @@
-"""What the tests of the Activity drawer, the Tools and Status pages and the acceptance walk share:
+"""What the tests of the Activity page, the Tools and Status pages and the acceptance walk share:
 reading every page of a list tool, and reading the Activity feed. All of it goes through a real MCP
 client against the real containers; none of it reaches into the page's own code."""
 
@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from mcp import Client
-from playwright.async_api import Locator, Page
+from playwright.async_api import Locator, Page, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from tests.board_helpers import SLOW
@@ -84,3 +84,30 @@ async def events_of(client: Client, **filters: Any) -> list[dict[str, Any]]:
 def spoken(text: str) -> str:
     """Words as a person reads them: any run of spaces and line breaks is one space."""
     return " ".join(text.split())
+
+
+# -- who is working on what (the Activity page's side) ------------------------------------------
+
+
+async def open_working(page: Page) -> None:
+    """Open "Who is working on what" on the Activity page when it is folded (under 700 pixels it
+    starts folded; from 1280 it is always open), and wait for its claims."""
+    working = page.locator("#working")
+    if await working.get_attribute("open") is None:
+        await working.locator(":scope > summary").click()
+    await expect(page.locator("#claims-live")).to_be_visible(timeout=SLOW)
+
+
+async def claim_rows(page: Page) -> list[dict[str, Any]]:
+    """The claims the Activity page lists now, in the order drawn: node (the reference), actor (who
+    holds it; None for work that is free to take), live (False for a claim that ran out; None for
+    work that is free) and section (claims-live, claims-lapsed or free)."""
+    rows: list[dict[str, Any]] = await page.locator("#working li.claim").evaluate_all(
+        """els => els.map(e => ({
+            node: e.dataset.node,
+            actor: e.dataset.actor ?? null,
+            live: e.dataset.live === undefined ? null : e.dataset.live === '1',
+            section: e.closest('section').id,
+        }))"""
+    )
+    return rows

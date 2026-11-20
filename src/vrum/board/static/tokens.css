@@ -1,7 +1,12 @@
 /* Vrum design tokens: one set of values for the whole board, in a light and a dark theme.
    The theme is decided before the first paint by theme.js, which sets data-theme on <html>.
    Every colour a page uses comes from here, so nothing is inverted mechanically and every pair of
-   text and background below is checked for contrast (tests/test_board_theme.py). */
+   text and background below is checked for contrast (tests/test_board_theme.py).
+
+   The six statuses have one colour each, everywhere they are drawn (chips, columns, menus, the
+   Roadmap's bars, the Graph's marks): new is grey (--text-3), ready is blue (--info), in progress is
+   violet (--progress), blocked is red (--danger), done is green (--ok) and dropped is grey with
+   a dotted or faded look. A test fails when a rule for one status uses another's colour. */
 
 :root {
   /* Type. System fonts only: nothing is fetched from anywhere. */
@@ -15,6 +20,7 @@
   --text-2xl: 2rem;
   --leading: 1.5;
   --leading-tight: 1.25;
+  --caps-tracking: 0.05em;
 
   /* Space, in steps. Gutters, padding and gaps use these and nothing else. */
   --space-1: 0.25rem;
@@ -63,16 +69,20 @@
   --on-accent: #ffffff;
   --accent-text: #b02a14;
   --accent-soft: #fbe9e5;
-  --focus: #1f55c6;
+  --focus: #1c1b19;
   --ok: #1b6b44;
   --ok-soft: #e3f2ea;
   --warn: #86560a;
   --warn-soft: #faefd6;
   --info: #25579f;
   --info-soft: #e5edfa;
+  --progress: #5b36b4;
+  --progress-soft: #ece6fa;
   --danger: #b3261e;
   --danger-soft: #fbe6e3;
   --neutral-soft: #ece9e2;
+  --grid-line: #f0eee9;
+  --grid-weekend: #f9f8f5;
   --shadow: 0 1px 2px rgb(28 27 25 / 8%), 0 1px 1px rgb(28 27 25 / 4%);
   --shadow-lg: 0 8px 30px rgb(28 27 25 / 16%);
   --scrim: rgb(28 27 25 / 40%);
@@ -96,16 +106,20 @@
   --on-accent: #1d0f0a;
   --accent-text: #f5896a;
   --accent-soft: #3a2620;
-  --focus: #8db4ff;
+  --focus: #ecebe7;
   --ok: #5fcf97;
   --ok-soft: #1f3a2e;
   --warn: #e8b650;
   --warn-soft: #3b3017;
   --info: #8db4ff;
   --info-soft: #1f2e4a;
+  --progress: #bba6ff;
+  --progress-soft: #2b2347;
   --danger: #ff8a80;
   --danger-soft: #45221f;
   --neutral-soft: #2d3035;
+  --grid-line: #292c30;
+  --grid-weekend: #24272b;
   --shadow: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow-lg: 0 8px 30px rgb(0 0 0 / 55%);
   --scrim: rgb(0 0 0 / 60%);

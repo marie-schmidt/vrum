@@ -13,8 +13,8 @@ const CHOICES = [
 
 let counter = 0;
 
-// A control for the page it is on. Several may be on screen (the sign-in page has one, the sidebar
-// another); each follows the choice made in any of them.
+// A control for the page it is on (the top bar, before and after a project is open). Each follows
+// the choice made in any other that is on screen.
 export function appearanceControl() {
   counter += 1;
   const name = `appearance-${counter}`;
@@ -29,7 +29,7 @@ export function appearanceControl() {
       onchange: () => window.vrumTheme.set(choice.value),
     });
     group.append(
-      h('label', { class: 'appearance-option', for: input.id }, input, icon(choice.icon, { size: 14 }), h('span', {}, choice.label)),
+      h('label', { class: 'appearance-option', for: input.id, title: choice.label }, input, icon(choice.icon, { size: 14 }), h('span', { class: 'appearance-label' }, choice.label)),
     );
     return input;
   });

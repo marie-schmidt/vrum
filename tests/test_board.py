@@ -109,27 +109,33 @@ def test_the_security_policy_allows_only_the_servers_own_files_and_calls() -> No
 
 
 def test_no_page_script_keeps_a_session_or_an_agent_key_in_the_browser() -> None:
-    # The session is a cookie the page cannot read, and its secret lives in memory only. The one
-    # thing kept in the browser is the name a person's changes are recorded with, and every call
-    # to the server goes through api.js, which puts the project in the address and sends no key.
+    # The session is a cookie the page cannot read, and its secret lives in memory only. Nothing
+    # about who a person is, or which name their changes are recorded under, is kept in the browser
+    # (the server decides that from the session), and every call to the server goes through api.js,
+    # which puts the project in the address and sends no key.
     for path in SCRIPTS:
         text = path.read_text(encoding="utf-8")
         assert [w for w in ("document.cookie", "sessionStorage", "indexedDB") if w in text] == []
         assert "VRUM_TOKEN" not in text, path.name
         if path.name != "api.js":
             assert not re.search(r"\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket", text), path.name
-        if path.name not in ("ctx.js", "theme.js"):
+        if path.name != "theme.js":
             assert "localStorage" not in text, path.name
     api_text = (STATIC / "api.js").read_text(encoding="utf-8")
     assert "Authorization" not in api_text
-    ctx_text = (STATIC / "ctx.js").read_text(encoding="utf-8")
-    assert re.findall(r"localStorage\.\w+\((\w+)", ctx_text) == ["NAME_KEY"] * 2
-    assert "const NAME_KEY = 'vrum.actor'" in ctx_text
-    # The other thing kept is the choice of appearance (Light, Dark or System), and nothing else.
+    # The one thing kept is the choice of appearance (Light, Dark or System), and nothing else.
     theme_text = (STATIC / "theme.js").read_text(encoding="utf-8")
     assert set(re.findall(r"localStorage\.\w+\((\w+)", theme_text)) == {"KEY"}
     assert "var KEY = 'vrum.theme'" in theme_text
     assert "localStorage.clear" not in "".join(path.read_text(encoding="utf-8") for path in SCRIPTS)
+
+
+def test_no_page_types_or_sends_a_name_for_the_history() -> None:
+    # The server records who made a change from the session (a person) or the key (an agent), so
+    # no page keeps a name for it and no call carries one.
+    for path in SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"\bactor\s*:\s*actor\(|\bsetActor\b|vrum\.actor", text), path.name
 
 
 def test_the_board_asks_for_news_every_five_seconds_unless_told_otherwise() -> None:
@@ -190,7 +196,7 @@ def test_that_check_fails_when_a_tool_is_missing_from_the_map_or_made_up() -> No
     assert classification_problems(larger, live) == [
         "no_such_tool is in the map but the server has no such tool"
     ]
-    calls_it = {**TOOL_PLACES, "search": ToolPlace("Server", AgentsOnly("A reason."))}
+    calls_it = {**TOOL_PLACES, "search": ToolPlace("Status and changes", AgentsOnly("A reason."))}
     assert classification_problems(calls_it, live) == [
         "search is marked as for agents only, but the board calls it"
     ]
@@ -211,41 +217,46 @@ def test_the_tools_that_only_read_say_so_and_are_the_ones_the_board_reads_with()
         "next_work",
         "reindex",
         "import_graph",
-        "retain_fact",
-        "record_decision",
+        "add_note",
+        "supersede_note",
         "set_confirmation",
     ):
         assert name not in reads
 
 
-# -- M16: three views, no generation, no removed pages --------------------------------------------
+# -- M16: four views, no generation, no removed pages ---------------------------------------------
 
 GENERATION = {"extract_facts", "consolidate_memory", "find_contradictions", "reflect"}
 
 
-def test_the_board_is_three_views_and_the_settings_pages_and_the_old_pages_have_no_script() -> None:
+def test_the_board_is_four_views_and_the_settings_pages_and_the_old_pages_have_no_script() -> None:
     ctx = (STATIC / "ctx.js").read_text(encoding="utf-8")
     views = re.search(r"export const VIEWS = \[(.*?)\]", ctx)
     settings = re.search(r"export const SETTINGS = \[(.*?)\]", ctx)
     assert views and settings
-    assert re.findall(r"'(\w+)'", views.group(1)) == ["board", "graph", "roadmap"]
-    assert re.findall(r"'(\w+)'", settings.group(1)) == ["access", "tools", "status"]
+    assert re.findall(r"'(\w+)'", views.group(1)) == ["board", "graph", "roadmap", "lists"]
+    assert re.findall(r"'(\w+)'", settings.group(1)) == ["users", "definition", "tools", "status"]
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     pages = re.search(r"const PAGES = \{(.*?)\n\};", app, re.S)
     assert pages
-    # The page of one epic, story or task (item) is reached from the panel and from lists, so it
-    # is a page that is in neither VIEWS nor SETTINGS.
+    # Search, Activity, the coverage report and the page of one record (item) are reached from
+    # links and the top bar, so they are pages that are in neither VIEWS nor SETTINGS.
     assert re.findall(r"^\s{2}(\w+): \{ title", pages.group(1), re.M) == [
         "board",
         "graph",
         "roadmap",
-        "access",
+        "lists",
+        "search",
+        "activity",
+        "coverage",
+        "users",
+        "definition",
         "tools",
         "status",
         "item",
     ]
     # Home, Table, Outline, Rules, Memory, Overlaps and Ask are gone, scripts and all: Search and
-    # Activity are drawers, and requirements, facts and decisions live in the panel and the Graph.
+    # Activity are pages, and acceptance criteria and notes have pages of their own.
     gone = {"home", "table", "outline", "rules", "memory", "memory-forms", "overlaps", "ask"}
     assert not [path.name for path in SCRIPTS if path.stem in gone]
 
@@ -260,8 +271,6 @@ def test_no_generation_tool_exists_and_the_board_neither_calls_nor_names_one() -
         text = path.read_text(encoding="utf-8").lower()
         assert "language model" not in text and "language_model" not in text, path.name
         assert "reflect" not in text.replace("reflection", ""), path.name
-    # Facts and decisions are written, withdrawn and confirmed through the board's operations.
-    assert {"retain_fact", "record_decision", "withdraw_fact", "withdraw_decision"} <= set(
-        WRITE_TOOLS
-    )
+    # Notes are written, replaced, withdrawn and confirmed through the board's operations.
+    assert {"add_note", "supersede_note", "withdraw_note", "link_note"} <= set(WRITE_TOOLS)
     assert "set_confirmation" in WRITE_TOOLS

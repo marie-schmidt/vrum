@@ -1,0 +1,37 @@
+# The real OpenID provider of the check stack (Dex, the dex service of compose.check.yaml): a static
+# client for the second copy of Vrum (app-dex) and two fictional people with a password each, who
+# sign in on Dex's own page. It exists only for tests; the product has no idea it is here. The
+# three values between @ signs are filled in from the service's environment when it starts, so
+# that the same file serves any port.
+
+issuer: "@DEX_ISSUER@"
+
+storage:
+  type: memory
+
+web:
+  http: "0.0.0.0:@DEX_PORT@"
+
+oauth2:
+  skipApprovalScreen: true
+  responseTypes: ["code"]
+
+enablePasswordDB: true
+
+staticClients:
+  - id: vrum-dex
+    name: Vrum check stack
+    secret: dex-client-secret
+    redirectURIs:
+      - "@DEX_REDIRECT_URI@"
+
+# Passwords: open-sesame-dana and open-sesame-dev.
+staticPasswords:
+  - email: dana.dex@example.com
+    hash: "$2b$10$AT3avSjerHHu2WAzxOWGtuZnvU0grrc6ymzKAnpaHetEQwewdOAB."
+    username: dana
+    userID: 3c1d0a8e-5b0f-4f2f-9d57-0c5c1a2d7e11
+  - email: dev.dex@example.com
+    hash: "$2b$10$sSzZ70abvHuvl2f1BGjGU.3BvZJw94grY4ujGKq91aEWsRdUDwQAu"
+    username: dev
+    userID: 8a4b6f52-1c7e-4d3a-b9d4-6e2f0c9a5b37

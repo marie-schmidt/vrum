@@ -32,3 +32,25 @@ export const monthName = (day) =>
 export const yearOf = (day) => new Date(day * DAY_MS).getUTCFullYear();
 export const monthOf = (day) => new Date(day * DAY_MS).getUTCMonth();
 export const dayOfMonth = (day) => new Date(day * DAY_MS).getUTCDate();
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+export const weekdayName = (day) => WEEKDAYS[weekday(day)];
+export const longMonthName = (day) => MONTHS[monthOf(day)];
+
+// The same day of the month `count` months on (a negative count goes back), or the last day of that month when
+// it has no such day: one month after 31 January is 28 February.
+export const addMonths = (day, count) => {
+  const when = new Date(day * DAY_MS);
+  const first = Date.UTC(when.getUTCFullYear(), when.getUTCMonth() + count, 1) / DAY_MS;
+  return Math.min(first + when.getUTCDate() - 1, nextMonth(first) - 1);
+};
+
+// The day a text written as YYYY-MM-DD names, or null when it is anything else (including a day that is not on
+// the calendar, such as 2026-02-30).
+export const parseDay = (text) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const day = toDay(text);
+  return Number.isFinite(day) && fromDay(day) === text ? day : null;
+};

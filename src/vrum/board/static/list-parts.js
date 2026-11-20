@@ -1,10 +1,10 @@
-// What the Graph's context list sections share: the frame of a section (heading, count, buttons
+// What the Lists page's context list sections share: the frame of a section (heading, count, buttons
 // and filters), the way a record's connections are written out, and the text filter.
 
+import { itemLink } from './ctx.js';
 import { h } from './dom.js';
-import { neighboursOf, relationWords } from './graph-data.js';
-import { KIND, isNodeKind, itemCode, kindIcon } from './labels.js';
-import { openRecord } from './records.js';
+import { neighboursOf, relationWords } from './lists-data.js';
+import { isNodeKind, itemCode, kindIcon, kindLabel } from './labels.js';
 
 // One part of the context list: a heading with a count and its buttons, a row of filters that act
 // in the browser over the whole list the board holds, and the place the rows go. `controls` is a
@@ -33,7 +33,7 @@ export function sectionFrame({ name, title, buttons = [], controls = [], onFilte
     body,
     // "3 of 7": how many rows the filters keep, out of how many the scope holds.
     setCount(shown, total) {
-      count.textContent = shown === total ? `${total}` : `${shown} of ${total}`;
+      count.textContent = shown === total ? `(${total})` : `(${shown} of ${total})`;
       count.dataset.shown = String(shown);
       count.dataset.total = String(total);
     },
@@ -54,16 +54,14 @@ export function matchesText(typed, ...pieces) {
   return words.every((word) => hay.includes(word));
 }
 
-// What a record is joined to, as words and buttons that show the other record: the same joins the
-// map draws as lines, so the list says what the map shows. `skip` leaves out kinds of line the row
-// already says another way. The other end is opened by its real kind and number: a node's record
-// has a `number`, a requirement's, decision's and fact's an `id`.
+// What a record is joined to, as words and links to the page of the other record. `skip` leaves out kinds of line the
+// row already says another way. The other end is named by its key (story:12, rule:3, note:7).
 export function connectionsDetails(dot, ctx, { skip = [] } = {}) {
   const near = neighboursOf(dot.key, ctx.all.edges, ctx.all.dots).filter((entry) => !skip.includes(entry.edge.type));
   if (!near.length) return null;
   const chosen = ctx.cfg.sel?.key === dot.key;
   const numberOf = (other) => other.record?.number ?? other.record?.id ?? other.id;
-  const nameOf = (other) => (isNodeKind(other.type) ? `${itemCode(other.type, numberOf(other))} ${other.title}` : `${KIND[other.type].label} #${numberOf(other)} ${other.title}`);
+  const nameOf = (other) => (isNodeKind(other.type) ? `${itemCode(other.type, numberOf(other))} ${other.title}` : `${kindLabel(other.type)} #${numberOf(other)} ${other.title}`);
   return h(
     'details',
     { class: 'gv-connections', open: chosen, dataset: { for: dot.key } },
@@ -76,12 +74,7 @@ export function connectionsDetails(dot, ctx, { skip = [] } = {}) {
           'li',
           { dataset: { other: entry.dot.key, relation: entry.edge.type } },
           h('strong', {}, relationWords(entry)),
-          h(
-            'button',
-            { type: 'button', class: 'link gv-link', onclick: () => openRecord(entry.dot.type, numberOf(entry.dot)) },
-            kindIcon(entry.dot.type, 14),
-            nameOf(entry.dot),
-          ),
+          itemLink(entry.dot.key, { class: 'gv-link' }, kindIcon(entry.dot.type, 14), nameOf(entry.dot)),
         ),
       ),
     ),

@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from vrum.common import (
     Refusal,
     check_choice,
-    clean_actor,
     fetch_all,
     fetch_one,
     page_size,
@@ -79,7 +78,6 @@ class Links:
         self._database = database
 
     async def add_link(self, *, actor: str, source: str, target: str, link_type: str) -> Link:
-        actor = clean_actor(actor)
         check_choice("link_type", link_type, LINK_TYPES)
         if source == target:
             raise Refusal(
@@ -120,7 +118,6 @@ class Links:
         return Link.model_validate(row)
 
     async def remove_link(self, *, actor: str, source: str, target: str, link_type: str) -> Link:
-        actor = clean_actor(actor)
         check_choice("link_type", link_type, LINK_TYPES)
         async with self._database.transaction() as conn:
             row = await fetch_one(

@@ -1,6 +1,14 @@
 # The extra services and settings ./check.sh adds to compose.yaml (it sets COMPOSE_FILE to both).
-# They are for tests only. Nothing here is part of running Vrum.
+# They are for tests only. Nothing here is part of running Vrum. The scripted ones are stand-ins
+# (an embedding service, a mail server, an OpenID provider, GitHub); the real ones are an
+# OpenLDAP directory and Dex (a real OpenID provider) with a second copy of the server for it.
 services:
+  # The sidecar of compose.yaml (the real embedding model) is not part of the checks: the scripted
+  # service below answers for it, the same every run, with nothing to build. The one proof of the
+  # real thing starts it in a second stack of its own (tests/second_stack.py).
+  embeddings:
+    profiles: ["real-embeddings"]
+
   # Stands in for an embedding service, so the checks need no model download and give the same
   # answers every run. Tests stop and start it to see what happens when it is gone.
   scripted-embeddings:
@@ -18,9 +26,216 @@ services:
       timeout: 4s
       retries: 20
 
+  # Stands in for a mail server: it takes every message and keeps it, so the checks need no real
+  # mail account and the demo can show what Vrum sends. Its page and the list of its messages are
+  # on one HTTP port, published on this machine only at VRUM_MAIL_PORT (a free one if that is
+  # not set). The tests read it at VRUM_TEST_MAIL_URL.
+  scripted-mail:
+    image: python:3.12-slim
+    volumes:
+      - ./tests/scripted_mail.py:/service.py:ro
+    command: ["python", "/service.py"]
+    ports:
+      - "127.0.0.1:${VRUM_MAIL_PORT:-}:8025"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=3)
+      interval: 2s
+      timeout: 4s
+      retries: 20
+
+  # Stands in for an OpenID Connect provider (tests/scripted_oidc.py): fictional people on a page of
+  # buttons, discovery, keys, token endpoint, and a control endpoint that makes the next token
+  # misbehave. The server reaches it as scripted-oidc:8080 (that is its issuer); a browser reaches
+  # it at http://127.0.0.1:${VRUM_OIDC_PORT} (that is where the discovery document sends a person).
+  # The tests read it at VRUM_TEST_OIDC_URL. Vrum's OpenID settings point at it.
+  scripted-oidc:
+    image: python:3.12-slim
+    volumes:
+      - ./tests/scripted_oidc.py:/service.py:ro
+    environment:
+      PORT: "8080"
+      ISSUER: http://scripted-oidc:8080
+      BROWSER_URL: http://127.0.0.1:${VRUM_OIDC_PORT:-8093}
+      CLIENT_ID: vrum-check
+      CLIENT_SECRET: scripted-oidc-secret
+      REDIRECT_URIS: http://localhost:${VRUM_PORT:-8000}/board/auth/oidc/callback
+    command: ["python", "/service.py"]
+    ports:
+      - "127.0.0.1:${VRUM_OIDC_PORT:-8093}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
+      interval: 2s
+      timeout: 4s
+      retries: 30
+
+  # Stands in for GitHub (tests/scripted_github.py): GitHub's documented OAuth and API answers for
+  # fictional people. Published at VRUM_GITHUB_PORT (read by the tests at VRUM_TEST_GITHUB_URL).
+  scripted-github:
+    image: python:3.12-slim
+    volumes:
+      - ./tests/scripted_github.py:/service.py:ro
+    environment:
+      PORT: "8080"
+      CLIENT_ID: vrum-github-check
+      CLIENT_SECRET: scripted-github-secret
+      REDIRECT_URIS: http://localhost:${VRUM_PORT:-8000}/board/auth/github/callback
+    command: ["python", "/service.py"]
+    ports:
+      - "127.0.0.1:${VRUM_GITHUB_PORT:-8094}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
+      interval: 2s
+      timeout: 4s
+      retries: 20
+
+  # A real directory (OpenLDAP) with fictional people (tests/providers/ldap/people.ldif) and a
+  # read-only account for the search. Not published: the server reaches it as ldap:389, and the
+  # tests add people and look at it with docker compose exec.
+  ldap:
+    image: osixia/openldap:1.5.0
+    command: ["--copy-service"]
+    environment:
+      LDAP_ORGANISATION: Example Inc
+      LDAP_DOMAIN: example.org
+      LDAP_ADMIN_PASSWORD: directory-admin-password
+      LDAP_CONFIG_PASSWORD: directory-config-password
+      LDAP_TLS: "false"
+      LDAP_READONLY_USER: "true"
+      LDAP_READONLY_USER_USERNAME: vrum-search
+      LDAP_READONLY_USER_PASSWORD: search-only-password
+    volumes:
+      - ./tests/providers/ldap/people.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/people.ldif:ro
+    healthcheck:
+      # Healthy once the fictional people are in.
+      test:
+        - CMD-SHELL
+        - >-
+          ldapsearch -x -H ldap://127.0.0.1:389 -D cn=vrum-search,dc=example,dc=org
+          -w search-only-password -b ou=people,dc=example,dc=org '(uid=ava)' dn
+          | grep -q '^dn: uid=ava'
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # A real OpenID provider (Dex, tests/providers/dex/config.yaml) with two fictional people, for
+  # the one proof against something that is not scripted. Its address has to be the same for a
+  # browser and for the server, so it is dex.localhost on the same port inside and outside: a
+  # browser takes any *.localhost name to this machine, and the server finds the name through the
+  # network alias. Only app-dex (below) uses it.
+  dex:
+    image: ghcr.io/dexidp/dex:v2.46.1-alpine
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed -e "s|@DEX_ISSUER@|$$DEX_ISSUER|g" -e "s|@DEX_PORT@|$$DEX_PORT|g" \
+          -e "s|@DEX_REDIRECT_URI@|$$DEX_REDIRECT_URI|g" /etc/dex/config.yaml > /tmp/dex.yaml
+        exec dex serve /tmp/dex.yaml
+    environment:
+      DEX_PORT: ${VRUM_DEX_PORT:-8095}
+      DEX_ISSUER: http://dex.localhost:${VRUM_DEX_PORT:-8095}/dex
+      DEX_REDIRECT_URI: http://localhost:${VRUM_DEX_APP_PORT:-8096}/board/auth/oidc/callback
+    volumes:
+      - ./tests/providers/dex/config.yaml:/etc/dex/config.yaml:ro
+    networks:
+      default:
+        aliases:
+          - dex.localhost
+    ports:
+      - "127.0.0.1:${VRUM_DEX_PORT:-8095}:${VRUM_DEX_PORT:-8095}"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null "http://127.0.0.1:$$DEX_PORT/dex/healthz"
+      interval: 2s
+      timeout: 4s
+      retries: 30
+
+  # A second copy of the server (same image, same database) whose only difference is that its
+  # OpenID settings point at Dex, so that one browser sign-in can be proven against a real provider.
+  # Reached at http://localhost:${VRUM_DEX_APP_PORT} (VRUM_TEST_DEX_APP_URL).
+  app-dex:
+    build: .
+    depends_on:
+      app:
+        condition: service_healthy
+      dex:
+        condition: service_healthy
+    environment:
+      VRUM_HOST: 0.0.0.0
+      VRUM_PORT: ${VRUM_DEX_APP_PORT:-8096}
+      VRUM_DB_HOST: db
+      VRUM_DB_PASSWORD_FILE: /secrets/db-password
+      VRUM_PUBLIC_URL: http://localhost:${VRUM_DEX_APP_PORT:-8096}
+      VRUM_OIDC_ISSUER: http://dex.localhost:${VRUM_DEX_PORT:-8095}/dex
+      VRUM_OIDC_CLIENT_ID: vrum-dex
+      VRUM_OIDC_CLIENT_SECRET: dex-client-secret
+      VRUM_OIDC_NAME: Dex
+      VRUM_SSO_ALLOW_INSECURE_HTTP: "true"
+    volumes:
+      - vrum-secrets:/secrets:ro
+    ports:
+      - "127.0.0.1:${VRUM_DEX_APP_PORT:-8096}:${VRUM_DEX_APP_PORT:-8096}"
+    healthcheck:
+      test: ["CMD", "python", "-m", "vrum.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
   app:
+    depends_on:
+      scripted-oidc:
+        condition: service_healthy
+      scripted-github:
+        condition: service_healthy
+      ldap:
+        condition: service_healthy
     environment:
       EMBEDDING_BASE_URL: http://scripted-embeddings:8080/v1
       EMBEDDING_MODEL: scripted-embedding
       # Look for new work every second, so the checks do not have to wait long for the index.
       EMBEDDING_REINDEX_SECONDS: "1"
+      # Send email through the stand-in above, with links that point at this stack's board.
+      VRUM_SMTP_HOST: scripted-mail
+      VRUM_SMTP_PORT: "2525"
+      VRUM_SMTP_SECURITY: none
+      VRUM_SMTP_FROM: Vrum <vrum@example.com>
+      VRUM_PUBLIC_URL: http://localhost:${VRUM_PORT:-8000}
+      # Signing in with another provider: OpenID through the scripted provider, GitHub through the
+      # scripted GitHub, and LDAP through the real directory (all of them plain http on this
+      # network, which is why the insecure settings are on). A browser reaches the sign-in pages
+      # of the two scripted ones at the published ports, not at the names the server uses.
+      VRUM_SSO_ALLOW_INSECURE_HTTP: "true"
+      VRUM_OIDC_ISSUER: http://scripted-oidc:8080
+      VRUM_OIDC_CLIENT_ID: vrum-check
+      VRUM_OIDC_CLIENT_SECRET: scripted-oidc-secret
+      VRUM_OIDC_NAME: Scripted OpenID
+      VRUM_GITHUB_CLIENT_ID: vrum-github-check
+      VRUM_GITHUB_CLIENT_SECRET: scripted-github-secret
+      VRUM_GITHUB_URL: http://scripted-github:8080
+      VRUM_GITHUB_AUTHORIZE_URL: http://127.0.0.1:${VRUM_GITHUB_PORT:-8094}/login/oauth/authorize
+      VRUM_GITHUB_API_URL: http://scripted-github:8080/api/v3
+      VRUM_LDAP_URL: ldap://ldap:389
+      VRUM_LDAP_SECURITY: none
+      VRUM_LDAP_BIND_DN: cn=vrum-search,dc=example,dc=org
+      VRUM_LDAP_BIND_PASSWORD: search-only-password
+      VRUM_LDAP_BASE_DN: ou=people,dc=example,dc=org
+      VRUM_LDAP_NAME: Company directory
+      # The settings a test changes by starting the server again with them (nothing by default).
+      VRUM_SSO_CREATE_ACCOUNTS: ${VRUM_SSO_CREATE_ACCOUNTS:-}
+      VRUM_OIDC_ALLOWED_DOMAINS: ${VRUM_OIDC_ALLOWED_DOMAINS:-}
+      VRUM_GITHUB_ALLOWED_DOMAINS: ${VRUM_GITHUB_ALLOWED_DOMAINS:-}
+      VRUM_LDAP_ALLOWED_DOMAINS: ${VRUM_LDAP_ALLOWED_DOMAINS:-}

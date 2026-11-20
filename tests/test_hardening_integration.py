@@ -22,8 +22,9 @@ from mcp.shared.exceptions import MCPError
 
 from tests.helpers import (
     compose,
-    confirm,
+    confirm_on_board,
     connect,
+    connect_as,
     make_decision,
     make_fact,
     ok,
@@ -129,9 +130,8 @@ def count_everything() -> str:
     nothing."""
     result = run_sql(
         "SELECT (SELECT count(*) FROM nodes) || '/' || (SELECT count(*) FROM links) || '/' || "
-        "(SELECT count(*) FROM rules) || '/' || (SELECT count(*) FROM decisions) || '/' || "
-        "(SELECT count(*) FROM facts) || '/' || (SELECT count(*) FROM claims) || '/' || "
-        "(SELECT count(*) FROM events)",
+        "(SELECT count(*) FROM rules) || '/' || (SELECT count(*) FROM notes) || '/' || "
+        "(SELECT count(*) FROM claims) || '/' || (SELECT count(*) FROM events)",
         plain=True,
         as_project=True,
     )
@@ -147,11 +147,10 @@ def stored_anywhere(text: str) -> int:
         f"OR before::text LIKE {like} OR actor LIKE {like}) "
         f"+ (SELECT count(*) FROM nodes WHERE title LIKE {like} OR body LIKE {like}) "
         f"+ (SELECT count(*) FROM rules WHERE title LIKE {like} OR body LIKE {like}) "
-        f"+ (SELECT count(*) FROM decisions WHERE title LIKE {like} OR text LIKE {like} "
-        f"OR reason LIKE {like} OR decided_by LIKE {like} OR status_reason LIKE {like} "
-        f"OR confirmed_by LIKE {like}) "
-        f"+ (SELECT count(*) FROM facts WHERE text LIKE {like} OR source LIKE {like} "
-        f"OR status_reason LIKE {like} OR confirmed_by LIKE {like} OR recorded_by LIKE {like}) "
+        f"+ (SELECT count(*) FROM definition_of_done WHERE body LIKE {like}) "
+        f"+ (SELECT count(*) FROM notes WHERE text LIKE {like} OR why LIKE {like} "
+        f"OR decided_by LIKE {like} OR status_reason LIKE {like} OR confirmed_by LIKE {like} "
+        f"OR recorded_by LIKE {like}) "
         f"+ (SELECT count(*) FROM claims WHERE actor LIKE {like})",
         plain=True,
         project=None,
@@ -167,7 +166,7 @@ def a_revoked_key() -> str:
     """An agent key that was good for the shared project and has been revoked."""
     project = the_project()
     made = project.owner.call(
-        "POST", f"/board/api/projects/{project.id}/keys", {"label": "revoked soon"}
+        "POST", f"/board/api/projects/{project.id}/keys", {"name": f"revoked-soon-{unique_word()}"}
     )
     assert made.status == 201, made.body
     revoked = project.owner.call(
@@ -257,7 +256,11 @@ async def test_the_health_check_and_the_page_files_are_the_only_open_doors_and_h
         assert status == 200, path
         assert the_project().name.encode() not in body and the_token().encode() not in body
     status, _, body = request(root + "/board/api/session", method="GET", body=None)
-    assert status == 200 and json.loads(body) == {"account": None, "csrf": None}
+    signed_out = json.loads(body)
+    assert status == 200 and signed_out["account"] is None and signed_out["csrf"] is None
+    # Nothing about any person or project is in it: only what the sign-in page may offer.
+    assert set(signed_out) == {"account", "csrf", "mail", "providers", "sso_create_accounts"}
+    assert the_project().name not in body.decode() and the_token() not in body.decode()
     # Everything else the board answers needs a person who is signed in and owns the project, and
     # there is no way in with an agent key: it is for agents, not for people.
     project = the_project().id
@@ -369,7 +372,8 @@ async def test_a_text_too_long_to_be_searched_is_refused_plainly_and_not_as_a_br
 
 
 async def a_world(client: Client) -> dict[str, Any]:
-    """One of everything a write can name, with a claim held by ann, for the cases below."""
+    """One of everything a write can name, with a claim held by the test's key, for the cases
+    below."""
     epic = await ok(client, "create_node", actor="ann", kind="epic", title="An epic")
     story = await ok(
         client, "create_node", actor="ann", kind="story", title="A story", parent=epic["ref"]
@@ -377,8 +381,8 @@ async def a_world(client: Client) -> dict[str, Any]:
     task = await ok(
         client, "create_node", actor="ann", kind="task", title="A task", parent=story["ref"]
     )
-    await ok(client, "claim_node", actor="ann", node=task["ref"])
-    rule = await ok(client, "create_rule", actor="ann", title="A rule", story=story["ref"])
+    await ok(client, "claim_node", node=task["ref"])
+    rule = await ok(client, "create_rule", actor="ann", title="A rule", node=story["ref"])
     decision = await make_decision(client, "A decision", nodes=[story["ref"]])
     fact = await make_fact(client, "A fact")
     return {
@@ -401,7 +405,7 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
             {"key": "e", "kind": "epic", "title": "An epic"},
             {"key": "s", "kind": "story", "title": "A story", "parent": "e"},
         ]
-        rules = [{"title": "A rule", "story": "s"}]
+        rules = [{"title": "A rule", "node": "s"}]
         if where == "items[0].title":
             items[0]["title"] = secret
         elif where == "items[1].body":
@@ -415,21 +419,14 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
     def edit(tool: str, field: str, **fixed: Any) -> tuple[str, Any, str]:
         return tool, lambda secret: {**fixed, field: secret}, field
 
-    record = {"actor": "a", "title": "t", "text": "x", "reason": "r", "decided_by": "Marie"}
-    replace = {**record, "decision_id": decision}
-    supersede = {"actor": "a", "replaces": [fact], "reason": "r", "text": "x", "source": "x"}
-    withdraw_decision = {"actor": "a", "decision_id": decision, "reason": "r"}
-    withdraw_fact = {"actor": "a", "fact_ids": [fact], "reason": "r"}
-    confirm_fact = {"actor": "a", "kind": "fact", "record_id": fact, "confirmation": "confirmed"}
-    unconfirm_decision = {
-        "actor": "a",
-        "kind": "decision",
-        "record_id": decision,
-        "confirmation": "unconfirmed",
-    }
+    record = {"text": "x", "why": "r", "decided_by": "Marie"}
+    replace = {**record, "replaces": [decision]}
+    withdraw = {"note_ids": [fact], "reason": "r"}
+    confirm_fact = {"note_id": fact, "confirmation": "confirmed"}
+    unconfirm_decision = {"note_id": decision, "confirmation": "unconfirmed"}
     task_edit = {"actor": "a", "node": task, "expected_version": 1}
     rule_edit = {"actor": "a", "rule_id": rule, "expected_version": 1}
-    claimed = {"actor": "ann", "node": task}
+    claimed = {"node": task}
     created = {"actor": "a", "kind": "epic", "title": "t"}
     return [
         edit("create_node", "title", actor="a", kind="epic"),
@@ -437,6 +434,7 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         edit("create_node", "actor", kind="epic", title="t"),
         edit("update_node", "title", **task_edit),
         edit("update_node", "body", **task_edit),
+        edit("update_node", "why", **task_edit, status="blocked"),
         (
             "update_nodes",
             lambda s: {
@@ -464,21 +462,16 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         edit("create_rule", "body", actor="a", title="t"),
         edit("update_rule", "title", **rule_edit),
         edit("update_rule", "body", **rule_edit),
-        *(edit("record_decision", field, **record) for field in ("title", "text", "reason")),
-        edit("record_decision", "decided_by", **record),
-        *(edit("supersede_decision", f, **replace) for f in ("title", "text", "reason")),
-        edit("supersede_decision", "decided_by", **replace),
-        edit("retain_fact", "text", actor="a", source="x"),
-        edit("retain_fact", "source", actor="a", text="x"),
-        edit("supersede_decision", "said_by", **replace, quote="q"),
-        edit("withdraw_decision", "reason", actor="a", decision_id=decision),
-        edit("withdraw_decision", "quote", **withdraw_decision, said_by="Marie"),
-        edit("supersede_fact", "text", **supersede),
-        edit("supersede_fact", "reason", **supersede),
-        edit("supersede_fact", "source", **supersede),
-        edit("supersede_fact", "said_by", **supersede, quote="q"),
-        edit("withdraw_fact", "reason", actor="a", fact_ids=[fact]),
-        edit("withdraw_fact", "quote", **withdraw_fact, said_by="Marie"),
+        edit("set_definition_of_done", "body", expected_version=1),
+        *(edit("add_note", field, **record) for field in ("text", "why", "decided_by")),
+        edit("add_note", "decided_on", **record),
+        *(edit("supersede_note", f, **replace) for f in ("text", "why", "decided_by")),
+        edit("supersede_note", "decided_on", **replace),
+        edit("supersede_note", "said_by", **replace, quote="q"),
+        edit("supersede_note", "quote", **replace, said_by="Marie"),
+        edit("withdraw_note", "reason", note_ids=[fact]),
+        edit("withdraw_note", "quote", **withdraw, said_by="Marie"),
+        edit("withdraw_note", "said_by", **withdraw, quote="q"),
         edit("set_confirmation", "person", **confirm_fact),
         edit("set_confirmation", "quote", **confirm_fact, person="Marie"),
         edit("set_confirmation", "person", **unconfirm_decision, quote="q"),
@@ -487,6 +480,9 @@ def secret_cases(world: dict[str, Any]) -> list[tuple[str, Any, str]]:
         edit("release_claim", "note", **claimed),
         edit("claim_node", "actor", node=task),
         edit("add_link", "actor", source=story, target=task, link_type="relates_to"),
+        edit("list_nodes", "query"),
+        edit("list_notes", "status"),
+        edit("changes_since", "actor"),
         edit("search", "query"),
         edit("similar_items", "text"),
     ]
@@ -529,7 +525,7 @@ async def test_ordinary_text_that_talks_about_secrets_is_not_refused(client: Cli
     assert (await ok(client, "get_node", node=node["ref"]))["body"] == text
     assert fact["text"] == text
     decision = await make_decision(client, "Passwords", text=text, reason=text)
-    assert (decision["text"], decision["reason"]) == (text, text)
+    assert (decision["text"], decision["why"]) == (f"Passwords\n\n{text}", text)
 
 
 # -- plain refusals ------------------------------------------------------------------------------
@@ -541,11 +537,11 @@ async def test_arguments_that_do_not_fit_are_refused_in_plain_words_without_repe
     word = unique_word()
     big_body = "padding " * 20_000 + word
 
-    missing = await refused(client, "create_node", kind="epic", title="t", body=big_body)
+    missing = await refused(client, "create_node", kind="epic", body=big_body)
     wrong_type = await refused(client, "list_nodes", limit=f"not a number {word}")
     several = await refused(client, "get_node", node=[1, 2], extra=word)
 
-    assert "the arguments are not valid" in missing and "actor: Field required" in missing
+    assert "the arguments are not valid" in missing and "title: Field required" in missing
     assert word not in missing and len(missing) < 500
     assert "limit: Input should be a valid integer" in wrong_type and word not in wrong_type
     assert "Nothing was changed" in wrong_type and "against the tool's description" in wrong_type
@@ -571,10 +567,8 @@ PAGED = (
     "list_rules",
     "rule_history",
     "coverage_report",
-    "list_decisions",
-    "decision_history",
-    "list_facts",
-    "fact_history",
+    "list_notes",
+    "note_history",
     "recall",
     "search",
     "similar_items",
@@ -593,19 +587,17 @@ BOUNDED = {
     "finish_work",
     "create_plan",
     "update_nodes",
-    "record_decision",
-    "get_decision",
-    "link_decision",
-    "unlink_decision",
-    "supersede_decision",
-    "withdraw_decision",
-    "retain_fact",
-    "get_fact",
-    "link_fact",
-    "unlink_fact",
-    "supersede_fact",
-    "withdraw_fact",
+    "add_note",
+    "get_note",
+    "link_note",
+    "unlink_note",
+    "supersede_note",
+    "withdraw_note",
     "reindex",
+    # The checks of the definition of done: as many as it has list lines, or those of one item.
+    "get_definition_of_done",
+    "set_definition_of_done",
+    "set_check",
     # One entry for each person or agent who has taken work: as many as there are names.
     "who_is_working",
 }
@@ -638,8 +630,7 @@ async def test_a_page_size_outside_one_to_two_hundred_is_refused_in_plain_words(
         "node_history": {"node": world["task"]["ref"]},
         "list_links": {"node": world["task"]["ref"]},
         "rule_history": {"rule_id": world["rule"]["id"]},
-        "decision_history": {"decision_id": world["decision"]["id"]},
-        "fact_history": {"fact_id": world["fact"]["id"]},
+        "note_history": {"note_id": world["decision"]["id"]},
         "recall": {"node": world["story"]["ref"]},
         "search": {"query": "anything"},
         "similar_items": {"text": "anything"},
@@ -680,12 +671,14 @@ async def test_the_logs_say_what_happened_and_hold_no_key_no_password_no_session
     body = f"a body that only this test writes {content}"
     shared = the_project()
 
-    await ok(client, "create_node", actor=actor, kind="epic", title=f"Title {content}", body=body)
-    # A fact and a decision, and a person's confirmation with their words, are not logged either.
-    recorded = await make_fact(client, f"A fact {content}", source=f"A source {content}")
-    await confirm(client, "fact", recorded, person=f"Reviewer {content}", quote=f"Quote {content}")
-    await make_decision(client, f"Decision {content}", reason=f"Reason {content}")
-    await refused(client, "claim_node", actor=actor, node="task:999999999")
+    async with connect_as(actor) as agent:
+        await ok(agent, "create_node", kind="epic", title=f"Title {content}", body=body)
+        # A note and a decision, and a person's confirmation with their words, are not logged
+        # either.
+        recorded = await make_fact(client, f"A note {content}", source=f"A source {content}")
+        confirm_on_board("fact", recorded, person=f"Reviewer {content}", quote=f"Quote {content}")
+        await make_decision(client, f"Decision {content}", reason=f"Reason {content}")
+        await refused(agent, "claim_node", node="task:999999999")
     await refused(client, "create_node", actor=actor, kind="epic", title="t", body=secret)
     await refused(client, "create_node", actor=secret, kind="epic", title="t")
     await refused(client, "get_node", node="task:999999999")

@@ -1,0 +1,9 @@
+/* The Agent view dialog of an item's page (agent-view.js): the call an agent makes for the item and its answer,
+   as lines of text. Colour is only ever a token. */
+
+dialog.modal.agent-view { width: min(60rem, calc(100vw - var(--space-5))); }
+.agent-view-body > .loading { margin: var(--space-3) 0 0; }
+.agent-view-text { margin: var(--space-3) 0 0; padding: var(--space-3); max-height: min(34rem, calc(100vh - 14rem)); overflow: auto; background: var(--surface-2); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55; }
+.ag-line { padding-left: calc(var(--d) * 2ch + 2ch); text-indent: -2ch; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ag-key { color: var(--info); font-weight: 600; }
+.ag-id { color: var(--accent-text); }

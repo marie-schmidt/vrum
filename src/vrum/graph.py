@@ -7,16 +7,17 @@ from typing import Any
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
+from vrum.checks import Check, checks_of, refuse_while_unticked
 from vrum.common import (
     Refusal,
     check_choice,
-    clean_actor,
     fetch_all,
     fetch_one,
     kind_rank,
     missing_node,
     page_size,
     record_event,
+    required_text,
     save_changes,
     snapshot,
     split_node_ref,
@@ -29,22 +30,28 @@ from vrum.query import compile_query
 KINDS = ("epic", "story", "task")
 # What a person or agent may set. `ready` is not here on purpose: it is worked out, never set.
 STATUSES = ("new", "in_progress", "blocked", "done", "dropped")
+# The statuses a reason (why) can be given for: it is saved as a handoff note on the node.
+_WHY_STATUSES = ("blocked", "dropped")
 # What a node can show, and so what a list can be filtered by.
 SHOWN_STATUSES = ("new", "ready", "in_progress", "blocked", "done", "dropped")
 PRIORITIES = ("low", "normal", "high", "urgent")
+# How big a story or task is, effort and context together, and what each is worth when work is
+# added up. An epic has none of its own: it adds up what is in it.
+SIZES = ("xs", "s", "m", "l", "xl")
 # The kinds that work can be handed out for: ready_work lists these unless asked for another.
 WORKABLE_KINDS = ("story", "task")
 
 _PARENT_KIND = {"story": "epic", "task": "story"}
 _STORED_COLUMNS = (
-    "ref, kind, number, parent, title, body, status, priority, start_on, target_on, version, "
-    "created_at, updated_at"
+    "ref, kind, number, parent, title, body, status, priority, size, start_on, target_on, "
+    "version, created_at, updated_at"
 )
 STATE_COLUMNS = (
     _STORED_COLUMNS
     + ", body_chars, waiting_on, schedule_conflicts, overdue, span_start, span_end, "
-    "span_worked_out, claimed_by, claim_expires_at, lapsed_claim_by, lapsed_claim_at, "
-    "progress_done, progress_total"
+    "span_worked_out, claimed_by, claimed_by_kind, claim_expires_at, lapsed_claim_by, "
+    "lapsed_claim_by_kind, lapsed_claim_at, progress_done, progress_total, criteria_total, "
+    "criteria_met, points, points_total, points_done, unsized, checks_total, checks_ticked"
 )
 # How much of a body a compact list shows.
 BODY_PREVIEW_CHARS = 120
@@ -74,7 +81,8 @@ def list_columns(detail: bool) -> str:
 
 
 EVENT_COLUMNS = (
-    "id, node, other_node, rule_id, decision_id, fact_id, action, actor, at, before, after"
+    "id, node, other_node, rule_id, note_id, other_note_id, action, actor, actor_kind, at, "
+    "before, after"
 )
 
 
@@ -108,6 +116,14 @@ class Node(BaseModel):
         "while something it needs first is still open. ready is worked out, never set."
     )
     priority: str = Field(description="low, normal, high or urgent.")
+    size: str | None = Field(
+        description="How big a story or task is, effort and context together: xs, s, m, l or xl "
+        "(1, 2, 3, 5 and 8 points). Empty until someone says. An epic has no size of its own."
+    )
+    points: int | None = Field(
+        description="What its own size is worth in points: xs 1, s 2, m 3, l 5, xl 8. Empty when "
+        "it has no size."
+    )
     start_on: date | None = Field(
         description="The day work on it is planned to start, as YYYY-MM-DD. Empty when not set."
     )
@@ -146,13 +162,21 @@ class Node(BaseModel):
         description="True when span_start and span_end were worked out from what is under the "
         "node because it has no dates of its own."
     )
-    claimed_by: str | None = Field(description="Who holds a claim on it right now, if anyone.")
+    claimed_by: str | None = Field(
+        description="The name of whoever holds a claim on it right now, if anyone."
+    )
+    claimed_by_kind: str | None = Field(
+        description="person or agent: what that holder is. Empty when nobody holds it."
+    )
     claim_expires_at: datetime | None = Field(
         description="When that claim lapses on its own unless it is renewed."
     )
     lapsed_claim_by: str | None = Field(
         description="Set when someone's claim ran out without being renewed, released or taken "
         "over: they left it with no handoff note, so ask what state it is in."
+    )
+    lapsed_claim_by_kind: str | None = Field(
+        description="person or agent: what that holder is. Empty when no claim lapsed."
     )
     lapsed_claim_at: datetime | None = Field(description="When that claim ran out.")
     progress_done: int | None = Field(
@@ -163,11 +187,38 @@ class Node(BaseModel):
         description="For an epic or a story: how many tasks it has that are not dropped (the "
         "most progress_done can reach). Empty for a task."
     )
+    criteria_total: int = Field(
+        description="How many acceptance criteria are placed directly on it that are not "
+        "dropped. Always 0 for an epic, which has none. List them with list_rules and its node."
+    )
+    criteria_met: int = Field(
+        description="How many of those acceptance criteria are met (status met)."
+    )
+    points_total: int = Field(
+        description="What it adds up to, in points (xs 1, s 2, m 3, l 5, xl 8). A task: its own "
+        "points, 0 when it is dropped or has no size. A story: the sum over its tasks that are "
+        "not dropped, or its own points when it has none. An epic: the sum over its stories "
+        "that are not dropped."
+    )
+    points_done: int = Field(description="How many of points_total are done.")
+    unsized: int = Field(
+        description="How many items have no size yet: itself, or what it adds up, counting "
+        "only what is neither done nor dropped. A story with tasks counts its tasks and a story "
+        "with none counts itself."
+    )
+    checks_total: int = Field(
+        description="How many checks the project's definition of done has (the list lines of "
+        "its text). Always 0 for an epic."
+    )
+    checks_ticked: int = Field(
+        description="How many of those checks are ticked on this story or task."
+    )
 
 
 class Handoff(BaseModel):
     id: int = Field(description="The id of the event that recorded it.")
-    actor: str = Field(description="Who left the work.")
+    actor: str = Field(description="Who left the work: a person's or an agent's name.")
+    actor_kind: str = Field(description="person or agent (unknown in history from an old export).")
     at: datetime
     outcome: str = Field(description="done, blocked, dropped or released.")
     note: str = Field(description="What was done, and what the next person must know.")
@@ -176,7 +227,12 @@ class Handoff(BaseModel):
 class NodeDetail(Node):
     handoff_count: int = Field(description="How many handoff notes the node has in its history.")
     last_handoff: Handoff | None = Field(
-        description="The latest handoff note, in full. node_history has all of them."
+        description="The latest handoff note, in full. The node's history, on the board, has all."
+    )
+    checks: list[Check] = Field(
+        description="The checks of a story or task: each item of the definition of done, in its "
+        "order, ticked or not, with who ticked it, when and how it was checked. Empty for an "
+        "epic, and when the definition of done has no list lines."
     )
 
 
@@ -196,28 +252,37 @@ class NodePage(BaseModel):
 class Event(BaseModel):
     id: int = Field(description="The event's id. Events are listed oldest first.")
     node: str | None = Field(
-        description="The reference of the node the event is about. For a rule, the story it is in "
-        "after the event."
+        description="The reference of the node the event is about. For a rule (an acceptance "
+        "criterion), the story or task it is on after the event. Empty for a change of the "
+        "definition of done, which is about the whole project."
     )
     other_node: str | None = Field(
-        description="For a link, the node at its other end. For a rule that moved, the story it "
-        "left. The event shows in the history of both nodes."
+        description="For a link, the node at its other end. For a rule that moved, the story or "
+        "task it left. The event shows in the history of both nodes."
     )
     rule_id: int | None = Field(description="The rule the event is about, if it is about a rule.")
-    decision_id: int | None = Field(
-        description="The decision the event is about, if it is about a decision, or the decision "
-        "a fact concerns."
+    note_id: int | None = Field(
+        description="The note the event is about, if it is about a note: recorded, linked, "
+        "unlinked, confirmed, unconfirmed, replaced or withdrawn."
     )
-    fact_id: int | None = Field(description="The fact the event is about, if it is about one.")
+    other_note_id: int | None = Field(
+        description="For a note linked to or unlinked from another note, the note it concerns. "
+        "The event shows in the history of both notes."
+    )
     action: str = Field(
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
         "claim_released, handoff, rule_created, rule_updated, rule_placed, rule_moved, "
-        "decision_recorded, decision_superseded, decision_withdrawn, decision_linked, "
-        "decision_unlinked, decision_confirmed, decision_unconfirmed, fact_recorded, "
-        "fact_superseded, fact_withdrawn, fact_linked, fact_unlinked, fact_confirmed or "
-        "fact_unconfirmed."
+        "definition_of_done_changed, check_ticked, check_unticked, note_recorded, "
+        "note_superseded, note_withdrawn, note_linked, note_unlinked, note_confirmed or "
+        "note_unconfirmed. A check event names the story or task, and its before and after hold "
+        "the item (its key), its text and the evidence."
     )
-    actor: str = Field(description="The person or agent that made the change.")
+    actor: str = Field(description="The name of the person or agent that made the change.")
+    actor_kind: str = Field(
+        description="person or agent: what made the change. The server records it from who is "
+        "calling (a key, or a signed-in person); it is unknown only in history loaded from an "
+        "export made before names were verified."
+    )
     at: datetime
     before: dict[str, Any] | None = Field(
         description="The changed fields as they were, with the version where there is one. Empty "
@@ -254,6 +319,15 @@ def check_dates(start_on: date | None, target_on: date | None) -> None:
         )
 
 
+def check_size(kind: str, size: str | None, *, clear: bool = False) -> None:
+    """Refuse a size that is not one of the five, and any size (or clearing one) on an epic, which
+    has none of its own."""
+    if (size is not None or clear) and kind == "epic":
+        raise Refusal("An epic has no size of its own: it adds up the size of what is in it.")
+    if size is not None:
+        check_choice("size", size, SIZES)
+
+
 async def require_node(conn: AsyncConnection, ref: str, *, lock: bool = False) -> dict[str, Any]:
     """The node as stored, or a plain refusal. `lock` holds the row until the transaction ends."""
     row = await fetch_one(
@@ -280,7 +354,8 @@ async def handoffs_of(
     """Every handoff note a node has, oldest first (or newest first)."""
     rows = await fetch_all(
         conn,
-        "SELECT id, actor, at, after->>'outcome' AS outcome, after->>'note' AS note FROM events "
+        "SELECT id, actor, actor_kind, at, after->>'outcome' AS outcome, after->>'note' AS note "
+        "FROM events "
         "WHERE node = %s AND action = 'handoff' "
         f"ORDER BY id {'DESC' if newest_first else 'ASC'}",
         (node,),
@@ -355,6 +430,7 @@ async def insert_node(
     parent: str | None,
     body: str,
     priority: str,
+    size: str | None,
     start_on: date | None,
     target_on: date | None,
 ) -> dict[str, Any]:
@@ -363,9 +439,10 @@ async def insert_node(
     Returns the stored row."""
     row = await fetch_one(
         conn,
-        "INSERT INTO nodes (kind, number, parent, title, body, priority, start_on, target_on) "
-        f"VALUES (%s, next_id(%s), %s, %s, %s, %s, %s, %s) RETURNING {_STORED_COLUMNS}",
-        (kind, kind, parent, title, body, priority, start_on, target_on),
+        "INSERT INTO nodes (kind, number, parent, title, body, priority, size, start_on, "
+        "target_on) VALUES (%s, next_id(%s), %s, %s, %s, %s, %s, %s, %s) "
+        f"RETURNING {_STORED_COLUMNS}",
+        (kind, kind, parent, title, body, priority, size, start_on, target_on),
     )
     assert row is not None
     await record_event(
@@ -383,6 +460,7 @@ async def insert_node(
                 "body",
                 "status",
                 "priority",
+                "size",
                 "start_on",
                 "target_on",
                 "version",
@@ -435,13 +513,14 @@ class Graph:
         parent: str | None,
         body: str,
         priority: str,
+        size: str | None,
         start_on: date | None,
         target_on: date | None,
     ) -> Node:
-        actor = clean_actor(actor)
         check_choice("kind", kind, KINDS)
         title = clean_title(title)
         check_choice("priority", priority, PRIORITIES)
+        check_size(kind, size)
         check_dates(start_on, target_on)
         async with self._database.transaction() as conn:
             await _require_parent(conn, kind, parent)
@@ -453,6 +532,7 @@ class Graph:
                 parent=parent,
                 body=body,
                 priority=priority,
+                size=size,
                 start_on=start_on,
                 target_on=target_on,
             )
@@ -462,10 +542,12 @@ class Graph:
         async with self._database.transaction() as conn:
             found = await node_state(conn, node)
             notes = await handoffs_of(conn, node, newest_first=True)
+            checks = await checks_of(conn, node)
         return NodeDetail(
             **found.model_dump(),
             handoff_count=len(notes),
             last_handoff=notes[0] if notes else None,
+            checks=checks,
         )
 
     async def list_nodes(
@@ -546,13 +628,15 @@ class Graph:
         body: str | None,
         status: str | None,
         priority: str | None,
+        size: str | None,
         parent: str | None,
         start_on: date | None,
         target_on: date | None,
         clear_start_on: bool,
         clear_target_on: bool,
+        clear_size: bool,
+        why: str | None = None,
     ) -> Node:
-        actor = clean_actor(actor)
         if title is not None:
             title = clean_title(title)
         if status is not None:
@@ -564,8 +648,21 @@ class Graph:
                 if status == "ready"
                 else "",
             )
+        if why is not None:
+            if status not in _WHY_STATUSES:
+                raise Refusal(
+                    "why goes with a change of status to blocked or dropped. Give status blocked "
+                    "or dropped as well, or leave why out. Nothing was changed."
+                )
+            why = required_text(
+                why,
+                "why cannot be empty. Say why it is "
+                f"{status}, so that whoever comes next knows, or leave why out.",
+            )
         if priority is not None:
             check_choice("priority", priority, PRIORITIES)
+        if size is not None and clear_size:
+            raise Refusal("Give a new size or ask for it to be cleared (clear_size), not both.")
         for given, clear, name in (
             (start_on, clear_start_on, "start_on"),
             (target_on, clear_target_on, "target_on"),
@@ -578,19 +675,22 @@ class Graph:
             current = await require_node(conn, node, lock=True)
             if current["version"] != expected_version:
                 raise stale_version("Node", "get_node", node, current["version"], expected_version)
+            check_size(current["kind"], size, clear=clear_size)
             if parent is not None:
                 if current["kind"] == "epic":
                     raise Refusal("An epic has no parent. Leave parent out.")
                 if parent != current["parent"]:
                     raise Refusal(
                         f"{node} already belongs to {current['parent']}, and a node has exactly "
-                        f"one parent. To put it under {parent} instead, use move_node."
+                        f"one parent. To put it under {parent} instead, a person moves it on the "
+                        "board."
                     )
             wanted: dict[str, Any] = {
                 "title": title,
                 "body": body,
                 "status": status,
                 "priority": priority,
+                "size": size,
                 "start_on": start_on,
                 "target_on": target_on,
             }
@@ -599,19 +699,38 @@ class Graph:
                 for field, value in wanted.items()
                 if value is not None and value != current[field]
             }
-            for field, clear in (("start_on", clear_start_on), ("target_on", clear_target_on)):
+            for field, clear in (
+                ("start_on", clear_start_on),
+                ("target_on", clear_target_on),
+                ("size", clear_size),
+            ):
                 if clear and current[field] is not None:
                     changes[field] = None
+            if why is not None and "status" not in changes:
+                raise Refusal(
+                    f"{node} is already {status}, so there is no change of status for why to go "
+                    "with. Leave why out. Nothing was changed."
+                )
             if not changes:
                 raise Refusal(
                     f"Nothing to change: {node} already has the values you gave, or you "
-                    "gave none. Give at least one of title, body, status, priority, start_on or "
-                    "target_on with a new value, or ask for a date to be cleared."
+                    "gave none. Give at least one of title, body, status, priority, size, "
+                    "start_on or target_on with a new value, or ask for a size or a date to be "
+                    "cleared."
                 )
             check_dates(
                 changes.get("start_on", current["start_on"]),
                 changes.get("target_on", current["target_on"]),
             )
+            if changes.get("status") == "done":
+                await refuse_while_unticked(
+                    conn,
+                    node,
+                    instead="leave its status as it is",
+                    person_instead="set its status to blocked with update_node, giving why to say "
+                    "what the person should look at; a person then judges it on the board and "
+                    "marks it done",
+                )
             row = await save_changes(conn, "nodes", node, changes, _STORED_COLUMNS, key="ref")
             await record_event(
                 conn,
@@ -621,12 +740,20 @@ class Graph:
                 before={**snapshot(current, tuple(changes)), "version": current["version"]},
                 after={**snapshot(row, tuple(changes)), "version": row["version"]},
             )
+            if why is not None:
+                await record_event(
+                    conn,
+                    node=node,
+                    action="handoff",
+                    actor=actor,
+                    before=None,
+                    after={"outcome": row["status"], "note": why},
+                )
             return await node_state(conn, node)
 
     async def move_node(
         self, *, actor: str, node: str, expected_version: int, new_parent: str
     ) -> Node:
-        actor = clean_actor(actor)
         async with self._database.transaction() as conn:
             current = await require_node(conn, node, lock=True)
             if current["version"] != expected_version:

@@ -11,7 +11,6 @@ raised. To move a bigger graph, back it up and restore it (backup.sh and restore
 
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -21,10 +20,9 @@ from vrum_client import connect, said
 
 async def main(url: str, source: Path) -> None:
     document = json.loads(source.read_text(encoding="utf-8"))
-    actor = os.environ.get("USER") or "import_graph.py"
     async with connect(url) as client:
         try:
-            result = await client.call_tool("import_graph", {"actor": actor, "document": document})
+            result = await client.call_tool("import_graph", {"document": document})
         except MCPError as error:
             raise SystemExit(error.message) from None
     if result.is_error:

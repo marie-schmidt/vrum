@@ -1,27 +1,36 @@
 // The Roadmap: the work as bars on a timeline, from start date to target date. Dragging a bar moves
 // both dates and dragging an end moves one; a bar can also be moved with the keyboard (the arrow
-// keys, a week with Shift) and its dates are fields on its card. Every change is update_node, or
+// keys, a week with Shift) and its dates are fields on the item's page. A click on a bar, Enter on
+// it, and the label of its row open that page. Every change is update_node, or
 // update_nodes for several, with the version the bar was drawn at, so the server decides and a bar
 // that was changed meanwhile is refused and goes back. `needs_first` links are arrows from what
-// is needed to what waits. Items with no dates wait in a tray above, and dragging one onto the
-// timeline gives it dates.
+// is needed to what waits. Only work with dates (its own, or worked out from what is under it) is
+// drawn here; the rest is on the Board and in Lists.
+//
+// The timeline can be measured. A ruler runs along the top (a cell for each day when zoomed in) and a
+// very faint grid behind the rows is one day wide and one item high, so a bar covers its start day
+// through its target day, cell for cell. Work that is late has a hatched tail from the end of its bar
+// through today, a cell for each day it is late, and the number of days beside it.
 
 import { Refusal, call } from './api.js';
-import { actor, notify, ui } from './ctx.js';
+import { can, itemLink, notify, openItem, ui, viewLink } from './ctx.js';
 import { dayOfMonth, fromDay, monthName, monthOf, monthStart, nextMonth, toDay, todayDay, weekday, yearOf } from './dates.js';
 import { h, plural, put, s } from './dom.js';
 import { filterBar, loadRows } from './filterbar.js';
 import { icon } from './icons.js';
-import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, statusIcon } from './labels.js';
+import { keyButton } from './key-button.js';
+import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, addsUp, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, sizeWords, statusIcon } from './labels.js';
 import { epicOf, store, sync } from './store.js';
 
-const ROW = 30;
-const MIN_ROWS = 4; // an empty timeline keeps this many rows, so there is room to drop an item
-const SCALE = 56;
+const ROW = 38;
+const BAR_INSET = 5; // a bar is this far from the top and the bottom of its row
+const MIN_ROWS = 4; // an empty timeline keeps this many rows, so there is room for its hint
+const SCALE = 56; // the ruler: months and years above, days below
 const MIN_BAR = 8;
-const SHORT_BAR = 26; // a bar narrower than this has no room for its icon and words
-const NEW_LENGTH_DAYS = 7; // an item dropped on the timeline gets a week
-const ZOOMS = { month: { ppd: 10, label: 'Month' }, quarter: { ppd: 4, label: 'Quarter' }, year: { ppd: 1.2, label: 'Year' } };
+const SHORT_BAR = 72; // a bar narrower than this has no room for its words
+const TINY_BAR = 26; // a bar narrower than this has no room for handles of the usual size
+// Pixels for each day. It opens on Month, which shows about five weeks of a wide window, so that the bars are big enough to read.
+const ZOOMS = { month: { ppd: 22, label: 'Month' }, quarter: { ppd: 7, label: 'Quarter' }, year: { ppd: 2, label: 'Year' } };
 const GROUPS = [['epic', 'Epic'], ['status', 'Status'], ['priority', 'Priority'], ['claimed', 'Who holds it']];
 
 let root = null;
@@ -34,7 +43,6 @@ let geometry = null; // where everything is, for the pointer and the arrows
 let busy = 0; // changes in flight
 let drag = null; // a bar being dragged
 let keys = null; // arrow keys pressed, not yet sent
-let trayDragged = ''; // the ref of the item being dragged out of the tray
 let generation = 0;
 let wantToday = true;
 
@@ -45,8 +53,6 @@ export function mount(element, initial) {
   params = initial;
   picked = new Set();
   rows = [];
-  trayDrafts = new Map();
-  trayDecided = false;
   wantToday = true;
   bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
   const group = h('select', { id: 'group', onchange: () => ui.navigate({ group: group.value === 'epic' ? null : group.value }) }, GROUPS.map(([value, label]) => h('option', { value }, label)));
@@ -59,7 +65,6 @@ export function mount(element, initial) {
     group,
     zooms,
     summary: h('p', { class: 'count', id: 'count', role: 'status' }),
-    tray: h('details', { class: 'rm-tray', id: 'tray' }),
     scroll: h('div', { class: 'rm-scroll', id: 'rm-scroll', role: 'region', tabindex: 0, 'aria-label': 'Timeline, scrolls sideways and down' }, h('p', { class: 'loading', role: 'status' }, 'Reading the timeline…')),
   };
   const pan = (way) => parts.scroll.scrollBy({ left: way * Math.max(parts.scroll.clientWidth * 0.6, 160), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
@@ -68,7 +73,7 @@ export function mount(element, initial) {
     h(
       'div',
       { class: 'roadmap-page' },
-      h('header', { class: 'page-header' }, h('div', { class: 'page-title' }, h('h1', {}, 'Roadmap'), h('p', { class: 'page-sub' }, 'Work on a timeline: when it starts, when it is due, and what waits for what.'))),
+      h('header', { class: 'page-header' }, h('div', { class: 'page-title' }, h('h1', {}, 'Roadmap'))),
       h(
         'div',
         { class: 'rm-toolbar' },
@@ -87,35 +92,84 @@ export function mount(element, initial) {
       h(
         'div',
         { class: 'rm-notes' },
-        bar.help,
-        h(
-          'details',
-          { class: 'filter-help rm-help' },
-          h('summary', {}, icon('chevron_right', { size: 14 }), 'How to read and change the timeline'),
-          h(
-            'p',
-            {},
-            'A bar runs from its start date to its target date. Drag a bar to move both dates, or an end to move one. With a bar focused, the left and right arrows move it a day (Shift: a week); Alt moves only its start and Ctrl only its end; Space chooses it to move together with others, and Enter opens it. A light dashed bar is worked out from what is under it. An arrow runs from what is needed first to what waits for it. Drag the empty timeline to move along it.',
-          ),
-        ),
-        h('details', { class: 'filter-help rm-key' }, h('summary', {}, icon('chevron_right', { size: 14 }), 'Key to the bars'), legend()),
+        keyButton(keyContent(), { id: 'rm-key-button' }),
         parts.summary,
       ),
-      parts.tray,
       parts.scroll,
     ),
   );
   load();
 }
 
-// What a bar looks like for each state: its icon and its shape, as well as its colour.
-function legend() {
+// What the Key card holds (key-button.js). Every mark is drawn with the classes the timeline itself uses (the same
+// swatch rules as the bars, the same arrow lines), so the key cannot drift from the real look. What only a person who
+// may change things can do is told only to them.
+function keyContent() {
+  const mark = (...inside) => h('span', { class: 'rm-key-mark', 'aria-hidden': 'true' }, ...inside);
+  const wide = (...inside) => h('span', { class: 'rm-key-mark rm-key-line', 'aria-hidden': 'true' }, ...inside);
+  const swatch = (classes, ...inside) => mark(h('span', { class: `rm-swatch ${classes}` }, ...inside));
+  const line = (conflict) =>
+    h(
+      'span',
+      { class: 'rm-key-mark rm-key-line', 'aria-hidden': 'true' },
+      s(
+        'svg',
+        { class: 'rm-key-dep', width: 40, height: 16, viewBox: '0 0 40 16' },
+        s('defs', {}, marker(conflict ? 'rm-key-arrow-conflict' : 'rm-key-arrow', conflict ? 'rm-arrow conflict' : 'rm-arrow')),
+        s('path', { class: `dep${conflict ? ' conflict' : ''}`, d: 'M1,12 H9 V4 H36', fill: 'none', 'marker-end': `url(#${conflict ? 'rm-key-arrow-conflict' : 'rm-key-arrow'})` }),
+      ),
+    );
+  const item = (picture, ...words) => h('li', {}, picture, h('span', {}, ...words));
+  const group = (title, className, ...items) => h('div', { class: `rm-key-group ${className}` }, h('h3', {}, title), h('ul', { class: 'plain' }, items));
+  const kind = (name) => mark(h('span', { class: 'rm-kind' }, kindIcon(name, 14)));
+  // The small mark a row's label carries for the same two things.
+  const rowMark = (classes) => mark(h('span', { class: `chip ${classes}` }, icon('alert', { size: 12 })));
   return h(
-    'ul',
-    { class: 'rm-legend', 'aria-label': 'What the bars show' },
-    STATUSES.map((status) => h('li', {}, h('span', { class: `rm-swatch status-${status}` }, statusIcon(status, 12)), STATUS[status].label)),
-    h('li', {}, h('span', { class: 'rm-swatch worked-out' }), 'Worked out from what is under it'),
-    h('li', {}, h('span', { class: 'rm-swatch overdue' }, icon('alert', { size: 12 })), 'Overdue'),
+    'div',
+    { class: 'rm-key-card' },
+    h(
+      'div',
+      { class: 'rm-key-column' },
+      group('Status', 'is-status', STATUSES.map((status) => item(swatch(`status-${status}`, statusIcon(status, 12)), STATUS[status].label))),
+      group(
+        'Lines',
+        '',
+        item(mark(h('span', { class: 'rm-key-today' })), 'Today'),
+        item(line(false), 'Needs first: runs from what is needed to what waits for it'),
+        item(line(true), 'Planned too early: this work is planned to start before the work it needs is due'),
+      ),
+      group(
+        'Rows',
+        '',
+        item(kind('epic'), 'Epic, in bold'),
+        item(kind('story'), 'Story'),
+        item(kind('task'), 'Task'),
+        item([rowMark('danger overdue'), rowMark('warn conflict')], 'Marks at the end of a row: overdue, schedule conflict'),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'rm-key-column' },
+      group(
+        'Time',
+        '',
+        item(wide(h('span', { class: 'rm-key-days' }, h('span', { class: 'rm-swatch' }))), 'One cell is one day: a bar covers its start day to its due day'),
+        item(mark(h('span', { class: 'rm-key-weekend' })), 'Weekend'),
+        item(wide(h('span', { class: 'rm-key-late' }, h('span', { class: 'rm-swatch status-in_progress' }), h('span', { class: 'rm-late' }))), 'Late: a hatched cell for each day since the due day, up to today'),
+      ),
+      group(
+        'On a bar',
+        '',
+        item(swatch('worked-out'), 'Dates worked out from what is under it'),
+        item(swatch('conflict', icon('alert', { size: 12 })), 'Schedule conflict: starts before something it needs is due'),
+        item(mark(h('span', { class: 'rm-key-icon status-in_progress' }, statusIcon('in_progress', 13))), 'Status icon beside a bar too short for its words'),
+        can('write') ? item(swatch('picked'), 'Chosen to move together (Shift-click or Space)') : null,
+        can('write') ? item(swatch('handles', h('span', { class: 'rm-handle start' }), h('span', { class: 'rm-handle end' })), 'Drag a bar to move it, an end to change one date') : null,
+      ),
+      can('write')
+        ? group('With the keyboard', '', h('li', {}, 'Arrow keys move a bar a day, Shift a week'), h('li', {}, 'Alt moves only its start, Ctrl only its end'), h('li', {}, 'Space chooses a bar, Enter opens its page'))
+        : null,
+    ),
   );
 }
 
@@ -139,8 +193,8 @@ export function update(next) {
   } else if ((next.get('group') || '') !== (before.get('group') || '')) {
     draw();
   }
-  // Nothing else in the address (the drawer, the selected record) changes the timeline, so it is
-  // left as it is, with its scroll, its chosen bars and what is being dragged.
+  // Nothing else in the address changes the timeline, so it is left as it is, with its scroll, its
+  // chosen bars and what is being dragged.
 }
 
 export function refresh() {
@@ -161,7 +215,7 @@ async function load() {
 // -- what goes where --------------------------------------------------------------------------------
 
 // The days a node is drawn over: its own dates, or what its children's add up to. Null when it has
-// none, and then it waits in the tray.
+// none, and then it is not drawn.
 function spanOf(node) {
   const first = node.span_start;
   const last = node.span_end;
@@ -170,6 +224,20 @@ function spanOf(node) {
   let end = toDay(last ?? first);
   if (start > end) [start, end] = [end, start];
   return { s: start, e: end, editable: !node.span_worked_out };
+}
+
+// How many days late a node is: a cell for each day from the one after its target date through today. Work that is
+// done or dropped is never late, and a node with no target date of its own has nothing to be late for.
+function lateDays(node, today) {
+  return node.overdue && node.target_on ? Math.max(1, today - toDay(node.target_on)) : 0;
+}
+
+const dayText = (day, withYear) => `${dayOfMonth(day)} ${monthName(day)}${withYear ? ` ${yearOf(day)}` : ''}`;
+
+// "5 days: 3 Dec to 7 Dec": what a bar covers, counting its first and its last day. The year is said when it is not this one.
+function spanWords(first, last, today) {
+  const withYear = yearOf(first) !== yearOf(today) || yearOf(last) !== yearOf(today);
+  return `${plural(last - first + 1, 'day')}: ${first === last ? dayText(first, withYear) : `${dayText(first, withYear)} to ${dayText(last, withYear)}`}`;
 }
 
 function groupOf(node, mode) {
@@ -203,7 +271,7 @@ function layoutRows(dated, mode) {
   }
   const list = [];
   for (const group of [...groups.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))) {
-    list.push({ type: 'group', label: `${group.label} (${group.items.length})` });
+    list.push({ type: 'group', label: group.label, count: group.items.length });
     for (const item of inOrder(group.items, mode)) list.push({ type: 'item', ...item });
   }
   return list;
@@ -225,22 +293,39 @@ function draw() {
   parts.zooms.querySelectorAll('button').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.zoom === zoom)));
 
   const dated = [];
-  const undated = [];
   for (const node of rows) {
     const span = spanOf(node);
     if (span) dated.push({ node, ...span });
-    else undated.push(node);
+  }
+  // With no work at all there is no timeline to draw: say why, and what to do next.
+  if (!rows.length) {
+    geometry = null;
+    put(
+      parts.scroll,
+      h(
+        'div',
+        { class: 'empty rm-empty', id: 'rm-empty' },
+        icon('roadmap', { size: 24 }),
+        h('p', {}, h('strong', {}, params.get('q') ? 'Nothing matches this filter.' : 'No work to show yet.'), ' ', params.get('q') ? 'Change the words, or clear the filter.' : 'Work with dates is drawn here as bars. Make some on the Board first.'),
+        params.get('q') ? null : viewLink('board', {}, { class: 'link-button' }, 'Go to the Board'),
+      ),
+    );
+    sayCount(0, 0);
+    parts.scroll.dataset.ready = 'true';
+    return;
   }
   const low = Math.min(today, ...dated.map((item) => item.s));
   const high = Math.max(today, ...dated.map((item) => item.e));
   const origin = monthStart(low - 14);
-  const end = Math.max(nextMonth(high + 45) - 1, origin + 120);
+  // The timeline runs to the edge of the window at least, so the ruler is never cut short beside empty space.
+  const reach = origin + Math.ceil(parts.scroll.clientWidth / ppd);
+  const end = Math.max(nextMonth(high + 45) - 1, nextMonth(Math.max(origin + 120, reach)) - 1);
   const width = (end - origin + 1) * ppd;
 
   const list = layoutRows(dated, mode);
   const items = new Map();
   list.forEach((entry, at) => {
-    if (entry.type === 'item') items.set(entry.node.ref, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR) });
+    if (entry.type === 'item') items.set(entry.node.ref, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR), late: lateDays(entry.node, today) });
   });
   geometry = { origin, end, ppd, items, today };
 
@@ -249,41 +334,37 @@ function draw() {
   const area = h('div', { class: 'rm-rows', css: { height: `${rowsHigh}px` } });
   const scale = h('div', { class: 'rm-scale', css: { height: `${SCALE}px`, width: `${width}px` } });
   const track = h('div', { class: 'rm-track', css: { width: `${width}px` }, dataset: { origin: fromDay(origin), ppd: String(ppd), today: fromDay(today), zoom } }, scale, area);
+  // What the style sheet draws the grid and the ruler's cells from: a day, a week, a weekend and a row, and where the
+  // first Saturday and the first Monday fall from the left edge.
+  track.style.setProperty('--rm-row', `${ROW}px`);
+  track.style.setProperty('--rm-day', `${ppd}px`);
+  track.style.setProperty('--rm-week', `${7 * ppd}px`);
+  track.style.setProperty('--rm-weekend', `${2 * ppd}px`);
+  track.style.setProperty('--rm-saturday', `${((6 - weekday(origin) + 7) % 7) * ppd}px`);
+  track.style.setProperty('--rm-monday', `${((1 - weekday(origin) + 7) % 7) * ppd}px`);
 
   drawScale(scale, origin, end, zoom, ppd, today);
   for (let month = origin; month <= end; month = nextMonth(month)) area.append(h('div', { class: 'rm-gridline', css: { left: `${(month - origin) * ppd}px` } }));
-  area.append(h('div', { class: 'rm-today', 'aria-hidden': 'true', css: { left: `${(today - origin) * ppd}px` } }));
+  // Zoomed in, a line at the start of each week, a little firmer than a day's, helps to read where a bar begins.
+  if (zoom === 'month') for (let day = origin; day <= end; day += 1) if (weekday(day) === 1) area.append(h('div', { class: 'rm-gridline week', css: { left: `${(day - origin) * ppd}px` } }));
+  // Today is a cell like any other (as wide as a day, though never thinner than its line), so a late tail ends where it ends.
+  area.append(h('div', { class: 'rm-today', 'aria-hidden': 'true', css: { left: `${(today - origin) * ppd}px`, width: `${Math.max(ppd, 2)}px` } }));
 
   list.forEach((entry, at) => {
     if (entry.type === 'group') {
-      labels.append(h('div', { class: 'rm-group', title: entry.label, css: { height: `${ROW}px` } }, h('span', { class: 'rm-group-text' }, entry.label)));
+      // The name may be cut short with an ellipsis; the count after it never is.
+      labels.append(
+        h('div', { class: 'rm-group', title: `${entry.label} (${entry.count})`, css: { height: `${ROW}px`, lineHeight: `${ROW - 1}px` } }, h('span', { class: 'rm-group-text' }, entry.label), h('span', { class: 'rm-group-count' }, ` (${entry.count})`)),
+      );
       area.append(h('div', { class: 'rm-band', css: { top: `${at * ROW}px`, height: `${ROW}px` } }));
       return;
     }
     labels.append(labelFor(entry, mode));
     area.append(...barFor(entry, items.get(entry.node.ref)));
   });
-  // A timeline with nothing on it is still somewhere to drop an item from the tray.
   if (list.length < MIN_ROWS) labels.append(h('div', { class: 'rm-spacer', css: { height: `${(MIN_ROWS - list.length) * ROW}px` } }));
-  if (!dated.length) area.append(h('p', { class: 'rm-drop-hint' }, rows.length ? 'Nothing here has dates yet. Drag an item from the tray onto the timeline, or give it dates in the tray.' : 'Nothing to show. Make some work on the Board, or clear the filter.'));
+  if (!dated.length) area.append(h('p', { class: 'rm-hint' }, 'Nothing here has dates yet. Give work a start or due date on its page and it appears here.'));
   area.append(arrows(items, width, rowsHigh));
-  area.addEventListener('dragover', (event) => {
-    if (trayDragged) {
-      event.preventDefault();
-      area.classList.add('over');
-    }
-  });
-  area.addEventListener('dragleave', () => area.classList.remove('over'));
-  area.addEventListener('drop', (event) => {
-    event.preventDefault();
-    area.classList.remove('over');
-    const ref = trayDragged;
-    trayDragged = '';
-    const node = store.nodes.get(ref);
-    if (!node) return;
-    const first = geometry.origin + Math.floor((event.clientX - area.getBoundingClientRect().left) / geometry.ppd);
-    changeDates(node, { start_on: fromDay(first), target_on: fromDay(first + NEW_LENGTH_DAYS - 1) }, 'Gave');
-  });
   area.addEventListener('pointerdown', pointerDown);
   scale.addEventListener('pointerdown', startPan);
 
@@ -294,35 +375,68 @@ function draw() {
     wantToday = false;
     scrollToStart();
   }
-  drawTray(undated, dated.length);
-  parts.summary.textContent = `${plural(dated.length, 'item')} on the timeline, ${undated.length} undated${params.get('q') ? ', for this filter' : ''}${picked.size ? `; ${picked.size} chosen to move together` : ''}.`;
+  sayCount(dated.length, rows.length - dated.length);
   if (focusedBar) parts.scroll.querySelector(`.rm-bar[data-ref="${focusedBar}"]`)?.focus();
   parts.scroll.dataset.ready = 'true';
 }
 
+// The line under the controls: how many items are drawn, and how many are not because they have no
+// dates, with the way to them (the Lists, filtered to the work with no dates). A filter that joins
+// alternatives with OR cannot be added to, so then the list is of all the work with no dates.
+function sayCount(drawn, undated) {
+  const filter = params.get('q') || '';
+  const query = [/\bOR\b/.test(filter) ? '' : filter, 'no:start no:target'].filter(Boolean).join(' ');
+  put(
+    parts.summary,
+    `${plural(drawn, 'item')} on the timeline${filter ? ', for this filter' : ''}${picked.size ? `; ${picked.size} chosen to move together` : ''}.`,
+    undated ? [` ${undated === 1 ? '1 has' : `${undated} have`} no dates and ${undated === 1 ? 'is' : 'are'} not drawn: `, viewLink('lists', { q: query }, { id: 'rm-undated' }, 'see them in Lists'), '.'] : null,
+  );
+}
+
+// The ruler. At Month it is a cell for each day with its number, today's a pill; at Quarter a tick for each day, taller
+// on Mondays and on the first of a month, with the number on Mondays; at Year only a tick for each week and each
+// month, since a tick a day would be mud. The months (the years, at Year) are named in the tier above, and a name
+// stays in view while any of its stretch is.
 function drawScale(scale, origin, end, zoom, ppd, today) {
-  const tick = (day, text, line) => h('span', { class: `rm-tick ${line}`, css: { left: `${(day - origin) * ppd + 4}px` } }, text);
+  const at = (day) => (day - origin) * ppd;
+  const stretch = (from, until, words) => h('span', { class: 'rm-period', css: { left: `${at(from)}px`, width: `${at(until) - at(from)}px` } }, h('span', { class: 'rm-period-name' }, words));
+  const name = (day, words) => h('span', { class: 'rm-tick', css: { left: `${at(day) + 3}px` } }, words);
+  const mark = (day, kind) => h('span', { class: `rm-mark ${kind}`, css: { left: `${at(day)}px` } });
+  const days = h('div', { class: 'rm-days', 'aria-hidden': 'true' });
+  // A label that would sit under today's mark is left out, so the mark is never covered.
+  const covered = (centre) => Math.abs(centre - (at(today) + ppd / 2)) < (zoom === 'year' ? 36 : 20);
   for (let month = origin; month <= end; month = nextMonth(month)) {
-    const quarter = Math.floor(monthOf(month) / 3) + 1;
-    const first = monthOf(month) === 0;
-    if (zoom === 'month') scale.append(tick(month, `${monthName(month)} ${yearOf(month)}`, 'top'));
-    else if (zoom === 'quarter') {
-      if (monthOf(month) % 3 === 0 || month === origin) scale.append(tick(month, `${yearOf(month)} Q${quarter}`, 'top'));
-      scale.append(tick(month, monthName(month), 'bottom'));
+    if (zoom === 'year') {
+      if (monthOf(month) === 0 || month === origin) {
+        let until = nextMonth(month);
+        while (monthOf(until) !== 0) until = nextMonth(until);
+        scale.append(stretch(month, until, String(yearOf(month))));
+      }
+      days.append(mark(month, monthOf(month) % 3 === 0 ? 'quarter' : 'month'));
+      if (!covered(at(month) + 16)) days.append(name(month, monthName(month)));
     } else {
-      if (first || month === origin) scale.append(tick(month, String(yearOf(month)), 'top'));
-      if (monthOf(month) % 3 === 0 || month === origin) scale.append(tick(month, `Q${quarter}`, 'bottom'));
+      scale.append(stretch(month, nextMonth(month), `${monthName(month)} ${yearOf(month)}`));
+      if (zoom === 'quarter') days.append(mark(month, 'month'));
     }
   }
   if (zoom === 'month') {
-    for (let day = origin; day <= end; day += 1) if (weekday(day) === 1) scale.append(tick(day, String(dayOfMonth(day)), 'bottom'));
+    for (let day = origin; day <= end; day += 1) days.append(h('span', { class: day === today ? 'rm-day today' : 'rm-day', dataset: { day: fromDay(day) } }, String(dayOfMonth(day))));
+  } else {
+    if (zoom === 'quarter') {
+      for (let day = origin; day <= end; day += 1) {
+        if (weekday(day) !== 1) continue;
+        if (dayOfMonth(day) !== 1) days.append(mark(day, 'monday'));
+        if (!covered(at(day) + 10)) days.append(name(day, String(dayOfMonth(day))));
+      }
+    }
+    days.append(h('span', { class: 'rm-today-label', css: { left: `${at(today) + ppd / 2}px` } }, zoom === 'year' ? 'Today' : String(dayOfMonth(today))));
   }
-  scale.append(h('span', { class: 'rm-today-label', css: { left: `${(today - origin) * ppd}px` } }, 'Today'));
+  scale.append(days);
 }
 
-function marks(node, editable) {
+function marks(node, editable, late) {
   const found = [];
-  if (node.overdue) found.push('Overdue');
+  if (late) found.push(`${plural(late, 'day')} late`);
   if (node.schedule_conflicts.length) found.push('Schedule conflict');
   if (!editable) found.push('Worked out from what is under it');
   return found;
@@ -336,7 +450,7 @@ function labelFor(entry, mode) {
     'div',
     { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { ref: node.ref, kind: node.kind } },
     h('span', { class: 'rm-kind', 'aria-hidden': 'true' }, kindIcon(node.kind, 14)),
-    h('button', { type: 'button', class: 'link', title: `${KIND[node.kind].label} ${code} ${node.title}`, onclick: () => ui.navigate({ sel: node.ref, panel: null }) }, h('span', { class: 'id mono' }, code), ` ${node.title}`),
+    itemLink(node.ref, { class: 'rm-open', title: `${KIND[node.kind].label} ${code} ${node.title}` }, h('span', { class: 'id mono' }, code), ` ${node.title}`),
     node.overdue ? h('span', { class: 'chip danger overdue', title: 'Overdue' }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Overdue')) : null,
     node.schedule_conflicts.length
       ? h('span', { class: 'chip warn conflict', title: `It starts before ${node.schedule_conflicts.map(codeOf).join(', ')} is due` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
@@ -346,45 +460,53 @@ function labelFor(entry, mode) {
 
 function barFor(entry, spot) {
   const { node, s: first, e: last, editable } = entry;
-  const found = marks(node, editable);
+  const { late } = spot;
+  const found = marks(node, editable, late);
   const code = nodeCode(node.kind, node.number);
-  const words = `${KIND[node.kind].label} ${node.number}: ${node.title}. ${fromDay(first)} to ${fromDay(last)}. ${STATUS[node.status].label}.${found.length ? ` ${found.join('. ')}.` : ''}`;
+  const sized = sizeWords(node, { rollup: addsUp(node) });
+  const words = `${KIND[node.kind].label} ${node.number}: ${node.title}. ${spanWords(first, last, geometry.today)}. ${STATUS[node.status].label}.${sized ? ` Size: ${sized}.` : ''}${found.length ? ` ${found.join('. ')}.` : ''}`;
   const chosen = picked.has(node.ref);
   // A bar with no room for its icon and words shows neither: the row's label says what it is, and
   // its status icon stands beside it, so nothing is drawn over the bar.
   const short = spot.width < SHORT_BAR;
+  const top = `${spot.y + BAR_INSET}px`;
+  const height = `${ROW - 2 * BAR_INSET}px`;
   const el = h(
     'div',
     {
-      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', short ? 'short' : '', node.overdue ? 'overdue' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
+      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', short ? 'short' : '', spot.width < TINY_BAR ? 'tiny' : '', late ? 'late' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
       role: 'button',
       tabindex: 0,
       'aria-pressed': String(chosen),
       'aria-label': words,
       title: words,
-      css: { left: `${spot.left}px`, width: `${spot.width}px`, top: `${spot.y + 4}px`, height: `${ROW - 8}px` },
-      dataset: { ref: node.ref, kind: node.kind, start: fromDay(first), end: fromDay(last), workedOut: String(!editable) },
+      css: { left: `${spot.left}px`, width: `${spot.width}px`, top, height },
+      dataset: { ref: node.ref, kind: node.kind, start: fromDay(first), end: fromDay(last), workedOut: String(!editable), late: String(late) },
       onkeydown: barKey,
     },
-    editable ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
+    editable && can('write') ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
     short ? null : h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
     short ? null : h('span', { class: 'rm-text' }, `${code} ${node.title}`),
-    editable ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
+    editable && can('write') ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
   );
+  // Late work: a hatched tail from the end of the bar through today, a cell for each day, and the days said at its end.
+  const barEnd = spot.left + spot.width;
+  const todayEnd = (geometry.today + 1 - geometry.origin) * geometry.ppd;
+  const tail = late && todayEnd > barEnd ? [h('span', { class: 'rm-late', 'aria-hidden': 'true', dataset: { ref: node.ref, late: String(late) }, css: { left: `${barEnd}px`, width: `${todayEnd - barEnd}px`, top, height } })] : [];
   const said = found.filter((text) => text !== 'Worked out from what is under it');
   const note =
     short || said.length
       ? [
           h(
             'span',
-            { class: `rm-note status-${node.status}${node.overdue ? ' overdue' : ''}`, css: { left: `${spot.left + spot.width + 4}px`, top: `${spot.y + 4}px` } },
+            { class: `rm-note status-${node.status}${late ? ' overdue' : ''}`, 'aria-hidden': 'true', dataset: { ref: node.ref }, css: { left: `${Math.max(barEnd, late ? todayEnd : 0) + 4}px`, top, height } },
             short ? statusIcon(node.status, 13) : null,
-            node.overdue || node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
+            node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
             said.join(' · '),
           ),
         ]
       : [];
-  return [el, ...note];
+  return [el, ...tail, ...note];
 }
 
 // An arrow from what is needed first to the item that waits for it, between bars that are drawn.
@@ -422,13 +544,15 @@ function marker(id, className) {
 
 function scrollToToday() {
   if (!geometry) return;
+  // Today a third of the way across what is in view beside the labels, so the days just gone, where
+  // what is overdue is, are in view too, however narrow the window is.
   const labels = parts.scroll.querySelector('.rm-labels')?.offsetWidth ?? 0;
-  const at = labels + (geometry.today - geometry.origin) * geometry.ppd;
-  parts.scroll.scrollLeft = Math.max(0, at - parts.scroll.clientWidth / 3);
+  const at = (geometry.today - geometry.origin) * geometry.ppd;
+  parts.scroll.scrollLeft = Math.max(0, at - (parts.scroll.clientWidth - labels) / 3);
 }
 
-// Where the timeline opens: at today, or at the first item when nothing is anywhere near today, so
-// that it never opens on months of empty space.
+// Where the timeline opens: at today, or, when no work is anywhere near today, at the work nearest to
+// it, so that it never opens on empty space.
 function scrollToStart() {
   if (!geometry || !geometry.items.size) {
     scrollToToday();
@@ -438,68 +562,13 @@ function scrollToStart() {
   const labels = parts.scroll.querySelector('.rm-labels')?.offsetWidth ?? 0;
   const days = (parts.scroll.clientWidth - labels) / ppd;
   const spans = [...items.values()];
-  if (spans.some((item) => item.e >= today - days / 3 && item.s <= today + (days * 2) / 3)) scrollToToday();
-  else parts.scroll.scrollLeft = Math.max(0, (Math.min(...spans.map((item) => item.s)) - origin) * ppd - 16);
-}
-
-// -- the tray of undated items ---------------------------------------------------------------------
-
-// What was typed in the tray's date boxes and not sent yet, kept across the redraws that news causes.
-let trayDrafts = new Map();
-// The tray opens by itself only when there is nothing on the timeline to look at and something
-// waits in it; after that it stays as the person left it.
-let trayDecided = false;
-
-function drawTray(undated, onTimeline) {
-  if (!trayDecided) {
-    parts.tray.open = onTimeline === 0 && undated.length > 0;
-    trayDecided = true;
+  if (spans.some((item) => item.e >= today - days / 3 && item.s <= today + (days * 2) / 3)) {
+    scrollToToday();
+    return;
   }
-  const open = parts.tray.open;
-  // With nothing undated the tray has nothing to hold: the count above the timeline says so.
-  parts.tray.hidden = undated.length === 0;
-  const here = new Set(undated.map((node) => node.ref));
-  for (const ref of [...trayDrafts.keys()]) if (!here.has(ref)) trayDrafts.delete(ref);
-  put(
-    parts.tray,
-    h('summary', {}, icon('chevron_right', { size: 14 }), h('span', { class: 'tray-title' }, 'Undated'), h('span', { class: 'chip' }, String(undated.length)), h('span', { class: 'tray-sub' }, 'Drag one onto the timeline, or give it dates here')),
-    undated.length
-      ? h(
-          'ul',
-          { class: 'plain tray-list' },
-          undated.map((node) => {
-            const code = nodeCode(node.kind, node.number);
-            const draft = trayDrafts.get(node.ref) || { start: '', target: '' };
-            trayDrafts.set(node.ref, draft);
-            const start = h('input', { type: 'date', value: draft.start, 'aria-label': `Start date of ${code}`, oninput: () => { draft.start = start.value; } });
-            const target = h('input', { type: 'date', value: draft.target, 'aria-label': `Target date of ${code}`, oninput: () => { draft.target = target.value; } });
-            return h(
-              'li',
-              { class: 'tray-item', dataset: { ref: node.ref } },
-              h('span', { class: 'tray-drag', draggable: 'true', title: 'Drag onto the timeline', ondragstart: (event) => { trayDragged = node.ref; event.dataTransfer.setData('application/x-vrum-node', node.ref); event.dataTransfer.setData('text/plain', code); event.dataTransfer.effectAllowed = 'move'; }, ondragend: () => { trayDragged = ''; } }, kindIcon(node.kind, 14), h('span', { class: 'id mono' }, code), h('span', { class: 'tray-name' }, node.title)),
-              h(
-                'form',
-                {
-                  class: 'tray-form',
-                  onsubmit: (event) => {
-                    event.preventDefault();
-                    if (!start.value && !target.value) {
-                      notify('Give a start date, a target date or both.', { refusal: true });
-                      return;
-                    }
-                    changeDates(node, { ...(start.value ? { start_on: start.value } : {}), ...(target.value ? { target_on: target.value } : {}) }, 'Gave');
-                  },
-                },
-                h('span', { class: 'tray-field' }, h('span', { 'aria-hidden': 'true' }, 'Start'), start),
-                h('span', { class: 'tray-field' }, h('span', { 'aria-hidden': 'true' }, 'Due'), target),
-                h('button', { type: 'submit', class: 'small' }, 'Set dates'),
-              ),
-            );
-          }),
-        )
-      : h('p', { class: 'quiet tray-none' }, rows.length ? 'Everything here has dates, or has children that do.' : 'There is no work to show yet.'),
-  );
-  parts.tray.open = open;
+  const away = (item) => (item.s > today ? item.s - today : today - item.e);
+  const nearest = spans.reduce((best, item) => (away(item) < away(best) ? item : best));
+  parts.scroll.scrollLeft = Math.max(0, (nearest.s - origin) * ppd - 16);
 }
 
 // -- moving bars ------------------------------------------------------------------------------------
@@ -527,9 +596,12 @@ function changeFor(item, mode, days) {
 }
 
 function targetsFor(ref, mode) {
-  if (mode === 'move' && picked.has(ref)) return [...picked].filter((other) => geometry.items.get(other)?.editable);
-  return geometry.items.get(ref)?.editable ? [ref] : [];
+  if (mode === 'move' && picked.has(ref)) return [...picked].filter((other) => movable(geometry.items.get(other)));
+  return movable(geometry.items.get(ref)) ? [ref] : [];
 }
+
+// A bar whose own dates can be changed by this person: it has dates of its own, and they may write.
+const movable = (item) => Boolean(item?.editable) && can('write');
 
 function preview(refs, mode, days) {
   const { origin, ppd } = geometry;
@@ -543,6 +615,8 @@ function preview(refs, mode, days) {
     el.style.width = `${Math.max((to - from + 1) * ppd, MIN_BAR)}px`;
     el.classList.toggle('backwards', first > last);
     el.dataset.preview = `${fromDay(first)} to ${fromDay(last)}`;
+    // What stands beside the bar (its late tail and its marks) would be left behind, so it is put away until the change is made.
+    for (const beside of parts.scroll.querySelectorAll(`.rm-late[data-ref="${ref}"], .rm-note[data-ref="${ref}"]`)) beside.hidden = true;
   }
   parts.scroll.classList.add('moving');
 }
@@ -565,7 +639,7 @@ async function commit(refs, mode, days) {
       const { node } = items[0];
       const change = changeFor(items[0], mode, days);
       try {
-        await call('update_node', { actor: actor(), node: node.ref, expected_version: node.version, ...change });
+        await call('update_node', { node: node.ref, expected_version: node.version, ...change });
         notify(`Moved ${nodeCode(node.kind, node.number)}: ${describe(change)}.`);
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
@@ -574,7 +648,7 @@ async function commit(refs, mode, days) {
     } else {
       const changes = items.map((item) => ({ node: item.node.ref, expected_version: item.node.version, ...changeFor(item, mode, days) }));
       try {
-        const outcome = await call('update_nodes', { actor: actor(), changes });
+        const outcome = await call('update_nodes', { changes });
         for (const result of outcome.results.filter((one) => !one.applied)) notify(`${codeOf(result.node)} was not moved. ${result.refusal}`, { refusal: true });
         if (outcome.applied) notify(`Moved ${plural(outcome.applied, 'item')}${outcome.refused ? `; ${outcome.refused} refused` : ''}.`);
       } catch (error) {
@@ -592,22 +666,6 @@ async function commit(refs, mode, days) {
 
 function describe(change) {
   return [change.start_on ? `starts ${change.start_on}` : null, change.target_on ? `due ${change.target_on}` : null].filter(Boolean).join(', ');
-}
-
-// Dates given to one item (from the tray, or by dropping it on the timeline).
-async function changeDates(node, change, verb) {
-  busy += 1;
-  try {
-    await call('update_node', { actor: actor(), node: node.ref, expected_version: node.version, ...change });
-    notify(`${verb} ${nodeCode(node.kind, node.number)} dates: ${describe(change)}.`);
-    await settle();
-  } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    notify(error.message, { refusal: true });
-  } finally {
-    busy -= 1;
-  }
-  await load();
 }
 
 // Dragging the empty timeline moves along it, as the scroll bars would (a mouse only: a finger
@@ -643,7 +701,7 @@ function pointerDown(event) {
   const ref = el.dataset.ref;
   const item = geometry.items.get(ref);
   if (!item) return;
-  const mode = item.editable ? event.target.closest('.rm-handle')?.dataset.handle || 'move' : 'click';
+  const mode = movable(item) ? event.target.closest('.rm-handle')?.dataset.handle || 'move' : 'click';
   const started = { ref, mode, x: event.clientX, days: 0, moved: false, together: event.shiftKey || event.ctrlKey || event.metaKey };
   drag = started;
   el.setPointerCapture(event.pointerId);
@@ -662,7 +720,7 @@ function pointerDown(event) {
     drag = null;
     if (!started.moved) {
       if (started.together) togglePicked(ref);
-      else ui.navigate({ sel: ref, panel: null });
+      else openItem(ref);
     } else if (started.days !== 0 && mode !== 'click') {
       commit(targetsFor(ref, mode), mode, started.days);
     } else {
@@ -688,12 +746,12 @@ function barKey(event) {
   const item = geometry?.items.get(ref);
   if (!item) return;
   const key = event.key;
-  if (key === 'Enter') ui.navigate({ sel: ref, panel: null });
+  if (key === 'Enter') openItem(ref);
   else if (key === ' ') togglePicked(ref);
   else if (key === 'Escape') {
     picked = new Set();
     draw();
-  } else if ((key === 'ArrowLeft' || key === 'ArrowRight') && item.editable) {
+  } else if ((key === 'ArrowLeft' || key === 'ArrowRight') && movable(item)) {
     const mode = event.altKey ? 'start' : event.ctrlKey || event.metaKey ? 'end' : 'move';
     shiftBy(ref, mode, (key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 7 : 1));
   } else if (key === 'ArrowUp' || key === 'ArrowDown') {

@@ -19,25 +19,27 @@ SCRIPT = Path(__file__).resolve().parent.parent / "src/vrum/board/static/referen
         ("[[story:12]]", "story", "12"),
         ("see [[task:40]], then", "task", "40"),
         ("see [[rule:3]], then", "rule", "3"),
-        ("a [[decision:7]] b", "decision", "7"),
-        ("[[fact:5]]", "fact", "5"),
+        ("a [[note:7]] b", "note", "7"),
         ("[[story:123456789012345678]]", "story", "123456789012345678"),
     ],
 )
-def test_the_six_kinds_are_references(text: str, kind: str, ident: str) -> None:
+def test_the_five_kinds_are_references(text: str, kind: str, ident: str) -> None:
     found = re.search(REFERENCE_PATTERN, text)
     assert found and found.groups() == (kind, ident)
     assert kind in REFERENCE_KINDS
 
 
-def test_the_kinds_are_the_six_things_a_reference_can_name() -> None:
-    assert REFERENCE_KINDS == ("epic", "story", "task", "rule", "decision", "fact")
+def test_the_kinds_are_the_five_things_a_reference_can_name() -> None:
+    assert REFERENCE_KINDS == ("epic", "story", "task", "rule", "note")
 
 
 @pytest.mark.parametrize(
     "text",
     [
         "[[node:12]]",
+        "[[decision:7]]",
+        "[[fact:5]]",
+        "[[note:0]]",
         "[[story:0]]",
         "[[story:05]]",
         "[[story: 5]]",

@@ -1,19 +1,32 @@
-// The Graph's list of work: the hierarchy of epics, stories and tasks as a tree that opens and
+// The Lists page's list of work: the hierarchy of epics, stories and tasks as a tree that opens and
 // closes, with each item's status, what it needs first and what needs it, and who holds it.
-// Choosing an item shows it in the shared detail panel. The title of an epic or a story is a link to
-// its own page (a plain click goes there, a click with a modifier key opens it the way a link
-// does), and a small "Quick look" button beside it shows it in the panel; a task's title opens the
-// panel. It draws what the Graph page hands it (the same scope the map draws) and keeps nothing of
-// its own but which branches are closed.
+// The title of every item is a link to its own page (a plain click goes there, a click with a
+// modifier key opens it the way a link does), a click on the rest of its row and Enter on a row
+// do the same. It draws what the Lists page hands it (the scope the epic and the filter choose) and keeps
+// nothing of its own but which branches are closed. The record chosen in the address (`sel`) is marked.
 
-import { itemLink } from './ctx.js';
+import { itemLink, openItem } from './ctx.js';
 import { h, moment, plural } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, statusChip } from './labels.js';
-import { openRecord } from './records.js';
+import { KIND, actorLabel, byRef, checksChip, codeOf, criteriaChip, itemSizeChip, kindIcon, nodeCode } from './labels.js';
+import { statusChip } from './status-menu.js';
 import { store } from './store.js';
-import { byDot } from './graph-data.js';
+import { byDot } from './lists-data.js';
 import { connectionsDetails } from './list-parts.js';
+
+// The tree is one stop of the keyboard, the row in use. The status chip of a row is the next stop after
+// the row, and is a stop only while its row is.
+function stopOf(item, on) {
+  item.setAttribute('tabindex', on ? '0' : '-1');
+  item.querySelector(':scope > .gv-row > .chip[data-menu]')?.setAttribute('tabindex', on ? '0' : '-1');
+}
+
+// The status of a row, as a chip that changes it.
+function stateChip(node) {
+  const chip = statusChip(node);
+  if (chip instanceof HTMLButtonElement) chip.setAttribute('tabindex', '-1');
+  return chip;
+}
 
 export function createWorkList() {
   const closed = new Set(); // refs of the branches the person closed
@@ -21,11 +34,13 @@ export function createWorkList() {
   let current = null; // what the page last handed over
   let chosen = null;
 
-  const select = (node) => openRecord(node.kind, node.number);
-  const showRef = (ref) => {
-    const { kind, number } = parseNodeRef(ref);
-    openRecord(kind, number);
-  };
+  // A row that takes the focus (by a click, or the keys) becomes the stop of the tree, and its chip the stop after it.
+  tree.addEventListener('focusin', (event) => {
+    const item = event.target.closest?.('li[role=treeitem]');
+    if (item && event.target === item) tree.querySelectorAll('li[role=treeitem]').forEach((other) => stopOf(other, other === item));
+  });
+
+  const select = (node) => openItem(node.ref);
 
   function relation(node, type, outgoing) {
     const refs = store.links
@@ -45,7 +60,7 @@ export function createWorkList() {
             `${words} `,
             refs.map((ref, at) => {
               const other = store.nodes.get(ref);
-              return [at ? ', ' : '', h('button', { type: 'button', class: 'link gv-link', tabindex: -1, 'data-other': ref, onclick: () => showRef(ref) }, other ? `${codeOf(ref)} ${other.title}${other.status === 'done' ? ' (done)' : ''}` : codeOf(ref))];
+              return [at ? ', ' : '', itemLink(ref, { class: 'gv-link', tabindex: -1, 'data-other': ref }, other ? `${codeOf(ref)} ${other.title}${other.status === 'done' ? ' (done)' : ''}` : codeOf(ref))];
             }),
           )
         : null;
@@ -59,13 +74,13 @@ export function createWorkList() {
   }
 
   function claim(node) {
-    if (node.claimed_by) return h('span', { class: 'gv-claim' }, `Held by ${node.claimed_by} until ${moment(node.claim_expires_at)}`);
-    if (node.lapsed_claim_by) return h('span', { class: 'gv-claim lapsed' }, `${node.lapsed_claim_by}’s claim ran out`);
+    if (node.claimed_by) return h('span', { class: 'gv-claim' }, 'Held by ', actorLabel(node.claimed_by, node.claimed_by_kind), ` until ${moment(node.claim_expires_at)}`);
+    if (node.lapsed_claim_by) return h('span', { class: 'gv-claim lapsed' }, actorLabel(node.lapsed_claim_by, node.lapsed_claim_by_kind), '’s claim ran out');
     return null;
   }
 
-  // What else the item is joined to in this preset (what relates to it, the requirements, decisions
-  // and facts that concern it, the references that name it), as the map draws it. The hierarchy is
+  // What else the item is joined to in this preset (what relates to it, the acceptance criteria and notes
+  // that concern it, the references that name it). The hierarchy is
   // the tree, and what it needs first is said on the row.
   function joined(dot) {
     const details = connectionsDetails(dot, current, { skip: ['hierarchy', 'needs_first'] });
@@ -73,15 +88,16 @@ export function createWorkList() {
     return details;
   }
 
-  // The title of an epic or story is a link to its page, with a quick look at it in the panel
-  // beside it; a task's title is plain, and a click on its row shows it in the panel.
+  // The title of an item is a link to its page.
   function titleOf(node) {
-    if (node.kind === 'task') return node.title;
-    const code = nodeCode(node.kind, node.number);
-    return [
-      itemLink(node.ref, { class: 'gv-title', tabindex: -1 }, node.title),
-      h('button', { type: 'button', class: 'gv-quick ghost icon-only small', tabindex: -1, title: 'Quick look', 'aria-label': `Quick look at ${code}`, onclick: () => select(node) }, icon('search', { size: 14 })),
-    ];
+    return itemLink(node.ref, { class: 'gv-title', tabindex: -1 }, node.title);
+  }
+
+  // Its size, in the column before its status.
+  function sizeOf(node) {
+    const chip = itemSizeChip(node);
+    chip?.classList.add('gv-size');
+    return chip;
   }
 
   function branch(dot, level, kids) {
@@ -113,9 +129,10 @@ export function createWorkList() {
           : h('span', { class: 'gv-twisty none' }),
         h('span', { class: 'gv-kind' }, kindIcon(node.kind, 14), KIND[node.kind].label),
         h('span', { class: 'gv-label' }, h('span', { class: 'id' }, `${nodeCode(node.kind, node.number)} `), titleOf(node)),
-        statusChip(node.status),
+        sizeOf(node),
+        stateChip(node),
         total !== null ? progress(node, total) : null,
-        h('div', { class: 'gv-ties-line' }, claim(node), ties(node)),
+        h('div', { class: 'gv-ties-line' }, criteriaChip(node), checksChip(node), claim(node), ties(node)),
         joined(dot),
       ),
       parent ? h('ul', { role: 'group', hidden: !open }, children.map((child) => branch(child, level + 1, kids))) : null,
@@ -141,6 +158,8 @@ export function createWorkList() {
     current = ctx;
     chosen = ctx.cfg.sel?.key ?? null;
     const hadFocus = tree.contains(document.activeElement);
+    // A status chip that was just used is where the focus returns to, not the row that was the stop.
+    const chipKey = hadFocus ? document.activeElement.closest?.('.chip[data-focus-key]')?.dataset.focusKey : null;
     const focused = tree.querySelector('li[tabindex="0"]')?.dataset.key;
     const dots = [...ctx.shown.dots.values()].filter((dot) => dot.isNode);
     const present = new Set(dots.map((dot) => dot.key));
@@ -156,9 +175,11 @@ export function createWorkList() {
     tree.replaceChildren(...(rows.length ? rows : [emptyRow(ctx, nothing)]));
     const stops = [...tree.querySelectorAll('li[role=treeitem]')];
     const wanted = (focused && tree.querySelector(`li[data-key="${focused}"]`)) || (chosen && tree.querySelector(`li[data-key="${chosen}"]`)) || stops[0];
-    stops.forEach((item) => item.setAttribute('tabindex', item === wanted ? '0' : '-1'));
+    stops.forEach((item) => stopOf(item, item === wanted));
     // A redraw keeps the focus where it was, and does not take it from anything outside the tree.
-    if (hadFocus && wanted) wanted.focus();
+    const chip = chipKey ? [...tree.querySelectorAll('.chip[data-focus-key]')].find((one) => one.dataset.focusKey === chipKey) : null;
+    if (chip) chip.focus();
+    else if (hadFocus && wanted) wanted.focus();
   }
 
   // Only the choice changed: mark it again, and make it the one stop of the tree.
@@ -176,7 +197,7 @@ export function createWorkList() {
     item.setAttribute('aria-current', 'true');
     item.querySelector(':scope > .gv-row > .gv-connections')?.setAttribute('open', '');
     if (!tree.contains(document.activeElement)) {
-      tree.querySelectorAll('li[role=treeitem]').forEach((other) => other.setAttribute('tabindex', other === item ? '0' : '-1'));
+      tree.querySelectorAll('li[role=treeitem]').forEach((other) => stopOf(other, other === item));
     }
     return item;
   }
@@ -190,7 +211,7 @@ export function createWorkList() {
   const visible = () => [...tree.querySelectorAll('li[role=treeitem]')].filter((item) => !item.parentElement.closest('ul[hidden]'));
 
   function focusItem(item) {
-    tree.querySelectorAll('li[role=treeitem]').forEach((other) => other.setAttribute('tabindex', other === item ? '0' : '-1'));
+    tree.querySelectorAll('li[role=treeitem]').forEach((other) => stopOf(other, other === item));
     item.focus();
   }
 

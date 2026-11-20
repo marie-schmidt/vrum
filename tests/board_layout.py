@@ -1,11 +1,12 @@
 # ruff: noqa: E501
 # The audits below are JavaScript that runs in the page; its lines are not wrapped to Python's width.
-"""What M17's layout, responsiveness and visual-quality browser tests share: a real project with
-content of varied lengths, a browser at each of the proof's widths and in each theme, the tour of
-every screen of the board, and the in-page audits (overflow, scroll regions, targets, overlap,
-names, headings, landmarks, spilled text, focus rings and contrast). The page helpers every
-browser test uses are in board_helpers.py; the audits run in the page itself, because that is
-where the sizes and the colours are."""
+"""What M17's layout, responsiveness and visual-quality browser tests share (and M20 keeps): a real
+project with content of varied lengths, a browser at each of the proof's widths and in each theme, the
+tour of every screen of the board (the three views, the page of each kind of record, Search with Possible
+duplicates, Activity, the coverage report, the settings pages), and the in-page audits (overflow,
+scroll regions, targets, overlap, names, headings, landmarks, spilled text, focus rings and contrast).
+The page helpers every browser test uses are in board_helpers.py; the audits run in the page itself,
+because that is where the sizes and the colours are."""
 
 import base64
 import json
@@ -20,9 +21,9 @@ from urllib.parse import urlparse
 from mcp import Client
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from tests.board_helpers import SLOW, Watched, board_url, item_address, made
+from tests.board_helpers import SLOW, Watched, board_url, item_address, made, tree_expand
 from tests.helpers import (
-    confirm,
+    confirm_on_board,
     connect,
     day,
     make_decision,
@@ -30,6 +31,7 @@ from tests.helpers import (
     number_of,
     ok,
     ref_of,
+    set_definition_on_board,
     set_status,
 )
 from tests.world import SESSION_COOKIE, Project, make_project, project_at, register
@@ -42,6 +44,37 @@ TALL = 3000  # CSS pixels: a window as tall as this shows nearly every screen wi
 LONG_TITLE = " ".join(["Long titles must wrap and never clip their meaning."] * 4)
 UNBROKEN = "Unbroken" + "x" * 192
 LONG_SOURCE = "https://example.test/archive/" + "a" * 190
+
+# The project-wide decisions of the project, after the first: (title, text). Their titles and texts
+# are of every length, one with a title as long as a title can be and one with a word that cannot break.
+PROJECT_WIDE = [
+    ("Every change says who made it", "Whoever changes anything is named, with the time."),
+    (
+        "Nothing is ever deleted, only replaced or withdrawn",
+        "A record keeps its history. A replaced or withdrawn record stays readable and says why it ended.",
+    ),
+    (
+        "Plain words in every message",
+        "Messages a person or an agent reads are written in plain English.",
+    ),
+    (
+        "A confirmation is a person's review and never proof",
+        "A named person confirms a record to say they reviewed it. Vrum never infers that it is true.",
+    ),
+    (
+        "Agents get small answers by default, with the way to ask for more",
+        "Lists leave out long text, and any tool that can return a lot has a limit and says how much it left out.",
+    ),
+    (
+        "The board and the tools do the same things",
+        f"Whatever a person does on the board an agent can do through a tool, and the reverse. {UNBROKEN}",
+    ),
+    (
+        "Dates are days, counted in UTC",
+        "A start or a target is a day, written year-month-day, the same day for everyone.",
+    ),
+    (LONG_TITLE, "The longest title there can be, for the table that has to hold it on one line."),
+]
 
 # The icons of the old design, which were letters of a font. The board draws SVG now.
 OLD_GLYPHS = "◆●▶✓⚑◈▤▪○◎■✕△▽▲"
@@ -67,7 +100,8 @@ class Screen:
 
     @property
     def phone(self) -> bool:
-        """The drawer and the panel are sheets over the whole window (under 700 CSS pixels)."""
+        """The pages are one column, and the claims of the Activity page start folded (under 700
+        CSS pixels)."""
         return self.width < 700
 
 
@@ -120,7 +154,7 @@ async def the_world(server_url: str) -> World:
 
 async def build(client: Client, world: World) -> None:
     """Work and context made through MCP: epics that are dense in one column and sparse in the
-    others, one with nothing in it, one all done, one made of long words, requirements, decisions
+    others, one with nothing in it, one all done, one made of long words, acceptance criteria, decisions
     and facts (some with long words and a long source), links, dates, a claim."""
     refs = world.refs
 
@@ -191,7 +225,7 @@ async def build(client: Client, world: World) -> None:
     # A long lease, so that the claim is still held however long the whole run takes.
     await ok(client, "claim_node", actor="agent-1", node=refs["B1"], lease_seconds=86_400)
 
-    # Context: requirements, decisions and facts, some with long words.
+    # Context: acceptance criteria, decisions and facts, some with long words.
     async def record(name: str, kind: str, made_one: dict[str, Any]) -> None:
         refs[name] = ref_of(kind, made_one["id"])
 
@@ -203,16 +237,25 @@ async def build(client: Client, world: World) -> None:
             "create_rule",
             actor="ann",
             title="Keep actor, time and handoff note",
-            story=refs["S1"],
+            node=refs["S1"],
         ),
     )
     await record(
-        "R2", "rule", await ok(client, "create_rule", actor="ann", title="Not in any story yet")
+        "R2", "rule", await ok(client, "create_rule", actor="ann", title="Not placed anywhere yet")
     )
     await record(
         "R3",
         "rule",
-        await ok(client, "create_rule", actor="ann", title=LONG_TITLE, story=refs["S5"]),
+        await ok(client, "create_rule", actor="ann", title=LONG_TITLE, node=refs["S5"]),
+    )
+    # The long task has criteria of its own, and the project has a definition of done to read.
+    await record(
+        "R4",
+        "rule",
+        await ok(client, "create_rule", actor="ann", title=LONG_TITLE, node=refs["D1"]),
+    )
+    set_definition_on_board(
+        f"- Tests pass\n- {LONG_TITLE}\n- A person has tried it", project=world.project
     )
     claims = await make_decision(
         client,
@@ -222,7 +265,7 @@ async def build(client: Client, world: World) -> None:
         nodes=[refs["S2"]],
         rule_ids=[world.number("R1")],
     )
-    await record("X1", "decision", claims)
+    await record("X1", "note", claims)
     long_decision = await make_decision(
         client,
         LONG_TITLE,
@@ -230,27 +273,53 @@ async def build(client: Client, world: World) -> None:
         reason=LONG_SOURCE,
         nodes=[refs["S5"]],
     )
-    await record("X2", "decision", long_decision)
+    await record("X2", "note", long_decision)
     await record(
         "X3",
-        "decision",
+        "note",
         await make_decision(client, "Everything is written down", project_wide=True),
     )
-    await confirm(client, "decision", claims)
+    # Eight more project-wide decisions, some with long words, so that an epic with none of its own
+    # has a table of nine of them to show (the most a page of records holds), and a decision that
+    # was replaced and a note that was withdrawn, so that the "Earlier" tables and the page of a
+    # note that replaces another have something to draw.
+    for number, (title, text) in enumerate(PROJECT_WIDE, start=1):
+        wide = await make_decision(
+            client, title, text=text, reason=LONG_SOURCE, project_wide=True, decided_by="Ann"
+        )
+        await record(f"P{number}", "note", wide)
+    lease_old = await make_decision(
+        client, "Claims last ten minutes", nodes=[refs["S2"]], text="Ten minutes, then it ends."
+    )
+    await record("X4", "note", lease_old)
+    lease_new = await ok(
+        client,
+        "supersede_note",
+        replaces=[lease_old["id"]],
+        text="Claims last fifteen minutes\n\nFifteen minutes, then it ends, unless it is renewed.",
+        why="Ten minutes was too short for a review.",
+        decided_by="Ann",
+        keep_links=True,
+    )
+    await record("X5", "note", lease_new["replacement"])
+    confirm_on_board("note", claims, project=world.project)
     lease = await make_fact(
         client, "The team call agreed the lease is ten minutes", nodes=[refs["S2"]]
     )
-    await record("Y1", "fact", lease)
+    await record("Y1", "note", lease)
     long_fact = await make_fact(
         client,
         f"{UNBROKEN} {LONG_TITLE}",
         source=LONG_SOURCE,
         nodes=[refs["D1"]],
-        decision_ids=[world.number("X2")],
+        note_ids=[world.number("X2")],
     )
-    await record("Y2", "fact", long_fact)
-    await record("Y3", "fact", await make_fact(client, "A fact about nothing in particular"))
-    await confirm(client, "fact", lease)
+    await record("Y2", "note", long_fact)
+    await record("Y3", "note", await make_fact(client, "A note about nothing in particular"))
+    slip = await make_fact(client, "The office closes at five", nodes=[refs["S2"]])
+    await record("Y4", "note", slip)
+    await ok(client, "withdraw_note", note_ids=[slip["id"]], reason="It closes at six.")
+    confirm_on_board("note", lease, project=world.project)
 
 
 # -- a browser at a size, in a theme ------------------------------------------------------------
@@ -279,7 +348,7 @@ async def layout_context(
                 color_scheme="dark" if theme == "dark" else "light",
                 reduced_motion="reduce" if reduced_motion else "no-preference",
                 has_touch=touch,
-                # A date field is typed in the order its language writes a date.
+                # Times are written the way American English writes them.
                 locale="en-US",
             )
             if signed_in:
@@ -367,55 +436,68 @@ class Stop:
 
 def stops(world: World) -> list[Stop]:
     """Every screen the proof names that needs a project and a person signed in: the Board, the
-    Graph (map and list, Work, Context and Everything), the Roadmap, the full page of an epic, a
-    story and a task, the detail panel of each kind of record (and over a page), the search and
-    activity drawers, the three settings pages, and the pages that have no project open."""
+    Graph (map and list, Work, Context and Everything), the Roadmap, the page of an epic, a story, a
+    task, an acceptance criterion, a decision and a fact (each reached from a view or from Search, so the
+    breadcrumb and the sidebar are audited with their longest paths), the coverage report, Search
+    (with results, with none and Possible duplicates), Activity, the four settings pages, and the
+    pages that have no project open. The groups are board, graph, roadmap, item, coverage, search,
+    activity, settings and entry."""
     e1 = world.number("E1")
-    map_ready = "svg#graph-svg[data-ready=true]"
+    structure = "#graph-view[data-tab=structure] svg.graph-st-svg"
 
-    def page_of(name: str, item: str, ready: str) -> Stop:
-        """The full page of an epic, story or task: ready once its table or its place is drawn."""
+    def page_of(name: str, item: str, ready: str, from_page: str | None = None) -> Stop:
+        """The page of a record, reached from a view (the Board unless said): ready once its table,
+        its place or its record is drawn."""
+        ref = world[item]
         return Stop(
-            name, item_address(world[item]), f"#item-page[data-ref='{world[item]}'] {ready}", "item"
+            name, item_address(ref, from_page), f"#item-page[data-ref='{ref}'] {ready}", "item"
         )
 
     rows = "#item-table tbody tr"
+    record = "article.record-detail"
     return [
         Stop("board", "#/board", ".card[data-ref]", "board"),
         Stop("board-no-match", "#/board?q=zzzznothingmatches", "#board-empty", "board"),
-        Stop("graph-work-map", f"#/graph?view=work&as=map&epic={e1}", map_ready, "graph"),
-        Stop("graph-context-map", f"#/graph?view=context&as=map&epic={e1}", map_ready, "graph"),
+        # The Graph's three tabs. The names of the stops that stood for the old map and its lists are
+        # kept for what replaced them: the work map is Structure, and the lists of context and of
+        # everything are the Lists view's Notes and Everything.
+        Stop("graph-work-map", "#/graph", structure, "graph"),
         Stop(
-            "graph-everything-map", f"#/graph?view=everything&as=map&epic={e1}", map_ready, "graph"
+            "graph-work-epic",
+            f"#/graph?scope={world['E1']}",
+            "#graph-view[data-tab=structure] svg.graph-rd-svg",
+            "graph",
         ),
-        Stop("graph-all-map", "#/graph?view=everything&as=map", map_ready, "graph"),
-        Stop("graph-work-list", f"#/graph?view=work&as=list&epic={e1}", "#work-tree li", "graph"),
-        Stop("graph-context-list", "#/graph?view=context&as=list", ".gv-record", "graph"),
-        Stop("graph-everything-list", "#/graph?view=everything&as=list", ".gv-record", "graph"),
+        Stop("graph-around", f"#/graph?tab=around&focus={world['S2']}", ".graph-around", "graph"),
+        Stop("graph-around-overview", "#/graph?tab=around", "#graph-around-empty", "graph"),
+        Stop("graph-order", "#/graph?tab=order", ".graph-xv", "graph"),
+        Stop("graph-order-epic", f"#/graph?tab=order&focus={world['E1']}", ".graph-xv", "graph"),
+        Stop("lists-work", f"#/lists?view=work&epic={e1}", "#work-tree li", "lists"),
+        Stop("lists-requirements", "#/lists?view=requirements", "#requirements-summary", "lists"),
+        Stop("graph-context-list", "#/lists?view=notes", "tr.record-line[data-kind=note]", "lists"),
+        Stop("graph-everything-list", "#/lists?view=everything", ".gv-record", "lists"),
         Stop("roadmap", "#/roadmap", ".rm-bar", "roadmap"),
         page_of("item-epic", "E1", rows),
         page_of("item-epic-long", "E3", rows),
         page_of("item-epic-empty", "E4", "#item-empty .empty-text"),
         page_of("item-story", "S2", rows),
         page_of("item-story-long", "S5", rows),
-        page_of("item-task", "D1", "#item-part-title"),
+        page_of("item-task", "D1", "#item-part-title", "graph"),
+        page_of("item-requirement", "R3", record),
+        page_of("item-decision", "X2", record, "search"),
+        page_of("item-decision-replaced", "X5", record),
+        page_of("item-fact", "Y2", record),
+        page_of("item-fact-short", "Y1", record),
+        Stop("coverage", "#/coverage", "#coverage-summary[data-unplaced]", "coverage"),
+        Stop("search", "#/search?search=card", "#search-results tr.result", "search"),
         Stop(
-            "item-quick-look",
-            f"{item_address(world['S2'])}&sel={world['B1']}",
-            f"#panel .card-detail[data-ref='{world['B1']}']",
-            "item",
+            "search-empty", "#/search?search=zzzznothing", "#search-results .search-empty", "search"
         ),
-        Stop("panel-epic", f"#/board?sel={world['E3']}", "#panel .card-detail", "panel"),
-        Stop("panel-story", f"#/board?sel={world['S5']}", "#panel .card-detail", "panel"),
-        Stop("panel-task", f"#/board?sel={world['D1']}", "#panel .card-detail", "panel"),
-        Stop("panel-requirement", f"#/board?sel={world['R3']}", "#panel .detail", "panel"),
-        Stop("panel-decision", f"#/board?sel={world['X2']}", "#panel .detail", "panel"),
-        Stop("panel-fact", f"#/board?sel={world['Y2']}", "#panel .detail", "panel"),
-        Stop("panel-coverage", "#/board?panel=coverage", "#panel .detail", "panel"),
-        Stop("search", "#/board?drawer=search&search=card", "#search-results li.result", "drawer"),
-        Stop("search-empty", "#/board?drawer=search&search=zzzznothing", "#search-count", "drawer"),
-        Stop("activity", "#/board?drawer=activity", "#feed .event", "drawer"),
-        Stop("access", "#/access", ".settings-page", "settings"),
+        Stop("search-duplicates", "#/search?dups=1", "#dup-pairs > *", "search"),
+        Stop("activity", "#/activity", "#feed .event", "activity"),
+        # The Users page keeps the name its stop had as the Agent access page.
+        Stop("access", "#/users", ".settings-page", "settings"),
+        Stop("definition", "#/definition", "#definition-page .definition-checks", "settings"),
         Stop("tools", "#/tools", ".tool", "settings"),
         Stop("status", "#/status", "#status-body table", "settings"),
         Stop("projects", "/board", "#projects", "entry"),
@@ -424,16 +506,13 @@ def stops(world: World) -> list[Stop]:
 
 
 async def settle(page: Page) -> None:
-    """Wait until the page has finished what it was asked: nothing is loading, the map's layout
-    is at rest, and the network is quiet."""
+    """Wait until the page has finished what it was asked: nothing is loading, and the network is
+    quiet."""
     await page.wait_for_function(
         """() => {
             const waiting = [...document.querySelectorAll('.loading, [aria-busy=true]')]
                 .filter(e => e.checkVisibility && e.checkVisibility());
-            const map = document.querySelector('svg#graph-svg');
-            const moving = map && map.offsetParent !== null && map.dataset.layout === 'compact'
-                && !map.dataset.settled;
-            return !waiting.length && !moving;
+            return !waiting.length;
         }""",
         timeout=SLOW,
     )
@@ -564,7 +643,7 @@ const disabled = (e) => !!e.closest(':disabled, [aria-disabled=true]');
 // Something opaque that is not part of `e` sits on top of it (a sheet, a scrim, a sticky column).
 // A control on top of a control is not cover: that is an overlap, and the audits report it.
 const opaque = (x) => {
-  if (x.matches('#sheet-scrim, #sidebar-scrim, dialog')) return true;
+  if (x.matches('#sidebar-scrim, dialog')) return true;
   const c = parse(getComputedStyle(x).backgroundColor);
   return !!c && c[3] >= 0.9;
 };
@@ -614,7 +693,7 @@ for (const e of document.body.querySelectorAll('*')) {
 // The nodes of the map are looked at in their own test, at 100% zoom: the map is drawn zoomed out.
 const targets = [];
 for (const e of document.body.querySelectorAll(CONTROLS)) {
-  if (!vis(e) || e.closest('.sr-only, .skip, svg#graph-svg')) continue;
+  if (!vis(e) || e.closest('.sr-only, .skip, svg#graph-svg, svg.graph-st-svg, svg.graph-rd-svg')) continue;
   const c = clipBox(e, rect(e));
   const box = { l: Math.max(0, c.l), t: Math.max(0, c.t), r: Math.min(w, c.r), b: Math.min(innerHeight, c.b) };
   if (box.r - box.l <= 1 || box.b - box.t <= 1 || obscured(e, box, false)) continue;
@@ -656,13 +735,21 @@ for (const t of targets) {
 // 4. Controls do not sit on each other (a link that wraps is the lines it is on, not the box
 // around them).
 const live = targets.filter((t) => !t.e.matches('summary'));
+// A field that holds a control at its end (the filter's help, a calendar button, the clear sign of a
+// search box) keeps its text clear of it with padding, so the field's own box is its text area.
 const lines = (t) => [...t.e.getClientRects()].filter((r) => r.width > 0 && r.height > 0).map((r) => {
   const c = clipBox(t.e, r);
-  return { l: Math.max(0, c.l), t: Math.max(0, c.t), r: Math.min(w, c.r), b: Math.min(innerHeight, c.b) };
+  const box = { l: Math.max(0, c.l), t: Math.max(0, c.t), r: Math.min(w, c.r), b: Math.min(innerHeight, c.b) };
+  if (t.e.matches('input, textarea')) {
+    const s = getComputedStyle(t.e);
+    box.l += parseFloat(s.paddingLeft) || 0;
+    box.r -= parseFloat(s.paddingRight) || 0;
+  }
+  return box;
 });
 // A menu, a dialog or a sheet floats over the page on purpose; controls are not compared across it.
 const layerOf = (e) => {
-  const l = e.closest('.menu, dialog, #panel, #drawer, #sidebar');
+  const l = e.closest('.menu, dialog, #sidebar');
   return l && ['fixed', 'absolute'].includes(getComputedStyle(l).position) ? l : null;
 };
 out.overlaps = [];
@@ -694,7 +781,7 @@ out.icons = [];
 for (const e of document.body.querySelectorAll('svg')) {
   if (!here(e)) continue;
   const named = e.getAttribute('role') === 'img' && (e.getAttribute('aria-label') || e.querySelector('title'));
-  const group = e.id === 'graph-svg' && e.getAttribute('aria-label');
+  const group = (e.id === 'graph-svg' || e.matches('.graph-st-svg, .graph-rd-svg')) && e.getAttribute('aria-label');
   if (e.getAttribute('aria-hidden') === 'true' || named || group) continue;
   out.icons.push(desc(e));
 }
@@ -713,7 +800,7 @@ const levels = [];
 for (const e of document.body.querySelectorAll('h1, h2, h3, h4, h5, h6, [role=heading]')) {
   if (!vis(e)) continue;
   const level = e.getAttribute('aria-level') ? Number(e.getAttribute('aria-level')) : Number(e.tagName[1]);
-  const region = e.closest('main, #sidebar, #top, #drawer, #panel, dialog, nav');
+  const region = e.closest('main, #sidebar, #top, dialog, nav');
   levels.push({ level, desc: desc(e), region: region ? region.id || region.tagName : 'body' });
 }
 out.h1 = levels.filter((l) => l.level === 1).length;
@@ -725,13 +812,28 @@ for (const l of levels) {
   last[l.region] = l.level;
 }
 
-// 7. Landmarks: one main; navigation, asides, regions and dialogs have names.
+// 7. Landmarks: one main; navigation, asides, regions and dialogs have names. So do the tables and
+// the trees (the sidebar's navigator): each says what it holds in its caption or its label, and not
+// only in the words it happens to contain.
 out.mains = [...document.querySelectorAll('main, [role=main]')].filter(vis).length;
 out.navs = [...document.querySelectorAll('nav')].filter(here).length;
 out.unlabelled = [];
 for (const e of document.querySelectorAll('nav, aside, [role=region], [role=search], dialog[open]')) {
   if (!here(e) || e.closest('[hidden]')) continue;
   if (!nameOf(e)) out.unlabelled.push(desc(e));
+}
+const saidBy = (e) => {
+  const ids = (e.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+  const fromIds = words(ids.map((id) => (document.getElementById(id) || {}).textContent).join(' '));
+  const caption = e.tagName === 'TABLE' ? words((e.querySelector(':scope > caption') || {}).textContent) : '';
+  return fromIds || words(e.getAttribute('aria-label')) || caption || words(e.getAttribute('title'));
+};
+// A table with column headings is a table of records, and says which; a list of facts that reads
+// down two columns (the Status page) is a plain list of labels and values.
+for (const e of document.querySelectorAll('table, [role=tree]')) {
+  if (!here(e) || e.closest('[hidden]')) continue;
+  if (e.tagName === 'TABLE' && !e.querySelector(':scope > thead')) continue;
+  if (!saidBy(e)) out.unlabelled.push(desc(e));
 }
 
 // 8. Text stays in its box: it wraps, scrolls, or is clipped with the whole of it said elsewhere.
@@ -750,11 +852,16 @@ out.spills = [];
 out.clipped = [];
 const boxes = new Map();
 const boxOf = (a) => { if (!boxes.has(a)) boxes.set(a, rect(a)); return boxes.get(a); };
+// Text that is hidden on purpose by a clip to nothing (a table's header on a narrow page, read aloud only).
+const clippedAway = (e) => {
+  for (let a = e; a && a !== document.body; a = a.parentElement) if (getComputedStyle(a).clip === 'rect(0px, 0px, 0px, 0px)') return true;
+  return false;
+};
 const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
 for (let n = texts.nextNode(); n; n = texts.nextNode()) {
   const p = n.parentElement;
   if (!words(n.nodeValue) || !p || p instanceof SVGElement || p.closest('svg, option, script, style')) continue;
-  if (!vis(p) || p.closest('.sr-only, .skip')) continue;
+  if (!vis(p) || p.closest('.sr-only, .skip') || clippedAway(p)) continue;
   const range = document.createRange();
   range.selectNodeContents(n);
   const t = range.getBoundingClientRect();
@@ -826,7 +933,7 @@ FOCUS = (
     + r"""
 const el = document.activeElement;
 if (!el || el === document.body || el === document.documentElement) return { skip: true, desc: 'body' };
-// The calendar button inside a date field has the browser's own focus, and the field itself does not.
+// A part of a control that has the focus for the control (not the element itself) is not audited.
 if (el instanceof HTMLElement && !el.matches(':focus')) return { skip: true, desc: desc(el) };
 const out = { skip: false, desc: desc(el), ok: false, why: 'no outline or ring', w: rect(el).width,
   h: rect(el).height };
@@ -891,7 +998,7 @@ COLLECT = (
 const items = [];
 const w = innerWidth; const h = innerHeight;
 const sheet = [...document.querySelectorAll('dialog[open]')][0];
-const fixed = ['sidebar', 'panel', 'drawer'].map((id) => document.getElementById(id))
+const fixed = ['sidebar'].map((id) => document.getElementById(id))
   .find((e) => e && !e.hidden && vis(e) && getComputedStyle(e).position === 'fixed');
 const root = sheet || fixed || document.body;
 // The fade at the edge of the Board that has more to show is over the words under it on purpose.
@@ -956,7 +1063,8 @@ for (const e of root.querySelectorAll('input, select')) {
   const shown = e.tagName === 'SELECT' ? e.options[e.selectedIndex] && e.options[e.selectedIndex].text : e.value;
   const color = parse(shown ? s.color : getComputedStyle(e, '::placeholder').color);
   const text = shown || e.placeholder;
-  if (!text || !color) continue;
+  // A placeholder drawn in no colour (the Graph's box, once something is chosen) is not on show.
+  if (!text || !color || color[3] === 0) continue;
   color[3] *= fade(e);
   items.push({ kind: 'text', desc: desc(e), text: String(text).slice(0, 40), box, color,
     size: parseFloat(s.fontSize), bold: false });
@@ -967,6 +1075,8 @@ for (const e of root.querySelectorAll('svg.icon')) {
   const color = parse(getComputedStyle(e).color);
   if (!box || !color) continue;
   color[3] *= fade(e);
+  // An icon that is only drawn on hover or focus (a menu chip's arrow, the calendar beside a day) is not on show.
+  if (color[3] < 0.05) continue;
   items.push({ kind: 'icon', desc: desc(e.parentElement || e), text: 'icon', box, color });
 }
 const edge = (e) => {
@@ -1216,14 +1326,10 @@ class State:
         await frames(w.page)
 
 
-async def press_escape(w: Watched) -> None:
-    await w.page.keyboard.press("Escape")
-
-
 def states(screen: Screen, world: World) -> dict[str, State]:
-    """The sidebar (on a window narrow enough to hide it), the Settings menu, a card's Move menu,
-    and three dialogs (the Board's New item, a fact to record, and a task to add on a story's
-    page)."""
+    """The sidebar (on a window narrow enough to hide it), the Settings menu,
+    the sidebar's navigator with an epic and a story opened, and three dialogs (the Board's New
+    item, a note to add, and a task to add on a story's page)."""
 
     async def sidebar(w: Watched) -> None:
         await w.page.locator("#sidebar-toggle").click()
@@ -1244,9 +1350,16 @@ def states(screen: Screen, world: World) -> dict[str, State]:
         if screen.narrow:
             await close_sidebar(w)
 
-    async def move(w: Watched) -> None:
-        await w.page.locator(".card .move").first.click()
-        await w.page.wait_for_selector(".move-menu", state="visible")
+    async def navigator(w: Watched) -> None:
+        for ref in (world["E1"], world["S2"]):
+            await tree_expand(w.page, ref)
+        await w.page.wait_for_selector(f"#epic-list li[data-key='{world['B1']}']", state="visible")
+
+    async def close_navigator(w: Watched) -> None:
+        for ref in (world["S2"], world["E1"]):
+            await tree_expand(w.page, ref, expand=False)
+        if screen.narrow:
+            await close_sidebar(w)
 
     async def new_item(w: Watched) -> None:
         await w.page.locator("#new-item").click()
@@ -1257,9 +1370,10 @@ def states(screen: Screen, world: World) -> dict[str, State]:
         await w.page.wait_for_selector("dialog.modal[open]", state="detached")
 
     async def record_fact(w: Watched) -> None:
-        await w.page.evaluate("() => { location.hash = '#/graph?view=context&as=list'; }")
-        await w.page.wait_for_selector("#record-fact", state="visible")
-        await w.page.locator("#record-fact").click()
+        # The dialog that adds a note (it was two, one for a fact and one for a decision).
+        await w.page.evaluate("() => { location.hash = '#/lists?view=notes'; }")
+        await w.page.wait_for_selector("#add-note", state="visible")
+        await w.page.locator("#add-note").click()
         await w.page.wait_for_selector("dialog.modal[open]", state="visible")
 
     async def new_task(w: Watched) -> None:
@@ -1275,7 +1389,7 @@ def states(screen: Screen, world: World) -> dict[str, State]:
 
     found = {
         "settings-menu": State("settings-menu", settings, close_settings, quick=True),
-        "move-menu": State("move-menu", move, press_escape, quick=True),
+        "navigator-open": State("navigator-open", navigator, close_navigator),
         "new-item-dialog": State("new-item-dialog", new_item, close_dialog),
         "record-fact-dialog": State("record-fact-dialog", record_fact, back_to_board),
         "new-task-dialog": State("new-task-dialog", new_task, back_to_board),
@@ -1356,50 +1470,40 @@ CARDS = """
 })
 """
 
-# Where the nodes and the lines of the map are, in the map's own units, and where its furniture is.
-GRAPH = """
+# Where the nodes, the lines and the names of the Structure map are on the screen, and where the
+# things round it are (everything in CSS pixels of the window).
+STRUCTURE_MAP = """
 () => {
-  const svg = document.querySelector('svg#graph-svg');
-  const num = (e, a) => parseFloat(e.getAttribute(a));
-  const screen = (e) => { const r = e.getBoundingClientRect();
+  const svg = document.querySelector('svg.graph-st-svg');
+  const box = (e) => { const r = e.getBoundingClientRect();
     return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
-  const dots = [...svg.querySelectorAll('.dot')].map((g) => {
-    const shape = g.querySelector('.shape');
-    const at = (g.getAttribute('transform') || '').match(/translate\\(([-\\d.]+)[ ,]+([-\\d.]+)\\)/);
-    const tx = at ? parseFloat(at[1]) : 0; const ty = at ? parseFloat(at[2]) : 0;
-    const local = { x: num(shape, 'x'), y: num(shape, 'y'), w: num(shape, 'width'), h: num(shape, 'height') };
-    const inside = [...g.querySelectorAll('text, svg.icon')].map((e) => {
-      if (e.tagName.toLowerCase() === 'svg') {
-        return { what: 'icon', x: num(e, 'x'), y: num(e, 'y'), w: num(e, 'width'), h: num(e, 'height') };
-      }
-      const b = e.getBBox();
-      return { what: e.textContent, x: b.x, y: b.y, w: b.width, h: b.height };
-    });
-    return { key: g.dataset.key, type: g.dataset.type, label: g.getAttribute('aria-label'),
-      tile: g.classList.contains('tile'), local, inside,
-      at: { x: tx + local.x, y: ty + local.y, w: local.w, h: local.h }, shape: screen(shape) };
+  const shown = (selector) => { const e = document.querySelector(selector);
+    return e && !e.hidden && e.checkVisibility() ? box(e) : null; };
+  const nodes = [...svg.querySelectorAll('g.graph-st-node')].map((g) => {
+    const r = g.querySelector('.graph-st-body').getBoundingClientRect();
+    const kind = ['epic', 'story', 'task'].find((k) => g.classList.contains('is-' + k));
+    return { ref: g.dataset.ref, kind, x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2,
+      r: r.width / 2 };
   });
-  const edges = [...svg.querySelectorAll('.edge')].map((p) => {
-    const length = p.getTotalLength();
-    const steps = Math.max(16, Math.ceil(length / 5));
-    const points = [];
-    for (let i = 0; i <= steps; i++) {
-      const q = p.getPointAtLength((length * i) / steps);
-      points.push([q.x, q.y]);
-    }
-    return { type: p.dataset.type, source: p.dataset.source, target: p.dataset.target, points };
+  const lines = [...svg.querySelectorAll('.graph-st-line')].map((line) => {
+    const m = line.getScreenCTM();
+    const at = (x, y) => { const p = svg.createSVGPoint(); p.x = x; p.y = y;
+      const q = p.matrixTransform(m); return [q.x, q.y]; };
+    const n = (a) => parseFloat(line.getAttribute(a));
+    return { from: at(n('x1'), n('y1')), to: at(n('x2'), n('y2')) };
+  });
+  const names = [...svg.querySelectorAll('.graph-st-names .graph-st-name')].map((g) => {
+    const text = g.querySelector('text');
+    return { text: g.textContent.trim().replace(/\\s+/g, ' '), ...box(text || g),
+      hub: g.classList.contains('is-hub'), project: g.classList.contains('is-project') };
   });
   const furniture = {};
-  for (const [name, selector] of [['legend', '#graph-legend'], ['zoom', '.gm-zoom'],
-    ['controls', '.gm-controls'], ['fit', '#fit'], ['canvas', '#graph-canvas'],
-    ['panel', '#panel'], ['hint', '#graph-hint'], ['caption', '#graph-caption']]) {
-    const e = document.querySelector(selector);
-    furniture[name] = e && !e.hidden && e.checkVisibility() ? screen(e) : null;
+  for (const [name, selector] of [['canvas', '.graph-st-inner'], ['zoom', '.graph-st-zoom'],
+    ['main', '.graph-st-main'], ['toolbar', '.graph-st-toolbar'], ['key', '.graph-st-toolbar .key-holder']]) {
+    furniture[name] = shown(selector);
   }
-  const edgeBoxes = [...svg.querySelectorAll('.edge')].map((p) => screen(p));
-  return { layout: svg.dataset.layout, dots, edges, furniture, edgeBoxes,
-    zoom: document.querySelector('#zoom-level').textContent,
-    transform: svg.querySelector('#viewport').getAttribute('transform') };
+  return { nodes, lines, names, furniture, svg: box(svg),
+    scroll: [document.documentElement.scrollWidth, innerWidth] };
 }
 """
 
@@ -1410,7 +1514,7 @@ async def cards(page: Page) -> dict[str, dict[str, Any]]:
     return {card["ref"]: card for card in found}
 
 
-async def graph(page: Page) -> dict[str, Any]:
-    """The map as it is drawn."""
-    found: dict[str, Any] = await page.evaluate(GRAPH)
+async def structure_map(page: Page) -> dict[str, Any]:
+    """The Structure map as it is drawn."""
+    found: dict[str, Any] = await page.evaluate(STRUCTURE_MAP)
     return found

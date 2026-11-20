@@ -18,10 +18,10 @@ from playwright.async_api import Page, expect
 from tests.board_helpers import SLOW, board_call, board_url, browser_page, made
 from tests.board_search import open_settings
 from tests.helpers import (
+    confirm_on_board,
     embeddings_stopped,
     export_everything,
-    make_decision,
-    make_fact,
+    make_note,
     ok,
     reindexed,
     the_token,
@@ -31,8 +31,8 @@ from tests.world import SESSION_COOKIE, project_at
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
-COUNTS = ("epics", "stories", "tasks", "links", "rules", "decisions", "facts", "events")
-SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
+COUNTS = ("epics", "stories", "tasks", "links", "rules", "notes", "events")
+SECTIONS = ("nodes", "links", "rules", "notes", "definition_of_done", "checks", "events")
 NO_MODEL = re.compile(r"language model|belief|principle", re.IGNORECASE)
 
 
@@ -55,8 +55,8 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
     word = unique_word()
     epic = await made(client, "epic", f"Counted {word}")
     await made(client, "story", f"A story {word}", epic)
-    await make_decision(client, f"A decision {word}")
-    await make_fact(client, f"A fact {word}")
+    await make_note(client, f"A decision {word}", decided_by="Marie")
+    await make_note(client, f"A plain note {word}")
     await reindexed(client)
     async with browser_page(board, token=the_token()) as w:
         page = w.page
@@ -69,8 +69,8 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert await shown(page, "vrum_version") == status["vrum_version"]
         assert await shown(page, "postgres_version") == status["postgres_version"]
         assert await shown(page, "pgvector_version") == status["pgvector_version"]
-        # The size of every kind of item, which are the ones of the two context records and no
-        # others.
+        # The size of every kind of item, with the notes (decisions and plain notes together) and no
+        # other kind of record.
         assert set(status["counts"]) == set(COUNTS)
         for name in COUNTS:
             assert await shown(page, name) == str(status["counts"][name]), name
@@ -95,7 +95,8 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert (
             f"{last['embedded']} item" in text and f"{last['waiting_after']} still waiting" in text
         )
-        await expect(page.locator("#index-state")).to_have_text("Index: 0 waiting")
+        # Nothing waits, so the top bar says nothing about the index: Status has the account.
+        await expect(page.locator("#index-state")).to_be_hidden()
         # There is no language model: not in what the server says, not on the page.
         assert "language_model" not in status
         assert not NO_MODEL.search(await page.locator("#page").inner_text())
@@ -126,7 +127,7 @@ async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_pag
                 str(before + 1), timeout=SLOW
             )
             await expect(page.locator("#index-state")).to_have_text(
-                f"Index: {before + 1} waiting", timeout=SLOW
+                f"Search by meaning is not answering: {before + 1} waiting", timeout=SLOW
             )
             status = await ok(client, "server_status")
             assert status["index"]["embedding_service"] == "unreachable"
@@ -137,7 +138,7 @@ async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_pag
         await expect(page.locator("#status-body tr[data-name=waiting] .value")).to_have_text(
             "0", timeout=SLOW
         )
-        await expect(page.locator("#index-state")).to_have_text("Index: 0 waiting", timeout=SLOW)
+        await expect(page.locator("#index-state")).to_be_hidden(timeout=SLOW)
         assert w.problems == []
 
 
@@ -151,17 +152,11 @@ async def test_the_downloaded_export_is_the_mcp_export(
     epic = await made(client, "epic", f"Exported {word}")
     story = await made(client, "story", f"Story {word}", epic)
     await made(client, "task", f"Task {word}", story)
-    decision = await make_decision(client, f"Decision {word}", nodes=[story])
-    fact = await make_fact(client, f"A fact {word}", nodes=[story], decision_ids=[decision["id"]])
-    await ok(
-        client,
-        "set_confirmation",
-        actor="a",
-        kind="fact",
-        record_id=fact["id"],
-        confirmation="confirmed",
-        person="Marie",
+    decision = await make_note(client, f"Decision {word}", decided_by="Marie", nodes=[story])
+    plain_note = await make_note(
+        client, f"A plain note {word}", nodes=[story], note_ids=[decision["id"]]
     )
+    confirm_on_board("note", plain_note, "Marie")
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/board")
@@ -179,9 +174,11 @@ async def test_the_downloaded_export_is_the_mcp_export(
         assert got == mcp
         assert got["format"] and got["counts"]["nodes"] == len(got["nodes"]) >= 3
         assert set(got["counts"]) == set(SECTIONS)
-        # The records come with their confirmation and what they concern.
-        exported = next(f for f in got["facts"] if f["id"] == fact["id"])
+        # The notes come with their confirmation and what they concern.
+        exported = next(n for n in got["notes"] if n["id"] == plain_note["id"])
         assert exported["confirmed_by"] == "Marie" and exported["confirmed_at"]
+        assert exported["nodes"] == [story] and exported["note_ids"] == [decision["id"]]
+        assert next(n for n in got["notes"] if n["id"] == decision["id"])["decided_by"] == "Marie"
         await expect(page.locator("#export-note")).to_contain_text("Downloaded:", timeout=SLOW)
         await expect(page.locator("#export-note")).to_contain_text(f"{len(got['events'])} events")
         assert word in path.read_text(encoding="utf-8")
@@ -194,6 +191,12 @@ async def test_no_agent_key_no_session_and_no_database_password_is_in_any_page_o
     word = unique_word()
     project = project_at(board)
     password = os.environ.get("VRUM_DB_PASSWORD", "no-such-password-set")
+    epic = await made(client, "epic", f"Shown {word}")
+    story = await made(client, "story", f"Story {word}", epic)
+    rule = await ok(client, "create_rule", actor="a", title=f"Rule {word}", node=story)
+    decision = await make_note(client, f"Decision {word}", decided_by="Marie", nodes=[story])
+    note = await make_note(client, f"Note {word}", nodes=[story])
+    await reindexed(client)
     async with browser_page(board, token=the_token(), keep_bodies=True) as w:
         page = w.page
         cookie = next(c for c in await page.context.cookies() if c["name"] == SESSION_COOKIE)
@@ -205,22 +208,31 @@ async def test_no_agent_key_no_session_and_no_database_password_is_in_any_page_o
         assert all(len(secret) >= 16 for secret in secrets.values())
         await w.open("#/board")
         texts = []
-        # Every page and every drawer, as the person would reach them.
+        # Every page, as the person would reach them: the views, the Lists, Search with its
+        # duplicates, Activity, the coverage report, a page of each kind of record, and the
+        # settings.
         for address in (
             "#/board",
-            "#/graph?view=context&as=list",
+            "#/graph",
+            "#/lists?view=notes",
             "#/roadmap",
-            "#/board?drawer=activity",
-            f"#/graph?drawer=search&search={word}",
-            "#/roadmap?drawer=search&dups=1",
-            "#/access",
+            "#/activity",
+            f"#/search?search={word}",
+            "#/search?dups=1",
+            "#/coverage",
+            f"#/item?item={epic}&from=board",
+            f"#/item?item={story}&from=graph",
+            f"#/item?item=rule:{rule['id']}&from=coverage",
+            f"#/item?item=note:{decision['id']}&from=search",
+            f"#/item?item=note:{note['id']}&from=activity",
+            "#/users",
             "#/tools",
             "#/status",
         ):
             await w.go(address)
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(500)
-            if address == "#/access":
+            if address == "#/users":
                 # The keys are listed by their first letters and nothing more.
                 await expect(page.locator("#keys")).to_contain_text(f"{project.key[:8]}…")
             texts.append(await page.locator("body").inner_text())

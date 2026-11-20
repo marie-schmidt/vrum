@@ -1,9 +1,11 @@
 """M16's Tools page, one of the settings pages, against the running containers, driven in a real
 headless browser and checked against a real MCP client (see ./check.sh): it is reached from the
-Settings menu with the keyboard, it lists exactly the 53 tools the server lists (and none that
-generate, or that belong to beliefs or principles), each with its description, fields and place on
-the board (or why it is for agents only), "Try it" returns what MCP returns and exists only for the
-tools that read, and the server turns away a try of anything that changes something."""
+Settings menu with the keyboard, it lists every tool the server has (44, one of which only a
+person can use), and none that generate or that belong to beliefs or principles, each with its
+description, fields and place on the board (or why it is for agents only), and says which tools
+agents are offered (25) and which are done on the board; "Try it" returns what MCP returns and
+exists only for the tools that read, and the server turns away a try of anything that changes
+something."""
 
 import json
 import re
@@ -15,10 +17,9 @@ from playwright.async_api import Page, expect
 
 from tests.board_helpers import SLOW, api_path, board_url, browser_page, made, plain
 from tests.board_m14 import spoken
-from tests.board_search import drawer, open_settings
+from tests.board_search import open_settings
 from tests.helpers import (
-    make_decision,
-    make_fact,
+    make_note,
     number_of,
     ok,
     refused,
@@ -26,7 +27,8 @@ from tests.helpers import (
     unique_word,
 )
 from tests.world import SESSION_COOKIE, api, project_at, register
-from vrum.board.tools import TOOL_PLACES, AgentsOnly
+from vrum.board.tools import TOOL_PLACES, AgentsOnly, OnTheBoard
+from vrum.surface import AGENT_TOOLS, MOST_AGENT_TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -34,7 +36,23 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 # memory: none of it is on the server, and none of it is on the page.
 GONE = {"extract_facts", "consolidate_memory", "find_contradictions", "reflect"}
 OLD_WORDS = re.compile(r"belief|principle|language model|memor(y|ies)", re.IGNORECASE)
-DRAWERS = {"search", "activity"}
+# Where on the board a thing is done is a page. There is no drawer and no detail panel to name.
+NO_PANEL_WORDS = re.compile(r"drawer|detail panel|side panel|quick look", re.IGNORECASE)
+PAGES = {
+    "board",
+    "graph",
+    "roadmap",
+    "lists",
+    "search",
+    "activity",
+    "coverage",
+    "users",
+    "definition",
+    "tools",
+    "status",
+}
+# The tools no agent key can have: only a person confirms a note or sets the definition of done.
+PEOPLE_ONLY = {"set_confirmation", "set_definition_of_done"}
 
 
 @pytest.fixture
@@ -49,13 +67,17 @@ async def listed(page: Page) -> None:
 # -- the page is the server's own tool list --------------------------------------------------------
 
 
-async def test_the_page_lists_exactly_the_53_tools_the_server_lists_with_a_place_for_each(
+async def test_the_page_lists_every_tool_the_server_has_with_a_place_and_who_is_offered_it(
     client: Client, board: str
 ) -> None:
+    # The test key may use every tool a key can have; the board lists those and the one that only a
+    # person can use.
     tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert len(tools) == 53 == len(TOOL_PLACES)
-    assert GONE.isdisjoint(tools)
-    assert not [name for name in tools if OLD_WORDS.search(name)]
+    assert PEOPLE_ONLY.isdisjoint(tools)
+    assert set(tools) | PEOPLE_ONLY == set(TOOL_PLACES) and len(TOOL_PLACES) == 47
+    assert len(AGENT_TOOLS) == MOST_AGENT_TOOLS == 25 and set(AGENT_TOOLS) <= set(tools)
+    assert GONE.isdisjoint(TOOL_PLACES)
+    assert not [name for name in TOOL_PLACES if OLD_WORDS.search(name)]
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/board")
@@ -65,20 +87,30 @@ async def test_the_page_lists_exactly_the_53_tools_the_server_lists_with_a_place
         names: list[str] = await page.locator("#tool-list article.tool").evaluate_all(
             "els => els.map(e => e.dataset.name)"
         )
-        assert sorted(names) == sorted(tools) and len(names) == len(set(names)) == 53
-        await expect(page.locator("#count")).to_contain_text("53 tools:")
+        assert sorted(names) == sorted(TOOL_PLACES) and len(names) == len(set(names)) == 47
+        # The switch says how many tools there are, and how many of them agents are offered.
+        await expect(page.locator("#tools-show-all")).to_contain_text("47")
+        await expect(page.locator("#tools-show-offered")).to_contain_text("25")
 
         reads = {
             name
             for name, tool in tools.items()
             if tool.annotations and tool.annotations.read_only_hint
         }
-        assert {"search", "recall", "list_facts", "get_decision", "find_overlaps"} <= reads
-        assert {"set_confirmation", "retain_fact", "record_decision", "withdraw_fact"}.isdisjoint(
-            reads
-        )
-        for name, tool in tools.items():
+        assert {"search", "recall", "list_notes", "get_note", "find_overlaps"} <= reads
+        assert {"add_note", "supersede_note", "withdraw_note", "link_note"}.isdisjoint(reads)
+        for name in names:
             entry = page.locator(f"#tool-entry-{name}")
+            # Whether agents are offered it, as a word and a sign, from the server's own list.
+            offered = name in AGENT_TOOLS
+            await expect(entry).to_have_attribute("data-offered", "1" if offered else "0")
+            await expect(entry.locator(".tool-offer")).to_have_text(
+                "Offered to agents" if offered else "Board and administration only"
+            )
+            if name in PEOPLE_ONLY:
+                await expect(entry.locator(".offer-note")).to_contain_text("Only a person")
+                continue
+            tool = tools[name]
             # The description, whole: its first paragraph and then the rest.
             paragraphs = [p for p in (tool.description or "").split("\n\n") if p.strip()]
             assert spoken(await entry.locator("p.first").inner_text()) == spoken(paragraphs[0])
@@ -98,35 +130,87 @@ async def test_the_page_lists_exactly_the_53_tools_the_server_lists_with_a_place
                     assert spoken(spec["description"]) in spoken(await cell.text_content() or "")
             # Whether it changes anything, from the server's own annotation.
             await expect(entry).to_have_attribute("data-changes", "0" if name in reads else "1")
-            # Where on the board, or why not: one or the other, never neither. A drawer opens over
-            # the page the person is on, which is this one.
+            # A try form for the tools that only read, and for no other.
+            assert (await entry.locator("details.try").count() == 1) == (name in reads), name
+        # Where on the board, or why not: one or the other, never neither. Where is always a
+        # page, and the link goes to that page and to nothing else.
+        for name in names:
+            entry = page.locator(f"#tool-entry-{name}")
             place = TOOL_PLACES[name].place
             if isinstance(place, AgentsOnly):
                 await expect(entry.locator(".where.agents")).to_contain_text(place.why)
                 assert await entry.locator(".where a").count() == 0
             else:
+                assert isinstance(place, OnTheBoard) and place.page in PAGES, name
                 link = entry.locator(".where a")
                 assert spoken(await link.inner_text()) == place.where
-                expected = (
-                    f"#/tools?drawer={place.page}" if place.page in DRAWERS else f"#/{place.page}"
-                )
-                assert await link.get_attribute("href") == expected
-            # A try form for the tools that only read, and for no other.
-            assert (await entry.locator("details.try").count() == 1) == (name in reads), name
+                assert await link.get_attribute("href") == f"#/{place.page}"
+                assert not NO_PANEL_WORDS.search(place.where), name
         assert await page.locator(".where.problem").count() == 0
         assert await page.locator("section.tool-area[data-area=unclassified]").count() == 0
         # Reindex and import are for agents only, and say why.
         for name in ("reindex", "import_graph"):
             await expect(page.locator(f"#tool-entry-{name} .where.agents")).to_be_visible()
-        # Nothing on the page belongs to what was taken out, and no tool of it is listed.
-        assert not OLD_WORDS.search(await page.locator("#page").inner_text())
-        assert not [name for name in GONE if name in await page.locator("#page").inner_text()]
+        # Nothing on the page belongs to what was taken out, no tool of it is listed, and nothing
+        # names a drawer or a detail panel, which the board has no more.
+        text = await page.locator("#page").inner_text()
+        assert not OLD_WORDS.search(text) and not NO_PANEL_WORDS.search(text)
+        assert not [name for name in GONE if name in text]
         assert await page.locator("#page").get_by_text("Ask", exact=True).count() == 0
-        # A place that is a drawer opens the drawer over the Tools page.
+        # The acceptance criteria coverage report is a page of its own, and the Tools page says so.
+        coverage = TOOL_PLACES["coverage_report"].place
+        assert isinstance(coverage, OnTheBoard) and coverage.page == "coverage"
+        assert (
+            await page.locator("#tool-entry-coverage_report .where a").get_attribute("href")
+            == "#/coverage"
+        )
+        # A place is a plain page link: it goes to that page (the same page, not over this one),
+        # and nothing opens beside it.
         await page.locator("#tool-entry-find_overlaps .where a").click()
-        await expect(drawer(page, "search")).to_be_visible(timeout=SLOW)
-        assert page.url.endswith("#/tools?drawer=search")
-        await expect(page.locator("#tool-list article.tool").first).to_be_visible()
+        await expect(page).to_have_url(re.compile(r"#/search$"), timeout=SLOW)
+        await expect(page.locator("#search-box")).to_be_visible(timeout=SLOW)
+        assert await page.locator("#tool-list").count() == 0
+        assert await page.locator("#panel, #drawer").count() == 0
+        await page.go_back()
+        await expect(page).to_have_url(re.compile(r"#/tools$"), timeout=SLOW)
+        await listed(page)
+        await page.locator("#tool-entry-coverage_report .where a").click()
+        await expect(page).to_have_url(re.compile(r"#/coverage$"), timeout=SLOW)
+        await expect(page.locator("#coverage-page")).to_be_visible(timeout=SLOW)
+        assert w.problems == []
+
+
+async def test_the_tools_agents_are_offered_can_be_told_from_the_rest_on_the_page(
+    client: Client, board: str
+) -> None:
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/tools")
+        await listed(page)
+        everything = await page.locator("#tool-list article.tool").count()
+        assert everything == 47
+        # Each choice of the switch lists only its tools, says how many they are, and is in the
+        # address, which opens the same list again.
+        for choice, offered, count in (("offered", "1", 25), ("board", "0", 22)):
+            await page.locator(f"#tools-show-{choice}").click()
+            await expect(page.locator(f"#tools-show-{choice}")).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            await expect(page.locator("#tool-list article.tool")).to_have_count(count, timeout=SLOW)
+            marks = await page.locator("#tool-list article.tool").evaluate_all(
+                "els => [...new Set(els.map(e => e.dataset.offered))]"
+            )
+            assert marks == [offered], choice
+            assert page.url.endswith(f"#/tools?show={choice}")
+        offered_here = await page.locator("#tools-show-offered .tools-show-count").inner_text()
+        assert offered_here == "25"
+        await w.open("#/tools?show=offered")
+        await listed(page)
+        await expect(page.locator("#tool-list article.tool")).to_have_count(25, timeout=SLOW)
+        await expect(page.locator("#tools-show-offered")).to_have_attribute("aria-pressed", "true")
+        # All tools again.
+        await page.locator("#tools-show-all").click()
+        await expect(page.locator("#tool-list article.tool")).to_have_count(47, timeout=SLOW)
         assert w.problems == []
 
 
@@ -139,22 +223,24 @@ async def test_the_settings_menu_is_a_menu_for_the_keyboard(client: Client, boar
         await page.keyboard.press("ArrowUp")
         await expect(page.locator("#settings-status")).to_be_focused()
         assert await items.evaluate_all("els => els.map(e => e.id)") == [
-            "settings-access",
+            "settings-users",
+            "settings-definition",
             "settings-tools",
             "settings-status",
         ]
         await page.keyboard.press("ArrowDown")
-        await expect(page.locator("#settings-access")).to_be_focused()
+        await expect(page.locator("#settings-users")).to_be_focused()
         await page.keyboard.press("End")
         await expect(page.locator("#settings-status")).to_be_focused()
         await page.keyboard.press("Home")
-        await expect(page.locator("#settings-access")).to_be_focused()
+        await expect(page.locator("#settings-users")).to_be_focused()
         # Escape closes it and gives the focus back; nothing was chosen, so the view stays.
         await page.keyboard.press("Escape")
         await expect(page.locator("#settings-list")).to_be_hidden()
         await expect(menu).to_be_focused()
         assert page.url.endswith("#/graph")
         # Space chooses an item as Enter does.
+        await page.keyboard.press("ArrowDown")
         await page.keyboard.press("ArrowDown")
         await page.keyboard.press("ArrowDown")
         await page.keyboard.press("Space")
@@ -173,11 +259,10 @@ async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_se
         await listed(page)
         assert await page.locator("#endpoint").inner_text() == server_url
         # It describes the agent key: sent as a bearer header, read from the environment, made on
-        # the Agent access page, and never one that is shown here.
+        # the Users page, and never one that is shown here.
         connecting = await page.locator("#connecting").inner_text()
         assert "agent key" in connecting and "Authorization: Bearer" in connecting
-        assert "shown only once" in connecting
-        assert await page.locator("#connecting a[href='#/access']").count() == 1
+        assert await page.locator("#connecting a[href='#/users']").count() >= 1
         await page.locator("#example summary").click()
         example = await page.locator("#example").text_content() or ""
         assert server_url in example and "Authorization" in example
@@ -199,7 +284,7 @@ async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_se
         # The search narrows the list by what is in the names, areas, descriptions and places.
         await page.locator("#tool-search").fill("overlaps")
         await page.locator("#page form.filter button[type=submit]").click()
-        await expect(page.locator("#count")).to_contain_text("match", timeout=SLOW)
+        await expect(page.locator("#count")).to_contain_text("1 tool shown", timeout=SLOW)
         shown: list[str] = await page.locator("#tool-list article.tool").evaluate_all(
             "els => els.map(e => e.dataset.name)"
         )
@@ -243,8 +328,8 @@ async def test_try_it_returns_what_mcp_returns_and_a_refusal_in_the_same_words(
     word = unique_word()
     epic = await made(client, "epic", f"Tried {word}")
     story = await made(client, "story", f"Try story {word}", epic)
-    decision = await make_decision(client, f"Try decision {word}", nodes=[story])
-    fact = await make_fact(client, f"Try fact {word}", nodes=[story])
+    decision = await make_note(client, f"Try decision {word}", decided_by="Marie", nodes=[story])
+    note = await make_note(client, f"Try note {word}", nodes=[story])
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/tools")
@@ -268,23 +353,24 @@ async def test_try_it_returns_what_mcp_returns_and_a_refusal_in_the_same_words(
             ("epic", epic),
             ("story", story),
         }
-        # The two kinds of context record, and what is known about the work they concern.
-        shown = await try_it(page, "get_decision", decision_id=str(decision["id"]))
-        assert shown == await ok(client, "get_decision", decision_id=decision["id"])
-        assert shown["title"] == f"Try decision {word}" and shown["confirmation"] == "unconfirmed"
-        shown = await try_it(page, "list_facts", node=story)
-        assert shown == await ok(client, "list_facts", node=story)
-        assert [f["id"] for f in shown["items"]] == [fact["id"]]
+        # A note, a list of notes, and what is known about the work they concern.
+        shown = await try_it(page, "get_note", note_id=str(decision["id"]))
+        assert shown == await ok(client, "get_note", note_id=decision["id"])
+        assert shown["headline"] == f"Try decision {word}" and shown["decided_by"] == "Marie"
+        assert shown["status"] == "unconfirmed"
+        shown = await try_it(page, "list_notes", node=story)
+        assert shown == await ok(client, "list_notes", node=story)
+        assert [n["id"] for n in shown["items"]] == [decision["id"], note["id"]]
         shown = await try_it(page, "recall", node=story)
         assert shown == await ok(client, "recall", node=story)
-        assert [i["decision"]["id"] for i in shown["active_decisions"]["items"]] == [decision["id"]]
+        assert [i["note"]["id"] for i in shown["notes"]["items"]] == [decision["id"], note["id"]]
         # A refusal is the server's own words: for a reference that names nothing, for text that
-        # is not a reference at all, and for a fact that is not there.
+        # is not a reference at all, and for a note that is not there.
         for nowhere in ("story:999999999", "999999999"):
             refusal = await try_it(page, "get_node", node=nowhere)
             plain(refusal["refused"], await refused(client, "get_node", node=nowhere))
-        refusal = await try_it(page, "get_fact", fact_id="999999999")
-        plain(refusal["refused"], await refused(client, "get_fact", fact_id=999999999))
+        refusal = await try_it(page, "get_note", note_id="999999999")
+        plain(refusal["refused"], await refused(client, "get_note", note_id=999999999))
         assert w.problems == []
 
 
@@ -295,8 +381,8 @@ async def test_no_tool_that_changes_anything_has_a_try_it_and_the_server_turns_a
     owner = project_at(board).owner.sign_in_again()
     origin = board.split("/board")[0]
     before = (await ok(client, "list_nodes", limit=1))["total"]
-    facts_before = (await ok(client, "list_facts", limit=1))["total"]
-    made_up = {"actor": "x", "kind": "epic", "title": "Must not exist"}
+    notes_before = (await ok(client, "list_notes", limit=1))["total"]
+    made_up = {"kind": "epic", "title": "Must not exist"}
     refusal = owner.call("POST", api_path(board, "/try/create_node"), made_up)
     assert refusal.status == 403 and "changes something" in refusal.body["message"]
     assert "Must not exist" not in json.dumps(refusal.body)
@@ -306,19 +392,18 @@ async def test_no_tool_that_changes_anything_has_a_try_it_and_the_server_turns_a
         "reindex",
         "import_graph",
         "next_work",
-        "retain_fact",
-        "record_decision",
+        "add_note",
         "set_confirmation",
-        "withdraw_fact",
+        "withdraw_note",
     ):
         assert owner.call("POST", api_path(board, f"/try/{name}"), {}).status == 403, name
     recorded = owner.call(
         "POST",
-        api_path(board, "/try/retain_fact"),
-        {"actor": "x", "text": "Must not exist", "source": "x"},
+        api_path(board, "/try/add_note"),
+        {"text": "Must not exist", "why": "x"},
     )
     assert recorded.status == 403
-    assert (await ok(client, "list_facts", limit=1))["total"] == facts_before
+    assert (await ok(client, "list_notes", limit=1))["total"] == notes_before
     # The tools that were taken out are not there to be tried, or to be called.
     for name in (*GONE, "no_such_tool"):
         nothing = owner.call("POST", api_path(board, f"/try/{name}"), {})

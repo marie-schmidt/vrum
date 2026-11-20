@@ -56,15 +56,53 @@ services:
       VRUM_DB_PASSWORD_FILE: /secrets/db-password
       VRUM_MAX_REQUEST_BYTES: ${VRUM_MAX_REQUEST_BYTES:-}
       VRUM_BOARD_POLL_SECONDS: ${VRUM_BOARD_POLL_SECONDS:-}
-      # The embedding service, if any: see .env.example. Without these, search works by exact
-      # words only.
-      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      # The embedding service, for search by meaning (see .env.example). The default is the small
+      # one in this project (the `embeddings` service below), so search by meaning works with
+      # nothing set. Set both to use a service of your own, or set EMBEDDING_BASE_URL to nothing
+      # to go without one (then search works by exact words only).
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL-http://embeddings:8080/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL-all-MiniLM-L6-v2}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MAX_CHARS: ${EMBEDDING_MAX_CHARS:-}
       EMBEDDING_MIN_SIMILARITY: ${EMBEDDING_MIN_SIMILARITY:-}
       EMBEDDING_OVERLAP_THRESHOLD: ${EMBEDDING_OVERLAP_THRESHOLD:-}
       EMBEDDING_REINDEX_SECONDS: ${EMBEDDING_REINDEX_SECONDS:-}
+      # Email, if any (invitations, confirming an address, choosing a new password): see
+      # .env.example. Without VRUM_SMTP_HOST nothing is sent and none of those exist.
+      VRUM_PUBLIC_URL: ${VRUM_PUBLIC_URL:-}
+      VRUM_SMTP_HOST: ${VRUM_SMTP_HOST:-}
+      VRUM_SMTP_PORT: ${VRUM_SMTP_PORT:-}
+      VRUM_SMTP_SECURITY: ${VRUM_SMTP_SECURITY:-}
+      VRUM_SMTP_USER: ${VRUM_SMTP_USER:-}
+      VRUM_SMTP_PASSWORD: ${VRUM_SMTP_PASSWORD:-}
+      VRUM_SMTP_FROM: ${VRUM_SMTP_FROM:-}
+      # Signing in with another provider, if any (OpenID Connect, GitHub, LDAP): see .env.example.
+      # Without VRUM_OIDC_ISSUER, VRUM_GITHUB_CLIENT_ID and VRUM_LDAP_URL there is none.
+      VRUM_SSO_CREATE_ACCOUNTS: ${VRUM_SSO_CREATE_ACCOUNTS:-}
+      VRUM_SSO_ALLOW_INSECURE_HTTP: ${VRUM_SSO_ALLOW_INSECURE_HTTP:-}
+      VRUM_OIDC_ISSUER: ${VRUM_OIDC_ISSUER:-}
+      VRUM_OIDC_CLIENT_ID: ${VRUM_OIDC_CLIENT_ID:-}
+      VRUM_OIDC_CLIENT_SECRET: ${VRUM_OIDC_CLIENT_SECRET:-}
+      VRUM_OIDC_NAME: ${VRUM_OIDC_NAME:-}
+      VRUM_OIDC_SCOPES: ${VRUM_OIDC_SCOPES:-}
+      VRUM_OIDC_ALLOWED_DOMAINS: ${VRUM_OIDC_ALLOWED_DOMAINS:-}
+      VRUM_GITHUB_CLIENT_ID: ${VRUM_GITHUB_CLIENT_ID:-}
+      VRUM_GITHUB_CLIENT_SECRET: ${VRUM_GITHUB_CLIENT_SECRET:-}
+      VRUM_GITHUB_URL: ${VRUM_GITHUB_URL:-}
+      VRUM_GITHUB_AUTHORIZE_URL: ${VRUM_GITHUB_AUTHORIZE_URL:-}
+      VRUM_GITHUB_API_URL: ${VRUM_GITHUB_API_URL:-}
+      VRUM_GITHUB_ALLOWED_DOMAINS: ${VRUM_GITHUB_ALLOWED_DOMAINS:-}
+      VRUM_LDAP_URL: ${VRUM_LDAP_URL:-}
+      VRUM_LDAP_SECURITY: ${VRUM_LDAP_SECURITY:-}
+      VRUM_LDAP_BIND_DN: ${VRUM_LDAP_BIND_DN:-}
+      VRUM_LDAP_BIND_PASSWORD: ${VRUM_LDAP_BIND_PASSWORD:-}
+      VRUM_LDAP_BASE_DN: ${VRUM_LDAP_BASE_DN:-}
+      VRUM_LDAP_USER_FILTER: ${VRUM_LDAP_USER_FILTER:-}
+      VRUM_LDAP_EMAIL_ATTRIBUTE: ${VRUM_LDAP_EMAIL_ATTRIBUTE:-}
+      VRUM_LDAP_NAME_ATTRIBUTE: ${VRUM_LDAP_NAME_ATTRIBUTE:-}
+      VRUM_LDAP_ID_ATTRIBUTE: ${VRUM_LDAP_ID_ATTRIBUTE:-}
+      VRUM_LDAP_NAME: ${VRUM_LDAP_NAME:-}
+      VRUM_LDAP_ALLOWED_DOMAINS: ${VRUM_LDAP_ALLOWED_DOMAINS:-}
     volumes:
       - vrum-secrets:/secrets:ro
     ports:
@@ -78,36 +116,28 @@ services:
       start_period: 15s
       retries: 5
 
-  # An embedding service that runs on this machine, for meaning-based search. Off unless asked for:
-  #   docker compose --profile local-embeddings up -d --build --wait
-  # with EMBEDDING_BASE_URL=http://ollama:11434/v1 and EMBEDDING_MODEL=all-minilm in .env. The
-  # first start downloads the model (about 50 MB) from the internet; after that it runs offline.
-  ollama:
-    profiles: ["local-embeddings"]
-    image: ollama/ollama:0.40.16
+  # The embedding service Vrum uses by default, for search by meaning, similar items and possible
+  # duplicates: a small open-source model (all-MiniLM-L6-v2) that runs on the processor, built from
+  # embedder/ with the model files inside the image, so it needs no internet once built and
+  # downloads nothing when it starts. It turns text into numbers and nothing else, and no port of
+  # it is published: only the app reaches it. The app does not wait for it: Vrum starts and
+  # answers while it is still warming up, and says plainly that only exact words were searched
+  # until it answers. To use another service, or none, see EMBEDDING_BASE_URL in .env.example.
+  embeddings:
+    build: ./embedder
     restart: unless-stopped
-    environment:
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-minilm}
-    volumes:
-      - vrum-models:/root/.ollama
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        trap 'kill $$pid' TERM INT
-        ollama serve &
-        pid=$$!
-        until ollama list >/dev/null 2>&1; do sleep 1; done
-        ollama pull "$$EMBEDDING_MODEL"
-        wait $$pid
+    mem_limit: 1g
     healthcheck:
-      # Healthy once the model has been downloaded.
-      test: ["CMD-SHELL", "ollama list | grep -q \"$$EMBEDDING_MODEL\""]
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
       interval: 5s
-      timeout: 5s
-      retries: 120
+      timeout: 4s
+      start_period: 20s
+      retries: 20
 
 volumes:
   vrum-data:
   vrum-secrets:
-  vrum-models:

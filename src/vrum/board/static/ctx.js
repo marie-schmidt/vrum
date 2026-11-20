@@ -3,44 +3,59 @@
 
 import { h } from './dom.js';
 import { icon } from './icons.js';
-import { parseItemRef } from './labels.js';
+import { itemCode, parseItemRef } from './labels.js';
 
 export const ui = {
   page: 'board',
+  // What the signed-in person is in the open project: owner, editor or viewer (see `can`).
+  role: 'owner',
   params: new URLSearchParams(),
-  // Change the address after the #: navigate({ sel: 'story:12', epic: null }) sets one and removes
-  // the other. `replace` keeps the browser's back button for something else. `page` goes to
-  // another view, taking along what the views share (see carriedTo).
+  // The page the person is "in": a view, Search, Activity or the coverage report. On such a page it
+  // is that page; on the page of a record it is the `from` of the address (the Board when there is
+  // none), so a record reached from the Graph, and every record reached from it, stays in the Graph.
+  from: 'board',
+  // The full address of the last view, Search, Activity or coverage page the person was on, as it
+  // was left (its filter, scope and search). Kept in memory: after a reload it is empty.
+  lastView: null,
+  // The address of the page the person was on just before this one (`#/graph?...`), or null when
+  // they arrived by an address. It is what the back arrow of a record's page goes to.
+  previous: null,
+  // Change the address after the #: navigate({ epic: '3', q: null }) sets one and removes the
+  // other. `replace` keeps the browser's back button for something else. `page` goes to another
+  // page, taking along what the views share (see carriedTo).
   navigate: () => {},
+  // Sign out and go to the sign-in page; app.js fills it in when the board starts.
+  signOut: () => {},
 };
 
-const NAME_KEY = 'vrum.actor';
+// The four views the work is seen in, and the pages of settings.
+export const VIEWS = ['board', 'graph', 'roadmap', 'lists'];
+export const SETTINGS = ['users', 'definition', 'tools', 'status'];
+// The pages a record page can say it was reached from, and what each is called.
+export const FROM_PAGES = [...VIEWS, 'search', 'activity', 'coverage'];
+export const FROM_TITLES = { board: 'Board', graph: 'Graph', roadmap: 'Roadmap', lists: 'Lists', search: 'Search', activity: 'Activity', coverage: 'Coverage' };
 
-// The three views the work is seen in, and the pages of settings.
-export const VIEWS = ['board', 'graph', 'roadmap'];
-export const SETTINGS = ['access', 'tools', 'status'];
-
-// What an address keeps when the person goes to another page: the drawer with its own choices
-// (search, duplicates and activity) everywhere, and, between the three views, the selected record
-// and the work filter and epic. The item of the item page (`item`) is kept nowhere: it names that
-// page.
-const DRAWER_KEYS = ['drawer', 'search', 'search_mode', 'search_type', 'search_status', 'search_epic', 'dups', 'dup_type', 'dup_min', 'dup_epics', 'dup_unlinked', 'act_actor', 'act_kind', 'act_item', 'act_from', 'act_to'];
-const VIEW_KEYS = ['sel', 'q', 'epic'];
+// What an address keeps when the person goes to another page: between the four views, the work
+// filter and the epic. Nothing else goes along: a page's own choices (the search, the activity
+// filters, the Graph's focus) belong to that page, and the way back to it is `lastView`.
+const VIEW_KEYS = ['q', 'epic'];
 
 function carriedTo(page) {
-  // The selected record, filter and epic belong to the three views, so they go only between them.
-  const keys = VIEWS.includes(page) && VIEWS.includes(ui.page) ? [...DRAWER_KEYS, ...VIEW_KEYS] : DRAWER_KEYS;
   const params = new URLSearchParams();
-  for (const key of keys) if (ui.params.has(key)) params.set(key, ui.params.get(key));
+  if (!VIEWS.includes(page) || !VIEWS.includes(ui.page)) return params;
+  for (const key of VIEW_KEYS) if (ui.params.has(key)) params.set(key, ui.params.get(key));
   return params;
 }
 
 const readable = (params) => params.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',');
 
 // The address of a page after these changes to what the person has now: on the page they are on,
-// all of it; on another, what carriedTo keeps. A null or empty choice removes it.
+// all of it; on another, what carriedTo keeps. A null or empty choice removes it. Going to another
+// record from the page of one starts the address over (the page's own choices were about the
+// record it leaves).
 export function addressOf(page, changes = {}) {
-  const params = page === ui.page ? new URLSearchParams(ui.params) : carriedTo(page);
+  const another = page === 'item' && 'item' in changes && changes.item !== ui.params.get('item');
+  const params = page === ui.page && !another ? new URLSearchParams(ui.params) : carriedTo(page);
   for (const [key, value] of Object.entries(changes)) {
     if (value === null || value === undefined || value === '') params.delete(key);
     else params.set(key, String(value));
@@ -80,37 +95,20 @@ export function viewLink(page, choices, props, ...children) {
   );
 }
 
-// The record in the shared detail panel, from `sel=story:12`: { kind, number, id, ref }, or null.
-// The kinds are epic, story, task, rule, decision and fact; `id` is the number again, for the
-// kinds that are still called by an id (a requirement, a decision, a fact).
+// The same thing under the name the record pages use.
+export const pageLink = viewLink;
+
+// The record in an address, from `item=story:12` (or the Graph's `sel=story:12`): { kind, number,
+// id, ref }, or null. The kinds are epic, story, task, rule and note; `id` is the number
+// again, for the kinds that are still called by an id (an acceptance criterion, a note).
 export const parseSel = (text) => parseItemRef(text);
 
-// A link that shows a record in the detail panel on the page the person is on, leaving the rest of
-// the address (the drawer, the filter, the scope) as it is. `kind` is the real kind (story, rule)
-// and `number` its number. A plain click changes the address without a page load; a click with a
+// The address of the page of one record: #/item?item=story:12&from=graph. `ref` is epic:3,
+// story:12, task:40, rule:3 or note:7; `from` is the page the person is in.
+export const itemAddress = (ref) => hrefTo('item', { item: ref, from: ui.from });
+
+// A link to the page of a record. A plain click goes there, in the same page; a click with a
 // modifier key opens it the way a link does.
-export function recordLink(kind, number, props, ...children) {
-  return h(
-    'a',
-    {
-      ...props,
-      href: addressOf(ui.page, { sel: `${kind}:${number}`, panel: null }),
-      onclick: (event) => {
-        if (!plainClick(event)) return;
-        event.preventDefault();
-        ui.navigate({ sel: `${kind}:${number}`, panel: null });
-      },
-    },
-    ...children,
-  );
-}
-
-// The page of one epic, story or task: #/item?item=story:12. `item` is not carried to another
-// page, and is not kept when another page is chosen.
-export const itemAddress = (ref) => hrefTo('item', { item: ref });
-
-// A link to the page of an epic, story or task. A plain click goes there keeping the drawer and
-// dropping the quick look (`sel`) of the page it leaves.
 export function itemLink(ref, props, ...children) {
   return h(
     'a',
@@ -120,21 +118,57 @@ export function itemLink(ref, props, ...children) {
       onclick: (event) => {
         if (!plainClick(event)) return;
         event.preventDefault();
-        ui.navigate({ item: ref, sel: null, panel: null }, { page: 'item' });
+        openItem(ref);
       },
     },
     ...children,
   );
 }
 
-// The name every change carries. Kept in this browser; whoever types it is who the history says.
-export function actor() {
-  return localStorage.getItem(NAME_KEY) || '';
+// Go to the page of a record.
+export const openItem = (ref) => ui.navigate({ item: ref, from: ui.from }, { page: 'item' });
+
+// Where "Back to the Board" goes from a record page: the view the person is in, as they left it,
+// or the plain page when they arrived by an address (after a reload, say). `label` is that page's
+// name ("Board", "Graph", "Roadmap", "Search", "Activity", "Coverage").
+export function backToView() {
+  const label = FROM_TITLES[ui.from] || FROM_TITLES.board;
+  const kept = ui.lastView && ui.lastView.split('?')[0] === `#/${ui.from}` ? ui.lastView : null;
+  return { label, hash: kept || `#/${FROM_PAGES.includes(ui.from) ? ui.from : 'board'}` };
 }
 
-export function setActor(name) {
-  localStorage.setItem(NAME_KEY, name.trim());
+const STEP_NAMES = { ...FROM_TITLES, users: 'Users', definition: 'Definition of done', tools: 'Tools', status: 'Status' };
+
+// The page one step back, which the back arrow goes to: where the person was just before, as they
+// left it, named by its page (Graph, Search, Users) or, for a record, by its code (S-12). With no
+// step before (the address was loaded fresh) it is the view the record was reached from.
+export function stepBack() {
+  const step = ui.previous;
+  if (!step) {
+    const view = backToView();
+    return { hash: view.hash, words: `Back to ${view.label}`, onTrail: false };
+  }
+  const [page, query = ''] = step.replace(/^#\/?/, '').split('?');
+  const found = page === 'item' ? parseItemRef(new URLSearchParams(query).get('item')) : null;
+  const name = found ? itemCode(found.kind, found.number) : STEP_NAMES[page] || FROM_TITLES.board;
+  return { hash: step, words: `Back to ${name}`, onTrail: true };
 }
+
+// Who is signed in: { id, email, name } and, from the server, whether the address is verified
+// (`email_verified`) and whether the account has a password (`has_password`: an account made by a
+// provider has none). app.js fills it in when the board starts, and the Users page changes the name in
+// place, so that every page that says it reads the same one. The server decides who a change is
+// recorded as; this is only what the board shows.
+export const account = { id: null, email: '', name: '' };
+
+// Whether the person may do something here, from their role: 'write' is changing the work and what
+// is known about it (an owner and an editor may, a viewer may not), 'manage' is who is in the project
+// and its agent keys (only the owner). The server decides every request in the same way: this only
+// keeps the board from offering what it would refuse.
+export const can = (action) => (action === 'write' ? ui.role !== 'viewer' : ui.role === 'owner');
+
+// Whether a name with its kind (from a claim or a history line) is the signed-in person.
+export const isMe = (name, kind) => kind === 'person' && name === account.name;
 
 // A message under the top bar. A refusal says what the server said, in its words, and stays until
 // it is dismissed; anything else goes away by itself.
@@ -150,8 +184,9 @@ export function notify(message, { refusal = false, detail = null } = {}) {
     detail,
     h(
       'button',
-      { type: 'button', class: 'link', onclick: () => notice.remove() },
-      'Dismiss',
+      { type: 'button', class: 'ghost icon-only small notice-close', onclick: () => notice.remove() },
+      icon('close', { size: 14 }),
+      h('span', { class: 'sr-only' }, 'Dismiss'),
     ),
   );
   box.prepend(notice);

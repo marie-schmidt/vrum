@@ -1,6 +1,8 @@
-"""What the browser tests of the Graph, its context list, requirements and references share (M16):
-finding the same record in the list, on the map and in the detail panel, and reading what `recall`
-says as the panel draws it. The page helpers of every browser test are in board_helpers.py."""
+"""What the browser tests of notes, acceptance criteria, references and the Graph share: a project
+of its
+own with work and notes of every sort, finding the same note in a list and on its own page, and
+reading what `recall` says as a record's page draws it. The page helpers of every browser test are
+in board_helpers.py."""
 
 import re
 from collections.abc import AsyncIterator
@@ -9,22 +11,23 @@ from typing import Any
 
 import anyio
 from mcp import Client
-from playwright.async_api import Locator, Page, expect
+from playwright.async_api import Locator, Page
 
-from tests.board_helpers import SLOW, Watched, board_url, made
-from tests.helpers import NODE_PAGES, confirm, connect, make_decision, make_fact, ok
+from tests.board_helpers import SLOW, board_url, item_page, made
+from tests.helpers import (
+    NODE_PAGES,
+    confirm_on_board,
+    connect,
+    make_decision,
+    make_note,
+    ok,
+)
 from tests.world import Project, make_project, register
 
 ADA = "Ada Lovelace"
 
 # The sections of a recall, in the order the server gives them.
-RECALL_SECTIONS = [
-    "active_decisions",
-    "project_wide_decisions",
-    "facts",
-    "past_decisions",
-    "past_facts",
-]
+RECALL_SECTIONS = ["notes", "project_wide_notes", "past_notes"]
 
 # What no part of the board may name any more: the old taxonomy of beliefs, principles and memories.
 REMOVED_WORDS = re.compile(r"\b(belief|beliefs|principle|principles|memory|memories)\b", re.I)
@@ -39,55 +42,6 @@ def refusal_in(page: Page) -> Locator:
     return page.locator("dialog.modal form > .problem")
 
 
-def svg(page: Page) -> Locator:
-    return page.locator("svg#graph-svg")
-
-
-def dot(page: Page, key: str) -> Locator:
-    return svg(page).locator(f".dot[data-key='{key}']")
-
-
-def edge(page: Page, kind: str, source: str, target: str) -> Locator:
-    return svg(page).locator(
-        f".edge[data-type='{kind}'][data-source='{source}'][data-target='{target}']"
-    )
-
-
-def listed(page: Page, key: str) -> Locator:
-    """The row of the Graph's list (work tree or context list) that holds this record."""
-    return page.locator(f"#graph-list [data-key='{key}']")
-
-
-def panel(page: Page) -> Locator:
-    return page.locator("#panel")
-
-
-async def graph_open(w: Watched, address: str) -> None:
-    """Open a Graph address and wait until what it asks for is drawn (the dots, or the list)."""
-    await w.open(address)
-    await expect(w.page.locator("#graph-page")).to_be_visible(timeout=SLOW)
-    if "as=list" in address:
-        await expect(w.page.locator("#graph-list")).to_be_visible(timeout=SLOW)
-    else:
-        await expect(svg(w.page)).to_have_attribute("data-ready", "true", timeout=SLOW)
-
-
-async def show(page: Page, view: str | None = None, presentation: str | None = None) -> None:
-    """Choose a preset and a presentation with the buttons, and wait until the page says so."""
-    if view:
-        await page.locator(f"#graph-view-{view}").click()
-        await expect(page.locator("#graph-page")).to_have_attribute("data-view", view, timeout=SLOW)
-    if presentation:
-        await page.locator(f"#graph-as-{presentation}").click()
-        await expect(page.locator("#graph-page")).to_have_attribute(
-            "data-as", presentation, timeout=SLOW
-        )
-        if presentation == "map":
-            await expect(svg(page)).to_have_attribute("data-ready", "true", timeout=SLOW)
-        else:
-            await expect(page.locator("#graph-list")).to_be_visible(timeout=SLOW)
-
-
 async def hash_params(page: Page) -> dict[str, str]:
     """The address after the #, as the choices it holds."""
     found: dict[str, str] = await page.evaluate(
@@ -96,76 +50,10 @@ async def hash_params(page: Page) -> dict[str, str]:
     return found
 
 
-async def dot_keys(page: Page) -> list[str]:
-    keys: list[str] = (
-        await svg(page).locator(".dot").evaluate_all("els => els.map(e => e.dataset.key)")
-    )
-    return sorted(keys)
-
-
-async def map_edges(page: Page) -> set[tuple[str, str, str]]:
-    """Every line the map draws, as (kind, source, target)."""
-    rows: list[list[str]] = (
-        await svg(page)
-        .locator(".edge")
-        .evaluate_all("els => els.map(e => [e.dataset.type, e.dataset.source, e.dataset.target])")
-    )
-    return {(kind, source, target) for kind, source, target in rows}
-
-
-async def drawn_as(page: Page, dots: set[str], edges: set[tuple[str, str, str]]) -> None:
-    """Wait until the map draws exactly these dots and lines (the page draws a moment after the
-    address changes), and say what is different when it does not."""
-    got: tuple[list[str], set[tuple[str, str, str]]] = ([], set())
-    for _ in range(SLOW // 250):
-        got = (await dot_keys(page), await map_edges(page))
-        if got == (sorted(dots), edges):
-            return
-        await anyio.sleep(0.25)
-    assert got[0] == sorted(dots), (set(got[0]) - dots, dots - set(got[0]))
-    assert got[1] == edges, (got[1] - edges, edges - got[1])
-
-
-async def listed_keys(page: Page) -> list[str]:
-    """The records the list shows: tree rows of work, and rows of requirements, decisions, facts.
-    A section that is hidden (Work in the Context preset) shows nothing."""
-    keys: list[str] = await page.locator(
-        "#work-tree li[role=treeitem][data-key], #graph-list .gv-record[data-key]"
-    ).evaluate_all("els => els.filter(e => e.getClientRects().length).map(e => e.dataset.key)")
-    return sorted(keys)
-
-
-async def list_as(page: Page, rows: set[str]) -> None:
-    """Wait until the list holds exactly these records (it draws a moment after the choice)."""
-    got: list[str] = []
-    for _ in range(SLOW // 250):
-        got = await listed_keys(page)
-        if got == sorted(rows):
-            return
-        await anyio.sleep(0.25)
-    assert got == sorted(rows), (set(got) - rows, rows - set(got))
-
-
-async def listed_connections(page: Page) -> set[tuple[str, str, str]]:
-    """What the rows of the list say each record is joined to, as (kind, source, target), the way
-    the map's lines read: each row names the line and the record at its other end."""
-    rows: list[list[Any]] = await page.locator("#graph-list details.gv-connections").evaluate_all(
-        """els => els.filter(d => d.getClientRects().length).flatMap(
-            d => [...d.querySelectorAll('li[data-other]')].map(
-                li => [d.dataset.for, li.dataset.other, li.dataset.relation, li.textContent]))"""
-    )
-    return {(relation, mine, other) for mine, other, relation, _ in rows}
-
-
-def tied(connections: set[tuple[str, str, str]], mine: str, other: str, kind: str) -> bool:
-    return (kind, mine, other) in connections or (kind, other, mine) in connections
-
-
 async def tally(client: Client) -> dict[str, int]:
-    """How much context and how many requirements there are, to see that a refusal wrote nothing."""
+    """How many notes and acceptance criteria there are, to see that a refusal wrote nothing."""
     return {
-        "facts": (await ok(client, "list_facts", limit=1))["total"],
-        "decisions": (await ok(client, "list_decisions", limit=1))["total"],
+        "notes": (await ok(client, "list_notes", limit=1))["total"],
         "rules": (await ok(client, "list_rules", limit=1))["total"],
     }
 
@@ -184,101 +72,126 @@ async def whole(client: Client, tool: str, **arguments: Any) -> list[dict[str, A
             return found
 
 
+# -- recall, as a record's page draws it -----------------------------------------------------------
+
+
 def expected_recall(
     recalled: dict[str, Any],
-) -> dict[str, tuple[int, list[tuple[str, int, str, str, str]]]]:
-    """What a recall says, as the detail panel draws it: for each section that holds something, its
-    count and each entry as (kind, id, lifecycle, confirmation, why). An empty section is left
-    out."""
-    found: dict[str, tuple[int, list[tuple[str, int, str, str, str]]]] = {}
+) -> dict[str, tuple[int, list[tuple[str, int, str, str]]]]:
+    """What a recall says, as a record's page draws it: for each section that holds something, its
+    count and each entry as (kind, id, status, why). An empty section is left out."""
+    found: dict[str, tuple[int, list[tuple[str, int, str, str]]]] = {}
     for name in RECALL_SECTIONS:
         entries = recalled[name]
         if not entries["items"]:
             continue
-        rows = []
-        for item in entries["items"]:
-            kind = "decision" if "decision" in item else "fact"
-            record = item[kind]
-            rows.append((kind, record["id"], record["status"], record["confirmation"], item["why"]))
+        rows = [
+            ("note", item["note"]["id"], item["note"]["status"], item["why"])
+            for item in entries["items"]
+        ]
         found[name] = (entries["count"], rows)
     return found
 
 
-async def recall_in_panel(
+async def recall_on_page(
     page: Page,
-) -> dict[str, tuple[int, list[tuple[str, int, str, str, str]]]]:
-    """The recall sections the detail panel shows, in the same shape as expected_recall."""
+) -> dict[str, tuple[int, list[tuple[str, int, str, str]]]]:
+    """The recall sections the page of an epic, story, task or acceptance criterion draws, in the
+    same shape
+    as expected_recall. The tables of the closed "Earlier" and "Project-wide" sections are read
+    too: a closed section still holds its rows."""
     sections: list[dict[str, Any]] = (
-        await panel(page)
+        await item_page(page)
         .locator(".recall-section")
         .evaluate_all(
             """els => els.map(s => ({
             name: s.dataset.section,
             count: Number(s.dataset.count),
-            rows: [...s.querySelectorAll('li.record')].map(li => [
-                li.dataset.kind, Number(li.dataset.record.split(':')[1]), li.dataset.status,
-                li.dataset.confirmation, (li.querySelector('.why-text') || {}).textContent || '',
+            rows: [...s.querySelectorAll('tr.record-line')].map(tr => [
+                tr.dataset.kind, Number(tr.dataset.id), tr.dataset.status, tr.dataset.why || '',
             ]),
         }))"""
         )
     )
     return {
-        s["name"]: (s["count"], [(k, i, st, c, why) for k, i, st, c, why in s["rows"]])
+        s["name"]: (s["count"], [(k, i, st, why) for k, i, st, why in s["rows"]])
         for s in sections
         if s["name"] != "similar"
     }
 
 
 async def recall_matches(client: Client, page: Page, **target: Any) -> None:
-    """The panel's recall is what `recall` returns for the same item, section by section. The
-    item is `node=<reference>` or `rule_id=<id>`."""
+    """The recall a record's page draws is what `recall` returns for the same item, section by
+    section. The item is `node=<reference>` or `rule_id=<id>`, and its page is on show."""
     want = expected_recall(await ok(client, "recall", limit=50, **target))
-    shown = await recall_in_panel(page)
+    shown = await recall_on_page(page)
     for _ in range(SLOW // 250):
         if shown == want:
             break
         await anyio.sleep(0.25)
-        shown = await recall_in_panel(page)
+        shown = await recall_on_page(page)
     assert shown == want
 
 
 async def history_actions(client: Client, tool: str, key: str, ident: int | str) -> list[str]:
     """The actions in an item's history, in the order the tool gives them: `key` is the argument
-    that names the item (`node` with a reference, `rule_id`, `decision_id` or `fact_id` with a
-    number)."""
+    that names the item (`node` with a reference, `rule_id` or `note_id` with a number)."""
     items = (await ok(client, tool, limit=200, **{key: ident}))["items"]
     return [event["action"] for event in items]
 
 
-async def lifecycle_filter(page: Page, plural: str, status: str) -> None:
-    """Choose which lifecycle a context section lists: active, superseded, withdrawn or ''."""
-    await page.locator(f"#ctx-{plural}-status").select_option(status)
+def board_refusal(project: Project, tool: str, **arguments: Any) -> str:
+    """The words the board's own call to a tool is refused in, as a person signed in to the
+    project's board would be (a tool only a person may use, such as set_confirmation, cannot be
+    asked of an agent key)."""
+    reply = project.owner.call("POST", f"/board/api/projects/{project.id}/tool/{tool}", arguments)
+    assert reply.status == 400, (reply.status, reply.body)
+    return str(reply.body["message"])
+
+
+async def choose_in_menu(page: Page, chip: Locator, value: str) -> None:
+    """Open the menu of a chip (the status of a note, a criterion or a piece of work) and choose
+    its row."""
+    menu_name = await chip.get_attribute("data-menu")
+    await chip.click()
+    menu = page.locator(f"div.vmenu[data-menu='{menu_name}']")
+    await menu.locator(f".vmenu-option[data-value='{value}']").click()
+
+
+# -- projects of their own ------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def fresh_project(server_url: str) -> AsyncIterator[tuple[Client, str, Project]]:
     """A project of its own, with nothing in it (an account, a project and an agent key made as a
-    person would), for a test that compares whole lists such as the coverage report. Gives a client
-    of that project, the address of its board and the project."""
-    project = make_project(register())
+    person would), for a test that compares whole lists such as the coverage report. The person who
+    owns it is called Ada Lovelace, which is who a change made on its board is recorded as, and the
+    agent key is the harness's ("tests"). Gives a client of that project, the address of its board
+    and the project."""
+    project = make_project(register(name=ADA))
     async with connect(server_url, project.key) as client:
         yield client, board_url(server_url, project), project
 
 
 async def coverage_numbers(client: Client) -> tuple[int, int]:
-    """What the coverage report says: requirements in no story, and stories with no requirement."""
+    """What the coverage report says: acceptance criteria placed nowhere, and stories with none."""
     report = await ok(client, "coverage_report", show="both", limit=1)
     return int(report["unplaced_rule_count"]), int(report["story_without_rules_count"])
 
 
-async def context_world(client: Client, word: str) -> dict[str, Any]:
-    """Work and context of every sort, made through MCP in an empty project, to look at on the
-    Graph. Two epics (E, with two stories and three tasks, and E2 with one story and one task), two
-    links between work, requirements (held, settled, one in no story and one dropped), decisions
-    (confirmed, project-wide, replaced, withdrawn, and one about E2) and facts (confirmed, about a
-    decision, about nothing, replaced, withdrawn, and one about E2). Gives them by short name:
-    work by its reference (a string, such as story:12), requirements, decisions and facts by their
-    id (a number)."""
+async def context_world(
+    client: Client, word: str, project: Project | None = None
+) -> dict[str, Any]:
+    """Work and notes of every sort, made through MCP in an empty project, to look at on the board.
+    Two epics (E, with two stories and three tasks, and E2 with one story and one task), two links
+    between work, acceptance criteria (open, met, one placed nowhere and one dropped), notes someone
+    decided
+    (one confirmed, a project-wide one, one replaced, one withdrawn, and one about E2) and notes
+    nobody decided (one confirmed, one about a note someone decided, one about nothing, one
+    replaced, one withdrawn, and one about E2). Gives them by short name: work by its reference (a
+    string, such as story:12), acceptance criteria and notes by their id (a number). Confirmed on
+    the
+    board, as a person, in `project` (the shared one by default)."""
     ids: dict[str, Any] = {}
 
     async def node(name: str, kind: str, parent: str | None = None) -> None:
@@ -300,21 +213,18 @@ async def context_world(client: Client, word: str) -> dict[str, Any]:
         await ok(
             client,
             "add_link",
-            actor="a",
             source=ids[source],
             target=ids[target],
             link_type=kind,
         )
 
     async def rule(name: str, story: str | None, **more: Any) -> None:
-        arguments = {"story": ids[story]} if story else {}
-        made_rule = await ok(
-            client, "create_rule", actor="a", title=f"{name} {word}", **arguments, **more
-        )
+        arguments = {"node": ids[story]} if story else {}
+        made_rule = await ok(client, "create_rule", title=f"{name} {word}", **arguments, **more)
         ids[name] = made_rule["id"]
 
     await rule("r1", "s1")
-    await rule("r2", "s2", status="settled")
+    await rule("r2", "s2", status="met")
     await rule("ru", None)
     await rule("rd", "s2", status="dropped")
 
@@ -328,110 +238,39 @@ async def context_world(client: Client, word: str) -> dict[str, Any]:
     old = await decision("d_old", nodes=[ids["s2"]])
     newer = await ok(
         client,
-        "supersede_decision",
-        actor="a",
-        decision_id=old["id"],
-        title=f"d_new {word}",
-        text="Changed.",
-        reason="Learned more.",
+        "supersede_note",
+        replaces=[old["id"]],
+        text=f"d_new {word}\n\nChanged.",
+        why="Learned more.",
         decided_by="Marie",
         keep_links=True,
     )
-    ids["d_new"] = newer["id"]
+    ids["d_new"] = newer["replacement"]["id"]
     gone = await decision("d_gone", nodes=[ids["s1"]])
-    await ok(client, "withdraw_decision", actor="a", decision_id=gone["id"], reason="Not needed")
+    await ok(client, "withdraw_note", note_ids=[gone["id"]], reason="Not needed")
     await decision("d9", nodes=[ids["s9"]])
 
-    async def fact(name: str, **more: Any) -> dict[str, Any]:
-        record = await make_fact(client, f"{name} {word}", **more)
+    async def plain(name: str, **more: Any) -> dict[str, Any]:
+        record = await make_note(client, f"{name} {word}", "Observed", **more)
         ids[name] = record["id"]
         return record
 
-    await fact("f1", nodes=[ids["s1"]], rule_ids=[ids["r1"]])
-    await fact("f2", decision_ids=[ids["d1"]])
-    await fact("f3")
-    old_fact = await fact("f_old", nodes=[ids["s2"]])
+    await plain("n1", nodes=[ids["s1"]], rule_ids=[ids["r1"]])
+    await plain("n2", note_ids=[ids["d1"]])
+    await plain("n3")
+    old_note = await plain("n_old", nodes=[ids["s2"]])
     replacement = await ok(
         client,
-        "supersede_fact",
-        actor="a",
-        replaces=[old_fact["id"]],
-        reason="Measured again",
-        text=f"f_new {word}",
-        source="A measurement",
+        "supersede_note",
+        replaces=[old_note["id"]],
+        text=f"n_new {word}",
+        why="Measured again",
         keep_links=True,
     )
-    ids["f_new"] = replacement["replacement"]["id"]
-    gone_fact = await fact("f_gone", nodes=[ids["s1"]])
-    await ok(client, "withdraw_fact", actor="a", fact_ids=[gone_fact["id"]], reason="A slip")
-    await fact("f9", nodes=[ids["s9"]])
-    await confirm(client, "decision", {"id": ids["d1"]}, "Marie")
-    await confirm(client, "fact", {"id": ids["f1"]}, "Marie")
+    ids["n_new"] = replacement["replacement"]["id"]
+    gone_note = await plain("n_gone", nodes=[ids["s1"]])
+    await ok(client, "withdraw_note", note_ids=[gone_note["id"]], reason="A slip")
+    await plain("n9", nodes=[ids["s9"]])
+    confirm_on_board("note", {"id": ids["d1"]}, "Marie", project=project)
+    confirm_on_board("note", {"id": ids["n1"]}, "Marie", project=project)
     return ids
-
-
-async def server_edges(client: Client) -> set[tuple[str, str, str]]:
-    """Every line the Graph could draw between the records of a project, worked out from what the
-    tools say (nodes, links, requirements, decisions and facts), as (kind, source, target) with
-    the keys the board uses: story:12, rule:3, decision:7, fact:5."""
-    found: set[tuple[str, str, str]] = set()
-    nodes = await whole(client, "list_nodes")
-    for node in nodes:
-        if node["parent"] is not None:
-            found.add(("hierarchy", node["parent"], node["ref"]))
-        for link in await whole(client, "list_links", node=node["ref"]):
-            found.add((link["link_type"], link["source"], link["target"]))
-    for rule in await whole(client, "list_rules"):
-        if rule["story"] is not None:
-            found.add(("placed", f"rule:{rule['id']}", rule["story"]))
-    for kind, tool in (("decision", "list_decisions"), ("fact", "list_facts")):
-        for record in await whole(client, tool):
-            me = f"{kind}:{record['id']}"
-            for other in record.get("nodes", []):
-                found.add(("concerns", me, other))
-            for other_kind, key in (("rule", "rule_ids"), ("decision", "decision_ids")):
-                for other_id in record.get(key, []):
-                    found.add(("concerns", me, f"{other_kind}:{other_id}"))
-            if record["superseded_by_id"] is not None:
-                found.add(("replaces", f"{kind}:{record['superseded_by_id']}", me))
-    return found
-
-
-async def check_same_relationships(page: Page, list_rows: set[str]) -> None:
-    """The map and the list, drawn for the same choices, hold the same lines: every line of the
-    map is said by the rows of the list at both its ends (a row that exists), and every line a
-    row says between two records the map draws is a line of the map. `list_rows` is the records
-    the list is to hold. Leaves the page on the map again."""
-    keys = set(await dot_keys(page))
-    drawn = await map_edges(page)
-    assert drawn, "the map draws no lines"
-    await page.locator("#graph-as-list").click()
-    await expect(page.locator("#graph-page")).to_have_attribute("data-as", "list", timeout=SLOW)
-    await list_as(page, list_rows)
-    rows = set(await listed_keys(page))
-    said = await listed_connections(page)
-    for kind, source, target in drawn:
-        if kind == "hierarchy":
-            nested = await page.locator(f"#work-tree li[data-key='{target}']").evaluate(
-                "(e, parent) => e.parentElement.closest('li')?.dataset.key === parent", source
-            )
-            assert nested, (kind, source, target)
-        elif kind == "needs_first":
-            ties = page.locator(f"#work-tree li[data-key='{source}'] .gv-ties.needs").first
-            assert target in (await ties.get_attribute("data-refs") or "").split(",")
-        else:
-            seen = [
-                ((kind, source, target) in said) if source in rows else None,
-                ((kind, target, source) in said) if target in rows else None,
-            ]
-            assert any(s is not None for s in seen) and all(s is not False for s in seen), (
-                kind,
-                source,
-                target,
-            )
-    for kind, mine, other in said:
-        if mine in keys and other in keys:
-            assert (kind, mine, other) in drawn or (kind, other, mine) in drawn, (kind, mine, other)
-    await page.locator("#graph-as-map").click()
-    await expect(page.locator("#graph-page")).to_have_attribute("data-as", "map", timeout=SLOW)
-    await expect(svg(page)).to_have_attribute("data-ready", "true", timeout=SLOW)

@@ -17,25 +17,26 @@ what an agent reads next.
 
 What is distinctive:
 
-- **One graph of work and context.** Epics hold stories and stories hold tasks. Requirements,
-  decisions and facts are linked to the work they concern, so an agent that takes a task is handed
-  those decisions and facts with it.
+- **One graph of work and context.** Epics hold stories and stories hold tasks. Acceptance criteria
+  (what must be true for a story or task to be done), a definition of done for the whole project, and
+  notes (what was decided or learned, and why) are linked to the work they concern, so an agent that
+  takes a task is handed them with it.
 - **Readiness is worked out, not typed.** A task is ready only when everything it needs first is
   done.
 - **Claims with leases.** An agent takes a task for a limited time. Two agents cannot hold the same
   task, and a claim that runs out frees it again.
 - **Durable handoffs.** Ending work requires a note, and the next person or agent is shown it.
-- **Decisions and facts record who confirmed them.** A decision keeps its reason and who decided it,
-  and a fact keeps its source. Each starts unconfirmed and becomes confirmed only when a named
-  person says they reviewed it. Replaced and withdrawn records stay, with their reasons.
+- **Notes have one status.** A note keeps its text and why it is so, and says who decided it when
+  someone did. Each starts unconfirmed and becomes confirmed only when a named person says they
+  reviewed it. Replaced and withdrawn notes stay, with their reasons.
 
 Vrum stores and coordinates. It does not generate text: the agents connected to it do the reasoning
 and record what they find. It is a prototype that runs on one machine.
 
-![The Board of an example project: stories and tasks in columns by status, with what each is waiting for and which agent holds a task](docs/screenshots/board.png)
+![The Board of an example project: tasks in columns by status, with blocked work marked and which agent holds a task](docs/screenshots/board.png)
 
-*Example project with fictional data. The Board shows each story and task by status, what it is
-waiting for, and which agent holds it and until when.*
+*Example project with fictional data. The Board shows each task by status (stories too, with the
+Show switch), what it is waiting for, and which agent holds it and until when.*
 
 ## Getting started
 
@@ -49,7 +50,8 @@ cd vrum
 ```
 
 There is nothing to set up first. The first start makes a random database password and keeps it in
-a Docker volume, and the first build downloads images, so it takes a minute or two. When it
+a Docker volume, and the first build downloads images and the small model that searches by meaning
+(about 100 MB), so it takes a few minutes. When it
 finishes, the script says "Vrum is now live" and gives the address of the board.
 (`./start.sh` runs `docker compose up -d --build --wait` and then prints that message, so the plain
 command works too.)
@@ -58,11 +60,12 @@ command works too.)
    Vrum with another one, for example `VRUM_PORT=8090 ./start.sh`, and use that port in every
    address below.
 2. Create an account: a name, an email address and a password of at least 10 characters. Vrum keeps
-   them itself and sends no email.
+   them itself. Vrum sends no email unless you set up a mail server (see
+   [Configuration](docs/configuration.md)).
 3. Create a project. It opens on the Board.
 4. Choose **New item** to make an epic, then another to make a story in it, then a task in the
    story. A task with nothing to wait for is Ready.
-5. To let an agent in, open **Settings & tools**, then **Agent access**, in the sidebar. Create a
+5. To let an agent in, open **Settings and tools**, then **Agent access**, in the sidebar. Create a
    key and copy it. It is shown once, and it reaches this project and no other. Then give it to the
    agent. For Claude Code:
 
@@ -73,7 +76,7 @@ command works too.)
 
 6. Ask the agent to take the next piece of work with `next_work`. The task shows as held on the
    Board, and the claim and the handoff note the agent leaves when it finishes appear in the
-   **Activity** drawer.
+   **Activity** page.
 
 For other clients, and for the guide the server gives every agent, see
 [Connecting an agent](docs/agents.md).
@@ -81,14 +84,20 @@ For other clients, and for the guide the server gives every agent, see
 `docker compose down` stops Vrum and keeps your data. `docker compose down --volumes` stops it and
 deletes the data, accounts included.
 
-Once a project has some history, the Graph shows how its work connects to the facts and decisions
-behind it. Choosing a record opens its details.
+To look around a project that already has work and notes in it before putting your own
+in, run `./demo.sh`. It starts a separate copy on its own port (8091), fills it with a fictional
+project and prints the address and a sign-in. `./demo.sh stop` removes it, and your own Vrum is
+never touched.
 
-![The Graph of the same project: a decision linked to the story and task it affects, a requirement and a fact, with the decision open in the detail panel](docs/screenshots/graph.png)
+Once a project has some history, the Graph shows how its work connects to the notes
+behind it. Choose any item and it shows what is around it, how everything fits together, what must
+come first and what was replaced. Every record also has a page of its own.
 
-*Example project with fictional data. The Graph around one decision: the work it applies to, the
-requirement it serves and the fact behind it. The decision was confirmed by a named person, and the
-detail panel on the right shows who and when.*
+![The Graph of the same project around one note: the work it applies to, an acceptance criterion and a note](docs/screenshots/graph.png)
+
+*Example project with fictional data. The Graph around one note: the work it applies to, the
+acceptance criterion it serves and the note behind it. A named person confirmed the note, and
+every item opens its own page.*
 
 ## How it is built
 
@@ -96,7 +105,7 @@ A Python 3.12 server, using the official MCP SDK, in front of PostgreSQL 17 with
 containers.
 
 - **The database enforces the rules.** The epic, story and task hierarchy, one claim at a time on an
-  item, no circle of items waiting on each other, decisions and facts that are never edited and an
+  item, no circle of items waiting on each other, notes that are never edited and an
   append-only history are constraints and triggers in one schema file (`src/vrum/schema.sql`). No
   code path can write around them. What is ready is a view computed from the links.
 - **Projects are isolated by row-level security.** Every row carries its project in its keys. Each
@@ -106,8 +115,10 @@ containers.
   agent would, with the same checks and the same refusals. The board keeps no data of its own.
 - **A front end with no build step.** Plain HTML, CSS and JavaScript modules, no libraries, a strict
   content security policy, and text is only ever put on a page as text.
-- **Embeddings are optional and separate.** Search by meaning and possible duplicates use an
-  embedding service you choose. Search by exact words needs nothing.
+- **Search by meaning works with nothing to set up.** A small open-source model runs in its own
+  container next to Vrum, built into its image, so it needs no internet once built and nothing
+  leaves your machine. It only turns text into numbers. You can point Vrum at an embedding service
+  of your own, or at none. Search by exact words needs nothing.
 - **Nothing is generated on the server.** Vrum never calls a language model. Confirmation is a named
   person's review, recorded with the time.
 - **Secrets are kept out.** Text that holds a well-known secret format is refused on every write,
@@ -142,6 +153,14 @@ your own stack or your `.env`.
   a fresh database, so keep an [export](docs/backup-and-export.md).
 - It speaks plain HTTP and only answers requests addressed to `localhost`. Passwords and keys travel
   as plain text. To use it from another machine, put it behind something that adds TLS first.
-- There is no email verification and no password recovery. Vrum has no way to send email. See
-  `BLOCKED.md`.
-- Search by meaning needs an embedding service that you provide.
+- Email is optional and off by default. Without a mail server setting, invitations are shared as a
+  copied link, an address is never confirmed, and a forgotten password cannot be reset by email.
+  See [Configuration](docs/configuration.md).
+- Signing in with OpenID Connect, GitHub or an LDAP directory is optional and off by default. It is
+  proved against a real OpenLDAP, a real OpenID provider and a stand-in for GitHub; the live GitHub
+  path and company providers such as Google, Microsoft and Okta are untested. See
+  [Configuration](docs/configuration.md).
+- The model that searches by meaning out of the box is small and made for English. It reads about
+  the first thousand characters of an item, and it uses about 200 MB of memory. For other
+  languages or longer texts, use an embedding service of your own (see
+  [Configuration](docs/configuration.md)).

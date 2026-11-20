@@ -1,12 +1,12 @@
 """M7 against the running containers, part two: loading a file into an empty server, and backing up
 and restoring a database. Both destroy a database, so they run on a second, separate copy of Vrum
 (tests/second_stack.py: its own compose project, database volume, port, account, project and agent
-key) that each test
-starts empty and removes afterwards (see ./check.sh).
+key) that each test starts empty and removes afterwards (see ./check.sh).
 
 The graph they move is built through the tools (tests.helpers.rich_world), so it is the kind of
 data the server really makes, and what comes out the other end is compared with what went in, whole,
-through the export."""
+through the export. A file of decisions and facts, as the servers before notes wrote it, is loaded
+there too, and comes out as notes."""
 
 import copy
 import json
@@ -17,12 +17,16 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from tests.helpers import REPO_ROOT, export_everything, ok, refused, rich_world
+from tests.documents import a_legacy_file, decision, fact, legacy_event, node, rule
+from tests.helpers import REPO_ROOT, export_everything, ok, on_board, refused, rich_world
 from tests.second_stack import SecondStack
+from tests.world import Project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
-SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
+SECTIONS = ("nodes", "links", "rules", "notes", "definition_of_done", "events")
+# The lists whose items have an id of their own.
+WITH_IDS = ("links", "rules", "notes", "events")
 
 
 @pytest.fixture
@@ -65,21 +69,88 @@ async def every_mention(client: Client) -> list[dict[str, Any]]:
         offset = page["next_offset"]
 
 
-async def a_world_with_references(client: Client) -> dict[str, dict[str, Any]]:
-    """The rich world, and an epic whose text names a fact, a decision, a rule and a story."""
-    world = await rich_world(client)
+async def a_world_with_references(client: Client, project: Project) -> dict[str, dict[str, Any]]:
+    """The rich world (its notes confirmed by a person on the board of this stack's `project`), and
+    an epic whose text names two notes, a rule and a story."""
+    world = await rich_world(client, project)
     await ok(
         client,
         "create_node",
-        actor="ann",
         kind="epic",
         title="Mentions",
         body=(
-            f"See [[fact:{world['fact1']['id']}]], [[decision:{world['wide']['id']}]], "
+            f"See [[note:{world['fact1']['id']}]], [[note:{world['wide']['id']}]], "
             f"[[rule:{world['rule1']['id']}]] and [[{world['story1']['ref']}]]."
         ),
     )
     return world
+
+
+def old_file() -> dict[str, Any]:
+    """What a server before notes wrote (format version 2): two decisions, one replacing the
+    other, and two facts, one about a decision, one given up, with the events that recorded some
+    of them."""
+    return a_legacy_file(
+        nodes=[node("epic", 1), node("story", 1, "epic:1")],
+        rules=[rule(1, "story:1", status="held")],
+        decisions=[
+            decision(
+                1,
+                title="Use codes",
+                text="Codes by SMS",
+                reason="Cheap",
+                status="superseded",
+                superseded_by_id=2,
+                nodes=["story:1"],
+            ),
+            decision(
+                2,
+                title="Use codes by email",
+                text="Codes by email",
+                reason="SMS costs money",
+                project_wide=True,
+                nodes=["story:1"],
+                rule_ids=[1],
+                confirmed_by="Priya",
+                confirmed_at="2026-11-16T12:30:00.000000Z",
+            ),
+        ],
+        facts=[
+            fact(1, text="People log in on phones", source="Analytics", decision_ids=[2]),
+            fact(
+                2,
+                text="The office has a dog",
+                source="Somebody said",
+                status="withdrawn",
+                status_reason="It is a cat",
+            ),
+        ],
+        events=[
+            legacy_event(1, node="epic:1", action="create"),
+            legacy_event(
+                2,
+                action="decision_recorded",
+                decision_id=2,
+                actor="Marie",
+                actor_kind="person",
+                after={
+                    "title": "Use codes by email",
+                    "text": "Codes by email",
+                    "reason": "SMS costs money",
+                    "decided_by": "Marie",
+                    "decided_on": "2026-11-15",
+                    "project_wide": True,
+                },
+            ),
+            legacy_event(
+                3,
+                action="fact_linked",
+                fact_id=1,
+                decision_id=2,
+                after={"fact_id": 1},
+            ),
+        ],
+    )
 
 
 # -- loading a file ------------------------------------------------------------------------------
@@ -89,25 +160,28 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
     stack: SecondStack, tmp_path: Path
 ) -> None:
     stack.up()
+    assert stack.project is not None
     async with stack.client() as client:
-        world = await a_world_with_references(client)
+        world = await a_world_with_references(client, stack.project)
         original = await export_everything(client)
         mentions = await every_mention(client)
         recalled = await ok(client, "recall", node=world["task3"]["ref"])
         briefed = await ok(client, "recall", node=world["story1"]["ref"])
-    assert mentions and recalled["project_wide_decisions"]["count"] == 1
+    assert mentions and recalled["project_wide_notes"]["count"] == 1
+    assert original["version"] == 6
+    assert len(original["definition_of_done"]) == 1
     exported = tmp_path / "vrum-export.json"
     result = stack.python("export_graph.py", stack.url, exported)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(exported.read_text(encoding="utf-8")) == original
     # Nothing about accounts or access is part of a project's export.
-    assert stack.project is not None
     for secret in (stack.project.owner.email, stack.project.owner.password, stack.key):
         assert secret not in exported.read_text(encoding="utf-8")
 
     # A new, empty server: the volume is deleted and everything starts again.
     stack.destroy()
     stack.up()
+    assert stack.project is not None
     async with stack.client() as client:
         assert nothing_in(await export_everything(client))
         await refuses_bad_files_and_loads_nothing(client, original)
@@ -117,9 +191,7 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
     assert f"Imported {sum(original['counts'].values())} items" in loaded.stdout
     async with stack.client() as client:
         assert await export_everything(client) == original
-        top = {
-            name: max(item["id"] for item in original[name]) for name in SECTIONS if name != "nodes"
-        }
+        top = {name: max(item["id"] for item in original[name]) for name in WITH_IDS}
         # What is loaded works like anything else: it can be read, searched and followed ...
         epic = await ok(client, "get_node", node=world["epic"]["ref"])
         assert epic["title"] == world["epic"]["title"] and epic["status"] == "ready"
@@ -127,87 +199,147 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
         found = await ok(client, "search", query=word, mode="words", limit=200)
         assert {i["ref"] for i in found["items"]} >= {
             world["epic"]["ref"],
-            f"fact:{world['fact1']['id']}",
-            f"decision:{world['wide']['id']}",
+            f"note:{world['fact1']['id']}",
+            f"note:{world['wide']['id']}",
         }
         # ... what a person confirmed is still confirmed, by whom and when, and what ended keeps
-        # what it was confirmed as ...
-        confirmed = await ok(client, "get_fact", fact_id=world["fact1"]["id"])
-        assert (confirmed["confirmation"], confirmed["confirmed_by"]) == ("confirmed", "Marie")
-        ended = await ok(client, "get_fact", fact_id=world["fact6"]["id"])
-        assert (ended["status"], ended["confirmation"]) == ("withdrawn", "confirmed")
-        replaced = await ok(client, "get_decision", decision_id=world["decision1"]["id"])
+        # who confirmed it ...
+        confirmed = await ok(client, "get_note", note_id=world["fact1"]["id"])
+        assert (confirmed["status"], confirmed["confirmed_by"]) == ("confirmed", "Marie")
+        ended = await ok(client, "get_note", note_id=world["fact6"]["id"])
+        assert (ended["status"], ended["confirmed_by"]) == ("withdrawn", "Marie")
+        replaced = await ok(client, "get_note", note_id=world["decision1"]["id"])
         assert (replaced["status"], replaced["superseded_by_id"]) == (
             "superseded",
             world["decision2"]["id"],
         )
-        assert replaced["confirmation"] == "confirmed" and replaced["supersedes_ids"] == []
-        # ... a project-wide decision still applies throughout the project, and what recall and
+        assert replaced["confirmed_by"] == "Marie" and replaced["supersedes_ids"] == []
+        decided = await ok(client, "get_note", note_id=world["decision2"]["id"])
+        assert (decided["decided"], decided["decided_by"]) == (True, "Marie")
+        assert decided["supersedes_ids"] == [world["decision1"]["id"]]
+        # ... a project-wide note still applies throughout the project, and what recall and
         # find_mentions answer is what they answered before ...
         assert await ok(client, "recall", node=world["task3"]["ref"]) == recalled
         assert await ok(client, "recall", node=world["story1"]["ref"]) == briefed
         assert await every_mention(client) == mentions
+        # ... the definition of done is back with its version and who set it, and a person can go
+        # on changing it from that version, and an acceptance criterion on a task is still there ...
+        (loaded_definition,) = original["definition_of_done"]
+        definition = on_board("get_definition_of_done", project=stack.project)
+        assert (definition["body"], definition["version"]) == (
+            loaded_definition["body"],
+            loaded_definition["version"],
+        )
+        assert definition["updated_by"] == loaded_definition["updated_by"]
+        changed = on_board(
+            "set_definition_of_done",
+            project=stack.project,
+            body=definition["body"] + "\n- Nothing left half done",
+            expected_version=definition["version"],
+        )
+        assert changed["version"] == definition["version"] + 1
+        assert (await ok(client, "get_rule", rule_id=world["rule3"]["id"]))["node"] == (
+            world["task1"]["ref"]
+        )
         # ... new items carry on from the highest number of their own kind in the file, their
         # changes after the loaded history ...
-        new = await ok(client, "create_node", actor="ann", kind="epic", title="After the import")
+        new = await ok(client, "create_node", kind="epic", title="After the import")
         assert new["ref"] == f"epic:{next_number(original, 'epic')}"
         changes = await ok(client, "changes_since", after_event_id=top["events"], limit=50)
-        assert [event["node"] for event in changes["items"]] == [new["ref"]]
+        # The change of the definition of done above came first, and about no item.
+        assert [event["node"] for event in changes["items"]] == [None, new["ref"]]
+        assert changes["items"][0]["action"] == "definition_of_done_changed"
         assert changes["items"][0]["id"] == top["events"] + 1
-        story = await ok(
-            client, "create_node", actor="ann", kind="story", title="Story", parent=new["ref"]
-        )
-        task = await ok(
-            client, "create_node", actor="ann", kind="task", title="Task", parent=story["ref"]
-        )
+        assert changes["items"][1]["id"] == top["events"] + 2
+        story = await ok(client, "create_node", kind="story", title="Story", parent=new["ref"])
+        task = await ok(client, "create_node", kind="task", title="Task", parent=story["ref"])
         assert (story["ref"], task["ref"]) == (
             f"story:{next_number(original, 'story')}",
             f"task:{next_number(original, 'task')}",
         )
-        # ... confirmation can be changed after the import, by a person, and only while active ...
-        again = await ok(
-            client,
+        # ... confirmation can be changed after the import, by a person, and only while in force ...
+        again = on_board(
             "set_confirmation",
-            actor="ann",
-            kind="fact",
-            record_id=world["fact2"]["id"],
+            project=stack.project,
+            note_id=world["fact2"]["id"],
             confirmation="confirmed",
             person="Ada",
         )
-        assert again["fact"]["confirmed_by"] == "Ada"
-        assert "already superseded" in await refused(
-            client,
-            "set_confirmation",
-            actor="ann",
-            kind="decision",
-            record_id=world["decision1"]["id"],
-            confirmation="unconfirmed",
-            person="Marie",
-            quote="No.",
+        assert again["confirmed_by"] == "Ada" and again["status"] == "confirmed"
+        refusal = stack.project.owner.call(
+            "POST",
+            f"/board/api/projects/{stack.project.id}/tool/set_confirmation",
+            {
+                "note_id": world["decision1"]["id"],
+                "confirmation": "unconfirmed",
+                "person": "Marie",
+                "quote": "No.",
+            },
         )
-        # ... and facts and decisions are numbered on from the file too.
-        next_fact = await ok(
-            client, "retain_fact", actor="ann", text="After the import", source="Here"
-        )
-        next_decision = await ok(
+        assert refusal.status == 400
+        assert "so its confirmation cannot change" in refusal.body["message"]
+        # ... and notes are numbered on from the file too: decisions and facts share one counter.
+        next_plain = await ok(client, "add_note", text="After the import", why="Here")
+        next_decided = await ok(
             client,
-            "record_decision",
-            actor="ann",
-            title="After the import",
+            "add_note",
             text="Carry on.",
-            reason="Because",
+            why="Because",
             decided_by="Marie",
         )
-        assert (next_fact["id"], next_decision["id"]) == (top["facts"] + 1, top["decisions"] + 1)
-        assert next_fact["confirmation"] == next_decision["confirmation"] == "unconfirmed"
+        assert (next_plain["id"], next_decided["id"]) == (top["notes"] + 1, top["notes"] + 2)
+        assert next_plain["status"] == next_decided["status"] == "unconfirmed"
         history = await ok(client, "changes_since", after_event_id=0, limit=200)
         assert [event["id"] for event in history["items"][:3]] == [
             event["id"] for event in original["events"][:3]
         ]
         # A server that holds anything is not loaded into again.
-        again_message = await refused(client, "import_graph", actor="ann", document=original)
+        again_message = await refused(client, "import_graph", document=original)
         assert "already holds data" in again_message
         assert "nothing was imported" in again_message.lower()
+
+
+async def test_an_export_made_before_notes_loads_into_an_empty_server_and_moves_on_as_notes(
+    stack: SecondStack, tmp_path: Path
+) -> None:
+    stack.up()
+    old = tmp_path / "vrum-old-export.json"
+    old.write_text(json.dumps(old_file()), encoding="utf-8")
+
+    loaded = stack.python("import_graph.py", stack.url, old)
+
+    assert loaded.returncode == 0, loaded.stdout + loaded.stderr
+    assert "Imported 10 items" in loaded.stdout  # 2 nodes, 1 rule, 4 notes and 3 events
+    async with stack.client() as client:
+        moved = await export_everything(client)
+        assert moved["version"] == 6 and "decisions" not in moved and "facts" not in moved
+        # The decisions come first, then the facts, each numbered from 1 with no gaps.
+        by_id = {note["id"]: note for note in moved["notes"]}
+        assert sorted(by_id) == [1, 2, 3, 4]
+        assert by_id[1]["text"] == "Use codes\n\nCodes by SMS" and by_id[1]["decided_by"] == "Marie"
+        assert (by_id[1]["status"], by_id[1]["superseded_by_id"]) == ("superseded", 2)
+        assert by_id[2]["supersedes_ids"] == [1] and by_id[2]["project_wide"] is True
+        assert (by_id[2]["confirmed_by"], by_id[2]["rule_ids"]) == ("Priya", [1])
+        assert (by_id[3]["decided_by"], by_id[3]["why"]) == (None, "Analytics")
+        assert by_id[3]["note_ids"] == [2]
+        assert (by_id[4]["status"], by_id[4]["status_reason"]) == ("withdrawn", "It is a cat")
+        recorded = [e for e in moved["events"] if e["action"] == "note_recorded"]
+        assert [(e["note_id"], e["actor"]) for e in recorded] == [(2, "Marie")]
+        assert (await ok(client, "recall", node="story:1"))["project_wide_notes"]["count"] == 1
+        new = await ok(client, "add_note", text="After the old file", why="Here")
+        assert new["id"] == 5
+
+    # What it became is a file of today, and goes on into another new server as it is.
+    current = tmp_path / "vrum-export.json"
+    result = stack.python("export_graph.py", stack.url, current)
+    assert result.returncode == 0, result.stdout + result.stderr
+    kept = json.loads(current.read_text(encoding="utf-8"))
+    stack.destroy()
+    stack.up()
+    again = stack.python("import_graph.py", stack.url, current)
+    assert again.returncode == 0, again.stdout + again.stderr
+    async with stack.client() as client:
+        assert await export_everything(client) == kept
 
 
 async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, Any]) -> None:
@@ -216,17 +348,20 @@ async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, An
     async def refusal(change: Any) -> str:
         bad = copy.deepcopy(good)
         change(bad)
-        message = await refused(client, "import_graph", actor="ann", document=bad)
+        message = await refused(client, "import_graph", document=bad)
         assert nothing_in(await export_everything(client)), message
         return message
 
     epic = next(n for n in good["nodes"] if n["kind"] == "epic")
     task = next(n for n in good["nodes"] if n["kind"] == "task")
     other = next(n for n in good["nodes"] if n["kind"] == "task" and n["number"] != task["number"])
-    confirmed_fact = next(f for f in good["facts"] if f["confirmed_by"] and f["status"] == "active")
-    replaced_fact = next(f for f in good["facts"] if f["status"] == "superseded")
-    withdrawn_fact = next(f for f in good["facts"] if f["status"] == "withdrawn")
-    linked_fact = next(f for f in good["facts"] if f["decision_ids"])
+    confirmed_note = next(
+        n for n in good["notes"] if n["confirmed_by"] and n["status"] == "confirmed"
+    )
+    replaced_note = next(n for n in good["notes"] if n["status"] == "superseded")
+    withdrawn_note = next(n for n in good["notes"] if n["status"] == "withdrawn")
+    linked_note = next(n for n in good["notes"] if n["note_ids"])
+    decided_note = next(n for n in good["notes"] if n["decided_by"])
 
     def lose_the_epic(bad: dict[str, Any]) -> None:
         bad["nodes"] = [
@@ -262,16 +397,18 @@ async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, An
 
     def not_refs(bad: dict[str, Any]) -> None:
         bad["nodes"][1]["parent"] = "Epic:1"
-        bad["facts"][0]["nodes"] = ["12"]
+        bad["notes"][0]["nodes"] = ["12"]
         bad["events"][0]["node"] = "node:3"
 
     message = await refusal(not_refs)
     meant = "must name an epic, story or task by its kind and number, such as story:12"
-    for place in ("nodes[1].parent", "facts[0].nodes[0]", "events[0].node"):
+    for place in ("nodes[1].parent", "notes[0].nodes[0]", "events[0].node"):
         assert f"{place}: {meant}" in message, (place, message)
 
     message = await refusal(lambda bad: bad.__setitem__("format", "something-else"))
     assert "format:" in message and "vrum-export" in message
+    message = await refusal(lambda bad: bad.__setitem__("version", 7))
+    assert "version:" in message
     message = await refusal(lambda bad: bad["links"].pop())
     assert "counts.links says" in message and "cut short" in message
     message = await refusal(lambda bad: bad["nodes"].append(dict(bad["nodes"][0])))
@@ -284,50 +421,89 @@ async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, An
     assert "document.nodes[3].body field contains what looks like a GitHub token" in message
     assert "ghp_" not in message.replace("looks like a GitHub token", "")
 
-    # Facts and decisions have to hang together: what a fact concerns is in the file, a confirmation
-    # names a person and a time, and a record that ended says how and why.
-    def lose_a_decision(bad: dict[str, Any]) -> None:
-        bad["decisions"] = [
-            d for d in bad["decisions"] if d["id"] not in linked_fact["decision_ids"]
-        ]
-        bad["counts"]["decisions"] = len(bad["decisions"])
+    # The ticks of the checks have to hang together too: they are on a story or task in the file,
+    # and an agent that ticked one said how it checked.
+    def tick_on_nothing(bad: dict[str, Any]) -> None:
+        bad["checks"][0]["node"] = "task:9999"
 
-    message = await refusal(lose_a_decision)
-    assert "decision_ids=" in message and "is not in the file" in message
+    message = await refusal(tick_on_nothing)
+    assert "node=task:9999 is not in the file" in message
+
+    def tick_on_the_epic(bad: dict[str, Any]) -> None:
+        bad["checks"][0]["node"] = f"epic:{epic['number']}"
+
+    message = await refusal(tick_on_the_epic)
+    assert "must be a story or a task" in message
+
+    def an_agent_that_said_nothing(bad: dict[str, Any]) -> None:
+        next(c for c in bad["checks"] if c["checked_by_kind"] == "agent")["evidence"] = None
+
+    message = await refusal(an_agent_that_said_nothing)
+    assert "a check ticked by an agent needs evidence" in message
+
+    # Notes have to hang together: what a note concerns is in the file, a confirmation names a
+    # person and a time, a decision names who decided it and when, and a note that ended says how
+    # and why.
+    def lose_a_note(bad: dict[str, Any]) -> None:
+        bad["notes"] = [n for n in bad["notes"] if n["id"] not in linked_note["note_ids"]]
+        bad["counts"]["notes"] = len(bad["notes"])
+
+    message = await refusal(lose_a_note)
+    assert "note_ids=" in message and "is not in the file" in message
 
     def confirmed_by_nobody_at_no_time(bad: dict[str, Any]) -> None:
-        one = next(f for f in bad["facts"] if f["id"] == confirmed_fact["id"])
+        one = next(n for n in bad["notes"] if n["id"] == confirmed_note["id"])
         one["confirmed_at"] = None
 
     message = await refusal(confirmed_by_nobody_at_no_time)
     assert "confirmed_by and confirmed_at go together" in message
 
+    def decided_on_no_day(bad: dict[str, Any]) -> None:
+        one = next(n for n in bad["notes"] if n["id"] == decided_note["id"])
+        one["decided_on"] = None
+
+    message = await refusal(decided_on_no_day)
+    assert "decided_by and decided_on go together" in message
+
     def replaced_by_nothing(bad: dict[str, Any]) -> None:
-        one = next(f for f in bad["facts"] if f["id"] == replaced_fact["id"])
+        one = next(n for n in bad["notes"] if n["id"] == replaced_note["id"])
         one["superseded_by_id"] = None
 
     message = await refusal(replaced_by_nothing)
-    assert "a superseded fact needs superseded_by_id" in message
+    assert "a superseded note needs superseded_by_id" in message
 
     def withdrawn_for_no_reason(bad: dict[str, Any]) -> None:
-        one = next(f for f in bad["facts"] if f["id"] == withdrawn_fact["id"])
+        one = next(n for n in bad["notes"] if n["id"] == withdrawn_note["id"])
         one["status_reason"] = None
 
     message = await refusal(withdrawn_for_no_reason)
-    assert "a withdrawn fact needs status_reason" in message
+    assert "a withdrawn note needs status_reason" in message
 
     def wide_by_word_of_mouth(bad: dict[str, Any]) -> None:
-        bad["decisions"][0]["project_wide"] = "yes"
+        bad["notes"][0]["project_wide"] = "yes"
 
     message = await refusal(wide_by_word_of_mouth)
-    assert "decisions[0].project_wide: Input should be a valid boolean" in message
+    assert "notes[0].project_wide: Input should be a valid boolean" in message
 
-    def no_source(bad: dict[str, Any]) -> None:
-        bad["facts"][0]["source"] = "  "
+    def no_why(bad: dict[str, Any]) -> None:
+        bad["notes"][0]["why"] = "  "
 
-    message = await refusal(no_source)
-    assert "The database refused this file, so nothing was imported" in message
-    assert "fact source is not blank" in message
+    message = await refusal(no_why)
+    assert "notes[0]" in message and "why cannot be empty" in message
+
+    def the_old_names(bad: dict[str, Any]) -> None:
+        bad["decisions"] = []
+        bad["facts"] = []
+
+    message = await refusal(the_old_names)
+    assert "decisions: Extra inputs are not permitted" in message
+
+    # A definition of done is a person's: a file that says an agent wrote one is refused.
+    def written_by_an_agent(bad: dict[str, Any]) -> None:
+        bad["definition_of_done"][0]["updated_by_kind"] = "agent"
+
+    message = await refusal(written_by_an_agent)
+    assert "definition_of_done[0].updated_by_kind: Input should be 'person'" in message
 
     # The database checks what the file says, whatever the file claims: a circle of waiting, and a
     # start date after the target date.
@@ -368,8 +544,9 @@ async def test_a_backup_restores_into_a_fresh_container_and_the_export_is_identi
     stack: SecondStack, tmp_path: Path
 ) -> None:
     stack.up()
+    assert stack.project is not None
     async with stack.client() as client:
-        world = await a_world_with_references(client)
+        world = await a_world_with_references(client, stack.project)
         original = await export_everything(client)
     assert await distinct_transactions(stack) > 1
     backup = tmp_path / "vrum.dump"
@@ -393,9 +570,9 @@ async def test_a_backup_restores_into_a_fresh_container_and_the_export_is_identi
 
     assert restored.returncode == 0, restored.stdout + restored.stderr
     assert "Restored from" in restored.stdout
+    assert f"{len(original['notes'])} notes" in restored.stdout
     # The backup holds the whole install: the same person signs in again with the same password
     # and finds the project, and the project's agent key still works.
-    assert stack.project is not None
     again = stack.project.owner.sign_in_again()
     listed = again.call("GET", "/board/api/projects")
     assert listed.status == 200
@@ -405,30 +582,23 @@ async def test_a_backup_restores_into_a_fresh_container_and_the_export_is_identi
         # The event log reads in order, and what is written after the restore comes after it.
         assert await distinct_transactions(stack) == 1
         last = original["events"][-1]["id"]
-        new = await ok(client, "create_node", actor="ann", kind="epic", title="After the restore")
+        new = await ok(client, "create_node", kind="epic", title="After the restore")
         assert new["ref"] == f"epic:{next_number(original, 'epic')}"
         changes = await ok(client, "changes_since", after_event_id=last, limit=50)
         assert [event["node"] for event in changes["items"]] == [new["ref"]]
-        # What a person confirmed is still confirmed, and the numbers of facts and decisions carry
-        # on after the restore as they do after an import.
-        confirmed = await ok(client, "get_fact", fact_id=world["fact1"]["id"])
-        assert (confirmed["confirmation"], confirmed["confirmed_by"]) == ("confirmed", "Marie")
+        # What a person confirmed is still confirmed, and the numbers of notes carry on after the
+        # restore as they do after an import.
+        confirmed = await ok(client, "get_note", note_id=world["fact1"]["id"])
+        assert (confirmed["status"], confirmed["confirmed_by"]) == ("confirmed", "Marie")
         recalled = await ok(client, "recall", node=world["task3"]["ref"])
-        assert [i["decision"]["id"] for i in recalled["project_wide_decisions"]["items"]] == [
+        assert [i["note"]["id"] for i in recalled["project_wide_notes"]["items"]] == [
             world["wide"]["id"]
         ]
-        fact = await ok(client, "retain_fact", actor="ann", text="After the restore", source="Here")
-        assert fact["id"] == max(item["id"] for item in original["facts"]) + 1
-        decision = await ok(
-            client,
-            "record_decision",
-            actor="ann",
-            title="After the restore",
-            text="Carry on.",
-            reason="Because",
-            decided_by="Marie",
-        )
-        assert decision["id"] == max(item["id"] for item in original["decisions"]) + 1
+        top = max(item["id"] for item in original["notes"])
+        plain = await ok(client, "add_note", text="After the restore", why="Here")
+        assert plain["id"] == top + 1
+        decided = await ok(client, "add_note", text="Carry on.", why="Because", decided_by="Marie")
+        assert decided["id"] == top + 2
         everything = await ok(client, "changes_since", after_event_id=0, limit=200)
         assert [event["id"] for event in everything["items"][:3]] == [
             event["id"] for event in original["events"][:3]

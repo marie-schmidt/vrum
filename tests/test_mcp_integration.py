@@ -1,13 +1,17 @@
 """Tests against the running containers, through a real MCP client (see ./check.sh)."""
 
 import urllib.request
+from typing import Any
 
 import pytest
 from mcp import Client
 
+from tests.world import the_project
+
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
-# The tools of the product: work, requirements, search, decisions, facts and confirmation.
+# The tools of the product: work, acceptance criteria, definition of done, search, notes and
+# confirmation.
 WORK = {
     "server_status",
     "create_node",
@@ -30,13 +34,12 @@ WORK = {
     "update_nodes",
     "changes_since",
 }
-REQUIREMENTS = {
+CRITERIA = {
     "create_rule",
     "get_rule",
     "list_rules",
     "update_rule",
     "place_rule",
-    "move_rule",
     "rule_history",
     "coverage_report",
 }
@@ -50,27 +53,20 @@ FINDING = {
     "import_graph",
     "recall",
 }
-DECISIONS = {
-    "record_decision",
-    "get_decision",
-    "list_decisions",
-    "link_decision",
-    "unlink_decision",
-    "supersede_decision",
-    "withdraw_decision",
-    "decision_history",
-}
-FACTS = {
-    "retain_fact",
-    "get_fact",
-    "list_facts",
-    "link_fact",
-    "unlink_fact",
-    "supersede_fact",
-    "withdraw_fact",
-    "fact_history",
+NOTES = {
+    "add_note",
+    "get_note",
+    "list_notes",
+    "link_note",
+    "unlink_note",
+    "supersede_note",
+    "withdraw_note",
+    "note_history",
 }
 CONFIRMATION = {"set_confirmation"}
+DEFINITION = {"get_definition_of_done", "set_definition_of_done", "set_check"}
+# The tools only a person may use: no key is offered them.
+PEOPLE_ONLY = CONFIRMATION | {"set_definition_of_done"}
 
 # Tools that only read: the board's Try it may run exactly these.
 READS = {
@@ -86,21 +82,21 @@ READS = {
     "list_rules",
     "rule_history",
     "coverage_report",
+    "get_definition_of_done",
     "search",
     "similar_items",
     "find_overlaps",
     "find_mentions",
     "export_graph",
     "recall",
-    "get_decision",
-    "list_decisions",
-    "decision_history",
-    "get_fact",
-    "list_facts",
-    "fact_history",
+    "get_note",
+    "list_notes",
+    "note_history",
 }
 
-# What the product no longer has: server-side generation, beliefs, principles and the memory tools.
+# What the product no longer has: server-side generation, beliefs, principles and the memory tools,
+# decisions and facts as two kinds of record (they are notes now), and the tool that moved a
+# requirement (place_rule places or moves).
 GONE = {
     "extract_facts",
     "consolidate_memory",
@@ -116,16 +112,46 @@ GONE = {
     "get_memory",
     "list_memories",
     "memory_history",
+    "record_decision",
+    "retain_fact",
+    "get_decision",
+    "get_fact",
+    "list_decisions",
+    "list_facts",
+    "link_decision",
+    "link_fact",
+    "unlink_decision",
+    "unlink_fact",
+    "supersede_decision",
+    "supersede_fact",
+    "withdraw_decision",
+    "withdraw_fact",
+    "decision_history",
+    "fact_history",
+    "move_rule",
 }
+
+EVERY_TOOL = WORK | CRITERIA | FINDING | NOTES | CONFIRMATION | DEFINITION
+
+
+def tools_on_the_board() -> list[dict[str, Any]]:
+    """The server's own list of every tool it has, which the board reads: a key is never offered
+    the tool only a person may use, so the client's list is one short of it."""
+    reply = the_project().owner.call("GET", "/board/api/tools")
+    assert reply.status == 200, reply.body
+    return list(reply.body["tools"])
 
 
 async def test_the_client_lists_the_tools(client: Client) -> None:
     tools = (await client.list_tools()).tools
     names = {tool.name for tool in tools}
-    assert names == WORK | REQUIREMENTS | FINDING | DECISIONS | FACTS | CONFIRMATION
-    assert len(tools) == len(names) == 53
+    # The key the tests use is allowed every tool a key can have: all but the ones a person uses.
+    assert names == EVERY_TOOL - PEOPLE_ONLY
+    assert len(tools) == len(names) == 45
     assert not names & GONE
     assert all(tool.description for tool in tools)
+    on_the_board = {tool["name"] for tool in tools_on_the_board()}
+    assert on_the_board == EVERY_TOOL and len(on_the_board) == 47
 
 
 async def test_exactly_the_reading_tools_are_marked_as_only_reading(client: Client) -> None:
@@ -138,33 +164,33 @@ async def test_exactly_the_reading_tools_are_marked_as_only_reading(client: Clie
     assert marked == READS
 
 
-async def test_the_tools_that_record_something_ask_for_the_source_reason_and_person(
-    client: Client,
-) -> None:
-    tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+async def test_the_tools_that_record_something_ask_for_the_reason_and_the_person() -> None:
+    schemas = {tool["name"]: tool["input_schema"] for tool in tools_on_the_board()}
 
     def required(name: str) -> set[str]:
-        return set(tools[name].input_schema.get("required", []))
+        return set(schemas[name].get("required", []))
 
-    assert {"actor", "text", "source"} <= required("retain_fact")
-    assert {"actor", "title", "text", "reason", "decided_by"} <= required("record_decision")
-    assert {"actor", "replaces", "reason", "text", "source"} <= required("supersede_fact")
-    assert {"actor", "fact_ids", "reason"} <= required("withdraw_fact")
-    assert {"actor", "decision_id", "title", "text", "reason", "decided_by"} <= required(
-        "supersede_decision"
-    )
-    assert {"actor", "decision_id", "reason"} <= required("withdraw_decision")
-    assert {"actor", "kind", "record_id", "confirmation", "person"} <= required("set_confirmation")
+    def properties(name: str) -> set[str]:
+        return set(schemas[name]["properties"])
+
+    assert required("add_note") == {"text", "why"}
+    assert required("supersede_note") == {"replaces", "text", "why"}
+    assert required("withdraw_note") == {"note_ids", "reason"}
+    assert required("set_confirmation") == {"note_id", "confirmation", "person"}
+    # No tool asks who is calling (the server knows from the key), and a note has no title and no
+    # source: it has its text and its why.
+    for name in ("add_note", "supersede_note", "withdraw_note", "set_confirmation"):
+        assert not properties(name) & {"actor", "title", "source", "kind"}
+    assert "reason" not in properties("supersede_note")
     # Who a person is and what they said are only ever asked for together with the change.
-    for name in ("supersede_fact", "withdraw_fact", "supersede_decision", "withdraw_decision"):
-        assert {"said_by", "quote"} <= set(tools[name].input_schema["properties"])
+    for name in ("supersede_note", "withdraw_note"):
+        assert {"said_by", "quote"} <= properties(name)
         assert not {"said_by", "quote"} & required(name)
-    # Recording a record has no way of saying that it is confirmed.
-    for name in ("retain_fact", "record_decision"):
-        properties = set(tools[name].input_schema["properties"])
-        assert not properties & {"confirmed_by", "confirmed_at", "confirmation"}
-    assert "project_wide" in tools["record_decision"].input_schema["properties"]
-    assert "project_wide" in tools["supersede_decision"].input_schema["properties"]
+    # Recording a note has no way of saying that it is confirmed: its status is not an argument.
+    for name in ("add_note", "supersede_note"):
+        assert not properties(name) & {"confirmed_by", "confirmed_at", "confirmation", "status"}
+    assert {"decided_by", "decided_on", "project_wide"} <= properties("add_note")
+    assert {"decided_by", "decided_on", "project_wide"} <= properties("supersede_note")
 
 
 async def test_server_status_reports_the_real_database_and_pgvector(client: Client) -> None:

@@ -14,8 +14,9 @@ import pytest
 from playwright.async_api import expect
 
 from tests.board_helpers import SLOW, browser_page, create_in_browser, made
-from tests.helpers import compose, connect, ok, unique_word
+from tests.helpers import compose, connect, ok, refused, unique_word
 from tests.world import api, make_project, register, server_base
+from vrum.surface import AGENT_TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -50,7 +51,13 @@ async def register_in_the_browser(w, name: str, email: str, password: str) -> No
 
 
 async def create_in_the_browser(w, kind: str, title: str, parent: str | None = None) -> str:  # type: ignore[no-untyped-def]
-    return await create_in_browser(w.page, kind, title, parent)
+    """Make an item with the Board's New item form, which goes to the page of the new item."""
+    await w.go("#/board")
+    await expect(w.page.locator("#new-item")).to_be_visible(timeout=SLOW)
+    ref = await create_in_browser(w.page, kind, title, parent)
+    await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", ref, timeout=SLOW)
+    await expect(w.page.locator("nav.crumbs .crumb-view a")).to_have_text("Board")
+    return ref
 
 
 async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_restart() -> None:
@@ -89,17 +96,22 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         epic = await create_in_the_browser(w, "epic", f"Portal {word}")
         story = await create_in_the_browser(w, "story", f"Sign in {word}", epic)
         task = await create_in_the_browser(w, "task", f"Login form {word}", story)
+        # Back on the Board, the new work is in its lanes and cards.
+        await w.go("#/board")
         await expect(w.page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
 
-        # An agent key made on the project's own page (the Settings menu's Agent access) reaches
-        # the same records over MCP.
+        # An agent key made on the project's own Users page (the Settings menu) reaches the same
+        # records over MCP.
         await w.page.locator("#settings-menu").click()
-        await w.page.locator("#settings-access").click()
-        await expect(w.page.locator("#key-label")).to_be_visible(timeout=SLOW)
-        assert "#/access" in w.page.url
-        await w.page.locator("#key-label").fill("build agent")
+        await w.page.locator("#settings-users").click()
+        await expect(w.page.locator("#key-name")).to_be_visible(timeout=SLOW)
+        assert "#/users" in w.page.url
+        await w.page.locator("#key-name").fill("build agent")
+        await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await w.page.locator("#create-key").click()
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
+        # A key made with no choice of tools is the standard one: the tools Vrum offers agents.
+        await expect(w.page.locator("#new-key-allowed")).to_contain_text("Standard, 25 tools")
         key = (await w.page.locator("#key-secret").inner_text()).strip()
         async with connect(f"{base}/mcp", key) as agent:
             nodes = (await ok(agent, "list_nodes"))["items"]
@@ -128,7 +140,7 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         await w.page.locator("li.project a.open-project").click()
         await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         assert f"/board/p/{project_number}" in w.page.url
-        await w.go("#/board")
+        await w.go("#/board?show=both")
         for item in (story, task):
             await expect(w.page.locator(f".card[data-ref='{item}']").first).to_be_visible(
                 timeout=SLOW
@@ -314,20 +326,22 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
         await made(elsewhere, "epic", f"Elsewhere {word}")
 
     async with browser_page(project.address, token=project.key, name=None) as w:
-        await w.open("#/access")
+        await w.open("#/users")
         await expect(w.page.locator("#keys li.key")).to_have_count(1, timeout=SLOW)
-        await w.page.locator("#key-label").fill(f"second agent {word}")
+        await w.page.locator("#key-name").fill(f"second agent {word}")
+        await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await w.page.locator("#create-key").click()
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
         secret = (await w.page.locator("#key-secret").inner_text()).strip()
         await expect(w.page.locator("#keys li.key")).to_have_count(2, timeout=SLOW)
         # The key is shown once: after leaving the page it is not anywhere on it.
         await w.go("#/board")
-        await w.go("#/access")
+        await w.go("#/users")
         await expect(w.page.locator("#keys li.key")).to_have_count(2, timeout=SLOW)
         assert secret not in await w.page.locator("body").inner_text()
         row = w.page.locator("#keys li.key", has_text=f"second agent {word}")
         await expect(row).to_contain_text(f"{secret[:8]}…")
+        await expect(row.locator(".key-allowance")).to_have_text("Standard, 25 tools")
 
         # A real MCP client with the key does a day's work here, and cannot see the other project.
         async with connect(project.mcp_url, secret) as agent:
@@ -335,17 +349,15 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
             story = await ok(
                 agent,
                 "create_node",
-                actor="agent",
                 kind="story",
                 title=f"A story {word}",
                 parent=task,
             )
-            taken = await ok(agent, "next_work", actor="agent-keyed")
+            taken = await ok(agent, "next_work")
             assert taken["work"]["ref"] == story["ref"] and taken["claim"] is not None
             await ok(
                 agent,
                 "finish_work",
-                actor="agent-keyed",
                 node=story["ref"],
                 outcome="done",
                 note="Done with the key from the board.",
@@ -373,6 +385,98 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
         # The project's first key, and the other project, are as they were.
         async with connect(project.mcp_url, project.key) as agent:
             assert f"Work {word}" in json.dumps(await ok(agent, "list_nodes", limit=200))
+
+
+async def make_key_on_the_page(w, name: str, choice: str | None = None) -> str:  # type: ignore[no-untyped-def]
+    """Make an agent key on the Users page, with one of the quick choices of what it may do (the
+    standard tools when none is chosen), and give the key that is shown once."""
+    await w.go("#/users")
+    await expect(w.page.locator("#key-name")).to_be_visible(timeout=SLOW)
+    await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
+    if choice is not None:
+        await w.page.locator(f"#key-tools-choice-{choice}").click()
+        await expect(w.page.locator(f"#key-tools-choice-{choice}")).to_have_attribute(
+            "aria-checked", "true"
+        )
+    await w.page.locator("#key-name").fill(name)
+    await w.page.locator("#create-key").click()
+    await expect(w.page.locator("#new-key-title")).to_contain_text(name, timeout=SLOW)
+    await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
+    return str((await w.page.locator("#key-secret").inner_text()).strip())
+
+
+async def test_the_key_picker_makes_standard_read_only_and_everything_keys_the_server_holds() -> (
+    None
+):
+    word = unique_word()
+    owner = register(name=f"Picker {word}")
+    project = make_project(owner, f"Picked {word}")
+    listing = owner.call("GET", "/board/api/tools")
+    assert listing.status == 200
+    tools = listing.body["tools"]
+    offered = {t["name"] for t in tools if t["offered_to_agents"]}
+    assert offered == set(AGENT_TOOLS) and listing.body["most_agent_tools"] == len(offered) == 25
+    readers = {t["name"] for t in tools if t["offered_to_agents"] and not t["changes_something"]}
+    grantable = {t["name"] for t in tools if not t["people_only"]}
+    assert len(grantable) == len(tools) - 2
+
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        page = w.page
+        await w.open("#/users")
+        await expect(page.locator("#create-key")).to_be_enabled(timeout=SLOW)
+        # A new key starts as the standard one, which sends no list of tools of its own; the
+        # tools that are not offered to agents by default are in a fold that starts closed.
+        await expect(page.locator("#key-tools-choice-standard")).to_have_attribute(
+            "aria-checked", "true"
+        )
+        await expect(page.locator("#key-tools-choice-everything")).to_be_visible()
+        await page.locator("#key-tools-toggle").click()
+        fold = page.locator("#key-tools-not-offered")
+        await expect(fold).to_be_hidden()
+        await page.locator(".kt-group-other .kt-fold-named").click()
+        await expect(fold).to_be_visible()
+        await expect(fold.locator("li.kt-tool[data-offered='0']")).to_have_count(len(tools) - 25)
+        await expect(page.locator("li.kt-tool[data-offered='1']")).to_have_count(25)
+        await page.locator("#key-tools-toggle").click()
+
+        # Standard: exactly the 25 tools, and any other is refused in words that say it is done
+        # on the board.
+        standard = await make_key_on_the_page(w, f"standard-{word}")
+        row = page.locator("#keys li.key", has_text=f"standard-{word}")
+        await expect(row.locator(".key-allowance")).to_have_text("Standard, 25 tools")
+        await expect(row).to_have_attribute("data-state", "active")
+        await expect(row.locator(".key-allowance")).to_have_attribute("data-allowance", "standard")
+        async with connect(project.mcp_url, standard) as agent:
+            assert {t.name for t in (await agent.list_tools()).tools} == set(AGENT_TOOLS)
+            said = await refused(agent, "server_status")
+            assert "is not one of the tools Vrum offers agents" in said
+            assert "done on the board, by a person" in said
+
+        # Read only: the tools that only read, and nothing that changes anything.
+        read = await make_key_on_the_page(w, f"read-{word}", "read")
+        row = page.locator("#keys li.key", has_text=f"read-{word}")
+        await expect(row.locator(".key-allowance")).to_have_attribute("data-allowance", "read")
+        async with connect(project.mcp_url, read) as agent:
+            assert {t.name for t in (await agent.list_tools()).tools} == readers
+            said = await refused(agent, "create_node", kind="epic", title="Not allowed")
+            assert "is not allowed to use create_node" in said
+            assert (await ok(agent, "list_nodes", limit=1))["total"] == 0
+
+        # Everything, including administration: every tool a key can have, as a list of its own
+        # (so a tool added later is not in it), and the one only people may use is not.
+        everything = await make_key_on_the_page(w, f"admin-{word}", "everything")
+        row = page.locator("#keys li.key", has_text=f"admin-{word}")
+        await expect(row.locator(".key-allowance")).to_have_attribute(
+            "data-allowance", "everything"
+        )
+        await expect(row.locator(".key-allowance")).to_have_text(
+            f"Everything, {len(grantable)} tools"
+        )
+        async with connect(project.mcp_url, everything) as agent:
+            assert {t.name for t in (await agent.list_tools()).tools} == grantable
+            assert (await ok(agent, "server_status"))["counts"]["epics"] == 0
+            assert (await ok(agent, "export_graph", limit=1))["format"] == "vrum-export"
+        assert w.problems == []
 
 
 async def test_a_session_that_ended_sends_the_page_back_to_sign_in_and_signing_in_returns() -> None:
@@ -417,35 +521,43 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
     word = unique_word()
     owner = register(name=f"A person with quite a long name {word}")
     project = make_project(owner, f"A project with a long name too {word}")
-    agreed = """() => {
+    long_title = (
+        f"Under the bar, with a title that is a good deal longer than the bar is wide {word}"
+    )
+    # What sticks under the bar on a page (the section list of a record's page, the side column of
+    # the Activity page) starts below where the bar really ends: it is published as --top-now.
+    agreed = """(selector) => {
         const near = (a, b) => Math.abs(a - b) < 0.5;
         const bar = document.getElementById('top').getBoundingClientRect().height;
         const said = getComputedStyle(document.documentElement).getPropertyValue('--top-now');
-        const below = ['drawer', 'panel'].every((id) => {
-            const column = getComputedStyle(document.getElementById(id));
-            return column.position !== 'sticky' || near(parseFloat(column.top), bar);
-        });
-        return near(parseFloat(said), bar) && below;
+        const column = document.querySelector(selector);
+        if (!column || !near(parseFloat(said), bar)) return false;
+        const style = getComputedStyle(column);
+        return style.position === 'sticky' && parseFloat(style.top) >= bar - 0.5;
     }"""
     async with (
         connect(project.mcp_url, project.key) as agent,
         browser_page(project.address, token=project.key, name=None) as w,
     ):
-        epic = await made(agent, "epic", f"Under the bar {word}")
-        await w.open(f"#/board?drawer=activity&sel={epic}")
+        epic = await made(agent, "epic", long_title)
+        await w.open(f"#/item?item={epic}&from=board")
+        await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", epic, timeout=SLOW)
         await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
-        await expect(w.page.locator("#drawer")).to_be_visible(timeout=SLOW)
-        await expect(w.page.locator("#panel")).to_be_visible(timeout=SLOW)
-        # What sticks (the drawer on the left and the detail panel on the right) must start below
-        # the bar, whatever height the bar really has: it is published as --top-now, and the long
-        # names (which are in the sidebar and the breadcrumbs now) truncate instead of wrapping it.
-        await w.page.wait_for_function(agreed, timeout=SLOW)
-        for column in ("drawer", "panel"):
-            assert (
-                await w.page.evaluate(
-                    f"getComputedStyle(document.getElementById('{column}')).position"
-                )
-                == "sticky"
-            )
+        # The long names (the person's, the project's and the item's, which are in the sidebar and
+        # the path) are cut short instead of making the bar taller, and what sticks starts below it.
+        await w.page.wait_for_function(agreed, arg=".item-nav", timeout=SLOW)
+        top = await w.page.evaluate(
+            "parseFloat(getComputedStyle(document.querySelector('.item-nav')).top)"
+        )
+        bar = await w.page.evaluate("document.getElementById('top').getBoundingClientRect().height")
+        assert abs(top - bar) < 0.5
+        # There is no panel or drawer that could stick under it as well.
+        assert await w.page.locator("#panel, #drawer").count() == 0
         await w.page.set_viewport_size({"width": 700, "height": 1500})
-        await w.page.wait_for_function(agreed, timeout=SLOW)
+        await w.page.wait_for_function(agreed, arg=".item-nav", timeout=SLOW)
+        await w.page.set_viewport_size({"width": 1500, "height": 1500})
+        # The Activity page keeps who is working on what in view beside the feed, below the bar.
+        await w.go("#/activity")
+        await expect(w.page.locator("#working")).to_be_visible(timeout=SLOW)
+        await w.page.wait_for_function(agreed, arg=".activity-side", timeout=SLOW)
+        assert await w.page.locator("#panel, #drawer").count() == 0

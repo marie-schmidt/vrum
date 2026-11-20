@@ -106,8 +106,8 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     for link in document["links"]:
         pairs.append((key_of(link["source"]), key_of(link["target"])))
     for rule in document["rules"]:
-        if rule["story"] is not None:
-            pairs.append((("rule", rule["id"]), key_of(rule["story"])))
+        if rule["node"] is not None:
+            pairs.append((("rule", rule["id"]), key_of(rule["node"])))
     for d in document["decisions"]:
         here = ("decision", d["id"])
         pairs += [(here, key_of(x)) for x in d["nodes"]]

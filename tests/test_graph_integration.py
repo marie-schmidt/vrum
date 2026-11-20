@@ -4,7 +4,8 @@ import anyio
 import pytest
 from mcp import Client
 
-from tests.helpers import all_nodes, make_tree, node_core, ok, refused
+from tests.helpers import all_nodes, connect_as, make_tree, node_core, ok, refused, unique_word
+from tests.world import HARNESS_AGENT
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -29,21 +30,23 @@ async def test_a_valid_epic_story_and_task_are_created_and_their_history_is_read
         assert not {"id", "parent_id"} & set(node)
     assert node_core(await ok(client, "get_node", node=task["ref"])) == node_core(task)
 
-    changed = await ok(
-        client,
-        "update_node",
-        actor="agent-1",
-        node=task["ref"],
-        expected_version=1,
-        status="in_progress",
-        title="A better task title",
-    )
+    # Who changed it is the agent whose key makes the change, and nothing else.
+    agent = f"agent-{unique_word()}"
+    async with connect_as(agent) as by_agent:
+        changed = await ok(
+            by_agent,
+            "update_node",
+            node=task["ref"],
+            expected_version=1,
+            status="in_progress",
+            title="A better task title",
+        )
     assert (changed["version"], changed["status"]) == (2, "in_progress")
 
     history = (await ok(client, "node_history", node=task["ref"]))["items"]
     assert [(event["action"], event["actor"]) for event in history] == [
-        ("create", "agent-1"),
-        ("update", "agent-1"),
+        ("create", HARNESS_AGENT),
+        ("update", agent),
     ]
     assert all(event["node"] == task["ref"] for event in history)
     assert history[0]["before"] is None
@@ -105,7 +108,8 @@ async def test_a_node_cannot_be_given_a_second_parent(client: Client) -> None:
         parent=other_epic["ref"],
     )
     assert "exactly one parent" in message
-    assert "move_node" in message
+    # An agent is told a person moves it, on the board (the tool is not one it is offered).
+    assert "a person moves it on the board" in message and "move_node" not in message
     after = await ok(client, "get_node", node=story["ref"])
     assert (after["parent"], after["version"]) == (epic["ref"], 1)
 
@@ -188,29 +192,31 @@ async def test_moving_a_node_replaces_its_parent_in_one_logged_step(client: Clie
         parent=epic["ref"],
     )
 
-    moved = await ok(
-        client,
-        "move_node",
-        actor="ann",
-        node=story["ref"],
-        expected_version=1,
-        new_parent=other_epic["ref"],
-    )
-    assert (moved["parent"], moved["version"]) == (other_epic["ref"], 2)
-    assert (await ok(client, "get_node", node=task["ref"]))["parent"] == story["ref"]
-    assert [n["ref"] for n in await all_nodes(client, parent=epic["ref"])] == [other_story["ref"]]
+    ann, bob = f"ann-{unique_word()}", f"bob-{unique_word()}"
+    async with connect_as(ann) as by_ann, connect_as(bob) as by_bob:
+        moved = await ok(
+            by_ann,
+            "move_node",
+            node=story["ref"],
+            expected_version=1,
+            new_parent=other_epic["ref"],
+        )
+        assert (moved["parent"], moved["version"]) == (other_epic["ref"], 2)
+        assert (await ok(client, "get_node", node=task["ref"]))["parent"] == story["ref"]
+        assert [n["ref"] for n in await all_nodes(client, parent=epic["ref"])] == [
+            other_story["ref"]
+        ]
 
-    await ok(
-        client,
-        "move_node",
-        actor="bob",
-        node=task["ref"],
-        expected_version=1,
-        new_parent=other_story["ref"],
-    )
+        await ok(
+            by_bob,
+            "move_node",
+            node=task["ref"],
+            expected_version=1,
+            new_parent=other_story["ref"],
+        )
 
     history = (await ok(client, "node_history", node=story["ref"]))["items"]
-    assert (history[1]["action"], history[1]["actor"]) == ("move", "ann")
+    assert (history[1]["action"], history[1]["actor"]) == ("move", ann)
     assert history[1]["before"] == {"parent": epic["ref"], "version": 1}
     assert history[1]["after"] == {"parent": other_epic["ref"], "version": 2}
 
@@ -272,8 +278,6 @@ async def test_changes_that_make_no_sense_are_refused_in_plain_words(client: Cli
     assert "priority must be one of low, normal, high, urgent" in message
     message = await refused(client, "update_node", actor="a", title="   ", **edit)
     assert "title cannot be empty" in message
-    message = await refused(client, "update_node", actor=" ", title="x", **edit)
-    assert "actor must be the name of a person or an agent" in message
     message = await refused(client, "update_node", actor="a", title="A story", **edit)
     assert "Nothing to change" in message
     message = await refused(

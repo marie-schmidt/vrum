@@ -1,0 +1,29 @@
+/* The hover card (hovercard.js): a small panel beside the thing it explains. It is a fixed box over the
+   page, placed by the script from its trigger, so no scrolling column cuts it off. Colours and sizes
+   come from tokens.css. */
+
+.hovercard {
+  position: fixed; left: 0; top: 0; z-index: 90; box-sizing: border-box;
+  width: max-content; max-width: min(24rem, calc(100vw - 2 * var(--space-2)));
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface); color: var(--text);
+  border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm); font-weight: 400; line-height: 1.4; text-align: left; white-space: normal; overflow-wrap: anywhere;
+  animation: hovercard-in 120ms ease-out;
+}
+.hovercard[data-placement="above"] { animation-name: hovercard-in-above; }
+.hovercard[data-size="wide"] { max-width: min(42rem, calc(100vw - 2 * var(--space-2))); }
+@keyframes hovercard-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes hovercard-in-above { from { opacity: 0; transform: translateY(4px); } }
+
+.hovercard .hovercard-title { margin: 0 0 var(--space-2); font-size: var(--text-sm); font-weight: 650; color: var(--text); }
+.hovercard p { margin: 0 0 var(--space-2); color: var(--text-2); }
+.hovercard > :last-child { margin-bottom: 0; }
+.hovercard-list { display: grid; gap: var(--space-2); margin: 0 0 var(--space-2); }
+.hovercard-list li { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.hovercard-list .id { flex: none; color: var(--text-2); font-size: var(--text-xs); }
+.hovercard-list a { color: var(--text); text-decoration: none; }
+.hovercard-list a:hover { color: var(--accent-text); text-decoration: underline; }
+.hovercard code { font-size: var(--text-xs); }

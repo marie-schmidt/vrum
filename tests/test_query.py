@@ -72,6 +72,7 @@ def test_every_field_the_language_names_can_be_used() -> None:
         "kind": "kind:task",
         "status": "status:ready",
         "priority": "priority:high",
+        "size": "size:m,l",
         "claimed": "claimed:ann",
         "parent": "parent:epic:3",
         "epic": "epic:3",
@@ -89,6 +90,19 @@ def test_every_field_the_language_names_can_be_used() -> None:
         compile_query(f"is:{flag}")
     for empty in NO_FIELDS:
         compile_query(f"no:{empty}")
+
+
+def test_a_size_is_one_of_the_five_and_no_size_finds_the_work_that_needs_one() -> None:
+    sql, params = sql_of("size:M,l")
+    assert "size = ANY(%(q0)s)" in sql and params == {"q0": ["m", "l"]}
+    assert "NOT COALESCE(size = ANY(%(q0)s), false)" in sql_of("-size:xs")[0]
+    # Only a story or task can need a size, and a story with tasks adds up theirs.
+    needing = sql_of("no:size")[0]
+    assert "kind <> 'epic' AND size IS NULL" in needing and "NOT EXISTS" in needing
+    with pytest.raises(
+        Refusal, match="size must be one of xs, s, m, l, xl, but one value is 'big'"
+    ):
+        compile_query("size:big")
 
 
 def test_an_epic_or_a_story_is_found_by_its_number_and_a_parent_by_its_reference() -> None:
@@ -109,6 +123,8 @@ def test_an_epic_or_a_story_is_found_by_its_number_and_a_parent_by_its_reference
     number, params = sql_of("kind:task number:5")
     assert "number = ANY(%(q1)s)" in number and params == {"q0": ["task"], "q1": [5]}
     assert "parent IS NULL" in sql_of("no:parent")[0]
+    # Only a story or task can hold a criterion, so an epic is never "without" one.
+    assert "kind <> 'epic' AND criteria_total = 0" in sql_of("no:criteria")[0]
 
 
 def test_nothing_that_was_typed_becomes_part_of_the_sql() -> None:

@@ -1,16 +1,17 @@
 """Write a Markdown copy of the graph of a running Vrum into a folder: one file per epic, story,
-task, requirement (a rule), decision and fact, with its fields at the top and its links written
-as [[references]], to read in Obsidian or keep in git. A decision or fact says whether it still
-counts and whether a person confirmed it.
+task, acceptance criterion (a rule) and note, and one for the definition of done, with its fields
+at the top and its links written
+as [[references]], to read in Obsidian or keep in git. A note says where it stands (unconfirmed,
+confirmed by a person, replaced or withdrawn) and who decided it, if somebody did.
 
     VRUM_AGENT_KEY=<the agent key of the project> uv run python scripts/export_markdown.py \\
         http://127.0.0.1:8000/mcp vrum-notes
 
 The copy is read-only: it is made again from the graph each time. This replaces the folders epics,
-stories, tasks, rules, decisions and facts inside the target folder and leaves anything
-else in it alone. A target folder that has something else in it and was not made by this script is
-refused, so that nothing of yours is overwritten. The same graph gives the same files, so a copy
-kept in git only changes when the graph does."""
+stories, tasks, rules and notes, and the file definition-of-done.md, inside the target folder and
+leaves anything else in it alone. A target folder that has something else in it and was not made by
+this script is refused, so that nothing of yours is overwritten. The same graph gives the same
+files, so a copy kept in git only changes when the graph does."""
 
 import asyncio
 import shutil
@@ -19,12 +20,13 @@ from pathlib import Path
 
 from vrum_client import connect, fetch_export
 
-from vrum.markdown import FOLDERS, render
+from vrum.markdown import DEFINITION_FILE, FOLDERS, render
 
 MARKER = ".vrum-export"
 MARKER_TEXT = (
     "This folder holds a Markdown copy of a Vrum graph, written by scripts/export_markdown.py.\n"
-    "The folders " + ", ".join(FOLDERS) + " are replaced each time it runs: do not edit them.\n"
+    "The folders " + ", ".join(FOLDERS) + f" and the file {DEFINITION_FILE} are replaced each "
+    "time it runs: do not edit them.\n"
     "Anything else in this folder is left alone.\n"
 )
 
@@ -41,6 +43,7 @@ def prepare(target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for folder in FOLDERS:
         shutil.rmtree(target / folder, ignore_errors=True)
+    (target / DEFINITION_FILE).unlink(missing_ok=True)
     (target / MARKER).write_text(MARKER_TEXT, encoding="utf-8")
 
 

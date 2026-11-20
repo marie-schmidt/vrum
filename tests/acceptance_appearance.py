@@ -1,17 +1,19 @@
-"""Chapter 15 of the acceptance scenario: the redesigned workbench in light and dark (M17), driven
-in a real headless Chromium against the real containers, with what the page shows compared with what
-a real MCP client says. Registration, sign-in and the project list are in the new design; Light,
-Dark and System are chosen before and after signing in, kept across a reload and signing out,
-applied before the first paint, and only System follows the operating system; switching appearance
-keeps a filter, a selection and a draft; no screen scrolls sideways at 390, 768, 1280 and 1600 CSS
-pixels or at 200% zoom, in either theme; cards, progress bars and icons are what the records say;
-the keyboard does the work with a visible focus and reduced motion stops the transitions; and a
-lost connection is told and then forgiven. Every proof reads values from the page; none is a
-picture.
+"""Chapter 15 of the acceptance scenario: the redesigned workbench in light and dark (M17, kept by
+M20), driven in a real headless Chromium against the real containers, with what the page shows
+compared with what a real MCP client says. Registration, sign-in and the project list are in the new
+design; Light, Dark and System are chosen before and after signing in, kept across a reload and
+signing out, applied before the first paint, and only System follows the operating system;
+switching appearance keeps a filter, a draft, the words in the search box and the open branches of
+the sidebar's tree; no screen scrolls sideways at 390, 768, 1280 and 1600 CSS pixels or at 200%
+zoom, in either theme, on the three views, Search (with Possible duplicates), Activity, the coverage
+report and the page of each kind of record; cards, progress bars and icons are what the records say;
+the keyboard does the work (a card's title opens its page, the next button moves on) with a visible
+focus and reduced motion stops the transitions; and a lost connection is told and then forgiven.
+Every proof reads values from the page; none is a picture.
 
 The chapter makes its own account, project and agent key, so it needs nothing from the chapters
 before it. Set VRUM_LAYOUT_SHOTS to a folder outside the repository to also keep screenshots of the
-Board and of the Graph with its detail panel in both themes, to look at."""
+Board, of the Graph with its chosen record and of the page of an epic in both themes, to look at."""
 
 import json
 import re
@@ -21,10 +23,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from playwright.async_api import Error as BrowserError
-from playwright.async_api import Page, expect
+from playwright.async_api import FloatRect, Page, expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, Watched, hold_back_news, item_address, made, open_editor
+from tests.board_helpers import (
+    SLOW,
+    Watched,
+    hold_back_news,
+    item_address,
+    item_loaded,
+    made,
+    no_panel_or_drawer,
+    open_editor,
+    pager,
+    tree_expand,
+    tree_item,
+    view_crumb,
+)
 from tests.board_layout import (
     LONG_SOURCE,
     LONG_TITLE,
@@ -182,8 +197,9 @@ async def build_world() -> World:
         )
 
         rule = await ok(
-            client, "create_rule", actor="ann", title="Keep who, when and why", story=ids["S1"]
+            client, "create_rule", actor="ann", title="Keep who, when and why", node=ids["S1"]
         )
+        ids["R1"] = rule["id"]
         decision = await make_decision(
             client,
             "Claims expire; work stays visible",
@@ -428,16 +444,27 @@ async def system_follows_only_when_chosen(world: World) -> None:
     )
 
 
-STATE = """() => {
+BOARD_STATE = """() => {
+  const filter = document.getElementById('filter');
+  return {
+    hash: location.hash, history: history.length, same: window.__same,
+    filter: [filter.value, filter.__same], cards: document.querySelectorAll('.card').length,
+  };
+}"""
+
+PAGE_STATE = """() => {
   const typed = (id) => document.getElementById(id);
   const own = (id) => [typed(id).value, typed(id).__same];
   return {
     hash: location.hash, history: history.length, same: window.__same,
-    filter: own('filter'), title: own('edit-title'), body: own('edit-body'),
+    search: own('global-search'), title: own('edit-title'), body: own('edit-body'),
     caret: [typed('edit-body').selectionStart, typed('edit-body').selectionEnd],
-    selected: [...document.querySelectorAll('.card.selected')].map((card) => card.dataset.ref),
-    cards: document.querySelectorAll('.card').length,
-    panel: document.getElementById('panel').firstElementChild === window.__panel,
+    open: [...document.querySelectorAll('#epic-list li[aria-expanded=true]')]
+      .map((li) => li.dataset.key),
+    current: [...document.querySelectorAll('#epic-list a[aria-current=page]')]
+      .map((a) => a.dataset.ref),
+    page: typed('item-page') === window.__page,
+    details: typed('item-details') === window.__details,
   };
 }"""
 
@@ -448,47 +475,68 @@ async def switching_keeps_what_was_typed(world: World) -> None:
         version = (await ok(client, "get_node", node=task))["version"]
         async with themed_page(world.board, signed_in=True, scheme="light") as w:
             page = w.page
-            await in_project(page, f"{world.board}#/board?q=kind:task&sel={task}")
-            await expect(page.locator("#card-title")).to_contain_text(
-                f"{code_of(task)} ", timeout=SLOW
-            )
-            await expect(page.locator(f".card.selected[data-ref='{task}']")).to_have_count(1)
+            await in_project(page, f"{world.board}#/board?q=kind:task")
+            await expect(page.locator(".card").first).to_be_visible(timeout=SLOW)
             await hold_back_news(page)
             await page.locator("#filter").fill("kind:task status:ready")
+            await page.evaluate(
+                """() => {
+                    window.__same = 'one document';
+                    document.getElementById('filter').__same = 'filter';
+                }"""
+            )
+            on_board: dict[str, Any] = await page.evaluate(BOARD_STATE)
+            asked = len(w.requests)
+            for choice in ("dark", "light", "system", "dark"):
+                await choose(page, choice)
+                await settled(page, resolved_theme(choice, "light"), choice)
+            on_board_after: dict[str, Any] = await page.evaluate(BOARD_STATE)
+            board_quiet = set(api_requests(w.requests[asked:])) <= POLL
+            # The same document goes on to the page of a task, opened with its card's title, where a
+            # draft is typed, words wait in the search box and branches of the tree are open.
+            await page.locator(f".card[data-ref='{task}'] .card-title a").click()
+            await item_loaded(page, task)
+            await tree_expand(page, world["E2"])
             await open_editor(page)
+            await page.locator("#global-search").fill("words not asked yet")
             await page.locator("#edit-title").fill("A draft title that is not saved")
             await page.locator("#edit-body").fill("Draft line one\nDraft line two")
             await page.locator("#edit-body").focus()
             await page.evaluate(
                 """() => {
-                    window.__same = 'one document';
-                    for (const id of ['filter', 'edit-title', 'edit-body']) {
+                    for (const id of ['global-search', 'edit-title', 'edit-body']) {
                         document.getElementById(id).__same = id;
                     }
                     document.getElementById('edit-body').setSelectionRange(5, 9);
-                    window.__panel = document.getElementById('panel').firstElementChild;
+                    window.__page = document.getElementById('item-page');
+                    window.__details = document.getElementById('item-details');
                 }"""
             )
-            before: dict[str, Any] = await page.evaluate(STATE)
+            before: dict[str, Any] = await page.evaluate(PAGE_STATE)
             asked = len(w.requests)
             for choice in ("dark", "light", "system", "dark"):
                 await choose(page, choice)
                 await settled(page, resolved_theme(choice, "light"), choice)
-            after: dict[str, Any] = await page.evaluate(STATE)
+            after: dict[str, Any] = await page.evaluate(PAGE_STATE)
             saved_nothing = (await ok(client, "get_node", node=task))["version"] == version
-            quiet = set(api_requests(w.requests[asked:])) <= POLL
+            quiet = board_quiet and set(api_requests(w.requests[asked:])) <= POLL
     proof(
-        "M17",
-        "switching appearance four times while a filter is typed, a card is selected and a draft "
-        "is in its text boxes leaves the filter, the selection, the draft (and the part of it that "
-        "was selected) exactly as they were: the same page, the same boxes, no navigation, and "
-        "nothing saved",
-        after == before
-        and before["filter"] == ["kind:task status:ready", "filter"]
+        "M20",
+        "switching appearance four times while a filter is typed on the Board, and again on the "
+        "page of a task with a draft in its edit form, words in the top bar's search box and "
+        "branches of the sidebar's tree open, leaves the filter, the draft (and the part of it "
+        "that was selected), the words and the open branches exactly as they were: the same "
+        "page, the same boxes, no navigation, and nothing saved",
+        on_board_after == on_board
+        and on_board["filter"] == ["kind:task status:ready", "filter"]
+        and after == before
         and before["title"] == ["A draft title that is not saved", "edit-title"]
-        and before["selected"] == [task]
+        and before["search"] == ["words not asked yet", "global-search"]
         and before["caret"] == [5, 9]
-        and before["panel"]
+        and before["current"] == [task]
+        and {world["E1"], world["S1"], world["E2"]} <= set(before["open"])
+        and before["page"]
+        and before["details"]
         and saved_nothing
         and quiet,
         f"hash {after['hash'][:40]}",
@@ -501,23 +549,28 @@ async def switching_keeps_what_was_typed(world: World) -> None:
 def views(world: World) -> list[Stop]:
     ready = "svg#graph-svg[data-ready=true]"
     rows = "#item-table tbody tr"
+    record = "article.record-detail"
+
+    def page_of(name: str, ref: str, drawn: str, from_page: str | None = None) -> Stop:
+        return Stop(
+            name, item_address(ref, from_page), f"#item-page[data-ref='{ref}'] {drawn}", "item"
+        )
+
     return [
         Stop("the Board", "#/board", ".card[data-ref]", "board"),
         Stop("the Graph map", "#/graph?view=everything&as=map", ready, "graph"),
         Stop("the Graph list", "#/graph?view=everything&as=list", ".gv-record", "graph"),
         Stop("the Roadmap", "#/roadmap", ".rm-bar", "roadmap"),
-        Stop(
-            "an epic's page",
-            item_address(world["E1"]),
-            f"#item-page[data-ref='{world['E1']}'] {rows}",
-            "item",
-        ),
-        Stop(
-            "a story's page",
-            item_address(world["S2"]),
-            f"#item-page[data-ref='{world['S2']}'] {rows}",
-            "item",
-        ),
+        Stop("Search", "#/search?search=card", "#search-results tr.result", "search"),
+        Stop("Possible duplicates", "#/search?dups=1", "#dup-pairs > *", "search"),
+        Stop("Activity", "#/activity", "#feed .event", "activity"),
+        Stop("the coverage report", "#/coverage", "#coverage-summary[data-unplaced]", "coverage"),
+        page_of("an epic's page", world["E1"], rows),
+        page_of("a story's page", world["S2"], rows, "graph"),
+        page_of("a task's page", world["D1"], "#item-part-title"),
+        page_of("a requirement's page", f"rule:{world['R1']}", record, "coverage"),
+        page_of("a decided note's page", f"note:{world['X1']}", record, "search"),
+        page_of("a note's page", f"note:{world['Y1']}", record, "activity"),
     ]
 
 
@@ -528,10 +581,16 @@ OVERFLOW = """() => ({
 })"""
 
 
+def inside(box: FloatRect | None, screen: Screen) -> bool:
+    """A box is in the window, from side to side."""
+    return box is not None and box["x"] >= -0.5 and box["x"] + box["width"] <= screen.width + 0.5
+
+
 async def reach_what_is_hidden(w: Watched, screen: Screen, world: World) -> list[str]:
-    """What cannot be reached on this screen: the menu (behind its button on a narrow window) and
-    the whole detail of a record with a very long title. The Board's columns scroll in their own
-    region, which can be moved by its arrows while the page does not move."""
+    """What cannot be reached on this screen: the menu (behind its button on a narrow window), the
+    whole title of a record with a very long one on its page with its way on and its way back, and
+    the sidebar's tree opened all the way down, which scrolls in its own region. The Board's columns
+    scroll in their own region, which can be moved by its arrows while the page does not move."""
     page = w.page
     problems: list[str] = []
     await visit(w, views(world)[0])
@@ -544,7 +603,7 @@ async def reach_what_is_hidden(w: Watched, screen: Screen, world: World) -> list
         await frames(page)
         for place in ("board", "graph", "roadmap"):
             box = await nav.locator(f"a[data-page={place}]").bounding_box()
-            if box is None or box["x"] < 0 or box["x"] + box["width"] > screen.width:
+            if not inside(box, screen):
                 problems.append(f"the {place} link is not inside the window")
         await page.keyboard.press("Escape")
         await expect(nav).to_be_hidden()
@@ -569,28 +628,41 @@ async def reach_what_is_hidden(w: Watched, screen: Screen, world: World) -> list
     elif await toggle.is_visible() or not await nav.is_visible():
         problems.append("the menu should be open beside the page on a wide window")
     task = world["D1"]
-    await page.locator(f".card[data-ref='{task}']").click()
-    panel = page.locator("#panel")
-    await expect(panel.locator(".detail")).to_be_visible(timeout=SLOW)
+    await page.locator(f".card[data-ref='{task}'] .card-title a").click()
+    await item_loaded(page, task)
     await settle(page)
-    box = await panel.bounding_box()
-    heading = " ".join((await page.locator("#card-title").inner_text()).split())
-    cut = await panel.evaluate(
-        """(p) => { const t = p.querySelector('.detail-title');
-            return t.scrollWidth > t.clientWidth + 1 || t.scrollHeight > t.clientHeight + 1; }"""
+    await no_panel_or_drawer(page)
+    heading = " ".join((await page.locator("#item-title").inner_text()).split())
+    cut = await page.locator("#item-title").evaluate(
+        "t => t.scrollWidth > t.clientWidth + 1 || t.scrollHeight > t.clientHeight + 1"
     )
-    if box is None or box["x"] < -0.5 or box["x"] + box["width"] > screen.width + 0.5:
-        problems.append(f"the detail panel is not inside the window: {box}")
-    if screen.phone and box is not None and box["width"] < screen.width - 1:
-        problems.append("on a phone the detail panel should fill the window")
+    if not inside(await page.locator("#item-page").bounding_box(), screen):
+        problems.append("the page of the task is not inside the window")
     if LONG_TITLE not in heading or cut:
-        problems.append("the long title is not shown whole in the detail panel")
-    close = panel.locator(".detail-head .close")
-    shut = await close.bounding_box()
-    if shut is None or shut["y"] < 0 or shut["y"] + shut["height"] > screen.height:
-        problems.append("the panel's close button is out of reach")
-    await close.click()
-    await expect(panel).to_be_hidden()
+        problems.append("the long title is not shown whole on the task's page")
+    controls = await pager(page)
+    if controls["next"] is None or controls["next"]["disabled"] or not controls["next"]["label"]:
+        problems.append("the next button of the task's page is missing, off or has no name")
+    elif not inside(await page.locator("#item-next").bounding_box(), screen):
+        problems.append("the next button is out of reach")
+    if not inside(await view_crumb(page).bounding_box(), screen):
+        problems.append("the breadcrumb's way back is out of reach")
+    await view_crumb(page).click()
+    await expect(page.locator(".card[data-ref]").first).to_be_visible(timeout=SLOW)
+    # The tree of every epic, story and task, opened all the way down, stays in the window.
+    for ref in (world["E1"], world["S1"], world["S2"], world["E2"], world["S3"], world["E3"]):
+        await tree_expand(page, ref)
+    tree = await page.evaluate(
+        """() => { const s = document.getElementById('sidebar').getBoundingClientRect();
+            const t = document.getElementById('epic-list');
+            return { bottom: s.bottom, height: innerHeight,
+              scrolls: t.scrollHeight > t.clientHeight + 1,
+              page: document.documentElement.scrollHeight }; }"""
+    )
+    if tree["bottom"] > tree["height"] + 0.5:
+        problems.append(f"the sidebar's tree makes it taller than the window: {tree}")
+    if screen.narrow:
+        await page.keyboard.press("Escape")
     return problems
 
 
@@ -621,24 +693,28 @@ async def no_screen_scrolls_sideways(world: World) -> None:
                 ]
                 if screen.name == "1600":
                     chosen = f"#/graph?view=everything&as=map&sel=decision:{world['X1']}"
-                    await visit(w, Stop("the Graph", chosen, "#panel .detail", "graph"))
-                    await shoot(w.page, f"graph-panel-{theme}")
+                    await visit(w, Stop("the Graph", chosen, "#graph-chosen[data-key]", "graph"))
+                    await shoot(w.page, f"graph-chosen-{theme}")
+                    await visit(w, views(world)[8])
+                    await shoot(w.page, f"epic-page-{theme}")
     proof(
-        "M17",
+        "M20",
         "at 390, 768, 1280 and 1600 CSS pixels wide, and at 200% zoom (640 CSS pixels at twice the "
-        "pixels), the Board, the Graph's map and list, the Roadmap and the full page of an epic "
-        "and of a story (with its table of what is under it) never make the page scroll "
-        "sideways, in Light and in Dark",
-        visits == 60 and not wide,
+        "pixels), the Board, the Graph's map and list, the Roadmap, Search (results and Possible "
+        "duplicates), Activity, the coverage report and the pages of an epic, a story, a task, a "
+        "requirement, a decision and a fact never make the page scroll sideways, in Light and in "
+        "Dark",
+        visits == len(SCREENS) * len(THEMES) * len(views(world)) and not wide,
         clip("; ".join(wide), 160) or f"{visits} screens measured",
     )
     proof(
-        "M17",
+        "M20",
         "on a narrow window the menu is reached through its button and closes with Escape, the "
         "Board's columns scroll in a named region of their own that its arrow buttons move while "
-        "the page stays put, and the detail panel of a record with a 200 character title opens "
-        "inside the window with the whole title and a close button in reach (on a wide window the "
-        "menu is simply there)",
+        "the page stays put, the page of a record with a 200 character title shows the whole "
+        "title inside the window with its next button and the breadcrumb's way back to the view "
+        "in reach, and the sidebar's tree opened all the way down stays inside the window (on a "
+        "wide window the menu is simply there)",
         not stuck,
         clip("; ".join(stuck), 160) or "390, 768, 640 (200% zoom), 1280 and 1600 wide",
     )
@@ -853,49 +929,51 @@ async def the_keyboard_and_reduced_motion(world: World) -> None:
         async with layout_context(world.board, screen, "light") as (w, _):
             page = w.page
             where = f"at {screen.name}"
+            title = f"{card} .card-title a"
             await open_address(w, "#/board")
-            await expect(page.locator(card)).to_be_visible(timeout=SLOW)
+            await expect(page.locator(title)).to_be_visible(timeout=SLOW)
             await settle(page)
             await start_of_page(page)
-            await tab_to(page, card)
-            await ring(page, f"the card {where}")
+            await tab_to(page, title)
+            await ring(page, f"a card's title {where}")
             await page.keyboard.press("Enter")
-            await expect(page.locator("#card-title")).to_contain_text(
-                f"{code_of(task)} ", timeout=SLOW
-            )
+            await item_loaded(page, task)
             await frames(page, 3)
-            if f"sel={task}" not in page.url:
-                problems.append(f"Enter on the card did not open it {where}")
+            if not page.url.endswith(f"#/item?item={task}&from=board"):
+                problems.append(f"Enter on the card's title did not open its page {where}")
             await start_of_page(page)
-            await tab_to(page, f"{card} button.move")
-            await ring(page, f"the Move button {where}")
+            await tab_to(page, "#item-next")
+            await ring(page, f"the next button {where}")
             await page.keyboard.press("Enter")
-            menu = page.locator(".move-menu")
-            await expect(menu).to_be_visible()
-            if await page.evaluate("document.activeElement.getAttribute('role')") != "menuitem":
-                problems.append(f"the Move menu did not take the focus {where}")
-            await ring(page, f"a Move menu item {where}")
-            await page.keyboard.press("Escape")
-            await expect(menu).to_be_hidden()
-            if not (await focused(page)).startswith(f"button Move {code_of(task)}"):
-                problems.append(f"Escape did not give the focus back to Move {where}")
-            if screen.narrow:
-                # The panel is a sheet over the window here, and Escape closes it.
-                await page.keyboard.press("Escape")
-            else:
-                await tab_to(page, "#panel .detail-head .close")
-                await ring(page, f"the panel's close button {where}")
-                await page.keyboard.press("Enter")
-            await expect(page.locator("#panel")).to_be_hidden()
-            if "sel=" in page.url:
-                problems.append(f"the panel closed but the address still names it {where}")
+            await item_loaded(page, world["A3"])
+            if f"item={world['A3']}&" not in page.url:
+                problems.append(f"Enter on the next button did not go to the next task {where}")
+            await start_of_page(page)
+            await tab_to(page, "nav.crumbs li.crumb-view a")
+            await ring(page, f"the breadcrumb's way back {where}")
+            await page.keyboard.press("Enter")
+            await expect(page.locator(card)).to_be_visible(timeout=SLOW)
+            if "#/board" not in page.url or "item=" in page.url:
+                problems.append(f"the breadcrumb's way back did not return to the Board {where}")
+            await start_of_page(page)
+            await tab_to(page, f"{card} button.fold")
+            await ring(page, f"the fold button {where}")
+            await page.keyboard.press("Enter")
+            await expect(page.locator(card)).to_have_class(re.compile(r"\bfolded\b"))
+            await page.keyboard.press("Enter")
+            await expect(page.locator(card)).not_to_have_class(re.compile(r"\bfolded\b"))
+            if not (await focused(page)).startswith(f"button Show {code_of(task)}") and not (
+                await focused(page)
+            ).startswith(f"button Fold away {code_of(task)}"):
+                problems.append(f"the fold button lost the focus when it was used {where}")
     proof(
-        "M17",
-        "with the keyboard alone on the Board, a card is opened with Enter, its Move menu is "
-        "opened and left with Escape, and the panel is closed (with Escape where it is a sheet "
-        "over the window, with its close button beside the page); every control the keyboard "
-        "stops on shows an outline of at least 2 pixels that stands out from what is around it",
-        not problems and len(seen) >= 7,
+        "M20",
+        "with the keyboard alone on the Board, a card's title is followed with Enter to the page "
+        "of the task, the next button there goes to the next task, the breadcrumb's way back "
+        "returns to the Board, and the card's fold button folds it and opens it again; every "
+        "control the keyboard stops on shows an outline of at least 2 pixels that stands out "
+        "from what is around it",
+        not problems and len(seen) >= 10,
         clip("; ".join(problems), 160) or f"{len(seen)} stops checked at 1280 and 768",
     )
 
@@ -937,8 +1015,8 @@ async def losing_the_server(world: World) -> None:
     ):
         page = w.page
         context = page.context
-        await in_project(page, f"{world.board}#/board?sel={task}")
-        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
+        await in_project(page, f"{world.board}#/item?item={task}&from=board")
+        await item_loaded(page, task)
         await open_editor(page)
         await page.locator("#edit-title").fill(draft)
         note, chip = page.locator("#connection-note"), page.locator("#connection")
@@ -957,38 +1035,42 @@ async def losing_the_server(world: World) -> None:
             and contrast(rgb_of(told["color"]), rgb_of(told["background"])) >= 4.5
             and rgb_of(told["background"]) == token("dark", "--warn-soft")
         )
-        kept_in_every_view = True
-        for view in ("graph", "roadmap", "board"):
-            await w.go(f"#/{view}?sel={task}")
-            await expect(page.locator("main#page h1").first).to_be_visible()
-            kept_in_every_view = (
-                kept_in_every_view
-                and await note.is_visible()
-                and await page.locator("#edit-title").input_value() == draft
-            )
+        kept_while_away = await page.locator("#edit-title").input_value() == draft
         await page.locator("#edit-title").fill(f"{draft}, and more")
 
         news = await made(client, "epic", f"Made while the board was cut off {word}")
         await context.set_offline(False)
         await expect(note).to_be_hidden(timeout=30_000)
         await expect(chip).to_be_hidden()
-        await expect(
-            page.get_by_role("region", name=f"Epic Made while the board was cut off {word}")
-        ).to_be_visible(timeout=SLOW)
-        recovered = await page.locator(f"#epic-list a[data-ref='{news}']").is_visible()
+        await expect(tree_item(page, news)).to_be_visible(timeout=SLOW)
+        recovered = await page.locator(f"#epic-list a.tree-link[data-ref='{news}']").is_visible()
         draft_kept = await page.locator("#edit-title").input_value() == f"{draft}, and more"
         unsaved = await ok(client, "get_node", node=task)
+
+        # Cut again, the notice is on every other page there is, and goes again with the connection.
+        await context.set_offline(True)
+        await expect(note).to_be_visible(timeout=30_000)
+        told_everywhere = True
+        for address in ("#/graph", "#/roadmap", "#/search", "#/activity", "#/coverage", "#/board"):
+            await w.go(address)
+            await expect(page.locator("main#page h1").first).to_be_visible()
+            told_everywhere = told_everywhere and await note.is_visible()
+        await context.set_offline(False)
+        await expect(note).to_be_hidden(timeout=30_000)
     proof(
-        "M17",
-        "with the connection cut the board says so in the view that is open (with a sign as well "
-        "as a colour, in readable contrast, on a warning surface of the theme) and keeps what was "
-        "typed through every view; when the connection is back the notice goes, the epic an agent "
-        "made meanwhile appears, and the draft is still in its box and was never saved",
+        "M20",
+        "with the connection cut the board says so on the page that is open, the page of a task "
+        "(with a sign as well as a colour, in readable contrast, on a warning surface of the "
+        "theme), and the draft typed there stays in its box; when the connection is back the "
+        "notice goes, the epic an agent made meanwhile appears in the sidebar's tree, and the "
+        "draft is still in its box and was never saved; cut again, the notice is on the views, "
+        "Search, Activity and the coverage report too",
         quiet_before
         and warned
-        and kept_in_every_view
+        and kept_while_away
         and recovered
         and draft_kept
-        and unsaved["title"] == "Wrap-up task 5",
+        and unsaved["title"] == "Wrap-up task 5"
+        and told_everywhere,
         clip(words, 100),
     )

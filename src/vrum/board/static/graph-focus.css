@@ -1,0 +1,85 @@
+/* The box at the top of the Graph page (graph-focus.js): a search box for the epic, story, task, requirement or
+   note the tabs look at, in the look of the filter box of the Board, the Roadmap and Lists (it is the same
+   `form.filter`, so the height, the border and the icon are theirs, kanban.css), the list of what it finds, and
+   beside it the way back through the items looked at. The list hangs from the body (position: fixed, placed
+   by the script) so no column and no edge of the window cuts it off, and on a narrow window it takes the room
+   the on-screen keyboard leaves. Every colour, space and size is a token. A focus ring is drawn for the keyboard
+   only (base.css decides). */
+
+/* -- the bar ---------------------------------------------------------------------------------------------- */
+
+/* It sits in the header of the page (graph-explore.css), between the title and New item, and the header
+   is what stays in view. The way back goes beside the box, or under it when there is no room. */
+.graph-focus { min-width: 0; }
+.graph-focus-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); min-width: 0; }
+/* -- the box ---------------------------------------------------------------------------------------------- */
+
+form.graph-find #graph-find-input { width: 100%; padding-left: calc(var(--space-3) + 16px + var(--space-2)); padding-right: 2.25rem; font-size: var(--text-sm); text-overflow: ellipsis; }
+form.graph-find #graph-find-input[aria-expanded="true"] { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+form.graph-find #graph-find-input::placeholder { text-overflow: ellipsis; }
+.graph-find-lead { position: absolute; left: var(--space-3); top: 0; bottom: 0; display: inline-flex; align-items: center; color: var(--text-3); pointer-events: none; }
+.graph-find-kind { display: none; }
+/* What is chosen is shown over the box until something is typed: its sign, code and title. */
+.graph-find:is(.has-item, .is-missing):not(.is-typing) .graph-find-lead > .icon { display: none; }
+.graph-find:is(.has-item, .is-missing):not(.is-typing) .graph-find-kind { display: inline-flex; }
+.graph-find.has-item:not(.is-typing) .graph-find-lead { color: var(--accent-text); }
+.graph-find.is-missing:not(.is-typing) .graph-find-lead { color: var(--danger); }
+form.graph-find.has-item:not(.is-typing) #graph-find-input { background: var(--accent-soft); border-color: var(--accent); }
+form.graph-find:is(.has-item, .is-missing):not(.is-typing) #graph-find-input::placeholder { color: transparent; }
+.graph-find-chosen { position: absolute; left: calc(var(--space-3) + 16px + var(--space-2)); right: 2.25rem; top: 0; bottom: 0; display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-size: var(--text-sm); font-weight: 600; color: var(--accent-text); pointer-events: none; }
+.graph-find-chosen[hidden], .graph-find.is-typing .graph-find-chosen { display: none; }
+.graph-find-chosen .graph-code { flex: none; color: var(--accent-text); }
+.graph-find-chosen-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-find.is-missing .graph-find-chosen { color: var(--danger); }
+/* The small round x at the end of the box, where the filter box has its "i". */
+button.graph-find-clear { position: absolute; right: var(--space-1); top: 50%; transform: translateY(-50%); display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem; min-height: 0; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); }
+button.graph-find-clear[hidden] { display: none; }
+button.graph-find-clear:hover, button.graph-find-clear:focus-visible, button.graph-find-clear:active { background: var(--surface-3); color: var(--text); }
+@media (pointer: coarse) {
+  /* A finger needs a target of 44 by 44, and the words in the box keep clear of it. */
+  form.graph-find #graph-find-input { padding-right: 2.75rem; }
+  .graph-find-chosen { right: 2.75rem; }
+  button.graph-find-clear { right: 0; width: 2.75rem; height: 2.75rem; }
+}
+
+/* The only line beside the box: what is wrong, when the address names something that is not there. */
+.graph-find-problem { flex: 1 1 100%; margin: 0; }
+
+/* the way back through the items looked at */
+.graph-focus-trail:empty { display: none; }
+.graph-trail { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.graph-trail ol { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.graph-trail li + li::before { content: "\203A"; margin-right: var(--space-2); color: var(--text-3); }
+.graph-trail .link { font-family: var(--font-mono); font-size: var(--text-sm); }
+.graph-trail-here { font-family: var(--font-mono); font-weight: 700; }
+
+/* -- the list ------------------------------------------------------------------------------------------------ */
+
+.graph-find-popup {
+  position: fixed; z-index: 80; box-sizing: border-box; display: flex; flex-direction: column;
+  max-width: calc(100vw - 2 * var(--space-2));
+  background: var(--surface); color: var(--text);
+  border: var(--border-w) solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm); line-height: 1.35;
+  animation: vselect-in 120ms ease-out;
+}
+.graph-find-popup[data-placement="above"] { animation-name: vselect-in-above; }
+.graph-find-heading { flex: none; padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.graph-find-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-1); }
+.graph-find-option { display: flex; align-items: center; gap: var(--space-2); min-height: var(--control-h); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); cursor: pointer; user-select: none; }
+.graph-find-option > .icon { flex: none; color: var(--text-2); }
+.graph-find-option[data-active="true"] { background: var(--surface-3); }
+.graph-find-option[data-chosen="true"] { font-weight: 650; }
+.graph-find-code { flex: none; }
+.graph-find-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-find-option.is-ended .graph-find-title { color: var(--text-2); }
+.graph-find-ended { flex: none; color: var(--text-2); font-size: var(--text-xs); }
+.graph-find-check { display: inline-flex; flex: none; color: var(--accent-text); }
+.graph-find-none { margin: 0; padding: var(--space-3); color: var(--text-2); }
+.graph-find-none[hidden] { display: none; }
+.graph-find-foot { flex: none; margin: 0; padding: var(--space-2) var(--space-3); border-top: var(--border-w) solid var(--border); font-size: var(--text-xs); color: var(--text-2); }
+.graph-find-foot[hidden] { display: none; }
+/* With a finger, or on a narrow window, every row is big enough to hit. */
+@media (max-width: 699.98px), (pointer: coarse) {
+  .graph-find-option { min-height: 2.75rem; }
+}

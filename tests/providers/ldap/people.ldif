@@ -1,0 +1,118 @@
+# The fictional people of the check stack's and the demo's real directory (OpenLDAP, started by
+# the ldap service of compose.check.yaml). They exist only for tests and the demo; the product has
+# no idea they are here. Every password is open-sesame-<uid>.
+#
+# The demo's three kinds of person: priya (the demo already has a confirmed account for her
+# address), tom (the demo has an account for his address that was never confirmed) and noor (new).
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: uid=ava,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: ava
+cn: Ava Stone
+sn: Stone
+givenName: Ava
+mail: ava.stone@example.com
+userPassword: open-sesame-ava
+
+dn: uid=ben,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: ben
+cn: Ben Okoye
+sn: Okoye
+givenName: Ben
+mail: ben.okoye@example.com
+userPassword: open-sesame-ben
+
+dn: uid=priya,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: priya
+cn: Priya Nair
+sn: Nair
+givenName: Priya
+mail: priya@example.com
+userPassword: open-sesame-priya
+
+dn: uid=tom,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: tom
+cn: Tom Berg
+sn: Berg
+givenName: Tom
+mail: tom@example.com
+userPassword: open-sesame-tom
+
+dn: uid=noor,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: noor
+cn: Noor Haddad
+sn: Haddad
+givenName: Noor
+mail: noor@example.com
+userPassword: open-sesame-noor
+
+# A person the directory holds no address for.
+dn: uid=quinn,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: quinn
+cn: Quinn Rowe
+sn: Rowe
+userPassword: open-sesame-quinn
+
+# An address with capitals, which must be the same address as the one in lower case.
+dn: uid=rae,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: rae
+cn: Rae Ng
+sn: Ng
+mail: Rae.Ng@Example.COM
+userPassword: open-sesame-rae
+
+# Two addresses: the first is the one that counts.
+dn: uid=sam,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: sam
+cn: Sam Lind
+sn: Lind
+mail: sam.lind@example.com
+mail: sam@elsewhere.example.net
+userPassword: open-sesame-sam
+
+# A name that is not plain ASCII (Ulla Åkerström).
+dn: uid=ulla,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: ulla
+cn:: VWxsYSDDhWtlcnN0csO2bQ==
+sn:: w4VrZXJzdHLDtm0=
+mail: ulla.akerstrom@example.com
+userPassword: open-sesame-ulla
+
+# A user name with characters that mean something in a search filter, which only a search that
+# escapes the name finds.
+dn: uid=paren(thesis),ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: paren(thesis)
+cn: Paren Thesis
+sn: Thesis
+mail: paren.thesis@example.com
+userPassword: open-sesame-paren(thesis)
+
+# Two people with the same user name, to see that a search that finds two people is refused.
+dn: cn=Twin Alpha,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: twin
+cn: Twin Alpha
+sn: Alpha
+mail: twin.alpha@example.com
+userPassword: open-sesame-twin-a
+
+dn: cn=Twin Beta,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: twin
+cn: Twin Beta
+sn: Beta
+mail: twin.beta@example.com
+userPassword: open-sesame-twin-b

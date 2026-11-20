@@ -1,14 +1,16 @@
-"""M19's page of an epic, story or task (#/item?item=story:12), driven in a real headless browser
-against the real containers and checked against a real MCP client: what a person reads in the page
-and in its table is compared with what the server says (`list_nodes`, `get_node`), and what a
-person does there is read back through the tools.
+"""M19's and M20's page of an epic, story or task (#/item?item=story:12&from=board), driven in a
+real headless browser against the real containers and checked against a real MCP client: what a
+person reads in the page and in its table is compared with what the server says (`list_nodes`,
+`get_node`, `recall`, `list_notes`, `get_rule`), and what a person does there is read
+back through the tools.
 
-A story's page has all of its details (the same sections as the detail panel, edited the same way,
-with the same version checks) and, under them, a table of its tasks: an epic's page lists its
-stories with their progress, and a task's says which story it is part of. The table sorts by every
-column, says when it is empty and adds one, follows an agent's work while it is open, and works by
-keyboard and at 390 pixels in both themes. The panel's "Open full page" button and the titles in the
-Graph's Work list reach the page."""
+A story's page has all of its details (edited with the same version checks as an agent's change)
+and, under them, a table of its tasks: an epic's page lists its stories with their progress, and a
+task's says which story it is part of. The table sorts by every column, says when it is empty and
+adds one, follows an agent's work while it is open, and works by keyboard and at 390 pixels in both
+themes. Each page has previous and next among its siblings. What concerns an item (criteria
+and notes) is a table across the page, and an acceptance criterion and a note have a
+page of their own: nothing opens beside the page, since there is no panel and no drawer."""
 
 import re
 from collections.abc import AsyncIterator, Callable
@@ -25,13 +27,20 @@ from tests.board_helpers import (
     Watched,
     board_url,
     browser_page,
+    crumbs,
     item_address,
+    item_loaded,
     item_row,
     item_rows,
     made,
+    no_panel_or_drawer,
     open_editor,
     open_item,
+    pager,
+    pager_go,
     plain,
+    record_rows,
+    siblings,
 )
 from tests.board_layout import frames, tab_to
 from tests.board_theme import policy_violations, themed_page
@@ -41,20 +50,24 @@ from tests.helpers import (
     connect,
     day,
     make_decision,
-    make_fact,
+    make_note,
     number_of,
     ok,
     ref_order,
     refused,
     unique_word,
 )
-from tests.world import Project, make_project, register
+from tests.world import Project, join_project, make_project, register
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 STATUS_ORDER = ["new", "ready", "in_progress", "blocked", "done", "dropped"]
 PRIORITY_ORDER = ["urgent", "high", "normal", "low"]  # urgent first
-NOTHING = "—"
+NOBODY, NO_DATE, NOTHING = "Nobody", "Not set", "Nothing"  # what an empty cell says
+# The sections of a recall, whose counts the page's "Notes" adds up.
+RECALLED = ["notes", "past_notes", "project_wide_notes"]
+# What the history says for a change the tests make through MCP: the name of the harness key.
+AGENT = "tests"
 
 
 @dataclass
@@ -82,8 +95,8 @@ async def status_of(client: Client, ref: str, status: str) -> None:
 
 async def build(client: Client, word: str, long_title: bool = False) -> dict[str, str]:
     """An epic with three stories (one with seven tasks of every status, priority and sort, one
-    with none, one with two done), and an epic with nothing in it, a requirement, a decision, a
-    fact and a link on the first story."""
+    with none, one with two done), and an epic with nothing in it, a criterion, two notes (one of
+    them decided by a person) and a link on the first story."""
     refs: dict[str, str] = {}
 
     async def make(name: str, kind: str, title: str, parent: str | None, **more: Any) -> None:
@@ -100,12 +113,12 @@ async def build(client: Client, word: str, long_title: bool = False) -> dict[str
         priority="high",
     )
     tasks: list[tuple[str, str, dict[str, Any]]] = [
-        ("form", "Task 10 build the form", {}),
-        ("api", "Task 2 write the API", {"priority": "urgent", "target_on": day(-3)}),
-        ("copy", "task 3 copy the words", {"priority": "low"}),
-        ("deploy", "Task 4 deploy", {"priority": "high"}),
+        ("form", "Task 10 build the form", {"size": "m"}),
+        ("api", "Task 2 write the API", {"priority": "urgent", "target_on": day(-3), "size": "xl"}),
+        ("copy", "task 3 copy the words", {"priority": "low", "size": "s"}),
+        ("deploy", "Task 4 deploy", {"priority": "high", "size": "m"}),
         ("docs", "Task 5 write the docs", {"target_on": day(5)}),
-        ("polish", "Task 6 polish", {"priority": "low", "target_on": day(10)}),
+        ("polish", "Task 6 polish", {"priority": "low", "target_on": day(10), "size": "xs"}),
         ("ship", "Task 7 ship it" + (" " + "Unbreakable" * 8 if long_title else ""), {}),
     ]
     for name, title, more in tasks:
@@ -139,9 +152,11 @@ async def build(client: Client, word: str, long_title: bool = False) -> dict[str
         target=refs["track"],
         link_type="relates_to",
     )
-    await ok(client, "create_rule", actor="agent-1", title=f"Fast {word}", story=refs["story"])
+    await ok(client, "create_rule", actor="agent-1", title=f"Fast {word}", node=refs["story"])
     await make_decision(client, f"Use REST {word}", nodes=[refs["story"]])
-    await make_fact(client, f"Orders are small {word}", nodes=[refs["story"]])
+    await make_note(
+        client, f"Orders are small {word}", "Counted in the last quarter", nodes=[refs["story"]]
+    )
     return refs
 
 
@@ -158,9 +173,9 @@ async def ordering(
 
 
 async def see_page(w: Watched, ref: str) -> None:
-    """Open the page of an item and wait until its details and what is under it are drawn."""
+    """Open the page of an item, reached from the Board, and wait until its details and what is
+    under it are drawn."""
     await open_item(w, ref)
-    await expect(w.page.locator("#item-details .card-detail")).to_be_visible(timeout=SLOW)
 
 
 async def children_of(client: Client, ref: str) -> list[dict[str, Any]]:
@@ -175,7 +190,17 @@ async def cells_of(page: Page, ref: str) -> dict[str, str]:
     """What each column of a row says, by the name of its column."""
     row = item_row(page, ref)
     out: dict[str, str] = {}
-    for name in ("item", "title", "status", "progress", "priority", "held", "due", "waiting"):
+    for name in (
+        "item",
+        "title",
+        "status",
+        "progress",
+        "size",
+        "priority",
+        "held",
+        "due",
+        "waiting",
+    ):
         place = row.locator(f".cell-{name}")
         if await place.count():
             out[name] = cell_text(await place.inner_text())
@@ -189,7 +214,16 @@ def status_words(status: str) -> str:
 # -- 1. a story's page: its details, and exactly its tasks ---------------------------------------
 
 
-async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_tasks(
+async def section_counts(page: Page) -> dict[str, str]:
+    """The list of sections at the top of a page: each section's name and the count beside it."""
+    found: list[list[str]] = await page.locator(".item-nav .item-jump").evaluate_all(
+        "els => els.map(e => [e.dataset.jump, (e.querySelector('.item-jump-count') || {})"
+        ".textContent || ''])"
+    )
+    return {key: count for key, count in found}
+
+
+async def test_a_storys_page_has_every_detail_the_server_has_and_a_table_of_exactly_its_tasks(
     server_url: str,
 ) -> None:
     async with ordering(server_url) as (world, client):
@@ -201,32 +235,33 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
             await see_page(w, story)
             page = w.page
             code = code_of(story)
-            # The title is the heading, with the code, and the line under it says what it is.
+            # The title is the heading, with the code; nothing sits under it, and the epic it
+            # is in is the link in the path.
             assert cell_text(await page.locator("h1#item-title").inner_text()) == (
                 f"{code} Place an order {world.word}"
             )
-            assert cell_text(await page.locator("#item-what").inner_text()) == (
-                f"Story in {code_of(world['epic'])} Ordering {world.word}"
-            )
-            assert await page.locator("#item-what a").get_attribute("href") == item_address(
-                world["epic"]
-            )
+            await expect(page.locator("#item-what")).to_have_count(0)
+            assert await page.locator("nav.crumbs li.crumb-item a").get_attribute(
+                "href"
+            ) == item_address(world["epic"], "board")
             assert (
                 await page.title()
                 == f"{code} Place an order {world.word} · {world.project.name} · Vrum"
             )
             assert await page.locator("#item-page").get_attribute("data-kind") == "story"
-            # The way back: Projects / the project / the epic / the story.
-            crumbs = page.locator("nav.crumbs li")
-            assert [cell_text(t) for t in await crumbs.all_inner_texts()] == [
+            # The way back: Projects / the project / the view it came from / the epic / the story,
+            # the epic and the story by their codes alone (their titles are in the tooltips).
+            assert await crumbs(page) == [
                 "Projects",
                 world.project.name,
-                f"{code_of(world['epic'])} Ordering {world.word}",
-                f"{code} Place an order {world.word}",
+                "Board",
+                code_of(world["epic"]),
+                code,
             ]
             assert await page.locator("nav.crumbs li a").evaluate_all(
                 "els => els.map(e => e.getAttribute('href'))"
-            ) == ["/board", "#/board", item_address(world["epic"])]
+            ) == ["/board", "#/board", "#/board", item_address(world["epic"], "board")]
+            await no_panel_or_drawer(page)
 
             # Every detail the server has is on the page: how it stands in the header, the words
             # and what surrounds them in the details.
@@ -239,6 +274,30 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
                 "first point",
                 "second point",
             ]
+            # What concerns it is a table of each kind, as the server holds it: its acceptance
+            # criterion, its notes (each with the one status the server gives it) and its link, each
+            # as many as the list of sections counts.
+            rules = (await ok(client, "list_rules", node=story))["items"]
+            notes = (await ok(client, "list_notes", node=story))["items"]
+            assert [(r["id"], r["status"]) for r in await record_rows(page, "requirements")] == [
+                (r["id"], r["status"]) for r in rules
+            ]
+            assert [(r["id"], r["status"]) for r in await record_rows(page, "notes")] == [
+                (n["id"], n["status"]) for n in notes
+            ]
+            assert [n["status"] for n in notes] == ["unconfirmed", "unconfirmed"]
+            recalled = await ok(client, "recall", node=story)
+            history = (await ok(client, "node_history", node=story, limit=200))["items"]
+            links = (await ok(client, "list_links", node=story))["items"]
+            assert await section_counts(page) == {
+                "edit": "",
+                "table": "7",
+                "requirements": "0/1",
+                "definition": "empty",
+                "context": str(sum(recalled[name]["count"] for name in RECALLED)),
+                "links": str(len(links)),
+                "history": str(len(history)),
+            }
             # The words are read as text first: the form is not on the page until Edit is pressed.
             assert await details.locator("form.edit").count() == 0
             await open_editor(page, "#item-page")
@@ -250,29 +309,22 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
                 assert await details.locator(f"#edit-{field}").count() == 1
             assert await details.locator("#edit-title").input_value() == server["title"]
             assert await details.locator("#edit-priority").input_value() == "high"
-            # The panel has the same sections for the same story.
-            page_sections = await page.locator("#item-details section.part").evaluate_all(
-                "els => els.map(e => e.querySelector('h2, h3, h4')?.textContent.trim())"
-            )
-            await w.go(f"#/board?sel={story}")
-            await expect(page.locator("#panel .card-detail")).to_be_visible(timeout=SLOW)
-            panel_sections = await page.locator("#panel section.part").evaluate_all(
-                "els => els.map(e => e.querySelector('h2, h3, h4')?.textContent.trim())"
-            )
-            assert page_sections and sorted(page_sections) == sorted(panel_sections)
 
             # The table lists exactly the story's tasks, as the server lists them.
             await see_page(w, story)
             assert await item_rows(page) == [t["ref"] for t in tasks]
-            assert cell_text(await page.locator("#item-count").inner_text()) == "7 tasks"
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(7)"
             assert cell_text(await page.locator("#item-table caption").inner_text()) == (
                 f"Tasks in {code}"
             )
-            assert await page.locator("#item-children-title").inner_text() == f"Tasks in {code}"
+            assert await page.locator("#item-children-title").inner_text() == "Tasks"
             assert await page.locator("#item-table thead th button.sort").evaluate_all(
                 "els => els.map(e => e.dataset.sort)"
-            ) == ["item", "title", "status", "priority", "held", "due", "waiting"]
-            assert await page.locator("th.col-item").get_attribute("aria-sort") == "ascending"
+            ) == ["item", "title", "status", "size", "priority", "held", "due", "waiting"]
+            assert (
+                await page.locator("#item-table th.col-item").get_attribute("aria-sort")
+                == "ascending"
+            )
             # None of another story's tasks is there.
             for other in ("announce", "celebrate"):
                 assert await item_row(page, world[other]).count() == 0
@@ -281,24 +333,25 @@ async def test_a_storys_page_has_the_panels_details_and_a_table_of_exactly_its_t
                 cells = await cells_of(page, ref)
                 assert cells["item"] == code_of(ref)
                 assert await item_row(page, ref).locator(".cell-item a").get_attribute("href") == (
-                    item_address(ref)
+                    item_address(ref, "board")
                 )
                 assert cells["title"] == task["title"]
                 assert cells["status"].lower() == status_words(task["status"]).lower()
+                assert cells["size"] == (task["size"].upper() if task["size"] else "Not set")
                 assert cells["priority"].lower() == task["priority"]
-                assert cells["held"] == (task["claimed_by"] or NOTHING)
+                assert cells["held"] == (task["claimed_by"] or NOBODY)
                 if task["target_on"]:
                     assert cells["due"].startswith(task["target_on"])
                     assert ("Overdue" in cells["due"]) == task["overdue"]
                 else:
-                    assert cells["due"] == NOTHING
+                    assert cells["due"] == NO_DATE
                 waiting = item_row(page, ref).locator(".cell-waiting a")
                 assert [cell_text(t) for t in await waiting.all_inner_texts()] == [
                     code_of(r) for r in task["waiting_on"]
                 ]
                 assert await waiting.evaluate_all(
                     "els => els.map(e => e.getAttribute('href'))"
-                ) == [item_address(r) for r in task["waiting_on"]]
+                ) == [item_address(r, "board") for r in task["waiting_on"]]
                 if not task["waiting_on"]:
                     assert cells["waiting"] == NOTHING
             assert {c["priority"] for c in tasks} == {"urgent", "high", "normal", "low"}
@@ -340,6 +393,7 @@ TASK_COLUMNS: dict[
     "item": (lambda r: ref_order(r["ref"]), lambda r: False),
     "title": (lambda r: natural(r["title"]), lambda r: False),
     "status": (lambda r: STATUS_ORDER.index(r["status"]), lambda r: False),
+    "size": (lambda r: r["points_total"] or 0, lambda r: not r["points_total"]),
     "priority": (lambda r: PRIORITY_ORDER.index(r["priority"]), lambda r: False),
     "held": (lambda r: str(r["claimed_by"]).lower(), lambda r: not r["claimed_by"]),
     "due": (lambda r: r["target_on"], lambda r: not r["target_on"]),
@@ -384,7 +438,7 @@ async def test_the_table_sorts_by_every_column_in_both_directions(server_url: st
             rows = await item_rows(w.page)
             await w.page.locator("#item-table button.sort[data-sort=title]").click()
             await w.page.locator("#item-table button.sort[data-sort=title]").click()
-            await expect(w.page.locator("th.col-title")).to_have_attribute(
+            await expect(w.page.locator("#item-table th.col-title")).to_have_attribute(
                 "aria-sort", "descending", timeout=SLOW
             )
             assert await item_rows(w.page) == sorted_as_shown(tasks, *TASK_COLUMNS["title"], True)
@@ -397,13 +451,26 @@ async def test_the_table_sorts_by_every_column_in_both_directions(server_url: st
                 for s in stories
             }
             columns = {
-                **{name: TASK_COLUMNS[name] for name in ("item", "title", "status", "priority")},
+                **{
+                    name: TASK_COLUMNS[name]
+                    for name in ("item", "title", "status", "size", "priority")
+                },
                 "progress": (lambda r: share[r["ref"]], lambda r: not r["progress_total"]),
             }
             await sort_both_ways(w.page, stories, columns)
             assert await w.page.locator("#item-table button.sort").evaluate_all(
                 "els => els.map(e => e.dataset.sort)"
-            ) == ["item", "title", "status", "progress", "priority", "held", "due", "waiting"]
+            ) == [
+                "item",
+                "title",
+                "status",
+                "progress",
+                "size",
+                "priority",
+                "held",
+                "due",
+                "waiting",
+            ]
             assert w.problems == [], w.problems
 
 
@@ -419,7 +486,7 @@ async def test_the_empty_state_and_new_task_make_a_task_that_appears_with_a_way_
             await see_page(w, pay)
             page = w.page
             assert await children_of(client, pay) == []
-            assert cell_text(await page.locator("#item-count").inner_text()) == "0 tasks"
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(0)"
             await expect(page.locator("#item-empty")).to_be_visible(timeout=SLOW)
             assert "No tasks yet." in await page.locator("#item-empty").inner_text()
             assert await page.locator("#item-table").count() == 0
@@ -433,49 +500,56 @@ async def test_the_empty_state_and_new_task_make_a_task_that_appears_with_a_way_
             assert await dialog.locator("#new-parent").input_value() == pay
             await dialog.locator("#new-title").fill(f"First task of it {world.word}")
             await dialog.get_by_role("button", name="Create").click()
-            await expect(page.locator("#card-title")).to_contain_text(
+            # Saving it goes to the new task's own page.
+            await expect(page.locator("#item-title")).to_contain_text(
                 f"First task of it {world.word}", timeout=SLOW
             )
             made_tasks = await children_of(client, pay)
             assert [t["title"] for t in made_tasks] == [f"First task of it {world.word}"]
             task = made_tasks[0]["ref"]
             assert made_tasks[0]["parent"] == pay and made_tasks[0]["kind"] == "task"
-            # It appears in the table, which now has no empty state, and the panel shows it.
-            await expect(item_row(page, task)).to_be_visible(timeout=SLOW)
-            assert await item_rows(page) == [task]
-            assert cell_text(await page.locator("#item-count").inner_text()) == "1 task"
-            assert await page.locator("#item-empty").is_hidden()
-            assert cell_text(await page.locator("#card-title").inner_text()) == (
-                f"{code_of(task)} First task of it {world.word}"
-            )
-            assert f"sel={task}" in page.url and f"item={pay}" in page.url
-
-            # The way back: from its page, the story it is part of, in the page and in the crumbs.
-            await item_row(page, task).locator(".cell-item a").click()
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", task, timeout=SLOW
             )
+            assert cell_text(await page.locator("#item-title").inner_text()) == (
+                f"{code_of(task)} First task of it {world.word}"
+            )
+            assert f"item={task}" in page.url and "from=board" in page.url
+            await no_panel_or_drawer(page)
+
+            # The way back: from its page, the story it is part of, in the page and in the crumbs.
             await expect(page.locator("#item-part")).to_be_visible(timeout=SLOW)
             part = page.locator("#item-part-title")
             assert (
                 cell_text(await part.inner_text())
                 == f"Part of {code_of(pay)} Pay for it {world.word}"
             )
-            assert await part.locator("a").get_attribute("href") == item_address(pay)
+            assert await part.locator("a").get_attribute("href") == item_address(pay, "board")
             assert await page.locator("nav.crumbs li a").evaluate_all(
                 "els => els.map(e => e.getAttribute('href'))"
-            ) == ["/board", "#/board", item_address(world["epic"]), item_address(pay)]
-            await page.locator("nav.crumbs li a[href='" + item_address(pay) + "']").click()
+            ) == [
+                "/board",
+                "#/board",
+                "#/board",
+                item_address(world["epic"], "board"),
+                item_address(pay, "board"),
+            ]
+            await page.locator(f"nav.crumbs li a[href='{item_address(pay, 'board')}']").click()
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", pay, timeout=SLOW
             )
+            # It is in the story's table, which now has no empty state.
             await expect(item_row(page, task)).to_be_visible(timeout=SLOW)
+            assert await item_rows(page) == [task]
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(1)"
+            assert await page.locator("#item-empty").is_hidden()
             await page.go_back()
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", task, timeout=SLOW
             )
 
-            # An epic with no stories says so in the same way and adds a story under it.
+            # An epic with no stories says so in the same way and adds a story under it, which
+            # opens on its own page; the epic's table has it when the person goes back up.
             empty = world["empty_epic"]
             await see_page(w, empty)
             assert "No stories yet." in await page.locator("#item-empty").inner_text()
@@ -486,10 +560,22 @@ async def test_the_empty_state_and_new_task_make_a_task_that_appears_with_a_way_
             assert await dialog.locator("#new-parent").input_value() == empty
             await dialog.locator("#new-title").fill(f"A story of it {world.word}")
             await dialog.get_by_role("button", name="Create").click()
-            await expect(page.locator("#item-table tbody tr")).to_have_count(1, timeout=SLOW)
+            # Saving it goes to the new story's own page: wait for that before asking the server.
+            await expect(page.locator("#item-title")).to_contain_text(
+                f"A story of it {world.word}", timeout=SLOW
+            )
             stories = await children_of(client, empty)
             assert [s["title"] for s in stories] == [f"A story of it {world.word}"]
-            assert await item_rows(page) == [stories[0]["ref"]]
+            story = stories[0]["ref"]
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", story, timeout=SLOW
+            )
+            await page.locator("nav.crumbs li.crumb-item a").click()
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", empty, timeout=SLOW
+            )
+            await expect(page.locator("#item-table tbody tr")).to_have_count(1, timeout=SLOW)
+            assert await item_rows(page) == [story]
             assert w.problems == [], w.problems
 
 
@@ -513,13 +599,11 @@ async def test_an_epics_page_lists_its_stories_with_the_progress_the_server_give
         async with browser_page(world.board, token=world.project.key) as w:
             await see_page(w, epic)
             page = w.page
-            assert cell_text(await page.locator("#item-what").inner_text()) == "Epic with 3 stories"
+            await expect(page.locator("#item-what")).to_have_count(0)
             assert await page.locator("#item-page").get_attribute("data-kind") == "epic"
             assert await item_rows(page) == [s["ref"] for s in stories]
-            assert cell_text(await page.locator("#item-count").inner_text()) == "3 stories"
-            assert await page.locator("#item-children-title").inner_text() == (
-                f"Stories in {code_of(epic)}"
-            )
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(3)"
+            assert await page.locator("#item-children-title").inner_text() == "Stories"
             assert await page.locator("#item-details").inner_text()
             assert f"{server['progress_done']} of {server['progress_total']} tasks done" in (
                 cell_text(await page.locator("#item-page .card-summary").inner_text())
@@ -535,18 +619,14 @@ async def test_an_epics_page_lists_its_stories_with_the_progress_the_server_give
                     assert width == f"{round(done / total * 100)}%", (story["ref"], width)
                 else:
                     assert await meter.count() == 0
-            # A story's own page names its epic and what the quick look and the link do.
-            await item_row(page, world["track"]).locator(".quick-look").click()
-            await expect(page.locator("#card-title")).to_contain_text(
-                f"{code_of(world['track'])} Track it", timeout=SLOW
-            )
-            assert f"item={epic}" in page.url and f"sel={world['track']}" in page.url
-            await item_row(page, world["track"]).locator(".cell-item a").click()
-            await expect(page.locator("#item-page")).to_have_attribute(
-                "data-ref", world["track"], timeout=SLOW
-            )
-            assert "sel=" not in page.url  # going to a page leaves the quick look behind
+            # A row opens the story's own page, which says which epic it is in and keeps the
+            # view the person came from.
+            await item_row(page, world["track"]).locator(".cell-title a").click()
+            await item_loaded(page, world["track"])
+            assert "from=board" in page.url and "sel=" not in page.url
             assert await item_rows(page) == [world["announce"], world["celebrate"]]
+            await expect(page.locator("#item-what")).to_have_count(0)
+            await no_panel_or_drawer(page)
             assert w.problems == [], w.problems
 
 
@@ -559,6 +639,8 @@ SKELETON = """() => {
     return {
         page: [...page.children].map(name),
         head: [...page.querySelector('header').children].map((e) => e.className),
+        tools: [...page.querySelector('.item-tools').children].map(name),
+        inside: Boolean(children && children.closest('#item-details')),
         title: [...page.querySelectorAll('h1')].length,
         card: [...page.querySelectorAll('#item-details > article')].map((e) => e.className),
         summary: [...page.querySelectorAll('header .card-summary > *')].map((e) => e.className),
@@ -586,17 +668,19 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
             assert cell_text(await page.locator("#item-title").inner_text()) == (
                 f"{code_of(task)} {server['title']}"
             )
-            assert cell_text(await page.locator("#item-what").inner_text()) == (
-                f"Task in {code_of(world['story'])} Place an order {world.word}"
-            )
+            await expect(page.locator("#item-what")).to_have_count(0)
             part = page.locator("#item-part")
             assert cell_text(await part.locator("h2").inner_text()) == (
                 f"Part of {code_of(world['story'])} Place an order {world.word}"
             )
-            assert await part.locator("h2 a").get_attribute("href") == item_address(world["story"])
+            assert await part.locator("h2 a").get_attribute("href") == item_address(
+                world["story"], "board"
+            )
             note = cell_text(await part.locator(".item-part-note").inner_text())
-            epic_code = f"In {code_of(world['epic'])} Ordering {world.word}."
-            assert note == f"{epic_code} 1 of 7 tasks in the story are done."
+            epic_code = f"In {code_of(world['epic'])} Ordering {world.word}"
+            assert note == epic_code
+            progress = cell_text(await part.locator(".item-part-progress-text").inner_text())
+            assert progress == "1 of 7 tasks done"
             # It has no children table, no count and no way to add something under it (what it is
             # tied to is in a table of relations, which has ids of its own).
             for gone in ("#item-table", "#item-count", "#new-child", "#item-region", "#item-empty"):
@@ -613,7 +697,7 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
             assert await page.locator("#item-details #edit-title").input_value() == server["title"]
             # What it needs first and what needs it, in the same columns as a story's table: it
             # needs the form task first, and the polish task needs it.
-            assert cell_text(await page.locator("#relations-count").inner_text()) == "2 relations"
+            assert cell_text(await page.locator("#relations-count").inner_text()) == "(2)"
             relation = page.locator("#relations-table tbody tr")
             assert await relation.count() == 2
             assert await relation.locator(".cell-relation").all_inner_texts() == [
@@ -644,7 +728,6 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
                 "nav",
                 "h2#item-details-title",
                 "section#item-details",
-                "section#item-children",
             ]
             assert epic_shape["children"] == ["header", "div#item-region", "div#item-empty"]
             assert task_shape["page"] == [
@@ -653,7 +736,6 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
                 "section#item-part",
                 "h2#item-details-title",
                 "section#item-details",
-                "section#item-relations",
             ]
             assert task_shape["children"] == [
                 "header",
@@ -661,81 +743,123 @@ async def test_a_tasks_page_says_which_story_it_is_part_of_and_the_three_pages_s
                 "div#relations-empty",
             ]
             for shape in shapes.values():
-                assert shape["head"] == ["page-title", "page-actions item-actions", "card-summary"]
+                assert shape["head"] == ["page-title", "item-tools", "card-summary"]
+                # The way to the neighbours comes before the actions, on every page.
+                assert shape["tools"] == ["nav#item-pager", "div"], shape["tools"]
                 assert shape["title"] == 1 and shape["mains"] == 1
                 assert shape["card"] == ["card-detail detail card-page"]
                 assert shape["columns"] == ["card-main", "card-side"]
-                assert shape["summary"][:2] == ["chips", "facts"], shape["summary"]
+                assert shape["summary"][:2] == ["chips", "state-strip"], shape["summary"]
+                # What is under the item is a table of the page's width inside its details.
+                assert shape["inside"] is True
+            assert w.problems == [], w.problems
+
+
+# -- 5b. previous and next ----------------------------------------------------------------------
+
+
+async def test_previous_and_next_walk_through_exactly_the_siblings_the_server_lists(
+    server_url: str,
+) -> None:
+    async with ordering(server_url) as (world, client):
+        note = (await ok(client, "list_notes", limit=1))["items"][0]["id"]
+        async with browser_page(world.board, token=world.project.key) as w:
+            page = w.page
+            # Epics across the project, the stories of an epic, the tasks of a story: the pager of
+            # each page moves through what the server lists, in order, from one end to the other
+            # and back, says where it is, and is disabled at the ends.
+            for start in (world["epic"], world["story"], world["api"]):
+                wanted = await siblings(client, start)
+                noun = start.split(":")[0]
+                assert len(wanted) >= 2 and start in wanted
+                await see_page(w, wanted[0])
+                first = await pager(page)
+                assert first["previous"] == {
+                    "disabled": True,
+                    "label": f"No previous {noun}",
+                    "code": None,
+                }, first
+                assert (first["at"], first["of"]) == (1, len(wanted))
+                walked = [wanted[0]]
+                while not (await pager(page))["next"]["disabled"]:
+                    here = await pager(page)
+                    after = wanted[len(walked)]
+                    assert here["next"]["code"] == code_of(after), here
+                    assert here["next"]["label"].startswith(f"Next {noun}: {code_of(after)} ")
+                    walked.append(await pager_go(page, "next"))
+                    assert (await pager(page))["at"] == len(walked)
+                assert walked == wanted
+                last = await pager(page)
+                assert (last["at"], last["of"]) == (len(wanted), len(wanted))
+                assert last["next"] == {"disabled": True, "label": f"No next {noun}", "code": None}
+                # And back, to the first.
+                for before in reversed(wanted[:-1]):
+                    assert await pager_go(page, "previous") == before
+                assert (await pager(page))["previous"]["disabled"]
+                # Moving on keeps the view the person came from.
+                assert "from=board" in page.url and (await crumbs(page))[2] == "Board"
+            # A requirement or a note has no neighbours to move between.
+            await open_item(w, f"note:{note}")
+            assert await page.locator("#item-pager, #item-prev, #item-next").count() == 0
             assert w.problems == [], w.problems
 
 
 # -- 6. how a person reaches the page ------------------------------------------------------------
 
 
-async def test_the_panels_button_the_work_lists_titles_and_a_quick_look_reach_the_page(
+async def test_a_card_a_work_list_title_and_a_row_reach_the_page_and_keep_the_view_they_came_from(
     server_url: str,
 ) -> None:
     async with ordering(server_url) as (world, _):
         epic, story, task = world["epic"], world["story"], world["api"]
         async with browser_page(world.board, token=world.project.key) as w:
             page = w.page
-            # The panel's button, from the Board.
-            await w.open(f"#/board?epic={number_of(epic)}&sel={story}")
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                f"{code_of(story)} Place an order", timeout=SLOW
-            )
-            button = page.locator("#panel a.open-page")
-            assert await button.get_attribute("href") == item_address(story)
-            assert await button.get_attribute("aria-label") == "Open full page"
-            await button.click()
+            # The Board's card: its title is a link to the page, which keeps the Board as the view.
+            # (The Board shows tasks only unless it is asked for stories too.)
+            await w.open(f"#/board?epic={number_of(epic)}&show=both")
+            card = page.locator(f".card[data-ref='{story}']")
+            await expect(card).to_be_visible(timeout=SLOW)
+            title = card.locator("h3.card-title a")
+            assert await title.get_attribute("href") == item_address(story, "board")
+            await title.click()
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", story, timeout=SLOW
             )
-            assert "sel=" not in page.url and await page.locator("#panel").is_hidden()
-            # A task's panel has the button too, and it leads to a page with no table.
-            await w.go(f"#/board?epic={number_of(epic)}&sel={task}")
-            await page.locator("#panel a.open-page").click()
+            assert "sel=" not in page.url and "from=board" in page.url
+            await no_panel_or_drawer(page)
+            assert (await crumbs(page))[2] == "Board"
+            # The way back returns to the Board as it was left, with its epic.
+            await page.locator("nav.crumbs li.crumb-view a").click()
+            await expect(card).to_be_visible(timeout=SLOW)
+            assert f"epic={number_of(epic)}" in page.url
+            # A task's card opens a page with no table of children.
+            await page.locator(f".card[data-ref='{task}'] h3.card-title a").click()
             await expect(page.locator("#item-page")).to_have_attribute(
                 "data-ref", task, timeout=SLOW
             )
             assert await page.locator("#item-table").count() == 0
 
-            # The Graph's Work list: an epic's and a story's title is a link to its page ...
-            await w.open(f"#/graph?view=work&as=list&epic={number_of(epic)}")
+            # The Lists view of Work: every title, an epic's, a story's and a task's, is a link to
+            # its page, which says it came from Lists.
+            await w.open(f"#/lists?view=work&epic={number_of(epic)}")
             tree = page.locator("#work-tree")
             await expect(tree.locator(f"li[data-key='{story}']")).to_be_visible(timeout=SLOW)
-            title = tree.locator(f"li[data-key='{epic}'] > .gv-row a.gv-title")
-            assert await title.get_attribute("href") == item_address(epic)
-            await title.click()
-            await expect(page.locator("#item-page")).to_have_attribute(
-                "data-ref", epic, timeout=SLOW
-            )
-            await page.go_back()
-            await expect(tree.locator(f"li[data-key='{story}']")).to_be_visible(timeout=SLOW)
-            title = tree.locator(f"li[data-key='{story}'] > .gv-row a.gv-title")
-            assert await title.get_attribute("href") == item_address(story)
-            await title.click()
-            await expect(page.locator("#item-page")).to_have_attribute(
-                "data-ref", story, timeout=SLOW
-            )
-            await page.go_back()
-            # ... with a Quick look beside it that opens the panel and stays on the Graph ...
-            quick = tree.locator(f"li[data-key='{story}'] > .gv-row button.gv-quick")
-            assert await quick.get_attribute("aria-label") == f"Quick look at {code_of(story)}"
-            await quick.click()
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                f"{code_of(story)} Place an order", timeout=SLOW
-            )
-            assert f"sel={story}" in page.url and "#/graph" in page.url
-            assert await page.locator("#item-page").count() == 0
-            # ... and a task's title still opens the panel: it has no page-link or quick look.
-            row = tree.locator(f"li[data-key='{task}'] > .gv-row")
-            assert await row.locator("a.gv-title, button.gv-quick").count() == 0
-            await row.locator(".gv-label").click()
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                f"{code_of(task)} Task 2", timeout=SLOW
-            )
-            assert f"sel={task}" in page.url and "#/graph" in page.url
+            for ref in (epic, story, task):
+                title = tree.locator(f"li[data-key='{ref}'] > .gv-row a.gv-title")
+                assert await title.get_attribute("href") == item_address(ref, "lists")
+                await title.click()
+                await expect(page.locator("#item-page")).to_have_attribute(
+                    "data-ref", ref, timeout=SLOW
+                )
+                assert (await crumbs(page))[2] == "Lists"
+                await expect(page.locator("#main-nav a[data-page=lists]")).to_have_attribute(
+                    "aria-current", "page"
+                )
+                await no_panel_or_drawer(page)
+                await page.go_back()
+                await expect(tree.locator(f"li[data-key='{story}']")).to_be_visible(timeout=SLOW)
+            # Nothing of the old panel is left in the list.
+            assert await tree.locator(".gv-quick, .quick-look").count() == 0
             assert w.problems == [], w.problems
 
 
@@ -756,13 +880,20 @@ async def test_the_page_opens_by_its_address_and_an_address_that_names_nothing_s
             await expect(item_row(page, world["api"])).to_be_visible(timeout=SLOW)
             assert "item=" + story in page.url
 
-            # An item that does not exist: the server's own words, and the way back.
-            said = await refused(client, "get_node", node="story:9999")
-            await w.go(item_address("story:9999"))
-            problem = page.locator("#item-page .notice.refusal")
-            await expect(problem).to_be_visible(timeout=SLOW)
-            plain(cell_text(await problem.inner_text()), said)
-            assert await page.locator("#item-table").count() == 0
+            # An item that does not exist: the server's own words, and the way back. Every kind
+            # of page says the same thing when what it names is not there.
+            for ref, tool, arguments in (
+                ("story:9999", "get_node", {"node": "story:9999"}),
+                ("rule:9999", "get_rule", {"rule_id": 9999}),
+                ("note:9999", "get_note", {"note_id": 9999}),
+            ):
+                said = await refused(client, tool, **arguments)
+                await w.go(item_address(ref, "board"))
+                problem = page.locator("#item-page .notice.refusal")
+                await expect(problem).to_be_visible(timeout=SLOW)
+                plain(cell_text(await problem.inner_text()), said)
+                assert await page.locator("#item-table").count() == 0
+                assert await page.locator("#item-title").inner_text() == "Nothing to show here"
             await page.locator("#item-back").click()
             await expect(page.locator("#main-nav [aria-current=page]")).to_be_visible(timeout=SLOW)
             assert page.url.endswith("#/board")
@@ -770,19 +901,28 @@ async def test_the_page_opens_by_its_address_and_an_address_that_names_nothing_s
             # What is not a reference at all, and no item at all.
             await w.go("#/item?item=12")
             await expect(page.locator("#item-page")).to_contain_text(
-                "That address does not name an epic, story or task", timeout=SLOW
+                "That address does not name an epic, story, task, acceptance criterion or note",
+                timeout=SLOW,
             )
             await w.go("#/item")
             await expect(page.locator("#item-page")).to_contain_text(
                 "This page needs an item", timeout=SLOW
             )
-            # The address of the old panel, which named an item by a bare number, says so too.
-            await w.go("#/board?sel=node:12")
-            await expect(page.locator("#panel")).to_contain_text(
-                "That address does not name something the board can show", timeout=SLOW
+            # The addresses of the old panel and drawers mean nothing now: the page opens without
+            # their keys, shows nothing beside itself and says nothing odd.
+            await w.go(f"#/board?sel={story}&drawer=search&panel=coverage")
+            await expect(page.locator("#board")).to_be_visible(timeout=SLOW)
+            await page.wait_for_function("() => location.hash === '#/board'", timeout=SLOW)
+            await no_panel_or_drawer(page)
+            await w.go(f"{item_address(story, 'board')}&sel={world['api']}&drawer=activity")
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", story, timeout=SLOW
             )
-            assert await page.locator("#panel .card-detail").count() == 0
-            for text in await page.locator("#panel, #page").all_inner_texts():
+            await page.wait_for_function(
+                "(want) => location.hash === want", arg=item_address(story, "board"), timeout=SLOW
+            )
+            await no_panel_or_drawer(page)
+            for text in await page.locator("#page").all_inner_texts():
                 assert "undefined" not in text and "[object" not in text and "NaN" not in text
             assert w.problems == [], w.problems
 
@@ -814,7 +954,9 @@ async def test_an_edit_on_the_page_is_saved_and_a_stale_one_is_refused_in_the_se
                 await page.title()
                 == f"{code_of(story)} Place an order, better {word} · {world.project.name} · Vrum"
             )
-            await expect(page.locator("nav.crumbs li").last).to_contain_text("better", timeout=SLOW)
+            await expect(page.locator("#crumb-page")).to_have_attribute(
+                "title", re.compile("better"), timeout=SLOW
+            )
             assert await item_rows(page) == [t["ref"] for t in await children_of(client, story)]
 
             # Someone else changes it while a draft is typed: nothing typed is overwritten.
@@ -827,7 +969,7 @@ async def test_an_edit_on_the_page_is_saved_and_a_stale_one_is_refused_in_the_se
             )  # fmt: skip
             changed = page.locator("#item-details .notice.changed")
             await expect(changed).to_be_visible(timeout=SLOW)
-            await expect(changed).to_contain_text("agent-1")
+            await expect(changed).to_contain_text(AGENT)
             assert await title.input_value() == f"My draft {word}"
             await expect(page.locator("h1#item-title")).to_contain_text("Agent title", timeout=SLOW)
 
@@ -849,6 +991,223 @@ async def test_an_edit_on_the_page_is_saved_and_a_stale_one_is_refused_in_the_se
             assert w.problems == [], w.problems
 
 
+# -- 7b. what an agent wrote is on the page: empty details, every change, every handoff note -----
+
+
+async def test_empty_details_are_a_field_with_a_button_and_a_change_to_them_is_read_whole(
+    server_url: str,
+) -> None:
+    async with ordering(server_url) as (world, client):
+        task, word = world["form"], world.word
+        async with browser_page(world.board, token=world.project.key) as w:
+            await see_page(w, task)
+            page = w.page
+            details = page.locator("#item-details")
+            # Nothing is written, and the page says so as a field: a box that says Empty, with the
+            # button that fills it, and the list of sections says so too.
+            empty = details.locator("[data-part=edit] .details-empty")
+            await expect(empty).to_be_visible(timeout=SLOW)
+            await expect(empty).to_contain_text("Empty")
+            assert (await section_counts(page))["edit"] == "empty"
+            await empty.get_by_role("button", name="Add details").click()
+            body = page.locator("#edit-body")
+            await expect(body).to_be_focused()
+            words = f"First line {word}\n\n- a point {word}"
+            await body.fill(words)
+            await page.get_by_role("button", name="Save changes").click()
+            await expect(details.locator(".body-text")).to_contain_text(
+                f"First line {word}", timeout=SLOW
+            )
+            assert await details.locator("[data-part=edit] .details-empty").count() == 0
+            assert (await ok(client, "get_node", node=task))["body"] == words
+            assert (await section_counts(page))["edit"] == ""
+
+            # The change is in the history with "Show what changed": the details before and after,
+            # whole and as written, with their lines.
+            history = page.locator("#item-page [data-part=history]")
+            row = history.locator("li[data-action=update]").first
+            await row.locator(".what-changed summary").click()
+            field = row.locator(".change-field[data-field=body]")
+            await expect(field.locator(".before")).to_contain_text("Empty")
+            assert await field.locator(".after .change-text").inner_text() == words
+
+            # A long title is cut in the sentence and whole in the change.
+            before = (await ok(client, "get_node", node=task))["title"]
+            long_title = f"A title that goes on well past what a sentence says of it {word}"
+            more = f"Second version {word}\n\n1. one\n2. two"
+            await ok(
+                client, "update_node", node=task, expected_version=2, title=long_title, body=more
+            )
+            row = history.locator("li[data-action=update]").first
+            await expect(page.locator("h1#item-title")).to_contain_text(
+                "A title that goes on", timeout=SLOW
+            )
+            await expect(row.locator(".what-changed")).to_be_visible(timeout=SLOW)
+            await expect(row.locator(".event-words")).not_to_contain_text(long_title)
+            await row.locator(".what-changed summary").click()
+            title = row.locator(".change-field[data-field=title]")
+            assert await title.locator(".before .change-text").inner_text() == before
+            assert await title.locator(".after .change-text").inner_text() == long_title
+            assert (
+                await row.locator(".change-field[data-field=body] .after .change-text").inner_text()
+                == more
+            )
+            assert w.problems == [], w.problems
+
+        # Someone who can only look sees the field, and that it is empty, but not the button.
+        viewer = join_project(world.project, "viewer")
+        async with browser_page(world.board, token=None, person=viewer) as v:
+            await see_page(v, world["copy"])
+            await expect(
+                v.page.locator("#item-details [data-part=edit] .details-empty")
+            ).to_contain_text("Empty", timeout=SLOW)
+            await expect(v.page.locator("#item-details .add-details")).to_have_count(0)
+            assert v.problems == [], v.problems
+
+
+async def test_every_handoff_note_is_listed_with_who_made_the_item_and_those_of_what_it_needs_first(
+    server_url: str,
+) -> None:
+    async with ordering(server_url) as (world, client):
+        word = world.word
+        first = await made(client, "task", f"Hand over {word}", world["track"])
+        second = await made(client, "task", f"Needs the hand over {word}", world["track"])
+        await ok(client, "add_link", source=second, target=first, link_type="needs_first")
+        for n in range(2):
+            await ok(client, "claim_node", node=first)
+            await ok(client, "release_claim", node=first, note=f"Handed back {n} {word}")
+        await ok(client, "claim_node", node=first)
+        await ok(client, "finish_work", node=first, outcome="done", note=f"Finished {word}")
+        server = await ok(client, "get_node", node=first)
+        assert server["handoff_count"] == 3
+        async with browser_page(world.board, token=world.project.key) as w:
+            await see_page(w, first)
+            page = w.page
+            notes = page.locator("#item-page [data-part=handoff]")
+            await expect(notes.locator("h3")).to_have_text("Handoff notes (3)", timeout=SLOW)
+            items = notes.locator("li.handoff-item")
+            assert await items.count() == 3
+            texts = [cell_text(t) for t in await items.all_inner_texts()]
+            assert [t.split(": ", 1)[1] for t in texts] == [
+                f"Finished {word}",
+                f"Handed back 1 {word}",
+                f"Handed back 0 {word}",
+            ]
+            assert [await items.nth(n).get_attribute("data-outcome") for n in range(3)] == [
+                "done",
+                "released",
+                "released",
+            ]
+            assert all(AGENT in t for t in texts)
+            # Who made it and when it last changed, and which version it is at.
+            summary = cell_text(await page.locator("#item-page .card-summary").inner_text())
+            assert f"created by {AGENT}" in summary.lower()
+            assert f"Version {server['version']}" in summary
+
+            # What it needs first is handed over too: the last note of each.
+            await see_page(w, second)
+            theirs = page.locator("#item-page [data-part=needs-handoff]")
+            await expect(theirs).to_contain_text(f"Finished {word}", timeout=SLOW)
+            await expect(theirs).to_contain_text("3 notes in all")
+
+            # The Board card of the work that has a handoff note says so.
+            await w.go("#/board")
+            sign = page.locator(f".card[data-ref='{first}'] .handoff-sign")
+            await expect(sign).to_have_text("Handoff", timeout=SLOW)
+            assert w.problems == [], w.problems
+
+
+async def test_start_and_target_are_chosen_in_vrums_calendar_and_saved_at_once(
+    server_url: str,
+) -> None:
+    async with ordering(server_url) as (world, client):
+        task = world["ship"]
+        viewer = join_project(world.project, "viewer")
+        async with browser_page(world.board, token=world.project.key) as w:
+            await see_page(w, task)
+            page = w.page
+            summary = page.locator("#item-page .card-summary")
+            start = summary.locator("button.date-value[data-field=start_on]")
+            target = summary.locator("button.date-value[data-field=target_on]")
+            calendar = page.locator(".dp")
+            clear = calendar.locator("button.dp-clear")
+
+            # A click on Start opens the calendar on today, with today ringed and nothing chosen.
+            await expect(start).to_have_text("Not set", timeout=SLOW)
+            await expect(target).to_have_text("Not set")
+            await start.click()
+            await expect(calendar).to_be_visible(timeout=SLOW)
+            await expect(calendar).to_have_attribute("role", "dialog")
+            await expect(calendar.locator("[aria-current=date]")).to_have_attribute(
+                "data-day", day()
+            )
+            await expect(calendar.locator("[aria-selected=true]")).to_have_count(0)
+            await expect(clear).to_be_disabled()
+            # Picking a day closes it, puts the focus back on Start and saves at once: an agent
+            # reads the new date through the tools.
+            await calendar.locator(f"button.dp-day[data-day='{day(3)}']").click()
+            await expect(calendar).to_have_count(0)
+            await expect(start).to_have_text(day(3), timeout=SLOW)
+            await expect(start).to_be_focused()
+            assert (await ok(client, "get_node", node=task))["start_on"] == day(3)
+
+            # A target before the start is refused in the server's own words, and the date stays.
+            version = (await ok(client, "get_node", node=task))["version"]
+            said = await refused(
+                client,
+                "update_node",
+                actor="x",
+                node=task,
+                expected_version=version,
+                target_on=day(1),
+            )
+            await target.click()
+            await calendar.locator(f"button.dp-day[data-day='{day(1)}']").click()
+            problem = page.locator("#notices .notice.refusal .notice-text")
+            await expect(problem).to_be_visible(timeout=SLOW)
+            plain(cell_text(await problem.inner_text()), cell_text(said))
+            await expect(target).to_have_text("Not set")
+            assert (await ok(client, "get_node", node=task))["target_on"] is None
+
+            # With the keyboard alone: Enter opens it, Escape closes it with nothing changed, and
+            # the arrows and Enter pick (down is a week on).
+            await target.focus()
+            await page.keyboard.press("Enter")
+            await expect(calendar).to_be_visible(timeout=SLOW)
+            await expect(calendar.locator("button.dp-day[tabindex='0']")).to_be_focused()
+            await page.keyboard.press("Escape")
+            await expect(calendar).to_have_count(0)
+            await expect(target).to_be_focused()
+            await page.keyboard.press("Enter")
+            await expect(calendar).to_be_visible(timeout=SLOW)
+            await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+            await expect(target).to_have_text(day(7), timeout=SLOW)
+            assert (await ok(client, "get_node", node=task))["target_on"] == day(7)
+
+            # Clear takes the start away, and there is nothing to clear on a date that is not set.
+            await start.click()
+            await expect(calendar.locator("[aria-selected=true] button")).to_have_attribute(
+                "data-day", day(3)
+            )
+            await clear.click()
+            await expect(start).to_have_text("Not set", timeout=SLOW)
+            assert (await ok(client, "get_node", node=task))["start_on"] is None
+            await start.click()
+            await expect(clear).to_be_disabled()
+            await page.keyboard.press("Escape")
+            assert w.problems == [], w.problems
+
+        # Someone who can only look sees the dates as plain text: no button, no calendar.
+        async with browser_page(world.board, token=None, person=viewer) as v:
+            await see_page(v, task)
+            seen = v.page.locator("#item-page .card-summary")
+            await expect(seen.locator("dd.target")).to_have_text(day(7), timeout=SLOW)
+            await expect(seen.locator("dd.start")).to_have_text("Not set")
+            await expect(seen.locator("button.date-value")).to_have_count(0)
+            assert v.problems == [], v.problems
+
+
 async def test_an_agent_adding_a_task_updates_the_open_page_and_a_draft_typed_there_survives(
     server_url: str,
 ) -> None:
@@ -858,7 +1217,7 @@ async def test_an_agent_adding_a_task_updates_the_open_page_and_a_draft_typed_th
             await see_page(w, story)
             page = w.page
             before = await item_rows(page)
-            assert cell_text(await page.locator("#item-count").inner_text()) == "7 tasks"
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(7)"
             await open_editor(page, "#item-page")
             draft = page.locator("#edit-body")
             await draft.fill(f"A draft that is not saved {word}")
@@ -873,7 +1232,7 @@ async def test_an_agent_adding_a_task_updates_the_open_page_and_a_draft_typed_th
             await ok(client, "claim_node", actor="dana", node=world["pay"])
             await expect(item_row(page, added)).to_be_visible(timeout=SLOW)
             assert await item_rows(page) == [*before, added]
-            assert cell_text(await page.locator("#item-count").inner_text()) == "8 tasks"
+            assert cell_text(await page.locator("#item-count").inner_text()) == "(8)"
             cells = await cells_of(page, added)
             assert cells["title"] == f"Added by an agent {word}" and cells["priority"] == "Urgent"
             await expect(item_row(page, world["ship"]).locator(".cell-status")).to_contain_text(
@@ -899,35 +1258,36 @@ async def test_an_agent_adding_a_task_updates_the_open_page_and_a_draft_typed_th
             assert w.problems == [], w.problems
 
 
-# -- 8. the quick look, in the panel beside the page ---------------------------------------------
+# -- 8. a row opens its own page, and nothing opens beside the page ------------------------------
 
 
-async def test_a_rows_quick_look_opens_the_panel_beside_the_page_and_no_id_is_used_twice(
+async def test_a_row_opens_the_tasks_own_page_by_its_link_or_a_click_and_ids_are_never_repeated(
     server_url: str,
 ) -> None:
     async with ordering(server_url) as (world, client):
-        story, task = world["story"], world["copy"]
+        story, task, other = world["story"], world["copy"], world["deploy"]
         async with browser_page(world.board, token=world.project.key) as w:
             await see_page(w, story)
             page = w.page
-            button = item_row(page, task).locator("button.quick-look")
-            assert await button.get_attribute("aria-label") == f"Quick look at {code_of(task)}"
-            await button.click()
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                f"{code_of(task)} task 3", timeout=SLOW
+            # A row has the link and the chips that change a status or a priority, and nothing
+            # else beside it: there is no quick look.
+            link = item_row(page, task).locator(".cell-item a")
+            assert await link.get_attribute("href") == item_address(task, "board")
+            assert await item_row(page, task).locator("button:not([data-menu])").count() == 0
+            assert await page.locator(".quick-look, .gv-quick").count() == 0
+
+            # A click on the row, away from its links and chips, opens the page in the same window.
+            await item_row(page, task).locator(".cell-due").click()
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", task, timeout=SLOW
             )
-            assert f"item={story}" in page.url and f"sel={task}" in page.url
-            await expect(item_row(page, task)).to_have_class(
-                re.compile(r"\bselected\b"), timeout=SLOW
+            assert "from=board" in page.url and "sel=" not in page.url
+            assert cell_text(await page.locator("#item-title").inner_text()) == (
+                f"{code_of(task)} task 3 copy the words {world.word}"
             )
-            assert (
-                await item_row(page, task).locator(".item-code-link").get_attribute("aria-current")
-                == "true"
-            )
-            # The page is still the story's, with both cards on it, each with its own ids (also
-            # with both forms open).
+            await no_panel_or_drawer(page)
+            # The page has one heading and no id twice, with its form open too.
             assert await page.locator("h1#item-title").count() == 1
-            await open_editor(page, "#panel")
             await open_editor(page, "#item-page")
             ids = await page.evaluate(
                 "() => { const all = [...document.querySelectorAll('[id]')].map((e) => e.id);"
@@ -935,23 +1295,21 @@ async def test_a_rows_quick_look_opens_the_panel_beside_the_page_and_no_id_is_us
             )
             assert ids == [], ids
             assert (
-                await page.locator("#panel #panel-edit-title").input_value()
+                await page.locator("#item-details #edit-title").input_value()
                 == ((await ok(client, "get_node", node=task))["title"])
             )
-            assert (
-                await page.locator("#item-details #edit-title").input_value()
-                == ((await ok(client, "get_node", node=story))["title"])
+
+            # The way back is the story's page with its table; another row's link goes to its own.
+            await page.go_back()
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", story, timeout=SLOW
             )
-            # Choosing another row moves the mark, closing the panel clears it, the page stays.
-            await item_row(page, world["deploy"]).locator("button.quick-look").click()
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                code_of(world["deploy"]), timeout=SLOW
+            await expect(item_row(page, other)).to_be_visible(timeout=SLOW)
+            await item_row(page, other).locator(".cell-title a").click()
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", other, timeout=SLOW
             )
-            assert await page.locator("#item-table tr.selected").count() == 1
-            await page.locator("#panel").get_by_role("button", name="Close the details").click()
-            await expect(page.locator("#panel")).to_be_hidden(timeout=SLOW)
-            assert await page.locator("#item-table tr.selected").count() == 0
-            assert await page.locator("#item-page").get_attribute("data-ref") == story
+            assert await page.locator("#item-page").get_attribute("data-kind") == "task"
             assert w.problems == [], w.problems
 
 
@@ -976,13 +1334,13 @@ async def test_the_table_is_used_by_keyboard_alone(server_url: str) -> None:
             await tab_to(page, "#item-table button.sort[data-sort=item]")
             await tab_to(page, "#item-table button.sort[data-sort=title]")
             await page.keyboard.press("Enter")
-            await expect(page.locator("th.col-title")).to_have_attribute(
+            await expect(page.locator("#item-table th.col-title")).to_have_attribute(
                 "aria-sort", "ascending", timeout=SLOW
             )
             assert await item_rows(page) == sorted_as_shown(tasks, *TASK_COLUMNS["title"], False)
             assert await page.evaluate("document.activeElement.dataset.sort") == "title"
             await page.keyboard.press("Enter")
-            await expect(page.locator("th.col-title")).to_have_attribute(
+            await expect(page.locator("#item-table th.col-title")).to_have_attribute(
                 "aria-sort", "descending", timeout=SLOW
             )
             assert await item_rows(page) == sorted_as_shown(tasks, *TASK_COLUMNS["title"], True)
@@ -991,7 +1349,7 @@ async def test_the_table_is_used_by_keyboard_alone(server_url: str) -> None:
             await page.keyboard.press("Tab")
             assert await page.evaluate("document.activeElement.dataset.sort") == "status"
             await page.keyboard.press("Space")
-            await expect(page.locator("th.col-status")).to_have_attribute(
+            await expect(page.locator("#item-table th.col-status")).to_have_attribute(
                 "aria-sort", "ascending", timeout=SLOW
             )
             assert await item_rows(page) == sorted_as_shown(tasks, *TASK_COLUMNS["status"], False)
@@ -1008,17 +1366,34 @@ async def test_the_table_is_used_by_keyboard_alone(server_url: str) -> None:
             )
             await page.go_back()
             await expect(item_row(page, world["api"])).to_be_visible(timeout=SLOW)
-            # ... and the quick look, which Enter opens in the panel beside the page (the page
-            # puts the focus on its title once its details are in: wait for that, then Tab).
+            # ... and the pager, by its own keys: ] goes to the next story of the epic and [ to the
+            # one before; the button that was used keeps the focus, so Enter carries on. (The page
+            # puts the focus on its title once its details are in: wait for that first.)
             await expect(page.locator("#item-details .card-detail")).to_be_visible(timeout=SLOW)
             await expect(page.locator("#item-title")).to_be_focused(timeout=SLOW)
             await frames(page)
-            await tab_to(page, f"{row} button.quick-look", limit=400)
-            await page.keyboard.press("Enter")
-            await expect(page.locator("#panel #card-title")).to_contain_text(
-                code_of(world["api"]), timeout=SLOW
+            stories = [story, world["pay"], world["track"]]
+            assert [s["ref"] for s in await children_of(client, world["epic"])] == stories
+            await expect(page.locator("#item-position")).to_have_text("1 of 3")
+            assert await page.locator("#item-prev").is_disabled()
+            await page.keyboard.press("]")
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", stories[1], timeout=SLOW
             )
-            assert f"sel={world['api']}" in page.url and f"item={story}" in page.url
+            await expect(page.locator("#item-position")).to_have_text("2 of 3", timeout=SLOW)
+            await expect(page.locator("#item-next")).to_be_focused(timeout=SLOW)
+            await page.keyboard.press("Enter")
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", stories[2], timeout=SLOW
+            )
+            await expect(page.locator("#item-position")).to_have_text("3 of 3", timeout=SLOW)
+            assert await page.locator("#item-next").is_disabled()
+            await frames(page)
+            await page.keyboard.press("]")  # nothing after the last one
+            await page.keyboard.press("[")
+            await expect(page.locator("#item-page")).to_have_attribute(
+                "data-ref", stories[1], timeout=SLOW
+            )
             assert w.problems == [], w.problems
 
 
@@ -1068,11 +1443,20 @@ async def narrow_audit(w: Watched, world: World, scheme: str) -> None:
         moved = await page.evaluate("document.querySelector('#item-region').scrollLeft")
         assert moved > 0, where
         assert await page.locator("#item-region").get_attribute("tabindex") == "0"
-        # What can be reached can be used: the quick look button is a real target (24 pixels, as
-        # the layout tests of M17 count it, WCAG 2.5.8).
+        # What can be reached can be used: the pager's buttons, a column's sort button and a whole
+        # row (which opens the page when it is pressed) are real targets (24 pixels, as the layout
+        # tests of M17 count it, WCAG 2.5.8).
         row = item_row(page, world["ship" if name == "story" else "pay"])
-        box = await row.locator("button.quick-look").bounding_box()
-        assert box and box["width"] >= 24 and box["height"] >= 24, where
+        targets = [
+            page.locator("#item-next"),
+            page.locator("#item-prev"),
+            page.locator("#item-table button.sort").first,
+            row,
+        ]
+        for target in targets:
+            box = await target.bounding_box()
+            assert box and box["width"] >= 24 and box["height"] >= 24, (where, box)
+        assert await page.locator(".quick-look").count() == 0, where
     assert w.problems == [], w.problems
     assert await policy_violations(page) == []
 

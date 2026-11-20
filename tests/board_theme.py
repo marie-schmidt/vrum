@@ -322,9 +322,9 @@ async def settled(page: Page, theme: str, choice: str, *, stored: str | None | b
     assert set(state["checked"]) <= {choice}, state
 
 
-async def choose(page: Page, choice: str, *, within: str = "#top, #sidebar") -> None:
-    """Pick Light, Dark or System with the appearance control a person sees (in the sidebar of a
-    project, at the top before one is open), the way a click on its label does."""
+async def choose(page: Page, choice: str, *, within: str = "#top") -> None:
+    """Pick Light, Dark or System with the appearance control a person sees (at the top, before a
+    project is open and in it), the way a click on its label does."""
     group = page.locator(within).locator("[role=radiogroup][aria-label=Appearance]").first
     await group.locator(f"label:has(input[data-appearance={choice}])").click()
     await page.wait_for_function(

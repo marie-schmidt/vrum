@@ -8,8 +8,12 @@ The language: words and `field:value` terms.
   - `field:a,b` means any of these values. A leading `-` leaves the matches out.
   - Terms that are next to each other must all hold. `OR` between groups of terms means either
     group.
-  - `no:field` finds the items where it is empty. `claimed` and `waiting` on their own find the
-    items that have one, and `-claimed` the ones that do not.
+  - `size:m,l` finds the stories and tasks of those sizes (xs, s, m, l, xl), and `no:size` the ones
+    that still need a size: a story or task with none of its own, apart from a story that has
+    tasks, which adds up theirs. An epic has no size, so it is never found by either.
+  - `no:field` finds the items where it is empty (`no:body` the ones with no details, `no:criteria`
+    the stories and tasks with no acceptance criteria of their own). `claimed` and `waiting` on
+    their own find the items that have one, and `-claimed` the ones that do not.
   - `epic:3` finds epic 3 and everything under it, `story:12` story 12 and its tasks, `number:7`
     the items with that number (with `kind:` to say which kind), and `parent:epic:3` the items
     directly under epic:3 (a parent is written as a reference, a kind and a number).
@@ -28,10 +32,12 @@ from vrum.common import Refusal, is_node_ref
 KINDS = ("epic", "story", "task")
 STATUSES = ("new", "ready", "in_progress", "blocked", "done", "dropped")
 PRIORITIES = ("low", "normal", "high", "urgent")
+SIZES = ("xs", "s", "m", "l", "xl")
 FIELDS = (
     "kind",
     "status",
     "priority",
+    "size",
     "claimed",
     "parent",
     "epic",
@@ -43,16 +49,16 @@ FIELDS = (
     "no",
 )
 IS_FLAGS = ("overdue", "conflict", "waiting", "claimed", "lapsed")
-NO_FIELDS = ("start", "target", "claimed", "parent", "body", "waiting")
+NO_FIELDS = ("start", "target", "claimed", "parent", "body", "waiting", "criteria", "size")
 # Words that mean "has one" on their own, and "has none" after a minus.
 BARE_FLAGS = ("claimed", "waiting")
 MAX_QUERY_CHARS = 2000
 
 _HELP = (
     "Use words, and field:value terms such as kind:task, status:ready,in_progress, priority:high, "
-    "epic:3, parent:story:12, claimed:ann, target:2026-11-01..2026-12-31 or is:overdue; a leading "
-    "- leaves matches out, no:field finds the empty ones, and OR joins alternatives. Put a word "
-    "in quotes to search for it as it is."
+    "size:m,l, epic:3, parent:story:12, claimed:ann, target:2026-11-01..2026-12-31 or is:overdue; "
+    "a leading - leaves matches out, no:field finds the empty ones, and OR joins alternatives. "
+    "Put a word in quotes to search for it as it is."
 )
 
 # The condition for each way a node can be found, on the node_state view. An epic or a story is
@@ -77,6 +83,13 @@ _EMPTY_SQL = {
     "parent": "parent IS NULL",
     "body": "btrim(body) = ''",
     "waiting": "cardinality(waiting_on) = 0",
+    # Only a story or task can hold acceptance criteria, so an epic is never found by this.
+    "criteria": "(kind <> 'epic' AND criteria_total = 0)",
+    # A story with tasks adds up their sizes, so it is not one that needs a size of its own.
+    "size": (
+        "(kind <> 'epic' AND size IS NULL AND NOT EXISTS (SELECT 1 FROM nodes k "
+        "WHERE k.parent = node_state.ref AND k.status <> 'dropped'))"
+    ),
 }
 
 
@@ -282,6 +295,8 @@ def _condition(term: Term, params: _Params) -> str:
         return f"status = ANY({params.add(_choice(term, 'status', STATUSES))})"
     if field == "priority":
         return f"priority = ANY({params.add(_choice(term, 'priority', PRIORITIES))})"
+    if field == "size":
+        return f"size = ANY({params.add(_choice(term, 'size', SIZES))})"
     if field == "claimed":
         names = [value.strip().lower() for value in term.values]
         return f"lower(claimed_by) = ANY({params.add(names)})"
@@ -307,6 +322,7 @@ def _example(field: str) -> str:
         "kind": "task",
         "status": "ready",
         "priority": "high",
+        "size": "m",
         "claimed": "ann",
         "parent": "epic:3",
         "is": "overdue",

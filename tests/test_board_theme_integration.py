@@ -4,8 +4,9 @@ The three choices are tried before sign-in and after it, through a reload, signi
 switching project; the operating system's preference is changed while a page is open (only System
 follows it) and a fresh browser with no saved choice follows it; what is painted first is checked
 against the resolved theme, with a real screenshot of the first frame; the security policy is
-unchanged; switching appearance keeps a draft, the selection, the filters and the open drawer and
-neither navigates nor loads anything; and every surface takes its colours from the tokens of the
+unchanged; switching appearance keeps a draft, the filters and the scroll of the page and neither
+navigates nor loads anything (there is no panel and no drawer: every record, Search and Activity
+are pages, themed like the rest); and every surface takes its colours from the tokens of the
 theme (read from tokens.css), the two themes differ, and nothing is inverted mechanically."""
 
 import asyncio
@@ -51,6 +52,7 @@ from tests.board_theme import (
 from tests.helpers import (
     code_of,
     connect,
+    make_note,
     number_of,
     ok,
     ref_from_code,
@@ -169,9 +171,9 @@ async def test_the_choice_survives_signing_in_project_switching_reload_and_signi
         await page.locator("#sign-in-submit").click()
         await page.wait_for_selector("#app[data-shell=project]", timeout=SLOW)
         await settled(page, "dark", "dark")
-        # The control is in the sidebar now, shows the choice, and there is only one of it.
+        # The control is in the top bar now, shows the choice, and there is only one of it.
         assert (await look(page))["controls"] == 1
-        await expect(page.locator("#sidebar [data-appearance=dark]")).to_be_checked()
+        await expect(page.locator("#top [data-appearance=dark]")).to_be_checked()
         cookies = {each["name"]: each["value"] for each in await page.context.cookies()}
         assert list(cookies) == ["vrum_session"]
         session = await page.evaluate("fetch('/board/api/session').then((r) => r.json())")
@@ -427,21 +429,31 @@ async def test_switching_appearance_across_every_page_causes_no_policy_violation
     base: str, project: Project
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
     story, task = world["story1"]["ref"], world["task1"]["ref"]
+    fact = ref_of("note", world["fact1"]["id"])
+    decision = ref_of("note", world["decision2"]["id"])
+    rule = ref_of("rule", world["rule1"]["id"])
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
         await in_project(page, f"{project.address}#/board")
         for address in (
-            f"#/board?sel={story}&drawer=search&search=log",
+            "#/search?search=log",
+            "#/search?dups=1",
+            "#/activity",
+            "#/coverage",
             item_address(story),
-            f"{item_address(story)}&sel={task}&drawer=activity",
+            f"{item_address(task)}&from=graph",
             item_address(world["epic"]["ref"]),
-            "#/board?drawer=activity",
-            "#/graph?view=everything",
-            "#/graph?view=context&as=list",
+            f"{item_address(rule)}&from=coverage",
+            f"{item_address(decision)}&from=search",
+            f"{item_address(fact)}&from=activity",
+            "#/graph",
+            f"#/graph?tab=around&focus={story}",
+            "#/graph?tab=order",
+            "#/lists?view=everything",
             "#/roadmap",
-            "#/access",
+            "#/users",
             "#/tools",
             "#/status",
         ):
@@ -463,32 +475,39 @@ async def test_switching_appearance_across_every_page_causes_no_policy_violation
 
 # -- switching appearance while editing ------------------------------------------------------------
 
-STATE = """() => {
+BOARD_STATE = """() => {
   const field = (id) => document.getElementById(id);
   return {
     hash: location.hash,
     history: history.length,
-    filter: field('filter').value,
+    filter: [field('filter').value, field('filter').__same],
     cards: [...document.querySelectorAll('.card')].map((e) => e.dataset.ref),
-    selected: [...document.querySelectorAll('.card.selected')].map((e) => e.dataset.ref),
-    heading: field('card-title').textContent,
-    same: window.__same,
+    search: [field('global-search').value, field('global-search').__same],
+    board: window.__board === document.querySelector('.board-inner'),
+    beside: document.querySelectorAll('#panel, #drawer').length,
+    scroll: [field('board').scrollLeft, field('board').scrollTop],
+  };
+}"""
+
+ITEM_STATE = """() => {
+  const field = (id) => document.getElementById(id);
+  return {
+    hash: location.hash,
+    history: history.length,
+    heading: field('item-title').textContent,
+    page: window.__page === field('item-page'),
     title: [field('edit-title').value, field('edit-title').__same],
     body: [field('edit-body').value, field('edit-body').__same],
     caret: [field('edit-body').selectionStart, field('edit-body').selectionEnd],
     priority: [field('edit-priority').value, field('edit-priority').__same],
     target: field('edit-target').value,
-    search: [field('search-box').value, field('search-box').__same],
-    panel: window.__panel === field('panel').firstElementChild,
-    board: window.__board === document.querySelector('.board-inner'),
-    drawer: field('drawer').dataset.drawer,
-    shown: [!field('drawer').hidden, !field('panel').hidden],
-    scroll: [field('board').scrollLeft, field('board').scrollTop],
+    search: [field('global-search').value, field('global-search').__same],
+    beside: document.querySelectorAll('#panel, #drawer').length,
   };
 }"""
 
 
-async def test_switching_appearance_keeps_the_draft_selection_filters_and_drawer_and_loads_nothing(
+async def test_switching_appearance_keeps_the_draft_filters_and_scroll_of_a_page_and_loads_nothing(
     project: Project,
 ) -> None:
     word = unique_word()
@@ -502,40 +521,28 @@ async def test_switching_appearance_keeps_the_draft_selection_filters_and_drawer
 
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
-        await in_project(
-            page,
-            f"{project.address}#/board?epic={number_of(epic)}&q=kind:task&sel={task}"
-            f"&drawer=search&search={word}&search_mode=words",
-        )
-        await expect(page.locator("#card-title")).to_contain_text(f"{code_of(task)} ", timeout=SLOW)
-        await expect(page.locator("#search-results li.result").first).to_be_visible(timeout=SLOW)
+        # A window narrow enough that the Board's columns scroll along their lane, and wide enough
+        # that the sidebar is still a column of the page.
+        await page.set_viewport_size({"width": 1300, "height": 1500})
+        await in_project(page, f"{project.address}#/board?epic={number_of(epic)}&q=kind:task")
         await expect(page.locator(".card")).to_have_count(2, timeout=SLOW)
-        await expect(page.locator(f".card.selected[data-ref='{task}']")).to_have_count(1)
         await hold_back_news(page)
 
-        # A draft in the panel's form and in the drawer's box, and marks to know them again by.
-        await open_editor(page)
-        await page.locator("#edit-title").fill("A draft title ✎ not saved")
-        await page.locator("#edit-body").fill("Draft line one\nDraft line two with [[task:1]]")
-        await page.locator("#edit-priority").select_option("high")
-        await page.locator("#edit-target").fill("2027-03-04")
-        await page.locator("#search-box").fill("words not yet searched")
-        await page.locator("#edit-body").focus()
+        # Words typed into the filter box and the top bar's box and not sent, and marks to know
+        # the elements again by.
+        await page.locator("#filter").fill("kind:task status:done")
+        await page.locator("#global-search").fill("words not yet searched")
         await page.evaluate(
             """() => {
-                window.__same = 'one document';
-                for (const id of ['edit-title', 'edit-body', 'edit-priority', 'search-box']) {
-                    document.getElementById(id).__same = id;
-                }
-                document.getElementById('edit-body').setSelectionRange(5, 9);
+                document.getElementById('filter').__same = 'filter';
+                document.getElementById('global-search').__same = 'search';
                 document.getElementById('board').scrollLeft = 90;
-                window.__panel = document.getElementById('panel').firstElementChild;
                 window.__board = document.querySelector('.board-inner');
             }"""
         )
-        before: dict[str, Any] = await page.evaluate(STATE)
-        assert before["filter"] == "kind:task" and before["selected"] == [task]
-        assert before["caret"] == [5, 9] and before["panel"] and before["board"]
+        before: dict[str, Any] = await page.evaluate(BOARD_STATE)
+        assert before["filter"] == ["kind:task status:done", "filter"] and before["board"]
+        assert before["search"] == ["words not yet searched", "search"] and before["beside"] == 0
         # The Board is scrolled along its lane, and stays so.
         assert before["scroll"][0] > 0, before["scroll"]
         asked = len(w.requests)
@@ -544,38 +551,68 @@ async def test_switching_appearance_keeps_the_draft_selection_filters_and_drawer
             await choose(page, choice)
             await settled(page, the_choice(choice, "light"), choice)
 
-        after: dict[str, Any] = await page.evaluate(STATE)
+        after: dict[str, Any] = await page.evaluate(BOARD_STATE)
         # The address and the history did not move, nothing was drawn again, and what was typed is
-        # still in the fields it was typed in, with the same selected text.
+        # still in the fields it was typed in.
         assert after == before
-        assert after["title"] == ["A draft title ✎ not saved", "edit-title"]
-        assert after["body"] == ["Draft line one\nDraft line two with [[task:1]]", "edit-body"]
-        assert after["priority"] == ["high", "edit-priority"] and after["target"] == "2027-03-04"
-        assert after["search"] == ["words not yet searched", "search-box"]
-        assert after["drawer"] == "search" and after["shown"] == [True, True]
         choices = parse_qs(after["hash"].split("?", 1)[1])
-        assert choices["epic"] == [str(number_of(epic))] and choices["q"] == ["kind:task"]
-        assert choices["sel"] == [task] and choices["drawer"] == ["search"]
-        # The board asked for nothing but its poll while the appearance was switched, and nothing
-        # was saved: the task is as it was.
+        assert choices == {"epic": [str(number_of(epic))], "q": ["kind:task"]}
+        # The board asked for nothing but its poll while the appearance was switched.
         assert set(api_requests(w.requests[asked:])) <= POLL, w.requests[asked:]
+
+        # The page of a task, with a draft in its form and in the top bar's box.
+        await w.go(f"{item_address(task)}&from=board")
+        await expect(page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
+        await expect(page.locator("#item-title")).to_contain_text(f"{code_of(task)} ")
+        await open_editor(page)
+        await page.locator("#edit-title").fill("A draft title ✎ not saved")
+        await page.locator("#edit-body").fill("Draft line one\nDraft line two with [[task:1]]")
+        await page.locator("#edit-priority").select_option("high")
+        await page.locator("#edit-target").fill("2027-03-04")
+        await page.locator("#global-search").fill("words typed in the bar")
+        await page.locator("#edit-body").focus()
+        await page.evaluate(
+            """() => {
+                for (const id of ['edit-title', 'edit-body', 'edit-priority', 'global-search']) {
+                    document.getElementById(id).__same = id;
+                }
+                document.getElementById('edit-body').setSelectionRange(5, 9);
+                window.__page = document.getElementById('item-page');
+            }"""
+        )
+        item_before: dict[str, Any] = await page.evaluate(ITEM_STATE)
+        assert item_before["caret"] == [5, 9] and item_before["page"]
+        assert item_before["heading"].startswith(code_of(task))
+        asked = len(w.requests)
+        for choice in ("dark", "light", "system", "dark", "light"):
+            await choose(page, choice)
+            await settled(page, the_choice(choice, "light"), choice)
+        item_after: dict[str, Any] = await page.evaluate(ITEM_STATE)
+        # What was typed is still in the fields it was typed in, with the same selected text.
+        assert item_after == item_before
+        assert item_after["title"] == ["A draft title ✎ not saved", "edit-title"]
+        assert item_after["body"] == ["Draft line one\nDraft line two with [[task:1]]", "edit-body"]
+        assert item_after["priority"] == ["high", "edit-priority"]
+        assert item_after["target"] == "2027-03-04" and item_after["beside"] == 0
+        assert item_after["search"] == ["words typed in the bar", "global-search"]
+        assert set(api_requests(w.requests[asked:])) <= POLL, w.requests[asked:]
+        # Nothing was saved: the task is as it was.
         async with connect(project.mcp_url, project.key) as client:
             assert (await ok(client, "get_node", node=task))["version"] == version
 
-        # The Graph keeps its selection and the places of its nodes, and the panel its draft.
-        await w.go(f"#/graph?sel={story}")
-        await expect(page.locator("#graph-svg[data-ready=true]")).to_be_visible(timeout=SLOW)
-        await expect(page.locator(f".dot.chosen[data-key='{story}']")).to_have_count(1)
+        # The Graph keeps what is looked at, its tab and the places of the boxes around it.
+        await w.go(f"#/graph?tab=around&focus={story}")
+        await expect(page.locator("#graph-hub")).to_have_attribute("data-ref", story, timeout=SLOW)
         boxes = await settled_boxes(page)
         for choice in ("dark", "light"):
             await choose(page, choice)
             await settled(page, choice, choice)
         assert await settled_boxes(page) == boxes
-        await expect(page.locator(f".dot.chosen[data-key='{story}']")).to_have_count(1)
+        await expect(page.locator("#graph-hub")).to_have_attribute("data-ref", story)
         assert (await page.evaluate("location.hash")).startswith("#/graph?")
 
         # The Roadmap keeps its zoom and where the timeline is scrolled to.
-        await w.go(f"#/roadmap?sel={story}")
+        await w.go("#/roadmap")
         await expect(page.locator("#rm-scroll")).to_be_visible(timeout=SLOW)
         timeline = page.locator("#rm-scroll")
         spot = await timeline.evaluate(
@@ -586,24 +623,26 @@ async def test_switching_appearance_keeps_the_draft_selection_filters_and_drawer
         )
         assert spot == [60, True], spot
         zoom = await page.locator(".segmented button[aria-pressed=true]").all_inner_texts()
+        roadmap_hash = await page.evaluate("location.hash")
         for choice in ("dark", "light"):
             await choose(page, choice)
             await settled(page, choice, choice)
         assert await timeline.evaluate("(el) => el.scrollLeft") == 60
         assert await page.locator(".segmented button[aria-pressed=true]").all_inner_texts() == zoom
-        assert (await page.evaluate("location.hash")).startswith("#/roadmap?")
+        assert (await page.evaluate("location.hash")) == roadmap_hash == "#/roadmap"
         assert w.dialogs == [] and w.problems == [], w.problems
         assert await policy_violations(page) == []
 
 
 async def settled_boxes(page: Page) -> list[tuple[Any, ...]]:
-    """Where every node of the Graph is, once it has stopped moving."""
+    """Where the chosen item and every box around it are in the Graph's Around tab, once they have
+    stopped moving."""
     last: list[tuple[Any, ...]] = []
     for _ in range(40):
-        found: list[list[Any]] = await page.locator(".dot").evaluate_all(
+        found: list[list[Any]] = await page.locator("#graph-hub, .graph-gbox").evaluate_all(
             """els => els.map((e) => {
                 const box = e.getBoundingClientRect();
-                return [e.dataset.key, box.x, box.y, box.width, box.height];
+                return [e.id || e.dataset.group, box.x, box.y, box.width, box.height];
             })"""
         )
         now = [tuple(each) for each in found]
@@ -681,11 +720,11 @@ async def test_a_dialog_keeps_what_was_typed_when_another_tab_or_the_system_chan
         # This page asked for nothing but its poll while the appearance changed under it.
         assert set(api_requests(heard)) <= POLL, heard
 
-        # It was a real draft: sending it makes exactly what was typed.
+        # It was a real draft: sending it makes exactly what was typed, and opens its page.
         await dialog.get_by_role("button", name="Create").click()
-        heading = page.locator("#card-title")
+        heading = page.locator("#item-title")
         await expect(heading).to_contain_text(f"Typed in a dialog {word}", timeout=SLOW)
-        code = re.match(r"([EST]-\d+) ", await heading.text_content() or "")
+        code = re.match(r"([EST]-\d+) ", await heading.inner_text())
         assert code is not None
         async with connect(project.mcp_url, project.key) as client:
             node = await ok(client, "get_node", node=ref_from_code(code[1]))
@@ -712,20 +751,18 @@ async def test_switching_appearance_while_another_projects_answers_are_held_back
     ):
         epic_one = await made(one, "epic", f"Only in the first {word}")
         story_one = await made(one, "story", f"First story {word}", epic_one)
-        await ok(one, "retain_fact", actor="a", text=f"A first fact {word}", source="The first")
+        await make_note(one, f"A first note {word}", nodes=[epic_one])
         await made(two, "epic", f"Only in the second {word}")
 
         async with themed_page(first.address, signed_in=True, keep_bodies=True) as w:
             page = w.page
-            await in_project(
-                page,
-                f"{first.address}#/board?drawer=search&search=first+{word}&sel={story_one}",
-            )
-            await expect(page.locator("#card-title")).to_contain_text(
-                f"{code_of(story_one)} ", timeout=SLOW
-            )
-            await expect(page.locator("#search-results li.result").first).to_be_visible(
+            await in_project(page, f"{first.address}#/search?search=first+{word}")
+            await expect(page.locator("#search-results tr.result").first).to_be_visible(
                 timeout=SLOW
+            )
+            await w.go(f"#/item?item={story_one}&from=search")
+            await expect(page.locator("#item-title")).to_contain_text(
+                f"{code_of(story_one)} ", timeout=SLOW
             )
             # The first project's answers are held back, and an agent makes news for it.
             released = asyncio.Event()
@@ -775,7 +812,7 @@ async def test_switching_appearance_while_another_projects_answers_are_held_back
                 f"Only in the first {word}",
                 f"News for the first {word}",
                 f"First story {word}",
-                f"A first fact {word}",
+                f"A first note {word}",
             ):
                 assert gone not in shown, gone
             assert not [url for url in w.requests[after_switch:] if f"/projects/{first.id}/" in url]
@@ -792,15 +829,10 @@ BOARD = {
     "body": "body",
     "sidebar": "#sidebar",
     "card": ".board .card",
-    "panel": "#panel",
-    "drawer": "#drawer",
     "input": "#filter",
-    "select": "#edit-status",
-    "textarea": "#edit-body",
-    "date": "#edit-start",
-    "button": "#panel button.add-child",
-    "primary": "#panel button.primary",
-    "appearance": "#sidebar .appearance",
+    "select": "#epic-filter",
+    "primary": "#new-item",
+    "appearance": "#top .appearance",
 }
 FIELD = {"background": "--surface", "color": "--text", "border": "--border-strong"}
 ACCENT = {"background": "--accent", "color": "--on-accent", "border": "--accent"}
@@ -809,13 +841,8 @@ EXPECTED = {
     "body": PAGE,
     "sidebar": {"background": "--sidebar"},
     "card": {"background": "--surface", "border": "--border"},
-    "panel": {"background": "--surface", "color": "--text"},
-    "drawer": {"background": "--surface", "color": "--text"},
     "input": FIELD,
     "select": FIELD,
-    "textarea": FIELD,
-    "date": FIELD,
-    "button": FIELD,
     "primary": ACCENT,
     "appearance": {"background": "--surface", "border": "--border-strong"},
 }
@@ -833,7 +860,7 @@ def check_tokens(found: dict[str, Any], theme: str, expected: dict[str, dict[str
 
 
 FILTERS = """() => [
-  'html', 'body', '#app', '#main-column', '#sidebar', '#page', '#panel', '#drawer',
+  'html', 'body', '#app', '#main-column', '#sidebar', '#page',
 ].map((selector) => [selector, document.querySelector(selector)
   && getComputedStyle(document.querySelector(selector)).filter])"""
 
@@ -864,27 +891,21 @@ def of(found: Painted, theme: str, name: str) -> dict[str, str]:
     return painting
 
 
-async def test_the_board_the_panel_the_drawer_and_the_controls_use_the_tokens_of_each_theme(
+async def test_the_board_the_controls_and_the_pages_of_search_and_activity_use_the_tokens(
     project: Project,
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
-    story = world["story1"]["ref"]
+        await rich_world(client, project)
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
-        await in_project(page, f"{project.address}#/board?sel={story}&drawer=search&search=log")
-        await expect(page.locator("#card-title")).to_contain_text(
-            f"{code_of(story)} ", timeout=SLOW
-        )
-        await expect(page.locator("#search-results li.result").first).to_be_visible(timeout=SLOW)
+        await in_project(page, f"{project.address}#/board")
         await expect(page.locator(".board .card").first).to_be_visible(timeout=SLOW)
-        await open_editor(page)
         found = await painted_in_both(page, BOARD)
         for theme in THEMES:
             check_tokens(found[theme], theme, EXPECTED)
-        for name in ("body", "sidebar", "card", "panel", "drawer", "input", "select", "textarea"):
+        for name in ("body", "sidebar", "card", "input", "select"):
             differ(found, [name], "background")
-        differ(found, ["body", "panel", "input", "button"], "color")
+        differ(found, ["body", "input"], "color")
         differ(found, ["primary", "input", "card"], "border")
         differ(found, ["primary"], "background")
         for theme in THEMES:
@@ -908,36 +929,104 @@ async def test_the_board_the_panel_the_drawer_and_the_controls_use_the_tokens_of
             assert set(schemes) == {theme}, (theme, set(schemes))
             html = of({theme: await painted(page, {"html": "html"})}, theme, "html")
             assert rgb_of(html["scrollbar"].split(") ")[0] + ")") == token(theme, "--border-strong")
+
+        # Search is a page: its form, its filters and its table of results are painted from the
+        # tokens too, and so is Possible duplicates.
+        await w.go("#/search?search=log")
+        await expect(page.locator("#search-results tr.result").first).to_be_visible(timeout=SLOW)
+        search = await painted_in_both(
+            page,
+            {
+                "input": "#search-box",
+                "primary": "#search-go",
+                "facets": "#search-facets",
+                "head": "table.results thead th",
+                "row": "table.results tbody tr.result td",
+                "tab": "#search-tab-results",
+            },
+        )
+        for theme in THEMES:
+            check_tokens(
+                search[theme],
+                theme,
+                {
+                    "input": FIELD,
+                    "primary": ACCENT,
+                    "facets": {"background": "--surface", "border": "--border"},
+                    "head": {"background": "--surface-2"},
+                    "row": {"color": "--text"},
+                },
+            )
+        differ(search, ["input", "facets", "head", "primary"], "background")
+        await w.go("#/search?dups=1")
+        await expect(page.locator("#dup-count")).to_be_visible(timeout=SLOW)
+        await painted_in_both(page, {"body": "body", "count": "#dup-count"})
+
+        # Activity is a page: the filters, the feed and who is working on what.
+        await w.go("#/activity")
+        await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#claims-live li.claim").first).to_be_visible(timeout=SLOW)
+        activity = await painted_in_both(
+            page,
+            {
+                "body": "body",
+                "filters": "#activity-filter",
+                "field": "#a-actor",
+                "kind": "#a-kind",
+                "apply": "#apply-activity",
+                "working": "#working",
+                "event": "#feed li.event",
+            },
+        )
+        for theme in THEMES:
+            check_tokens(
+                activity[theme],
+                theme,
+                {
+                    "body": PAGE,
+                    "filters": {"background": "--surface", "border": "--border"},
+                    "field": FIELD,
+                    "kind": FIELD,
+                    "apply": FIELD,
+                },
+            )
+        differ(activity, ["body", "filters", "field", "apply"], "background")
         assert w.problems == [], w.problems
 
 
-async def test_the_page_of_an_item_its_table_and_its_chosen_row_use_the_tokens_of_each_theme(
+async def test_the_page_of_an_item_its_table_and_its_form_use_the_tokens_of_each_theme(
     project: Project,
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
     story, task = world["story1"]["ref"], world["task1"]["ref"]
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
-        # The page of a story with one of its tasks chosen (the panel is beside it).
-        await in_project(page, f"{project.address}{item_address(story)}&sel={task}")
-        await expect(page.locator("#item-table tbody tr.selected")).to_have_count(1, timeout=SLOW)
-        await expect(page.locator("#panel .card-detail")).to_be_visible(timeout=SLOW)
+        # The page of a story, with its tasks in a table and its form for the details open.
+        await in_project(page, f"{project.address}{item_address(story)}")
+        await expect(page.locator("#item-table tbody tr").first).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#item-details .card-main")).to_be_visible(timeout=SLOW)
         await page.wait_for_load_state("networkidle")
+        assert await page.locator("#panel, #drawer").count() == 0
         await open_editor(page, "#item-page")
         found = await painted_in_both(
             page,
             {
                 "body": "body",
                 "details": "#item-details .card-main",
+                "nav": ".item-nav",
+                "pager": ".item-pager",
+                "summary": ".card-summary",
                 "head": "#item-table thead th",
                 "sort": "#item-table th:not([aria-sort]) button.sort",
                 "sorted": "#item-table th[aria-sort] button.sort",
-                "row": "#item-table tbody tr:not(.selected) td.cell-title",
-                "chosen": "#item-table tbody tr.selected td.cell-title",
+                "row": "#item-table tbody tr td.cell-title",
                 "title": "#item-title",
                 "field": "#item-details #edit-title",
-                "panel": "#panel",
+                "select": "#item-details #edit-status",
+                "textarea": "#item-details #edit-body",
+                "date": "#item-details #edit-start",
+                "primary": "#item-details form.edit button.primary",
             },
         )
         for theme in THEMES:
@@ -947,59 +1036,79 @@ async def test_the_page_of_an_item_its_table_and_its_chosen_row_use_the_tokens_o
                 {
                     "body": PAGE,
                     "details": {"background": "--surface", "border": "--border"},
+                    "nav": {"background": "--bg"},
+                    "pager": {"background": "--surface", "border": "--border-strong"},
+                    "summary": {"background": "--surface", "border": "--border"},
                     "head": {"background": "--surface-2"},
                     "sort": {"color": "--text-2"},
                     "sorted": {"color": "--text"},
-                    "chosen": {"background": "--accent-soft", "color": "--text"},
                     "title": {"color": "--text"},
                     "field": FIELD,
-                    "panel": {"background": "--surface", "color": "--text"},
+                    "select": FIELD,
+                    "textarea": FIELD,
+                    "date": FIELD,
+                    "primary": ACCENT,
                 },
             )
-        differ(found, ["body", "details", "head", "chosen", "field"], "background")
+        differ(found, ["body", "details", "head", "field", "primary", "nav", "pager"], "background")
         differ(found, ["sort", "sorted", "title"], "color")
-        # An item with nothing under it, and a task (which has no table), are themed the same.
-        for ref in (world["epic"]["ref"], task):
+        # An epic, a task, an acceptance criterion, a decision and a plain note are themed the same.
+        for ref in (
+            world["epic"]["ref"],
+            task,
+            ref_of("rule", world["rule1"]["id"]),
+            ref_of("note", world["decision2"]["id"]),
+            ref_of("note", world["fact1"]["id"]),
+        ):
             await in_project(page, f"{project.address}{item_address(ref)}")
             await expect(page.locator("#item-page")).to_have_attribute("data-ref", ref)
             await page.wait_for_load_state("networkidle")
-            await painted_in_both(page, {"body": "body"})
+            await painted_in_both(page, {"body": "body", "details": "#item-details"})
         assert w.problems == [], w.problems
         assert await policy_violations(page) == []
 
 
-async def test_the_graph_in_every_view_and_when_it_draws_tiles_uses_the_tokens_of_each_theme(
+async def test_the_graph_in_every_tab_and_with_a_great_deal_of_work_uses_the_tokens_of_each_theme(
     project: Project,
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
         story = world["story1"]["ref"]
-        # Enough work that the map draws small tiles instead of boxes.
+        # Enough work that the Structure map has a great many small things to draw.
         for number in range(70):
             await made(client, "task", f"Bulk task {number}", story)
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
         await in_project(page, f"{project.address}#/board")
-        fact = ref_of("fact", world["fact1"]["id"])
         for address, drawn in (
-            ("#/graph?view=work", ".dot"),
-            ("#/graph?view=everything&ended=1&mentions=1", ".dot"),
-            ("#/graph?view=everything&ended=1&mentions=1&colour=status", ".dot"),
-            ("#/graph?view=context&ended=1", ".dot"),
-            (f"#/graph?view=everything&ended=1&scope=local&depth=2&sel={fact}", ".dot"),
-            ("#/graph?view=everything&as=list&ended=1", "#work-tree li"),
+            ("#/graph", "#graph-st-title"),
+            (f"#/graph?tab=around&focus={story}", "#graph-hub"),
+            ("#/graph?tab=order", ".graph-xv"),
+            ("#/lists?view=everything", "#work-tree li"),
         ):
             await w.go(address)
             await expect(page.locator(drawn).first).to_be_visible(timeout=SLOW)
-            if drawn == ".dot":
-                await settled_boxes(page)
+            await page.wait_for_load_state("networkidle")
+            await transitions_done(page)
             for theme in THEMES:
                 await switch(page, theme)
                 assert foreign_colours(await survey(page), theme) == [], (address, theme)
-        # With this much work the map draws tiles (in the force layout), which are real nodes.
-        await w.go("#/graph?view=work")
-        await expect(page.locator("#graph-svg[data-layout=compact]")).to_be_visible(timeout=SLOW)
-        assert await page.locator(".dot").count() > 60
+        # The Agent view, a dialog on the page of an item, is drawn from the tokens too.
+        await w.go(item_address(story, "graph"))
+        await expect(page.locator("#item-page")).to_have_attribute("data-ref", story, timeout=SLOW)
+        await page.wait_for_load_state("networkidle")
+        for theme in THEMES:
+            await switch(page, theme)
+            await page.locator("#item-agent-view").click()
+            await expect(page.locator("#agent-view-text")).to_be_visible(timeout=SLOW)
+            await transitions_done(page)
+            assert foreign_colours(await survey(page), theme) == [], ("agent view", theme)
+            await page.locator("#agent-view-close").click()
+            await expect(page.locator("#agent-view")).to_have_count(0)
+        # With this much work the Structure map draws every task as a thing of its own.
+        await w.go("#/graph")
+        await expect(page.locator("#graph-st-title")).to_be_visible(timeout=SLOW)
+        assert await page.locator("#graph-view svg [data-ref^='task:']").count() > 60
         assert w.problems == [], w.problems
 
 
@@ -1007,15 +1116,15 @@ async def test_a_refusal_the_graph_the_roadmap_the_menu_and_the_other_pages_use_
     project: Project,
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
     story = world["story1"]["ref"]
     async with themed_page(project.address, signed_in=True, scheme="dark") as w:
         page = w.page
 
-        # A refusal from the server, in the panel.
-        await in_project(page, f"{project.address}#/board?sel=story:99999")
-        await expect(page.locator("#panel .notice.refusal")).to_be_visible(timeout=SLOW)
-        found = await painted_in_both(page, {"notice": "#panel .notice.refusal"})
+        # A refusal from the server, on the page of a record that is not there.
+        await in_project(page, f"{project.address}#/item?item=story:99999")
+        await expect(page.locator("#item-page .notice.refusal")).to_be_visible(timeout=SLOW)
+        found = await painted_in_both(page, {"notice": "#item-page .notice.refusal"})
         for theme in THEMES:
             check_tokens(
                 found[theme],
@@ -1030,48 +1139,37 @@ async def test_a_refusal_the_graph_the_roadmap_the_menu_and_the_other_pages_use_
             )
         differ(found, ["notice"], "background")
 
-        # The Graph: a node, an edge and an arrowhead.
-        await in_project(page, f"{project.address}#/graph?sel={story}")
-        await expect(page.locator("#graph-svg[data-ready=true]")).to_be_visible(timeout=SLOW)
-        await expect(page.locator(".edge").first).to_be_attached(timeout=SLOW)
+        # The Graph: the item in the middle, the boxes around it and the words in them.
+        await in_project(page, f"{project.address}#/graph?tab=around&focus={story}")
+        await expect(page.locator("#graph-hub")).to_be_visible(timeout=SLOW)
+        await expect(page.locator(".graph-gbox").first).to_be_attached(timeout=SLOW)
         await settled_boxes(page)
-        graph = await painted_in_both(
-            page,
-            {
-                "node": ".dot:not(.chosen) .shape",
-                "chosen": ".dot.chosen .shape",
-                "edge": ".edge",
-                "arrow": "marker .arrow",
-                "label": ".dot .label",
-            },
-        )
+        graph = await painted_in_both(page, {"hub": "#graph-hub", "box": ".graph-gbox"})
         for theme in THEMES:
-            assert rgb_of(of(graph, theme, "edge")["stroke"]) == token(theme, "--border-strong")
-            assert rgb_of(of(graph, theme, "chosen")["stroke"]) == token(theme, "--accent")
-            assert rgb_of(of(graph, theme, "label")["fill"]) == token(theme, "--text")
-            assert rgb_of(of(graph, theme, "node")["fill"]) in palette(theme)
-            assert rgb_of(of(graph, theme, "arrow")["fill"]) in palette(theme)
-        differ(graph, ["edge", "chosen", "node"], "stroke")
-        differ(graph, ["label", "node", "arrow"], "fill")
+            assert rgb_of(of(graph, theme, "hub")["color"]) in palette(theme)
+            assert rgb_of(of(graph, theme, "box")["color"]) in palette(theme)
+        differ(graph, ["hub", "box"], "color")
 
-        # The Graph's list, then the Roadmap: bars, today's line, the tray.
-        await in_project(page, f"{project.address}#/graph?view=context&as=list")
-        await expect(page.locator("#ctx-requirements")).to_be_visible(timeout=SLOW)
+        # The Lists, then the Roadmap: bars and today's line.
+        await in_project(page, f"{project.address}#/lists?view=notes")
+        await expect(page.locator("#ctx-notes")).to_be_visible(timeout=SLOW)
         await painted_in_both(page, {"body": "body"})
-        await in_project(page, f"{project.address}#/roadmap?sel={story}")
+        await in_project(page, f"{project.address}#/roadmap")
         await expect(page.locator(".rm-bar").first).to_be_visible(timeout=SLOW)
         roadmap = await painted_in_both(page, {"bar": ".rm-bar", "today": ".rm-today"})
         for theme in THEMES:
             assert rgb_of(of(roadmap, theme, "bar")["border"]) in palette(theme)
-            assert rgb_of(of(roadmap, theme, "today")["background"]) == token(theme, "--accent")
+            today = rgb_of(of(roadmap, theme, "today")["background"])
+            assert today == token(theme, "--accent-soft")
         differ(roadmap, ["bar"], "color")
         differ(roadmap, ["today"], "background")
 
         # The other pages: nothing on them is painted from outside the tokens.
         for address in (
-            "#/board?drawer=activity",
-            "#/board?drawer=search&dups=1",
-            "#/access",
+            "#/activity",
+            "#/search?dups=1",
+            "#/coverage",
+            "#/users",
             "#/tools",
             "#/status",
         ):
@@ -1094,44 +1192,50 @@ async def test_records_coverage_the_switcher_dialogs_and_a_new_key_use_the_token
     project: Project,
 ) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
     story = world["story1"]["ref"]
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
-        # The coverage report, and a fact, a decision and a requirement in the detail panel.
-        await in_project(page, f"{project.address}#/board?panel=coverage")
-        await expect(page.locator("#panel")).to_be_visible(timeout=SLOW)
+        # The coverage report is a page, and a note, a decision and a criterion have pages.
+        await in_project(page, f"{project.address}#/coverage")
+        await expect(page.locator("#coverage-page")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#coverage-summary")).to_be_visible(timeout=SLOW)
         await page.wait_for_load_state("networkidle")
-        await painted_in_both(page, {"panel": "#panel"})
+        coverage = await painted_in_both(
+            page, {"page": "#coverage-page", "table": "#coverage-page table"}
+        )
+        for theme in THEMES:
+            check_tokens(coverage[theme], theme, {"page": {"color": "--text"}})
         for kind, record in (
-            ("fact", world["fact1"]),
-            ("decision", world["decision2"]),
+            ("note", world["fact1"]),
+            ("note", world["decision2"]),
             ("rule", world["rule1"]),
         ):
-            await w.go(f"#/board?sel={ref_of(kind, record['id'])}")
-            await expect(page.locator("#panel .record-detail")).to_be_visible(timeout=SLOW)
-            await painted_in_both(page, {"panel": "#panel"})
+            await w.go(item_address(ref_of(kind, record["id"])))
+            await expect(page.locator("#item-details .record-detail")).to_be_visible(timeout=SLOW)
+            found = await painted_in_both(
+                page, {"page": "#item-page", "details": "#item-details .record-detail"}
+            )
+            for theme in THEMES:
+                check_tokens(found[theme], theme, {"page": {"color": "--text"}})
 
-        # The dialogs that record and change facts and decisions.
-        await w.go(f"#/board?sel={story}")
-        await expect(page.locator("#card-title")).to_contain_text(
+        # The dialog that adds a note, which can name who decided it, and the ones that replace and
+        # withdraw one.
+        await w.go(item_address(story))
+        await expect(page.locator("#item-title")).to_contain_text(
             f"{code_of(story)} ", timeout=SLOW
         )
-        for button, field in (
-            ("button.record-fact", "#record-fact-text"),
-            ("button.record-decision", "#record-decision-title"),
-        ):
-            await page.locator(f"#panel {button}").first.click()
-            await expect(page.locator(field)).to_be_visible()
-            found = await painted_in_both(page, {"dialog": "dialog.modal", "field": field})
-            for theme in THEMES:
-                assert rgb_of(of(found, theme, "dialog")["background"]) == token(theme, "--surface")
-            await page.keyboard.press("Escape")
-            await expect(page.locator("dialog.modal")).to_have_count(0)
-        await w.go(f"#/board?sel={ref_of('fact', world['fact1']['id'])}")
+        await page.locator("#item-details button.add-note").first.click()
+        await expect(page.locator("#add-note-text")).to_be_visible()
+        found = await painted_in_both(page, {"dialog": "dialog.modal", "field": "#add-note-text"})
+        for theme in THEMES:
+            assert rgb_of(of(found, theme, "dialog")["background"]) == token(theme, "--surface")
+        await page.keyboard.press("Escape")
+        await expect(page.locator("dialog.modal")).to_have_count(0)
+        await w.go(item_address(ref_of("note", world["fact1"]["id"])))
         for button in ("button.supersede", "button.withdraw"):
-            await expect(page.locator(f"#panel {button}")).to_be_visible(timeout=SLOW)
-            await page.locator(f"#panel {button}").first.click()
+            await expect(page.locator(f"#item-page {button}")).to_be_visible(timeout=SLOW)
+            await page.locator(f"#item-page {button}").first.click()
             await expect(page.locator("dialog.modal")).to_be_visible()
             await painted_in_both(page, {"dialog": "dialog.modal"})
             await page.keyboard.press("Escape")
@@ -1149,8 +1253,9 @@ async def test_records_coverage_the_switcher_dialogs_and_a_new_key_use_the_token
         await page.keyboard.press("Escape")
 
         # A new agent key, whose secret is shown once.
-        await w.go("#/access")
-        await page.locator("#key-label").fill("Surveyed")
+        await w.go("#/users")
+        await page.locator("#key-name").fill("Surveyed")
+        await expect(page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await page.locator("#create-key").click()
         await expect(page.locator("#key-secret")).to_be_visible(timeout=SLOW)
         found = await painted_in_both(page, {"secret": "#key-secret", "reveal": "#new-key"})
@@ -1251,11 +1356,11 @@ async def test_the_dialog_the_project_list_and_the_sign_in_page_use_the_tokens_o
 
 async def test_the_chips_and_the_meter_keep_their_meaning_in_both_themes(project: Project) -> None:
     async with connect(project.mcp_url, project.key) as client:
-        world = await rich_world(client)
+        world = await rich_world(client, project)
     async with themed_page(project.address, signed_in=True, scheme="light") as w:
         page = w.page
-        await in_project(page, f"{project.address}#/board?sel={world['epic']['ref']}")
-        await expect(page.locator("#panel .meter").first).to_be_visible(timeout=SLOW)
+        await in_project(page, f"{project.address}{item_address(world['epic']['ref'])}")
+        await expect(page.locator("#item-page .meter").first).to_be_visible(timeout=SLOW)
         pairs = (("ok", "--ok-soft"), ("warn", "--warn-soft"), ("danger", "--danger-soft"))
         for theme in THEMES:
             await switch(page, theme)
@@ -1271,8 +1376,8 @@ async def test_the_chips_and_the_meter_keep_their_meaning_in_both_themes(project
                         ok: of('.chip.ok, .chip.confirmed'),
                         warn: of('.chip.warn, .chip.unconfirmed'),
                         danger: of('.chip.danger'),
-                        meter: of('#panel .meter > span'),
-                        track: of('#panel .meter'),
+                        meter: of('#item-page .meter > span'),
+                        track: of('#item-page .meter'),
                     };
                 }"""
             )

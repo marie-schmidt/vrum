@@ -1,9 +1,11 @@
 """A small OpenAI-compatible embedding service for the check stack (compose.check.yaml).
 
 It lets ./check.sh prove what Vrum does with an embedding service (finding things, saying how they
-matched, surviving the service being stopped, rebuilding the index) without downloading a model and
-with answers that are the same every run. It does not prove how good a real model is: a real model
-is tried by hand, with the `local-embeddings` profile (see AGENTS.md).
+matched, surviving the service being stopped, rebuilding the index) without building the real one
+and with answers that are the same every run. It does not prove how good a real model is: the
+real model (the `embeddings` service of compose.yaml) is measured by hand with
+scripts/real_embeddings_check.py, and tests/test_embeddings_second_stack.py proves it works
+out of the box.
 
 The "meaning" of a text here is the set of concepts its words stand for. Words in one group below
 stand for the same concept, so two texts that use different words for the same ideas get the same

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-theme-choice="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph, proposed (mockup) - Riverside Bike Share - Vrum</title>
+  <!-- The real board's own theme script and tokens, so colours, type and spacing are the product's. -->
+  <script src="../../../src/vrum/board/static/theme.js"></script>
+  <link rel="stylesheet" href="../../../src/vrum/board/static/tokens.css">
+  <link rel="stylesheet" href="../../../src/vrum/board/static/base.css">
+  <link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+  <a class="skip" href="#page">Skip to the page</a>
+
+  <div id="app" data-shell="project">
+    <aside id="sidebar" aria-label="Project navigation">
+      <div class="side-head">
+        <a class="brand" href="#" data-stub aria-label="vrum, home">
+          <svg class="wordmark" viewBox="-40 -40 519 180" width="90" height="31" role="img" aria-label="vrum" focusable="false">
+            <g transform="skewX(-9)">
+              <polygon class="wordmark-v" points="0,0 22,0 46.5,57 71,0 96,0 53,100 43,100"></polygon>
+              <polygon class="wordmark-vector" points="71,0 96,0 53,100 43,100 35.5,82.6"></polygon>
+              <path class="wordmark-rum" d="M123,100 V11 H159 M185,0 V61 A28,28 0 0 0 213,89 H247 V0 M309,100 V11 H405 A28,28 0 0 1 433,39 V100 M371,100 V11 M343,11 A28,28 0 0 1 371,39"></path>
+            </g>
+          </svg>
+        </a>
+        <button id="sidebar-close" class="icon-only ghost" type="button" aria-label="Close the menu"><i data-icon="close"></i></button>
+      </div>
+
+      <div class="project-switch">
+        <span class="avatar" aria-hidden="true">R</span>
+        <div class="project-text">
+          <label for="project-switcher">Project</label>
+          <select id="project-switcher"><option>Riverside Bike Share</option></select>
+        </div>
+        <i data-icon="chevron_down" class="side-chevron"></i>
+      </div>
+
+      <nav id="main-nav" aria-label="Views">
+        <a class="side-item" href="#" data-stub><i data-icon="board" data-size="18"></i><span class="side-label">Board</span><span class="nav-count">233</span></a>
+        <a class="side-item current" href="#" aria-current="page"><i data-icon="graph" data-size="18"></i><span class="side-label">Graph</span><span class="nav-count">311</span></a>
+        <a class="side-item" href="#" data-stub><i data-icon="roadmap" data-size="18"></i><span class="side-label">Roadmap</span><span class="nav-count">223</span></a>
+      </nav>
+
+      <section class="side-epics" aria-labelledby="side-epics-h">
+        <h2 class="side-heading" id="side-epics-h">Epics</h2>
+        <ul class="side-tree plain" id="epic-tree"></ul>
+      </section>
+
+      <div class="side-foot">
+        <a class="side-item" href="#" data-stub><i data-icon="activity" data-size="18"></i><span class="side-label">Activity</span><span class="nav-count">5</span></a>
+        <button class="side-item" type="button" data-stub><i data-icon="settings" data-size="18"></i><span class="side-label">Settings &amp; tools</span><i data-icon="chevron_down"></i></button>
+        <div class="appearance" role="radiogroup" aria-label="Appearance" id="appearance"></div>
+        <div class="account-block">
+          <span class="avatar small" aria-hidden="true">D</span>
+          <span class="account-name">Demo Owner</span>
+          <button class="small" type="button" data-stub>Sign out</button>
+          <button class="link quiet" id="who" type="button" data-stub>Recorded as Demo Owner: change</button>
+        </div>
+      </div>
+    </aside>
+    <div id="sidebar-scrim" hidden></div>
+
+    <div id="main-column">
+      <p class="ribbon" role="note"><strong>Design mockup.</strong> The Graph page as proposed in m21. Not connected to a server: the records are the demo project's, and nothing you click changes anything.</p>
+      <header id="top">
+        <button id="sidebar-toggle" class="icon-only ghost" type="button" aria-label="Open the menu" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
+        <nav class="crumbs" aria-label="Breadcrumb">
+          <ol>
+            <li class="crumb-root"><a href="#" data-stub>Projects</a></li>
+            <li class="crumb-project"><a href="#" data-stub>Riverside Bike Share</a></li>
+            <li aria-current="page">Graph</li>
+          </ol>
+        </nav>
+        <form class="global-search" role="search" id="top-search">
+          <i data-icon="search" class="global-search-icon"></i>
+          <input id="global-search" type="search" placeholder="Search work &amp; context..." aria-label="Search work and context">
+          <button class="small" type="submit">Search</button>
+        </form>
+        <button class="jump ghost" type="button" id="jump"><i data-icon="arrow_right"></i><span class="jump-label">Jump to</span> <kbd>Ctrl K</kbd></button>
+        <div class="top-chips"><span class="chip">Index: 0 waiting</span></div>
+      </header>
+
+      <main id="page" class="graph-page" tabindex="-1">
+        <noscript><p class="notice refusal">This mockup needs JavaScript.</p></noscript>
+      </main>
+    </div>
+  </div>
+
+  <div id="dock" aria-label="Mockup controls"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="data.js"></script>
+  <script src="mockup.js"></script>
+</body>
+</html>

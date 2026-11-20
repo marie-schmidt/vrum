@@ -72,7 +72,11 @@ def main() -> int:
         port=settings.port,
         max_request_bytes=settings.max_request_bytes,
         embedding_model=settings.embedding.model if settings.embedding else None,
+        email=settings.mail is not None,
+        sign_in=[one.id for one in settings.sso.providers()],
     )
+    for name, words in settings.sso.warnings():
+        event(logging.getLogger("vrum"), logging.WARNING, name, message=words)
     # The server writes its own log lines (see logs.py), so the web server's are off.
     config = uvicorn.Config(
         app, host=settings.host, port=settings.port, log_config=None, access_log=False

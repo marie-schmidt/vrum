@@ -7,7 +7,10 @@ function fill(el, props, children) {
   for (const [name, value] of Object.entries(props || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (name === 'class') el.setAttribute('class', value);
-    else if (name === 'dataset') Object.assign(el.dataset, value);
+    else if (name === 'dataset') {
+      // A value that is not there leaves the attribute off, and is not written as the word "null".
+      for (const [key, one] of Object.entries(value)) if (one !== null && one !== undefined) el.dataset[key] = one;
+    }
     // Styles are set from script, because the page's policy does not allow a style attribute.
     else if (name === 'css') Object.assign(el.style, value);
     else if (name.startsWith('on')) el.addEventListener(name.slice(2).toLowerCase(), value);
@@ -67,13 +70,17 @@ export function day(value) {
   return value ? String(value).slice(0, 10) : '';
 }
 
-// A moment as written on a card, in the person's own time.
+// A moment as written on a card, in the person's own time: "2026-11-18, 6:57 PM". The day is
+// written the way a day alone always is (see `day`), so a card that says "Due 2026-11-30" and
+// "held until 2026-11-18, 6:57 PM" uses one form, and every browser writes it the same way (some
+// write English as "Nov 18, 2026 at 6:57 PM"). The time follows the person's own clock settings.
 export function moment(value) {
   if (!value) return '';
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? String(value)
-    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  if (Number.isNaN(date.getTime())) return String(value);
+  const two = (number) => String(number).padStart(2, '0');
+  const clock = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).replace(/\s/g, '\u00a0');
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}, ${clock}`;
 }
 
 export function plural(count, one, many) {

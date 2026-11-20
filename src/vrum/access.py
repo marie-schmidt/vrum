@@ -17,7 +17,7 @@ from typing import Any, Protocol
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY
+from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY, KeyAccess
 from vrum.logs import event
 
 log = logging.getLogger("vrum.access")
@@ -39,7 +39,7 @@ NOT_A_BEARER = (
 
 
 class AgentKeys(Protocol):
-    async def project_for_key(self, key: str) -> int | None: ...
+    async def project_for_key(self, key: str) -> KeyAccess | None: ...
 
 
 def bearer_key(header: str | None) -> tuple[str | None, str | None]:

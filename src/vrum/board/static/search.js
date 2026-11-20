@@ -1,44 +1,40 @@
-// Search, in the drawer: the box in the top bar opens it, and a result opens the ordinary detail
-// panel (`sel=kind:number`, such as `sel=story:12`) without closing it. Each result says how it matched (exact words, meaning
-// or both) and why, shows a snippet with the matched words marked, and its parent and status as
-// the graph holds them now. The counts by kind, status and epic are worked out from the whole list
-// of results, and filtering by them keeps the server's order. The drawer says how many items wait
-// to be indexed, since results by meaning can lag where results by words never do, and says in
-// the server's words why meaning results are missing when the embedding service is not there.
-// Possible duplicates is a second mode of the same drawer (duplicates.js). It keeps nothing: the
-// search, the mode and the filters are in the address (search, search_mode, search_type,
-// search_status, search_epic, and dups with its own choices).
+// The Search page (#/search): the box in the top bar goes here, and a result opens the record's own
+// page. Each result says how it matched (exact words, meaning or both) and why, shows a snippet
+// with the matched words marked, and its parent and status as the graph holds them now. The counts
+// by kind, status and epic are worked out from the whole list of results, and filtering by them
+// keeps the server's order. The page says how many items wait to be indexed, since results by
+// meaning can lag where results by words never do, and says in the server's words why meaning
+// results are missing when the embedding service is not there. Possible duplicates is the second
+// tab of the same page (duplicates.js). It keeps nothing: the search and the filters are
+// in the address (search, search_type, search_status, search_epic, and dups with its
+// own choices). A search always uses exact words and meaning together.
 
 import { Refusal, callPaged } from './api.js';
-import { recordLink, parseSel, ui } from './ctx.js';
+import { itemLink, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import * as duplicates from './duplicates.js';
 import { icon } from './icons.js';
-import { KIND, STATUS, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, statusChip, statusIcon } from './labels.js';
+import { KIND, anyStatusIcon, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, plainNoteStatus, plainRequirementStatus, statusChip, statusLabel } from './labels.js';
+import { pageHeader } from './page.js';
 import { epicOf, store } from './store.js';
 
 const FIRST = 50;
-const MODES = [
-  ['both', 'Words and meaning'],
-  ['words', 'Exact words only'],
-  ['meaning', 'Meaning only'],
-];
 const MATCHED = { words: 'Exact words', meaning: 'Meaning (a suggestion)', both: 'Words and meaning' };
-const TYPES = ['epic', 'story', 'task', 'rule', 'decision', 'fact'];
+const TYPES = ['epic', 'story', 'task', 'rule', 'note'];
+const WORK = ['epic', 'story', 'task'];
 
 let root = null;
 let params = new URLSearchParams();
 let parts = {};
-let inDuplicates = null; // which view is on show: true for possible duplicates, false for results
+let inDuplicates = null; // which tab is on show: true for possible duplicates, false for results
 let results = null; // { items, first } for the query in the address
 let shown = FIRST;
 let generation = 0;
 let loadedFor = '';
 
-const modeOf = (from) => (MODES.some(([value]) => value === from.get('search_mode')) ? from.get('search_mode') : 'both');
-const askedOf = (from) => `${from.get('search') || ''}|${from.get('search_mode') || 'both'}`;
+const askedOf = (from) => (from.get('search') || '').trim();
 
-// -- the drawer -----------------------------------------------------------------------------------
+// -- the page -------------------------------------------------------------------------------------
 
 export function mount(element, initial) {
   root = element;
@@ -48,13 +44,14 @@ export function mount(element, initial) {
   parts = {
     tabs: h(
       'div',
-      { class: 'drawer-tabs segmented', role: 'group', 'aria-label': 'What to do' },
+      { class: 'page-tabs', role: 'group', 'aria-label': 'What to do' },
       h('button', { type: 'button', id: 'search-tab-results', onclick: () => ui.navigate({ dups: null }) }, icon('search', { size: 16 }), 'Search'),
       h('button', { type: 'button', id: 'search-tab-dups', onclick: () => ui.navigate({ dups: '1' }) }, icon('link', { size: 16 }), 'Possible duplicates'),
     ),
-    view: h('div', { id: 'search-view' }),
+    view: h('div', { id: 'search-view', class: 'search-view' }),
   };
-  put(root, parts.tabs, parts.view);
+  parts.page = h('div', { class: 'search-page' }, pageHeader('Search'), parts.tabs, parts.view);
+  put(root, parts.page);
   showView();
 }
 
@@ -77,7 +74,7 @@ export function update(next) {
     duplicates.update(next);
     return;
   }
-  // The same words and mode only redraw: what is typed in the box and not asked yet stays.
+  // The same words only redraw: what is typed in the box and not asked yet stays.
   if (askedOf(next) !== loadedFor) {
     shown = FIRST;
     load();
@@ -95,19 +92,24 @@ export function index() {
   if (root && !inDuplicates) drawWaiting();
 }
 
-// The same words asked again (the service may be back, or something was saved).
+// The same words asked again (the service may be back, or something was saved). The shell calls
+// it when the top bar asks for the words the page already holds.
 export function again() {
   if (!root) return;
   if (inDuplicates) duplicates.again();
   else load();
 }
 
+// Where the keyboard goes when the page opens: the box for a new search, the title otherwise.
 export function focus() {
-  const target = inDuplicates || (params.get('search') || '').trim() ? document.getElementById('drawer-title') : parts.box;
-  if (target) target.focus();
+  const target = inDuplicates || (params.get('search') || '').trim() ? parts.page?.querySelector('h1') : parts.box;
+  if (target) {
+    if (target.tagName === 'H1') target.tabIndex = -1;
+    target.focus();
+  }
 }
 
-// Which of the two views the address asks for: the one that is on show is torn down first.
+// Which of the two tabs the address asks for: the one that is on show is torn down first.
 function showView() {
   const wanted = params.get('dups') === '1';
   if (inDuplicates === true) duplicates.unmount();
@@ -118,7 +120,7 @@ function showView() {
     button.setAttribute('aria-pressed', String(on));
     button.classList.toggle('on', on);
   }
-  root.parentElement.dataset.mode = wanted ? 'duplicates' : 'results';
+  parts.page.dataset.mode = wanted ? 'duplicates' : 'results';
   if (wanted) {
     clear(parts.view);
     duplicates.mount(parts.view, params);
@@ -129,94 +131,82 @@ function showView() {
   load();
 }
 
-// -- the results view -----------------------------------------------------------------------------
+// -- the results tab ------------------------------------------------------------------------------
 
 function buildResults() {
   shown = FIRST;
   loadedFor = '';
   const box = h('input', { id: 'search-box', name: 'search', type: 'search', autocomplete: 'off', value: params.get('search') || '', 'aria-label': 'What to look for', placeholder: 'Words, a phrase in quotes, or what you mean' });
-  const mode = h('select', { id: 'search-mode', 'aria-label': 'How to search' }, MODES.map(([value, label]) => h('option', { value }, label)));
-  mode.value = modeOf(params);
   Object.assign(parts, {
     box,
-    mode,
     waiting: h('p', { class: 'index-line', id: 'search-waiting', role: 'status' }),
     note: h('p', { class: 'index-note', id: 'search-note' }),
     problem: h('p', { class: 'problem', role: 'alert', id: 'search-problem' }),
     summary: h('p', { class: 'count', id: 'search-count', role: 'status' }),
+    clearFilters: h('button', { type: 'button', class: 'small', id: 'search-clear-filters', hidden: true, onclick: () => ui.navigate({ search_type: null, search_status: null, search_epic: null }) }, icon('clear', { size: 14 }), 'Clear the filters'),
     facets: h('div', { class: 'facets', id: 'search-facets' }),
-    list: h('div', { id: 'search-results' }),
+    list: h('div', { id: 'search-results', tabindex: '-1' }),
+    // Between the form and the results there are as many buttons as there are filters.
+    skip: h('button', { type: 'button', class: 'skip-filters', hidden: true, onclick: () => parts.list.focus() }, 'Skip the filters and go to the results'),
   });
   put(
     parts.view,
     h(
       'form',
       {
-        class: 'search-form drawer-form',
+        class: 'search-form',
         role: 'search',
         onsubmit: (event) => {
           event.preventDefault();
-          const asked = `${box.value.trim()}|${mode.value}`;
-          ui.navigate({ search: box.value.trim() || null, search_mode: mode.value === 'both' ? null : mode.value, search_type: null, search_status: null, search_epic: null });
+          const asked = box.value.trim();
+          ui.navigate({ search: asked || null, search_type: null, search_status: null, search_epic: null });
           // The same words again ask again.
-          if (asked === `${(params.get('search') || '').trim()}|${modeOf(params)}`) load();
+          if (asked === (params.get('search') || '').trim()) load();
         },
       },
       h('div', { class: 'search-field' }, icon('search', { size: 16 }), box),
-      h('div', { class: 'search-row' }, mode, h('button', { type: 'submit', class: 'primary', id: 'search-go' }, 'Search')),
+      h('button', { type: 'submit', class: 'primary', id: 'search-go' }, 'Search'),
     ),
-    parts.waiting,
-    parts.note,
-    parts.problem,
-    parts.summary,
+    h('div', { class: 'search-notices' }, parts.waiting, parts.note, parts.problem),
+    parts.skip,
     parts.facets,
+    h('div', { class: 'result-bar' }, parts.summary, parts.clearFilters),
     parts.list,
   );
 }
 
 function drawWaiting() {
   const waiting = store.index ? store.index.waiting_to_index : null;
-  put(
-    parts.waiting,
-    icon(waiting ? 'clock' : 'info', { size: 14 }),
-    h(
-      'span',
-      {},
-      waiting === null
-        ? 'Checking the index…'
-        : `${plural(waiting, 'item')} waiting to be indexed. ${waiting ? 'Matches by meaning may lag behind them; matches by exact words never do.' : 'Matches by meaning are up to date.'}`,
-    ),
-  );
+  put(parts.waiting, waiting ? [icon('clock', { size: 14 }), h('span', {}, `${plural(waiting, 'item')} waiting to be indexed`)] : null);
   parts.waiting.dataset.waiting = String(waiting ?? '');
 }
 
-// Said under the box when the index has something to say: the server's own words. It is a warning
-// when meaning could not be used, and only information when it was used or not asked for.
+// Said under the box when meaning could not be used: the server's own words. When it was used, or was not
+// asked for, there is nothing to say (each result says how it matched).
 function drawNote(text, meaning = 'used') {
   const fine = meaning === 'used' || meaning === 'not_requested';
-  parts.note.className = `index-note ${fine ? 'info' : 'warn'}`;
-  put(parts.note, text ? [icon(fine ? 'info' : 'alert', { size: 14 }), h('span', {}, text)] : null);
+  put(parts.note, text && !fine ? [icon('alert', { size: 14 }), h('span', {}, text)] : null);
 }
 
 // A quiet block in place of results: nothing asked yet, nothing found, or reading.
-const hush = (glyph, ...words) => h('div', { class: 'empty drawer-empty' }, icon(glyph, { size: 20 }), h('p', {}, ...words));
+const hush = (glyph, ...lines) => h('div', { class: 'empty search-empty' }, icon(glyph, { size: 20 }), lines.map((line) => h('p', {}, line)));
 
 // -- asking the server ----------------------------------------------------------------------------
 
 async function load(quiet = false) {
   const mine = ++generation;
   const query = (params.get('search') || '').trim();
-  const mode = modeOf(params);
   parts.box.value = params.get('search') || '';
-  parts.mode.value = mode;
   loadedFor = askedOf(params);
   if (!query) {
     results = null;
     parts.problem.textContent = '';
     drawNote('');
     parts.summary.textContent = '';
+    parts.clearFilters.hidden = true;
+    parts.skip.hidden = true;
     clear(parts.facets);
-    put(parts.list, hush('search', 'Type something to look for. Exact words are found the moment something is saved.'));
+    put(parts.list, hush('search', 'Type something to look for.'));
     return;
   }
   if (!quiet) {
@@ -225,13 +215,15 @@ async function load(quiet = false) {
   }
   let found;
   try {
-    found = await callPaged('search', { query, mode });
+    found = await callPaged('search', { query });
   } catch (error) {
     if (mine !== generation || !root) return;
     if (!(error instanceof Refusal)) throw error;
     results = null;
     parts.problem.textContent = error.message;
     parts.summary.textContent = '';
+    parts.clearFilters.hidden = true;
+    parts.skip.hidden = true;
     clear(parts.facets);
     clear(parts.list);
     return;
@@ -246,9 +238,9 @@ async function load(quiet = false) {
 // -- what the filters keep ----------------------------------------------------------------------------
 
 // The number of the epic an item of the graph is in: an epic, story or task by the graph, a
-// requirement by its story. The address (search_epic) carries that number.
+// an acceptance criterion by its story or task. The address (search_epic) carries that number.
 function epicOfResult(item) {
-  if (['epic', 'story', 'task'].includes(item.item_type)) return epicOf(store.nodes.get(item.ref))?.number ?? null;
+  if (WORK.includes(item.item_type)) return epicOf(store.nodes.get(item.ref))?.number ?? null;
   if (item.item_type === 'rule' && item.parent) return epicOf(store.nodes.get(item.parent))?.number ?? null;
   return null;
 }
@@ -261,8 +253,6 @@ function count(items, key) {
   }
   return found;
 }
-
-const capital = (word) => word[0].toUpperCase() + word.slice(1);
 
 function draw() {
   if (!root || inDuplicates || !results) return;
@@ -277,22 +267,24 @@ function draw() {
     (skip === 'epic' || !epic || epicOfItem.get(item) === epic);
   const kept = all.filter((item) => fits(item));
 
-  parts.summary.textContent = `${plural(kept.length, 'result')}${kept.length === all.length ? '' : ` of ${all.length}`}.`;
+  parts.summary.textContent = `${plural(kept.length, 'result')}${kept.length === all.length ? '' : ` of ${all.length}`}`;
+  parts.clearFilters.hidden = !(type || status || epic);
+  parts.skip.hidden = false;
   put(
     parts.facets,
     facet('type', 'Kind', count(all.filter((item) => fits(item, 'type')), (item) => item.item_type), (value) => KIND[value]?.label || value, TYPES, type),
-    facet('status', 'Status', count(all.filter((item) => fits(item, 'status')), (item) => item.status), (value) => STATUS[value]?.label || capital(value), null, status),
-    facet('epic', 'Epic', count(all.filter((item) => fits(item, 'epic')), (item) => epicOfItem.get(item)), (value) => `${nodeCode('epic', value)} ${store.nodes.get(nodeRef('epic', value))?.title || ''}`.trim(), null, epic ? String(epic) : '', epic ? 'Decisions and facts belong to no epic, so they are left out while an epic is chosen.' : null),
+    facet('status', 'Status', count(all.filter((item) => fits(item, 'status')), (item) => item.status), statusLabel, null, status),
+    facet('epic', 'Epic', count(all.filter((item) => fits(item, 'epic')), (item) => epicOfItem.get(item)), (value) => `${nodeCode('epic', value)} ${store.nodes.get(nodeRef('epic', value))?.title || ''}`.trim(), null, epic ? String(epic) : '', epic ? 'Notes belong to no epic, so they are left out while an epic is chosen.' : null),
   );
   const visible = kept.slice(0, shown);
   put(
     parts.list,
     kept.length
-      ? h('ul', { class: 'plain results' }, visible.map(resultRow))
+      ? resultTable(visible)
       : all.length
-        ? h('div', { class: 'empty drawer-empty' }, icon('filter', { size: 20 }), h('p', {}, 'Nothing matches these filters.'), h('button', { type: 'button', class: 'small', onclick: () => ui.navigate({ search_type: null, search_status: null, search_epic: null }) }, `Show all ${plural(all.length, 'result')}`))
+        ? h('div', { class: 'empty search-empty' }, icon('filter', { size: 20 }), h('p', {}, 'Nothing matches these filters.'), h('button', { type: 'button', class: 'small', onclick: () => ui.navigate({ search_type: null, search_status: null, search_epic: null }) }, `Show all ${plural(all.length, 'result')}`))
         : hush('search', 'Nothing matches. Try other words, or another way to search.'),
-    kept.length > shown ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-more', onclick: () => { shown += FIRST; draw(); } }, `Show ${Math.min(FIRST, kept.length - shown)} more`)) : null,
+    kept.length > shown ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'show-more', onclick: () => { shown += FIRST; draw(); } }, `Show ${Math.min(FIRST, kept.length - shown)} more`), h('span', { class: 'quiet' }, `${visible.length} of ${kept.length} shown`)) : null,
   );
 }
 
@@ -301,27 +293,34 @@ function draw() {
 function facet(name, label, counts, words, order, current, note = null) {
   const key = `search_${name}`;
   const keys = order ? order.filter((one) => counts.has(one)) : [...counts.keys()].sort((a, b) => (typeof a === 'number' ? a - b : String(a).localeCompare(String(b))));
-  const glyph = (one) => (name === 'type' ? kindIcon(one, 14) : name === 'status' && STATUS[one] ? statusIcon(one, 14) : name === 'epic' ? icon('epic', { size: 14 }) : null);
+  const glyph = (one) => (name === 'type' ? kindIcon(one, 14) : name === 'status' ? anyStatusIcon(one, 14) : name === 'epic' ? icon('epic', { size: 14 }) : null);
+  const button = (one, total, on) =>
+    h(
+      'button',
+      {
+        type: 'button',
+        class: `facet-button${on ? ' on' : ''}`,
+        'aria-pressed': String(on),
+        title: name === 'epic' ? words(one) : null,
+        dataset: { value: String(one), count: total },
+        onclick: () => ui.navigate({ [key]: on ? null : one }),
+      },
+      glyph(one),
+      h('span', { class: 'facet-label' }, words(one)),
+      ' ',
+      h('span', { class: 'facet-count' }, `(${total})`),
+    );
   return h(
     'fieldset',
     { class: 'facet', dataset: { facet: name } },
     h('legend', {}, label),
-    keys.length ? null : h('span', { class: 'quiet' }, 'none'),
-    keys.map((one) =>
-      h(
-        'button',
-        {
-          type: 'button',
-          class: `facet-button${String(one) === String(current) ? ' on' : ''}`,
-          'aria-pressed': String(String(one) === String(current)),
-          dataset: { value: String(one), count: counts.get(one) },
-          onclick: () => ui.navigate({ [key]: String(one) === String(current) ? null : one }),
-        },
-        glyph(one),
-        `${words(one)} (${counts.get(one)})`,
-      ),
+    h(
+      'div',
+      { class: 'facet-buttons' },
+      keys.length ? null : h('span', { class: 'quiet' }, 'None'),
+      keys.map((one) => button(one, counts.get(one), String(one) === String(current))),
+      current && !keys.map(String).includes(String(current)) ? button(name === 'epic' ? Number(current) : current, 0, true) : null,
     ),
-    current && !keys.map(String).includes(String(current)) ? h('button', { type: 'button', class: 'facet-button on', 'aria-pressed': 'true', onclick: () => ui.navigate({ [key]: null }) }, `${words(name === 'epic' ? Number(current) : current)} (0)`) : null,
     note ? h('p', { class: 'quiet' }, note) : null,
   );
 }
@@ -342,35 +341,54 @@ function snippet(text) {
   return out;
 }
 
-// The code a person reads for a result: S-12 for work, #3 for a requirement, decision or fact.
+// The code a person reads for a result: S-12 for work, #3 for an acceptance criterion or a note.
 const codeOfResult = (item) => {
   const at = parseNodeRef(item.ref);
   return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
 };
 
+// The results as a table: the kind, the item, how it matched, its status, and why with a snippet.
+// On a narrow page each row stacks into a card (pages.css), so the same elements serve both.
+function resultTable(items) {
+  const column = (name, label) => h('th', { scope: 'col', class: `col-${name}` }, label);
+  return h(
+    'div',
+    { class: 'result-table' },
+    h(
+      'table',
+      { class: 'results' },
+      h('caption', { class: 'sr-only' }, 'Search results, most relevant first'),
+      h('thead', {}, h('tr', {}, column('type', 'Type'), column('item', 'Item'), column('matched', 'Matched'), column('status', 'Status'), column('why', 'Why it matched'))),
+      h('tbody', {}, items.map(resultRow)),
+    ),
+  );
+}
+
 function resultRow(item) {
   const parentKind = item.parent ? parseNodeRef(item.parent)?.kind : null;
-  const parent = item.parent ? `${KIND[parentKind]?.label || parentKind} ${codeOf(item.parent)} ${store.nodes.get(item.parent)?.title ?? ''}`.trim() : null;
-  const record = item.item_type === 'decision' || item.item_type === 'fact';
-  const work = ['epic', 'story', 'task'].includes(item.item_type);
-  const at = parseSel(item.ref);
+  const work = WORK.includes(item.item_type);
+  const title = itemLink(item.ref, { class: 'result-title' }, h('span', { class: 'result-code' }, codeOfResult(item)), ' ', item.title);
   return h(
-    'li',
-    { class: `result matched-${item.matched}`, dataset: { type: item.item_type, ref: item.ref, matched: item.matched, ...(work ? {} : { id: item.id }) } },
+    'tr',
+    {
+      class: `result matched-${item.matched}`,
+      dataset: { type: item.item_type, ref: item.ref, matched: item.matched, ...(work ? {} : { id: item.id }) },
+      // A click anywhere on the row opens the page, unless it was on a link or a button of its own
+      // or ended a selection of the text; the keyboard and screen readers use the title link.
+      onclick: (event) => {
+        if (event.target.closest('a, button') || String(getSelection()).length) return;
+        title.click();
+      },
+    },
+    h('td', { class: 'cell-type' }, h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), KIND[item.item_type]?.label || item.item_type)),
     h(
-      'div',
-      { class: 'entry-head' },
-      h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), KIND[item.item_type]?.label || item.item_type),
-      work ? statusChip(item.status) : h('span', { class: `chip status status-${item.status}` }, STATUS[item.status]?.label || capital(item.status)),
-      item.confirmation === 'confirmed' ? h('span', { class: 'chip confirmed' }, icon('confirmed', { size: 14 }), 'Confirmed') : null,
-      item.confirmation === 'unconfirmed' ? h('span', { class: 'chip unconfirmed' }, icon('unconfirmed', { size: 14 }), 'Unconfirmed') : null,
-      h('span', { class: `chip matched matched-${item.matched}` }, MATCHED[item.matched] || item.matched),
-      item.suggestion ? h('span', { class: 'chip suggestion' }, 'a suggestion') : null,
+      'td',
+      { class: 'cell-item' },
+      title,
+      item.parent ? h('p', { class: 'result-parent' }, 'in ', itemLink(item.parent, {}, `${KIND[parentKind]?.label || parentKind} ${codeOf(item.parent)} ${store.nodes.get(item.parent)?.title ?? ''}`.trim())) : null,
     ),
-    recordLink(at.kind, at.number, { class: 'result-title' }, `${codeOfResult(item)} ${item.title}`),
-    parent ? h('span', { class: 'result-parent' }, ` in ${parent}`) : null,
-    record && item.label ? h('p', { class: 'quiet record-label' }, item.label) : null,
-    h('p', { class: 'snippet' }, ...snippet(item.snippet)),
-    h('p', { class: 'quiet why' }, item.why),
+    h('td', { class: 'cell-matched' }, h('span', { class: `chip matched matched-${item.matched}` }, MATCHED[item.matched] || item.matched)),
+    h('td', { class: 'cell-status' }, work ? statusChip(item.status) : item.item_type === 'note' ? plainNoteStatus(item.status) : plainRequirementStatus(item.status)),
+    h('td', { class: 'cell-why' }, h('p', { class: 'snippet' }, ...snippet(item.snippet)), h('p', { class: 'quiet why' }, item.why)),
   );
 }

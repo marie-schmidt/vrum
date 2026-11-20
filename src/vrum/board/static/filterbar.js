@@ -1,24 +1,55 @@
-// The filter box that the Board and the Roadmap share (and the Graph, for its work). The text is the
-// same filter language that list_nodes takes as `query`, and it is the server that reads it: the
-// page only sends it, shows what the server answers, and keeps the text in the address (`q`).
+// The filter box that the Board, the Roadmap and Lists share. The text is the
+// same filter language that the agents' list of work takes as `query`, and it is the server that
+// reads it: the page only sends it, shows what the server answers, and keeps the text in the address
+// (`q`). The help is a hover card on the small "i" at the end of the box (hovercard.js). A page may
+// add a sentence of its own to it (`note`).
 
 import { Refusal, callAll } from './api.js';
 import { h } from './dom.js';
+import { hoverCard } from './hovercard.js';
 import { icon } from './icons.js';
 import { store } from './store.js';
 
-const EXAMPLES = [
-  ['kind:task status:ready,in_progress -claimed priority:high OR kind:story', 'ready or running high-priority tasks that nobody holds, and every story'],
-  ['is:overdue', 'what is overdue'],
-  ['target:2026-11-01..2026-12-31', 'due in that range (leave one end off for “from” or “until”)'],
-  ['no:target', 'with no target date; no:start, no:claimed, no:parent and no:body work too'],
-  ['claimed:ann,bob', 'held by Ann or Bob; claimed on its own means held by anyone'],
-  ['invoice -draft', 'words in the title or body; quote a phrase to keep it together'],
-  ['epic:3', 'in epic 3 and everything under it (story:12 is a story and its tasks, parent:epic:3 is what sits directly under epic 3)'],
-  ['kind:story number:12', 'story 12 (number: goes with kind:, since each kind is numbered on its own)'],
+// Every form the language has: [what to type, what it does, examples].
+const FORMS = [
+  ['Words', 'search the title and details. Quote a phrase.', ['invoice "reset password"']],
+  ['field:value', 'narrows by a field: kind, status, priority, size, claimed, parent, epic, story, number, start, target, is or no.', ['kind:task', 'size:m,l']],
+  ['A comma', 'means any of these values.', ['status:ready,in_progress']],
+  ['OR', 'starts a second group. Terms side by side must all hold.', ['priority:urgent OR is:overdue']],
+  ['A leading -', 'leaves the matches out.', ['-status:done']],
+  ['no:', 'finds items where a field is empty: start, target, claimed, parent, body (no details), criteria (no acceptance criteria), size or waiting.', ['no:target', 'no:size', 'no:criteria']],
+  ['Dates', 'take a day or a range. Leave one end open.', ['target:2026-11-01..2026-12-31']],
+  ['is:', 'takes overdue, conflict, waiting, claimed or lapsed.', ['is:overdue']],
+  ['claimed and waiting', 'alone mean held by someone, and waiting on something.', ['-claimed', 'waiting']],
+  ['epic: and story:', 'take everything under it. parent: is only what is directly under it, and number: goes with kind:.', ['epic:3', 'kind:story number:12']],
 ];
 
-export function filterBar({ value, onSubmit }) {
+const TRY = [
+  ['kind:task status:ready -claimed priority:high', 'Ready, high priority, nobody holds it'],
+  ['epic:3 status:blocked,in_progress', 'Running or stuck in epic 3'],
+  ['target:2026-12-01..2026-12-31 -claimed', 'Due in December, nobody holds it'],
+];
+
+// What the "i" shows: the forms as a tidy list with an example each, then a few whole filters to start from.
+function helpContent(note) {
+  return [
+    h('p', { class: 'hovercard-title' }, 'How to filter'),
+    h('p', {}, 'Type words and field:value terms, then press Enter or Apply. Agents use the same words when they list work.'),
+    h(
+      'dl',
+      { class: 'filter-forms' },
+      FORMS.map(([lead, what, examples]) => [
+        h('dt', {}, h('strong', {}, lead), ' ', what),
+        h('dd', {}, examples.map((text) => h('code', {}, text))),
+      ]),
+    ),
+    h('p', { class: 'hovercard-title' }, 'Try these'),
+    h('dl', { class: 'filter-forms filter-tries' }, TRY.map(([text, what]) => [h('dt', {}, h('code', {}, text)), h('dd', {}, what)])),
+    note ? h('p', { class: 'filter-note' }, note) : null,
+  ];
+}
+
+export function filterBar({ value, onSubmit, note }) {
   const input = h('input', {
     type: 'search',
     id: 'filter',
@@ -26,9 +57,10 @@ export function filterBar({ value, onSubmit }) {
     value,
     autocomplete: 'off',
     spellcheck: 'false',
-    placeholder: 'Filter work, such as status:ready -claimed',
+    placeholder: 'Filter, e.g. is:overdue',
     'aria-describedby': 'filter-problem',
   });
+  const info = h('button', { type: 'button', id: 'filter-info', class: 'filter-info', 'aria-label': 'How to filter' }, icon('info', { size: 16 }));
   const problem = h('p', { class: 'problem', id: 'filter-problem', role: 'alert' });
   const form = h(
     'form',
@@ -41,47 +73,24 @@ export function filterBar({ value, onSubmit }) {
       },
     },
     h('label', { for: 'filter', class: 'sr-only' }, 'Filter work'),
-    h('span', { class: 'filter-field' }, icon('filter', { size: 16 }), input),
+    h('span', { class: 'filter-field' }, icon('filter', { size: 16 }), input, info, hoverCard(info, helpContent(note), { size: 'wide' })),
     h('button', { type: 'submit' }, 'Apply'),
     h(
       'button',
       {
         type: 'button',
         id: 'clear-filter',
-        class: 'ghost',
         onclick: () => {
           input.value = '';
           onSubmit('');
         },
       },
+      icon('clear', { size: 16 }),
       'Clear',
-    ),
-  );
-  const help = h(
-    'details',
-    { class: 'filter-help' },
-    h('summary', {}, icon('chevron_right', { size: 14 }), 'How to filter'),
-    h(
-      'p',
-      {},
-      'Type words and field:value terms. Terms side by side must all hold; OR between groups means either group; a leading - leaves matches out; a comma means any of these values. The fields are kind, status, priority, claimed, parent, epic, story, number, start, target, is and no. Agents use the same text as the query of list_nodes.',
-    ),
-    h(
-      'ul',
-      { class: 'plain filter-examples' },
-      EXAMPLES.map(([text, meaning]) =>
-        h(
-          'li',
-          {},
-          h('button', { type: 'button', class: 'link example', onclick: () => { input.value = text; onSubmit(text); } }, h('code', {}, text)),
-          ` ${meaning}`,
-        ),
-      ),
     ),
   );
   return {
     form,
-    help,
     problem,
     input,
     setProblem(text) {

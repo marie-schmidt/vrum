@@ -1,0 +1,307 @@
+/* The Structure and Order views of the Graph (graph-structure.js, graph-order.js) and the key they
+   share (graph-key.js). Every colour, space and size comes from
+   tokens.css. Classes start with graph-x (what the views share), graph-key (the key on top of a
+   picture), graph-st and graph-rd (Structure: the whole project and one epic, each the whole width of
+   the page, with no side column) and graph-or (Order). A state is an is- class. Lines keep a fine, even
+   width at every zoom (non-scaling strokes); dots grow with the zoom. A focus ring is drawn for the
+   keyboard only. */
+
+.graph-xv { container-type: inline-size; min-width: 0; }
+.graph-or { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+
+/* -- what the views share ------------------------------------------------------------------------ */
+
+.graph-x-panel { min-width: 0; padding: var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
+.graph-x-head { margin-bottom: var(--space-3); }
+.graph-x-head h2 { font-size: var(--text-lg); }
+.graph-x-head p { margin: var(--space-1) 0 0; }
+.graph-x-empty { padding: var(--space-6) var(--space-5); text-align: center; }
+.graph-x-empty h2 { font-size: var(--text-lg); }
+.graph-x-empty p { max-width: 40rem; margin: var(--space-2) auto var(--space-4); }
+.graph-x-code { color: var(--text-2); font-weight: 600; white-space: nowrap; }
+.graph-x-h { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); font-size: var(--text-xs); font-weight: 650; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); }
+.graph-x-note { margin: var(--space-2) 0; }
+.graph-x-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: var(--space-2) 0 0; }
+.graph-x-chips.is-centred { justify-content: center; }
+button.graph-x-chip-link { min-height: 1.5rem; padding: 0 var(--space-2); border: var(--border-w) solid var(--border-strong); background: var(--surface); color: var(--text); font-size: var(--text-xs); font-weight: 600; font-family: var(--font-mono); border-radius: var(--radius-sm); }
+button.graph-x-chip-link:hover { background: var(--surface-3); }
+
+/* a toolbar of choices over a picture */
+.graph-x-control { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.graph-x-control-label { font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
+.graph-st-toolbar, .graph-or-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
+.graph-st-toolbar .key-holder, .graph-or-toolbar .key-holder { margin-left: auto; }
+.graph-st-look { flex-wrap: nowrap; max-width: 100%; }
+.graph-st-look .graph-x-control-label { flex: none; }
+.graph-st-look select { min-width: 0; max-width: 17rem; text-overflow: ellipsis; }
+.graph-st-toolbar .segmented button { min-height: 1.75rem; padding-inline: var(--space-3); font-size: var(--text-sm); }
+@container (max-width: 699.98px) {
+  .graph-st-toolbar .segmented button { min-height: 2.25rem; }
+}
+.graph-x-hint { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); font-size: var(--text-xs); }
+
+/* the key of a picture: the card its Key button opens (graph-key.js, key-button.js) */
+.graph-key-body { display: grid; gap: var(--space-3); width: min(34rem, calc(100vw - 3rem)); }
+.graph-key-title { margin: 0 0 var(--space-1); font-size: var(--text-xs); font-weight: 650; text-transform: uppercase; letter-spacing: var(--caps-tracking); color: var(--text-2); }
+.graph-key-chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: var(--space-1) var(--space-3); margin: 0; padding: 0; list-style: none; }
+.graph-key-chip { display: flex; align-items: center; gap: var(--space-2); min-height: 1.5rem; color: var(--text); font-size: var(--text-sm); }
+.graph-key-chip > span:last-child { min-width: 0; }
+.graph-key-chip.is-button { padding: 0; }
+.graph-key-chip.is-button button { padding: 0 var(--space-2); border-radius: 999px; }
+.graph-key-count { margin-left: var(--space-2); font-weight: 650; font-variant-numeric: tabular-nums; }
+.graph-key-swatch { flex: none; overflow: visible; }
+.graph-key-swatch .graph-st-node { cursor: default; }
+.graph-key-ring { flex: none; }
+.graph-key-ring-track { fill: none; stroke: var(--surface-3); stroke-width: 2.6; }
+.graph-key-ring-fill { fill: none; stroke: var(--ok); stroke-width: 2.6; stroke-linecap: round; }
+.graph-key-dot { fill: var(--surface); stroke: var(--text-2); stroke-width: 1.6; }
+.graph-key-dot.is-full { fill: var(--text-2); }
+.graph-key-square { display: inline-block; width: 0.7rem; height: 0.7rem; background: var(--surface); border: 1.5px solid var(--text-2); border-radius: 2px; }
+.graph-x-key-new .icon, .graph-x-key-dropped .icon { color: var(--text-3); }
+.graph-x-key-ready .icon { color: var(--info); }
+.graph-x-key-in_progress .icon { color: var(--progress); }
+.graph-x-key-blocked .icon { color: var(--danger); }
+.graph-x-key-done .icon { color: var(--ok); }
+.graph-x-late { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 999px; background: var(--warn); box-shadow: 0 0 0 2px var(--surface); }
+.graph-x-late.is-ring { width: 0.7rem; height: 0.7rem; background: transparent; border: 2px solid var(--warn); box-shadow: none; }
+.graph-x-late.is-ring.is-danger { border-color: var(--danger); }
+.graph-key-late .icon { color: var(--warn); }
+.graph-x-bigger { display: inline-block; width: 0.35rem; height: 0.35rem; margin-right: 0.8rem; border-radius: 999px; background: var(--text-2); box-shadow: 0.6rem 0 0 0.12rem var(--text-2); }
+.graph-x-sample { flex: none; }
+.graph-x-sample .graph-or-edge { stroke-width: 2.2; }
+.graph-x-sample .graph-or-edge.is-hot, .graph-x-sample .graph-or-edge.is-on-path { stroke-width: 3; }
+.graph-x-sample .graph-or-arrowhead.is-hot { fill: var(--danger); }
+.graph-x-sample .graph-or-arrowhead.is-on-path { fill: var(--accent); }
+.graph-x-swatch { display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 999px; background: var(--ec); }
+button.graph-x-legend-button { min-height: 1.5rem; padding: 0 var(--space-1); gap: var(--space-1); border: 0; background: transparent; font-size: var(--text-xs); font-weight: 400; color: var(--text-2); font-family: var(--font-mono); }
+button.graph-x-legend-button:hover { background: var(--surface-3); color: var(--text); }
+
+/* a picture: its frame, its buttons and the tip that says what a dot is */
+.graph-x-canvas { position: relative; background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.graph-st-zoom { position: absolute; top: var(--space-3); right: var(--space-3); z-index: 2; display: flex; gap: var(--space-1); }
+.graph-x-tip { position: absolute; z-index: 5; max-width: 18rem; padding: var(--space-2) var(--space-3); background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); font-size: var(--text-sm); transform: translate(-50%, -100%); pointer-events: none; }
+.graph-x-tip.is-below { transform: translate(-50%, 0); }
+.graph-x-tip-top { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-2); }
+.graph-x-tip-title { margin: 2px 0; font-weight: 600; }
+
+/* -- Structure: the whole project ------------------------------------------------------------------ */
+
+.graph-st-canvas { min-height: 22rem; }
+.graph-st-inner { position: relative; }
+.graph-st-svg { display: block; width: 100%; height: auto; max-height: 80vh; touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+.graph-st-svg.is-grabbing { cursor: grabbing; }
+.graph-st-line { vector-effect: non-scaling-stroke; stroke: var(--border-strong); stroke-width: 1px; opacity: 0.55; fill: none; }
+.graph-st-line.is-lit { stroke: var(--text-2); opacity: 1; stroke-width: 1.6px; }
+.graph-st-svg.has-sel .graph-st-line:not(.is-lit) { opacity: 0.14; }
+.graph-st-node { cursor: pointer; outline: none; }
+.graph-st-hit { fill: transparent; }
+.graph-st-body { fill: var(--surface); stroke: var(--text-3); stroke-width: 1.4px; vector-effect: non-scaling-stroke; }
+.graph-st-track { fill: none; stroke: var(--surface-3); stroke-width: 2.6; }
+.graph-st-fill { fill: none; stroke: var(--ok); stroke-width: 2.6; stroke-linecap: round; }
+.graph-st-flag { fill: none; stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.graph-st-flag.is-warn { stroke: var(--warn); }
+.graph-st-flag.is-danger { stroke: var(--danger); }
+.graph-st-ring { fill: none; stroke: var(--accent); stroke-width: 2.4px; vector-effect: non-scaling-stroke; opacity: 0; }
+.graph-st-ring, .graph-st-flag, .graph-st-track, .graph-st-fill, .graph-rd-ring, .graph-rd-late { pointer-events: none; }
+.graph-st-node:hover .graph-st-ring { opacity: 0.5; }
+.graph-st-node.is-sel .graph-st-ring { opacity: 1; }
+.graph-st-node.is-linked .graph-st-ring { opacity: 1; stroke: var(--text); stroke-width: 1.6px; }
+html:not([data-input="pointer"]) .graph-st-node:focus-visible .graph-st-ring { opacity: 1; stroke: var(--focus); stroke-width: 3px; }
+/* tasks are small solid dots; hollow means not started */
+.graph-st-node.is-task.s-done .graph-st-body { fill: var(--ok); stroke: var(--ok); }
+.graph-st-node.is-task.s-in_progress .graph-st-body { fill: var(--progress); stroke: var(--progress); }
+.graph-st-node.is-task.s-blocked .graph-st-body { fill: var(--danger); stroke: var(--danger); }
+.graph-st-node.is-task.s-ready .graph-st-body { fill: var(--surface); stroke: var(--info); stroke-width: 2px; }
+.graph-st-node.is-task.s-dropped .graph-st-body { fill: var(--surface-3); stroke: var(--text-3); opacity: 0.6; }
+/* hubs are rings in the colour of their status */
+.graph-st-node.is-epic .graph-st-body { fill: var(--surface); stroke-width: 3.2px; }
+.graph-st-node.is-story .graph-st-body { fill: var(--surface); stroke-width: 2.2px; }
+.graph-st-node:is(.is-epic, .is-story).s-in_progress .graph-st-body { stroke: var(--progress); fill: var(--progress-soft); }
+.graph-st-node:is(.is-epic, .is-story).s-done .graph-st-body { stroke: var(--ok); fill: var(--ok-soft); }
+.graph-st-node:is(.is-epic, .is-story).s-blocked .graph-st-body { stroke: var(--danger); fill: var(--danger-soft); }
+.graph-st-node:is(.is-epic, .is-story).s-ready .graph-st-body { stroke: var(--info); fill: var(--info-soft); }
+.graph-st-node:is(.is-epic, .is-story).s-new .graph-st-body { stroke: var(--text-3); }
+.graph-st-node:is(.is-epic, .is-story).s-dropped .graph-st-body { stroke: var(--text-3); fill: var(--surface-3); opacity: 0.7; }
+.graph-st-svg.has-sel .graph-st-node:not(.is-lit) { opacity: 0.2; }
+.graph-st-svg.has-sel .graph-st-node.is-lit.is-task:not(.is-sel):not(.is-linked) { opacity: 0.85; }
+
+/* colour by epic: the same cluster in one hue; filled means started, hollow means not */
+.graph-st-svg.is-by-epic .graph-st-body { stroke: var(--ec); }
+.graph-st-svg.is-by-epic .graph-st-node.is-task:is(.s-done, .s-in_progress, .s-blocked) .graph-st-body { fill: var(--ec); stroke: var(--ec); }
+.graph-st-svg.is-by-epic .graph-st-node.is-task:is(.s-ready, .s-new) .graph-st-body { fill: var(--surface); stroke: var(--ec); }
+.graph-st-svg.is-by-epic .graph-st-node:is(.is-epic, .is-story) .graph-st-body { fill: var(--surface); stroke: var(--ec); }
+.graph-st-svg.is-by-epic .graph-st-fill { stroke: var(--ec); }
+.ep-0 { --ec: var(--accent); }
+.ep-1 { --ec: var(--info); }
+.ep-2 { --ec: var(--ok); }
+.ep-3 { --ec: var(--warn); }
+.ep-4 { --ec: var(--text); }
+.ep-5 { --ec: var(--text-3); }
+
+/* the project in the middle */
+.graph-st-project-ring { fill: none; stroke: var(--border-strong); stroke-width: 1px; stroke-dasharray: 2px 4px; vector-effect: non-scaling-stroke; }
+.graph-st-project-body { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+
+/* names: a fixed size on the screen, whatever the zoom */
+.graph-st-name { pointer-events: none; }
+.graph-st-name text { font-family: var(--font-sans); font-size: 12px; font-weight: 500; fill: var(--text-2); paint-order: stroke; stroke: var(--surface); stroke-width: 3.5px; stroke-linejoin: round; }
+.graph-st-name.is-epic text { fill: var(--text); font-weight: 650; }
+.graph-st-name.is-lit text { fill: var(--text); font-weight: 650; }
+.graph-st-code { font-family: var(--font-mono); font-weight: 700; fill: var(--text-2); }
+.graph-st-name:is(.is-epic, .is-lit) .graph-st-code { fill: var(--accent-text); }
+.graph-st-name.is-hub text { font-family: var(--font-mono); font-weight: 700; fill: var(--text); stroke: none; }
+.graph-st-name.is-project text { font-weight: 700; fill: var(--accent-text); stroke: none; }
+.graph-st-svg.has-sel .graph-st-name.is-epic { opacity: 0.55; }
+
+/* links between items, a line of its own for each kind: shape, not only colour */
+.graph-st-arrow { fill: var(--accent); }
+.graph-st-link, .graph-x-sample .graph-st-link { fill: none; stroke-linecap: round; vector-effect: non-scaling-stroke; stroke: var(--text); stroke-width: 1.5px; opacity: 0.9; }
+.graph-st-link.t-needs_first { stroke: var(--accent); stroke-width: 2px; }
+.graph-st-link.t-relates_to { stroke-dasharray: 5px 4px; }
+.graph-st-link.t-duplicates { stroke-width: 2.4px; stroke-dasharray: 0.1px 5px; }
+.graph-st-link.t-supersedes { stroke-dasharray: 11px 4px; }
+.graph-st-link.t-mention { stroke: var(--info); stroke-width: 1.2px; stroke-dasharray: 2px 3px; }
+.graph-st-cross.is-all .graph-st-link.is-all { opacity: 0.4; }
+.graph-st-link.is-chosen { opacity: 1; stroke-width: 2.2px; }
+.graph-st-svg.has-sel .graph-st-cross.is-all .graph-st-link.is-all { opacity: 0.14; }
+.graph-x-sample .graph-st-link.is-key { opacity: 1; }
+
+/* -- Structure: one epic --------------------------------------------------------------------------- */
+
+.graph-rd-scroll { overflow: auto; }
+.graph-rd-inner { position: relative; min-width: 560px; }
+.graph-rd-svg { display: block; width: 100%; height: auto; max-height: 82vh; min-height: 22rem; touch-action: pan-y; cursor: grab; }
+.graph-rd-svg.is-grabbing { cursor: grabbing; }
+.graph-rd-svg text { font-family: var(--font-sans); fill: var(--text); }
+.graph-rd-note-holder { position: absolute; left: var(--space-3); right: var(--space-3); bottom: var(--space-3); z-index: 2; pointer-events: none; }
+.graph-rd-note { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); max-width: 100%; padding: var(--space-2) var(--space-3); background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow); font-size: var(--text-sm); pointer-events: auto; }
+.graph-rd-band { fill: var(--surface-2); opacity: 0; }
+.graph-rd-band.is-alt { opacity: 0.7; }
+.graph-rd-band.is-on { fill: var(--accent-soft); opacity: 1; }
+.graph-rd-line { fill: none; stroke: var(--border-strong); stroke-width: 1.3; opacity: 0.55; }
+.graph-rd-leaf, .graph-rd-story, .graph-rd-epic { cursor: pointer; outline: none; }
+.graph-rd-hit { fill: transparent; }
+.graph-rd-mark { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+.graph-rd-bg { fill: var(--surface); stroke: none; }
+.graph-rd-mark.s-new { color: var(--text-3); }
+.graph-rd-mark.s-ready { color: var(--info); }
+.graph-rd-mark.s-in_progress { color: var(--progress); }
+.graph-rd-mark.s-blocked { color: var(--danger); }
+.graph-rd-mark.s-done { color: var(--ok); }
+.graph-rd-mark.s-dropped { color: var(--text-3); opacity: 0.65; }
+.graph-rd-mark.s-ready .graph-rd-bg { fill: var(--info-soft); }
+.graph-rd-mark.s-in_progress .graph-rd-bg { fill: var(--progress-soft); }
+.graph-rd-mark.s-blocked .graph-rd-bg { fill: var(--danger-soft); }
+.graph-rd-mark.s-done .graph-rd-bg { fill: var(--ok-soft); }
+.graph-rd-square { fill: var(--surface); stroke: var(--text-2); stroke-width: 1.4; }
+.graph-rd-late { fill: var(--warn); stroke: var(--surface); stroke-width: 1.4; }
+.graph-rd-leaf .graph-rd-ring { fill: none; stroke: var(--accent); stroke-width: 2; opacity: 0; }
+.graph-rd-leaf:hover .graph-rd-ring { opacity: 0.55; }
+.graph-rd-leaf.is-sel .graph-rd-ring { opacity: 1; stroke-width: 2.4; }
+.graph-rd-leaf.is-linked .graph-rd-ring { opacity: 1; stroke: var(--text); stroke-width: 1.6; }
+.graph-rd-story .graph-rd-ring, .graph-rd-epic .graph-rd-ring { fill: none; stroke: var(--accent); stroke-width: 2.4; opacity: 0; }
+.graph-rd-story:hover .graph-rd-ring, .graph-rd-epic:hover .graph-rd-ring { opacity: 0.45; }
+.graph-rd-story.is-sel .graph-rd-ring { opacity: 1; }
+.graph-rd-story.is-linked .graph-rd-ring { opacity: 1; stroke: var(--text); stroke-width: 1.6; }
+html:not([data-input="pointer"]) :is(.graph-rd-leaf, .graph-rd-story, .graph-rd-epic):focus-visible .graph-rd-ring { opacity: 1; stroke: var(--focus); stroke-width: 3; }
+.graph-rd-track { fill: none; stroke: var(--surface-3); stroke-width: 4; }
+.graph-rd-fill { fill: none; stroke: var(--ok); stroke-width: 4; stroke-linecap: round; }
+.graph-rd-body { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.2; }
+.graph-rd-story.s-in_progress .graph-rd-body { fill: var(--progress-soft); }
+.graph-rd-story.s-done .graph-rd-body { fill: var(--ok-soft); }
+.graph-rd-story.s-blocked .graph-rd-body { fill: var(--danger-soft); }
+.graph-rd-svg .graph-rd-code { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; }
+.graph-rd-epic-track { fill: none; stroke: var(--surface-3); stroke-width: 6; }
+.graph-rd-epic-fill { fill: none; stroke: var(--ok); stroke-width: 6; stroke-linecap: round; }
+.graph-rd-epic-body { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.graph-rd-svg .graph-rd-epic-code { font-family: var(--font-mono); font-size: 15px; font-weight: 700; fill: var(--accent-text); }
+.graph-rd-svg .graph-rd-epic-pct { font-size: 11px; fill: var(--text-2); }
+.graph-rd-svg .graph-rd-empty { font-size: 13px; fill: var(--text-2); }
+.graph-rd-svg .graph-rd-label-text { font-size: 12px; fill: var(--text-2); paint-order: stroke; stroke: var(--surface); stroke-width: 3.5px; stroke-linejoin: round; }
+.graph-rd-label:is(.is-linked, .is-sel) .graph-rd-label-text { fill: var(--text); font-weight: 650; }
+.graph-rd-svg.has-sel :is(.graph-rd-band, .graph-rd-line) { opacity: 0.2; }
+.graph-rd-svg.has-sel .graph-rd-band.is-on { opacity: 1; }
+.graph-rd-svg.has-sel :is(.graph-rd-leaf, .graph-rd-story):not(.is-sel):not(.is-linked) { opacity: 0.5; }
+.graph-rd-svg.has-sel .graph-rd-label:not(.is-sel):not(.is-linked) { opacity: 0.6; }
+.graph-rd-svg .graph-st-link { vector-effect: none; }
+.graph-rd-svg .graph-st-link.t-needs_first { stroke-width: 2.6px; }
+.graph-rd-svg .graph-st-link.t-relates_to { stroke-width: 1.9px; }
+.graph-rd-svg .graph-st-link.t-duplicates { stroke-width: 2.6px; }
+.graph-rd-svg .graph-st-link.t-supersedes { stroke-width: 2px; }
+
+/* -- Order -------------------------------------------------------------------------------------------- */
+
+.graph-or-summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-bottom: var(--space-3); }
+.graph-or-summary:empty { display: none; }
+.graph-or-scroll { overflow: auto; padding: var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); max-height: 44rem; }
+.graph-or-canvas { position: relative; }
+.graph-or-lines { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+button.graph-or-node { position: absolute; width: 190px; height: 78px; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 3px; min-height: 0; padding: var(--space-2); background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow); text-align: left; font-weight: 400; z-index: 1; }
+button.graph-or-node:hover { background: var(--surface-2); }
+.graph-or-node-top { display: flex; align-items: center; gap: var(--space-2); }
+.graph-or-epic { margin-left: auto; padding: 0 var(--space-1); border-radius: var(--radius-sm); background: var(--surface-3); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-2); }
+.graph-or-late { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; font-size: var(--text-xs); font-weight: 600; color: var(--warn); }
+.graph-or-epic + .graph-or-late { margin-left: 0; }
+.graph-or-node-title { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; font-size: var(--text-xs); line-height: 1.3; font-weight: 500; }
+button.graph-or-node.s-done { background: var(--ok-soft); border-color: var(--ok); }
+button.graph-or-node.s-done .graph-or-node-top > .icon { color: var(--ok); }
+button.graph-or-node.s-blocked { background: var(--danger-soft); border-color: var(--danger); }
+button.graph-or-node.s-blocked .graph-or-node-top > .icon { color: var(--danger); }
+button.graph-or-node.s-in_progress { border-color: var(--progress); }
+button.graph-or-node.s-in_progress .graph-or-node-top > .icon { color: var(--progress); }
+button.graph-or-node.s-ready .graph-or-node-top > .icon { color: var(--info); }
+button.graph-or-node.s-dropped { opacity: 0.6; }
+button.graph-or-node.is-outside { border-style: dashed; }
+button.graph-or-node.is-sel { box-shadow: 0 0 0 3px var(--accent); }
+button.graph-or-node.is-dim { opacity: 0.32; }
+button.graph-or-node.is-hot { box-shadow: 0 0 0 2px var(--danger); }
+.graph-or-edge { fill: none; stroke: var(--text-2); stroke-width: 2.2; }
+.graph-or-edge.is-ended { stroke: var(--ok); }
+.graph-or-edge.is-blocked { stroke: var(--danger); }
+.graph-or-edge.is-dim { opacity: 0.25; }
+.graph-or-edge.is-hot { stroke: var(--danger); stroke-width: 3; }
+.graph-or-edge.is-on-path { stroke: var(--accent); stroke-width: 3; }
+.graph-or-arrowhead { fill: var(--text-2); }
+.graph-or-dash-box { display: inline-block; width: 1.1rem; height: 0.75rem; border: var(--border-w) dashed var(--text-2); border-radius: var(--radius-sm); }
+
+/* Order in phases and batches (graph-phases.js, graph-order.js) */
+.graph-or-stepper { display: inline-flex; align-items: center; gap: var(--space-1); }
+.graph-or-step { min-width: 7.5rem; text-align: center; font-size: var(--text-sm); font-weight: 650; font-variant-numeric: tabular-nums; }
+.graph-or-phases { display: grid; gap: var(--space-4); max-width: 72rem; }
+.graph-or-phase-head, .graph-or-fold-head { margin: 0 0 var(--space-3); font-size: var(--text-lg); }
+.graph-or-phase-words { margin-left: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--text-2); }
+button.graph-or-fold { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--control-h-sm); padding: 0 var(--space-3) 0 var(--space-2); font-size: var(--text-md); font-weight: 650; }
+.graph-or-batch { margin-bottom: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface-2); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.graph-or-batch.graph-or-unsized { background: transparent; border-style: dashed; border-color: var(--border-strong); }
+.graph-or-batch-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-1); font-size: var(--text-md); }
+.graph-or-story { margin-top: var(--space-3); }
+.graph-or-story:first-child, .graph-or-batch-head + .graph-or-story { margin-top: 0; }
+.graph-or-story-head { margin: 0 0 var(--space-1); padding: var(--space-1) var(--space-2); border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 650; }
+.graph-or-story-head.is-sel { background: var(--accent-soft); }
+.graph-or-story-link { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; color: var(--text); text-decoration: none; }
+a.graph-or-story-link:hover .graph-or-story-title { text-decoration: underline; }
+.graph-or-story-link .icon { color: var(--text-2); }
+.graph-or-items { display: grid; margin: 0; padding: 0; }
+.graph-or-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-1) var(--space-3); padding: var(--space-2); border-top: var(--border-w) solid var(--border); }
+.graph-or-item:first-child { border-top: 0; }
+.graph-or-item.is-sel { background: var(--accent-soft); border-radius: var(--radius-md); }
+.graph-or-item-link { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; color: var(--text); font-size: var(--text-sm); text-decoration: none; }
+.graph-or-item-link:hover .graph-or-item-title { text-decoration: underline; }
+.graph-or-item-title { min-width: 0; overflow-wrap: anywhere; }
+.graph-or-item.is-ended .graph-or-item-title { text-decoration: line-through; color: var(--text-2); }
+.graph-or-item-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-1) var(--space-2); }
+.graph-or-waits { grid-column: 1 / -1; margin: 0; font-size: var(--text-xs); color: var(--text-2); }
+.graph-or-wait { display: inline-flex; align-items: center; min-height: 1.5rem; padding: 0 var(--space-1); background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text); font-size: var(--text-xs); font-weight: 600; text-decoration: none; }
+button.graph-or-wait { min-height: 1.5rem; }
+.graph-or-wait:hover { background: var(--surface-3); }
+.graph-or-big { background: transparent; box-shadow: inset 0 0 0 var(--border-w) var(--border-strong); color: var(--text-2); }
+.graph-or-key-mark { display: inline-grid; place-items: center; min-width: 1.4rem; height: 1.4rem; border-radius: 999px; background: var(--neutral-soft); font-size: var(--text-xs); font-weight: 650; }
+@container (max-width: 699.98px) {
+  .graph-or-item { grid-template-columns: minmax(0, 1fr); }
+  .graph-or-item-meta { justify-content: flex-start; }
+  .graph-or-batch { padding: var(--space-2) var(--space-3); }
+}
+@media (pointer: coarse) {
+  .graph-or-stepper button { min-width: 2.75rem; min-height: 2.75rem; }
+  button.graph-or-wait { min-height: 2.75rem; padding: 0 var(--space-2); }
+}

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from tests.helpers import all_nodes, day, number_of, ok, refused, unique_word
+from tests.helpers import all_nodes, connect_as, day, number_of, ok, refused, unique_word
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -35,6 +35,7 @@ class World:
 
     epic: str
     word: str
+    agent: str
     s1: str
     s2: str
     t_ready: str
@@ -48,6 +49,9 @@ class World:
 async def world(client: Client) -> World:
     w = World()
     w.word = unique_word()
+    # Who holds a claim is the agent its key is named for, so the claim is made with a key of
+    # its own.
+    w.agent = f"Ada Lovelace {w.word}"
     w.epic = await made(client, "epic", f"Epic {w.word}", target_on=day(90))
     w.s1 = await made(client, "story", f"Billing story {w.word}", w.epic, priority="high")
     w.s2 = await made(client, "story", f"Portal story {w.word}", w.epic)
@@ -71,7 +75,8 @@ async def world(client: Client) -> World:
         expected_version=1,
         status="in_progress",
     )
-    await ok(client, "claim_node", actor="Ada Lovelace", node=w.t_going)
+    async with connect_as(w.agent) as ada:
+        await ok(ada, "claim_node", node=w.t_going)
     await ok(
         client, "update_node", actor="a", node=w.t_blocked, expected_version=1, status="blocked"
     )
@@ -115,7 +120,7 @@ async def test_each_kind_of_term_finds_what_it_says(client: Client) -> None:
     assert await refs("kind:task status:ready") == sorted([w.t_ready, w.t_late, w.prerequisite])
     assert await refs("priority:urgent,low") == sorted([w.t_ready, w.t_blocked])
     assert await refs("claimed:ada") == []
-    assert await refs('claimed:"ada lovelace"') == [w.t_going]
+    assert await refs(f'claimed:"{w.agent.lower()}"') == [w.t_going]
     assert await refs("claimed") == [w.t_going]
     assert await refs("kind:task -claimed") == sorted(
         [w.t_ready, w.t_blocked, w.t_late, w.prerequisite, w.t_waiting]

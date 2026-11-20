@@ -1,5 +1,6 @@
-"""Rules (requirements) and the coverage report. This module owns creating, changing, placing and
-moving rules, and the question of which rules and stories are not yet matched up."""
+"""Rules, which a person reads as acceptance criteria, and the coverage report. A rule is what must
+hold for one story or one task to be done. This module owns creating, changing, placing and moving
+rules, and the question of which rules and stories are not yet matched up."""
 
 from datetime import datetime
 from typing import Any
@@ -10,7 +11,6 @@ from pydantic import BaseModel, Field
 from vrum.common import (
     Refusal,
     check_choice,
-    clean_actor,
     fetch_all,
     fetch_one,
     page_size,
@@ -35,13 +35,13 @@ from vrum.graph import (
     list_columns,
 )
 
-RULE_STATUSES = ("held", "settled", "dropped")
+RULE_STATUSES = ("open", "met", "dropped")
 _RULE_COLUMNS = (
-    "id, story, title, body, length(body) AS body_chars, status, version, created_at, updated_at"
+    "id, node, title, body, length(body) AS body_chars, status, version, created_at, updated_at"
 )
 
 
-def _rule_list_columns(detail: bool) -> str:
+def rule_list_columns(detail: bool) -> str:
     """The columns of a list of rules. Without `detail` the body is left out, and a short preview
     and its full length are given instead."""
     if detail:
@@ -52,32 +52,41 @@ def _rule_list_columns(detail: bool) -> str:
 
 
 COVERAGE_LISTS = ("both", "unplaced_rules", "stories_without_rules")
+# A story is covered when it, or one of its tasks, holds an acceptance criterion that is not
+# dropped.
 _STORY_WITHOUT_RULES = (
     "kind = 'story' AND status <> 'dropped' AND NOT EXISTS ("
-    "SELECT 1 FROM rules WHERE rules.story = node_state.ref AND rules.status <> 'dropped')"
+    "SELECT 1 FROM rules WHERE rules.status <> 'dropped' AND (rules.node = node_state.ref "
+    "OR rules.node IN (SELECT t.ref FROM nodes t WHERE t.parent = node_state.ref)))"
 )
 
 
 class Rule(BaseModel):
-    id: int = Field(description="The rule's id. Rules have their own ids, separate from nodes.")
-    story: str | None = Field(
-        description="The reference of the one story that owns this rule, such as story:12. Empty "
-        "while the rule is unplaced."
+    id: int = Field(
+        description="The acceptance criterion's id. Acceptance criteria have their own ids, "
+        "separate from nodes."
     )
-    title: str = Field(description="The rule, stated briefly.")
+    node: str | None = Field(
+        description="The reference of the one story or task this acceptance criterion belongs to, "
+        "such as story:12 or task:40. Empty while it is not placed."
+    )
+    title: str = Field(description="The acceptance criterion, stated briefly.")
     body: str | None = Field(
         description="Plain text or Markdown: the detail, or where it came from. Empty in a list "
-        "that left bodies out: see body_preview, and ask for detail or use get_rule."
+        "that left bodies out: see body_preview, and ask for detail."
     )
     body_chars: int = Field(description="How many characters the body has.")
     body_preview: str | None = Field(
         default=None,
         description="Only in a list that left bodies out: the first characters of the body.",
     )
-    status: str = Field(description="held, settled or dropped.")
+    status: str = Field(
+        description="open (it stands and is still to be met), met (it has been met) or dropped "
+        "(it no longer applies)."
+    )
     version: int = Field(
         description="Starts at 1 and rises by one with every change. Send it back as "
-        "expected_version when you change the rule."
+        "expected_version when you change the acceptance criterion."
     )
     created_at: datetime
     updated_at: datetime
@@ -85,7 +94,7 @@ class Rule(BaseModel):
 
 class RulePage(BaseModel):
     items: list[Rule]
-    total: int = Field(description="How many rules match in all, across pages.")
+    total: int = Field(description="How many acceptance criteria match in all, across pages.")
     next_after_id: int | None = Field(
         description="Pass this as after_id to get the next page. Empty when there are no more."
     )
@@ -97,15 +106,19 @@ class RulePage(BaseModel):
 
 class CoverageReport(BaseModel):
     unplaced_rule_count: int = Field(
-        description="How many rules are not in any story. Dropped rules are not counted."
+        description="How many acceptance criteria are placed nowhere (on no story or task). "
+        "Dropped ones are not counted."
     )
-    unplaced_rules: list[Rule] = Field(description="One page of them, oldest first.")
+    unplaced_rules: list[Rule] = Field(
+        description="One page of the acceptance criteria placed nowhere, oldest first."
+    )
     next_unplaced_after_id: int | None = Field(
-        description="Pass this as unplaced_after_id for the next page of unplaced rules."
+        description="Pass this as unplaced_after_id for the next page of unplaced acceptance "
+        "criteria."
     )
     story_without_rules_count: int = Field(
-        description="How many stories have no rule that is held or settled. Dropped stories are "
-        "not counted."
+        description="How many stories have no acceptance criterion that is open or met, on the "
+        "story or on any of its tasks. Dropped stories are not counted."
     )
     stories_without_rules: list[Node] = Field(description="One page of them, by story number.")
     next_stories_after: str | None = Field(
@@ -128,36 +141,39 @@ async def require_rule(
     )
     if row is None:
         raise Refusal(
-            f"There is no rule with id {rule_id}. Use list_rules to find the id you want."
+            f"There is no acceptance criterion with id {rule_id}. Use list_rules to find the id "
+            "you want."
         )
     return row
 
 
-async def _require_story(conn: AsyncConnection, story: str) -> None:
-    kind, number = split_node_ref(story)
-    if kind != "story":
+async def _require_holder(conn: AsyncConnection, node: str) -> None:
+    """Refuse unless `node` is a story or task that exists: the only items that hold acceptance
+    criteria."""
+    kind, number = split_node_ref(node)
+    if kind == "epic":
         raise Refusal(
-            f"A rule belongs to a story, but {story} is {'an' if kind == 'epic' else 'a'} {kind}. "
-            "Use list_nodes with kind=story to find the story you want."
+            f"An acceptance criterion belongs to a story or a task, but {node} is an epic. "
+            "Use list_nodes with kind=story or kind=task to find the one you want."
         )
-    found = await fetch_one(conn, "SELECT 1 FROM nodes WHERE ref = %s", (story,))
+    found = await fetch_one(conn, "SELECT 1 FROM nodes WHERE ref = %s", (node,))
     if found is None:
         raise Refusal(
-            f"There is no story {number} in this project, so a rule cannot be placed there. "
-            "Use list_nodes with kind=story to find the story you want."
+            f"There is no {kind} {number} in this project, so an acceptance criterion cannot be "
+            f"placed there. Use list_nodes with kind={kind} to find the one you want."
         )
 
 
 def _clean_title(title: str) -> str:
     cleaned = title.strip()
     if not cleaned:
-        raise Refusal("A rule needs a title: title cannot be empty.")
+        raise Refusal("An acceptance criterion needs a title: title cannot be empty.")
     return cleaned
 
 
-def _event_nodes(story: str | None, left: str | None = None) -> dict[str, Any]:
-    """The stories an event shows in the history of: the one the rule is in, and the one it left."""
-    return {"node": story, "other_node": left if left != story else None}
+def _event_nodes(node: str | None, left: str | None = None) -> dict[str, Any]:
+    """The items an event shows in the history of: the one the rule is on, and the one it left."""
+    return {"node": node, "other_node": left if left != node else None}
 
 
 async def insert_rule(
@@ -167,14 +183,14 @@ async def insert_rule(
     title: str,
     body: str,
     status: str,
-    story: str | None,
+    node: str | None,
 ) -> dict[str, Any]:
     """Insert a rule that has been checked, and record it. Returns the stored row."""
     row = await fetch_one(
         conn,
-        "INSERT INTO rules (story, title, body, status) VALUES (%s, %s, %s, %s) "
+        "INSERT INTO rules (node, title, body, status) VALUES (%s, %s, %s, %s) "
         f"RETURNING {_RULE_COLUMNS}",
-        (story, title, body, status),
+        (node, title, body, status),
     )
     assert row is not None
     await record_event(
@@ -183,8 +199,8 @@ async def insert_rule(
         action="rule_created",
         actor=actor,
         before=None,
-        after=snapshot(row, ("story", "title", "body", "status", "version")),
-        **_event_nodes(story),
+        after=snapshot(row, ("node", "title", "body", "status", "version")),
+        **_event_nodes(node),
     )
     return row
 
@@ -194,16 +210,15 @@ class Rules:
         self._database = database
 
     async def create_rule(
-        self, *, actor: str, title: str, body: str, status: str, story: str | None
+        self, *, actor: str, title: str, body: str, status: str, node: str | None
     ) -> Rule:
-        actor = clean_actor(actor)
         title = _clean_title(title)
         check_choice("status", status, RULE_STATUSES)
         async with self._database.transaction() as conn:
-            if story is not None:
-                await _require_story(conn, story)
+            if node is not None:
+                await _require_holder(conn, node)
             row = await insert_rule(
-                conn, actor=actor, title=title, body=body, status=status, story=story
+                conn, actor=actor, title=title, body=body, status=status, node=node
             )
         return Rule.model_validate(row)
 
@@ -214,7 +229,7 @@ class Rules:
     async def list_rules(
         self,
         *,
-        story: str | None,
+        node: str | None,
         unplaced: bool,
         status: str | None,
         detail: bool,
@@ -224,26 +239,27 @@ class Rules:
         limit = page_size(limit)
         if status is not None:
             check_choice("status", status, RULE_STATUSES)
-        if unplaced and story is not None:
+        if unplaced and node is not None:
             raise Refusal(
-                "Give story or unplaced, not both: a rule that is in a story is not unplaced."
+                "Give node or unplaced, not both: an acceptance criterion that is on a story or "
+                "task is not unplaced."
             )
         where = (
-            "(%(story)s::text IS NULL OR story = %(story)s) "
-            "AND (NOT %(unplaced)s OR story IS NULL) "
+            "(%(node)s::text IS NULL OR node = %(node)s) "
+            "AND (NOT %(unplaced)s OR node IS NULL) "
             "AND (%(status)s::text IS NULL OR status = %(status)s)"
         )
-        params = {"story": story, "unplaced": unplaced, "status": status}
+        params = {"node": node, "unplaced": unplaced, "status": status}
         async with self._database.transaction() as conn:
-            if story is not None:
-                await _require_story(conn, story)
+            if node is not None:
+                await _require_holder(conn, node)
             counted = await fetch_one(
                 conn, f"SELECT count(*) AS total FROM rules WHERE {where}", params
             )
             assert counted is not None
             rows = await fetch_all(
                 conn,
-                f"SELECT {_rule_list_columns(detail)} FROM rules "
+                f"SELECT {rule_list_columns(detail)} FROM rules "
                 f"WHERE {where} AND id > %(after)s ORDER BY id LIMIT %(fetch)s",
                 {**params, "after": after_id or 0, "fetch": limit + 1},
             )
@@ -266,7 +282,6 @@ class Rules:
         body: str | None,
         status: str | None,
     ) -> Rule:
-        actor = clean_actor(actor)
         if title is not None:
             title = _clean_title(title)
         if status is not None:
@@ -275,7 +290,11 @@ class Rules:
             current = await require_rule(conn, rule_id, lock=True)
             if current["version"] != expected_version:
                 raise stale_version(
-                    "Rule", "get_rule", rule_id, current["version"], expected_version
+                    "Acceptance criterion",
+                    "list_rules",
+                    rule_id,
+                    current["version"],
+                    expected_version,
                 )
             wanted = {"title": title, "body": body, "status": status}
             changes = {
@@ -285,8 +304,9 @@ class Rules:
             }
             if not changes:
                 raise Refusal(
-                    f"Nothing to change: rule {rule_id} already has the values you gave, or you "
-                    "gave none. Give at least one of title, body or status with a new value."
+                    f"Nothing to change: acceptance criterion {rule_id} already has the values you "
+                    "gave, or you gave none. Give at least one of title, body or status with a "
+                    "new value."
                 )
             row = await save_changes(conn, "rules", rule_id, changes, _RULE_COLUMNS)
             await record_event(
@@ -296,68 +316,41 @@ class Rules:
                 actor=actor,
                 before={**snapshot(current, tuple(changes)), "version": current["version"]},
                 after={**changes, "version": row["version"]},
-                **_event_nodes(current["story"]),
+                **_event_nodes(current["node"]),
             )
         return Rule.model_validate(row)
 
     async def place_rule(
-        self, *, actor: str, rule_id: int, expected_version: int, story: str
+        self, *, actor: str, rule_id: int, expected_version: int, node: str
     ) -> Rule:
-        actor = clean_actor(actor)
+        """Put a rule on a story or a task. A rule that is on none is placed; one that is already
+        on another is moved, as one step: it is never on two, and never on none, along the way.
+        Placing it on the item it is already on is refused."""
         async with self._database.transaction() as conn:
             current = await require_rule(conn, rule_id, lock=True)
             if current["version"] != expected_version:
                 raise stale_version(
-                    "Rule", "get_rule", rule_id, current["version"], expected_version
+                    "Acceptance criterion",
+                    "list_rules",
+                    rule_id,
+                    current["version"],
+                    expected_version,
                 )
-            if current["story"] is not None:
+            await _require_holder(conn, node)
+            was = current["node"]
+            if was == node:
                 raise Refusal(
-                    f"Rule {rule_id} is already placed in {current['story']}, and a rule "
-                    f"belongs to at most one story. To put it in {story} instead, use "
-                    "move_rule."
+                    f"Acceptance criterion {rule_id} is already on {node}, so nothing moved."
                 )
-            await _require_story(conn, story)
-            row = await save_changes(conn, "rules", rule_id, {"story": story}, _RULE_COLUMNS)
+            row = await save_changes(conn, "rules", rule_id, {"node": node}, _RULE_COLUMNS)
             await record_event(
                 conn,
                 rule_id=rule_id,
-                action="rule_placed",
+                action="rule_placed" if was is None else "rule_moved",
                 actor=actor,
-                before={"story": None, "version": current["version"]},
-                after={"story": story, "version": row["version"]},
-                **_event_nodes(story),
-            )
-        return Rule.model_validate(row)
-
-    async def move_rule(
-        self, *, actor: str, rule_id: int, expected_version: int, new_story: str
-    ) -> Rule:
-        """Take a rule out of its story and put it in another, as one step: it is never in two
-        stories, and never in none, along the way."""
-        actor = clean_actor(actor)
-        async with self._database.transaction() as conn:
-            current = await require_rule(conn, rule_id, lock=True)
-            if current["version"] != expected_version:
-                raise stale_version(
-                    "Rule", "get_rule", rule_id, current["version"], expected_version
-                )
-            if current["story"] is None:
-                raise Refusal(
-                    f"Rule {rule_id} is not in any story yet, so there is nothing to move. Use "
-                    "place_rule to put it in a story."
-                )
-            await _require_story(conn, new_story)
-            if new_story == current["story"]:
-                raise Refusal(f"Rule {rule_id} is already in {new_story}, so nothing moved.")
-            row = await save_changes(conn, "rules", rule_id, {"story": new_story}, _RULE_COLUMNS)
-            await record_event(
-                conn,
-                rule_id=rule_id,
-                action="rule_moved",
-                actor=actor,
-                before={"story": current["story"], "version": current["version"]},
-                after={"story": new_story, "version": row["version"]},
-                **_event_nodes(new_story, current["story"]),
+                before={"node": was, "version": current["version"]},
+                after={"node": node, "version": row["version"]},
+                **(_event_nodes(node) if was is None else _event_nodes(node, was)),
             )
         return Rule.model_validate(row)
 
@@ -385,9 +378,9 @@ class Rules:
         unplaced_after_id: int | None,
         stories_after: str | None,
     ) -> CoverageReport:
-        """Which rules are in no story, and which stories have no rule. A dropped rule is no
-        longer a requirement, so it is not unplaced and does not cover a story; a dropped story
-        needs no rules."""
+        """Which acceptance criteria are placed nowhere, and which stories have none. A dropped
+        criterion is not placed nowhere and does not cover a story; a dropped story needs none. A
+        story is covered by a criterion on it or on one of its tasks."""
         limit = page_size(limit)
         check_choice("show", show, COVERAGE_LISTS)
         unplaced_page: list[dict[str, Any]] = []
@@ -397,8 +390,8 @@ class Rules:
             if show in ("both", "unplaced_rules"):
                 rows = await fetch_all(
                     conn,
-                    f"SELECT {_rule_list_columns(detail)} FROM rules "
-                    "WHERE story IS NULL AND status <> 'dropped' AND id > %s "
+                    f"SELECT {rule_list_columns(detail)} FROM rules "
+                    "WHERE node IS NULL AND status <> 'dropped' AND id > %s "
                     "ORDER BY id LIMIT %s",
                     (unplaced_after_id or 0, limit + 1),
                 )
@@ -414,7 +407,7 @@ class Rules:
                 stories_page, next_stories = split_page(rows, limit, key="ref")
             unplaced_total = await fetch_one(
                 conn,
-                "SELECT count(*) AS total FROM rules WHERE story IS NULL AND status <> 'dropped'",
+                "SELECT count(*) AS total FROM rules WHERE node IS NULL AND status <> 'dropped'",
             )
             stories_total = await fetch_one(
                 conn, f"SELECT count(*) AS total FROM node_state WHERE {_STORY_WITHOUT_RULES}"

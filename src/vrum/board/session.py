@@ -20,6 +20,7 @@ from vrum.accounts import (
     SessionInfo,
     SignedIn,
 )
+from vrum.sso import COOKIE_NAME as SSO_COOKIE
 
 SESSION_COOKIE = "vrum_session"
 CSRF_HEADER = "x-vrum-csrf"
@@ -91,3 +92,30 @@ def start_cookie(response: Response, request: Request, signed: SignedIn) -> None
 
 def end_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path=COOKIE_PATH, httponly=True, samesite="strict")
+
+
+# The cookie that ties a sign-in with another provider to the browser that started it. Unlike the
+# session cookie it is SameSite=Lax, because the browser comes back from the provider by following
+# a link from another site, and a Strict cookie would stay behind. It holds only the random name
+# of the sign-in (which the server keeps for ten minutes and takes once), and goes only to the
+# addresses the provider sends the browser back to.
+SSO_COOKIE_PATH = "/board/auth"
+SSO_COOKIE_SECONDS = 600
+
+
+def start_sso_cookie(response: Response, name: str, *, secure: bool) -> None:
+    response.set_cookie(
+        SSO_COOKIE,
+        name,
+        max_age=SSO_COOKIE_SECONDS,
+        path=SSO_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+    )
+
+
+def end_sso_cookie(response: Response, *, secure: bool) -> None:
+    response.delete_cookie(
+        SSO_COOKIE, path=SSO_COOKIE_PATH, httponly=True, samesite="lax", secure=secure
+    )

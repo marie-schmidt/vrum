@@ -113,7 +113,7 @@ def claims_of(project: Project) -> str:
 
 async def whole_project(client: Client, project: Project) -> dict[str, Any]:
     """Everything a refused request must not change: the whole export (every node, link, rule,
-    decision, fact and event) and the claims."""
+    note and event) and the claims."""
     return {"export": await export_everything(client), "claims": claims_of(project)}
 
 
@@ -202,7 +202,7 @@ async def test_a_plan_numbers_each_kind_on_its_own_and_a_refused_plan_leaves_not
                 {"key": "lost", "kind": "task", "title": "Plan task", "parent": "ghost"},
             ],
             links=[{"source": "t", "target": "task:1", "link_type": "needs_first"}],
-            rules=[{"title": "Plan rule", "story": "s"}],
+            rules=[{"title": "Plan rule", "node": "s"}],
         )
         assert "The plan was not created" in said and "'ghost'" in said
         assert await whole_project(client, project) == before
@@ -225,7 +225,7 @@ async def test_a_plan_numbers_each_kind_on_its_own_and_a_refused_plan_leaves_not
                 {"key": "t2", "kind": "task", "title": "Plan task two", "parent": "story:1"},
             ],
             links=[{"source": "t1", "target": "task:1", "link_type": "needs_first"}],
-            rules=[{"title": "Plan rule", "story": "s2"}],
+            rules=[{"title": "Plan rule", "node": "s2"}],
         )
         made = {item["key"]: item["ref"] for item in done["created"]}
         assert [kind_of(made[key]) for key in ("e", "s1", "s2", "t1", "t2")] == [
@@ -278,7 +278,7 @@ def id_problems(tool: str, value: Any, where: str = "") -> list[str]:
             problems.append(f"{tool} {where}: a node has an id")
         problems += [f"{tool} {where}: {name}" for name in GONE_NAMES & value.keys()]
         names = set(REFERENCE_NAMES) | {"next_stories_after"}
-        if "link_type" in value:  # a link's ends (a fact's `source` is plain words)
+        if "link_type" in value:  # a link's ends (a note's `why` is plain words)
             names |= {"source", "target"}
         if tool != "export_graph":  # its pages are continued by `nodes:story:12`
             names.add("next_after")
@@ -306,7 +306,7 @@ def test_the_walk_that_looks_for_integer_ids_would_find_one() -> None:
     assert id_problems("t", {"node": 12}) and id_problems("t", {"waiting_on": [4]})
     assert id_problems("t", {"item_type": "task", "ref": "task:1", "id": 1})
     assert id_problems("t", {"link_type": "relates_to", "source": 4, "target": "task:1"})
-    assert id_problems("t", {"id": 3, "text": "a fact", "source": "The call"}) == []
+    assert id_problems("t", {"id": 3, "text": "a note", "why": "The call"}) == []
 
 
 # Every tool that reads or writes a node, a list of them or something that holds them.
@@ -333,17 +333,15 @@ NODE_TOOLS = {
     "release_claim", "who_is_working", "next_work", "finish_work", "create_plan", "update_nodes",
     "changes_since", "coverage_report", "recall", "search", "similar_items", "find_overlaps",
     "find_mentions", "export_graph", "list_rules", "get_rule", "rule_history", "place_rule",
-    "move_rule", "list_decisions", "get_decision", "link_decision", "decision_history",
-    "list_facts", "get_fact", "link_fact", "fact_history", "create_rule", "record_decision",
-    "retain_fact",
+    "list_notes", "get_note", "link_note", "note_history", "create_rule", "add_note",
 }  # fmt: skip
 NAMES_A_NODE = (
     "SELECT table_name || '.' || column_name || ' ' || udt_name FROM information_schema.columns "
     "WHERE table_schema = 'public' AND (table_name, column_name) IN (('nodes', 'parent'), "
     "('node_state', 'parent'), ('links', 'source'), ('links', 'target'), ('claims', 'node'), "
-    "('rules', 'story'), ('decision_nodes', 'node'), ('fact_nodes', 'node'), ('events', 'node'), "
+    "('rules', 'node'), ('note_nodes', 'node'), ('events', 'node'), "
     "('events', 'other_node'), ('node_state', 'waiting_on'), ('node_state', 'schedule_conflicts'), "
-    "('decision_state', 'nodes'), ('fact_state', 'nodes')) ORDER BY 1"
+    "('note_state', 'nodes')) ORDER BY 1"
 )
 
 
@@ -356,11 +354,11 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
             answers.append((tool, answer))
             return answer
 
-        world = await rich_world(client)
+        world = await rich_world(client, project)
         epic, story1, story2 = (world[n]["ref"] for n in ("epic", "story1", "story2"))
         task1, task2, task3 = (world[n]["ref"] for n in ("task1", "task2", "task3"))
         rule1, rule2 = world["rule1"]["id"], world["rule2"]["id"]
-        decision, fact = world["decision2"]["id"], world["fact1"]["id"]
+        decision, plain = world["decision2"]["id"], world["fact1"]["id"]
         word = unique_word()
 
         # Reading and changing nodes.
@@ -406,6 +404,16 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
         peeked = await ask("next_work", actor="dev", peek=True)
         taken = await ask("next_work", actor="dev")
         assert peeked["found"] and peeked["work"]["ref"] == taken["work"]["ref"]
+        # The project's definition of done has checks, and an agent finishes as done only when
+        # they are ticked.
+        for check in (await ask("get_node", node=taken["work"]["ref"]))["checks"]:
+            if not check["checked"]:
+                await ask(
+                    "set_check",
+                    node=taken["work"]["ref"],
+                    item=check["item"],
+                    evidence="Checked it",
+                )
         finished = await ask(
             "finish_work", actor="dev", node=taken["work"]["ref"], outcome="done", note="Done."
         )
@@ -421,7 +429,7 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
                 {"key": "t", "kind": "task", "title": f"Planned task {word}", "parent": "s"},
             ],
             links=[{"source": "t", "target": task1, "link_type": "needs_first"}],
-            rules=[{"title": f"Planned rule {word}", "story": "s"}],
+            rules=[{"title": f"Planned rule {word}", "node": "s"}],
         )
         assert all(re.fullmatch(r"(epic|story|task):\d+", i["ref"]) for i in planned["created"])
         await ask("changes_since", limit=200)
@@ -430,35 +438,33 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
         feed = await ask("changes_since", node=story1)
         assert feed["items"] and all(story1 in (e["node"], e["other_node"]) for e in feed["items"])
         await ask("coverage_report", limit=5)
-        await ask("list_rules", story=story1)
+        await ask("list_rules", node=story1)
         await ask("list_rules", unplaced=True)
         await ask("get_rule", rule_id=rule1)
         await ask("rule_history", rule_id=rule1)
-        await ask("place_rule", actor="ann", rule_id=rule2, expected_version=2, story=story2)
-        await ask("move_rule", actor="ann", rule_id=rule1, expected_version=1, new_story=story2)
-        await ask("create_rule", actor="ann", title=f"A rule {word}", story=story1)
+        await ask("place_rule", actor="ann", rule_id=rule2, expected_version=2, node=story2)
+        await ask("place_rule", actor="ann", rule_id=rule1, expected_version=1, node=story2)
+        await ask("create_rule", actor="ann", title=f"A rule {word}", node=story1)
 
-        # Decisions and facts.
-        await ask("list_decisions")
-        await ask("get_decision", decision_id=decision)
-        await ask("link_decision", actor="ann", decision_id=decision, nodes=[task2])
-        await ask("decision_history", decision_id=decision)
+        # Notes: the decisions among them and the ones nobody decided.
+        await ask("list_notes")
+        await ask("list_notes", within_node=epic)
+        await ask("get_note", note_id=decision)
+        await ask("link_note", note_id=decision, nodes=[task2])
+        await ask("note_history", note_id=decision)
         await ask(
-            "record_decision", actor="ann", title=f"Decide {word}", text="Yes", reason="Because",
-            decided_by="Marie", nodes=[fresh],
+            "add_note", text=f"Decide {word}\n\nYes", why="Because", decided_by="Marie",
+            nodes=[fresh],
         )  # fmt: skip
-        await ask("list_facts")
-        await ask("get_fact", fact_id=fact)
-        await ask("link_fact", actor="ann", fact_id=fact, nodes=[task2])
-        await ask("fact_history", fact_id=fact)
-        await ask(
-            "retain_fact", actor="ann", text=f"A fact {word}", source="The call", nodes=[story2]
-        )
+        await ask("get_note", note_id=plain)
+        await ask("link_note", note_id=plain, nodes=[task2])
+        await ask("note_history", note_id=plain)
+        await ask("add_note", text=f"A note {word}", why="The call", nodes=[story2])
 
         # Finding: recall, search, similar items, overlaps and mentions.
         await reindexed(client)
         recalled = await ask("recall", node=story1, with_similar=True)
-        assert recalled["active_decisions"]["count"] >= 1
+        assert recalled["notes"]["count"] >= 1
         await ask("recall", rule_id=rule1)
         found = await ask("search", query=word, mode="both", limit=50)
         assert {"epic", "story", "task"} & {i["item_type"] for i in found["items"]}
@@ -478,7 +484,15 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
             after = page["next_after"]
             if after is None:
                 break
-        assert sections == {"nodes", "links", "rules", "decisions", "facts", "events"}
+        assert sections == {
+            "nodes",
+            "links",
+            "rules",
+            "notes",
+            "definition_of_done",
+            "checks",
+            "events",
+        }
 
         problems = [p for tool, answer in answers for p in id_problems(tool, answer)]
         assert problems == [], problems[:10]
@@ -512,13 +526,12 @@ async def test_no_answer_and_no_database_column_holds_an_integer_node_id() -> No
         named = run_sql(NAMES_A_NODE, plain=True, project=None)
         assert named.returncode == 0, named.stderr
         types = dict(line.rsplit(" ", 1) for line in named.stdout.strip().splitlines())
-        assert len(types) == 14, types
+        assert len(types) == 12, types
         lists = {name for name, udt in types.items() if udt == "_text"}
         assert lists == {
             "node_state.waiting_on",
             "node_state.schedule_conflicts",
-            "decision_state.nodes",
-            "fact_state.nodes",
+            "note_state.nodes",
         }
         assert {udt for name, udt in types.items() if name not in lists} == {"text"}
         # And the events this project made name nodes only by reference.
@@ -543,8 +556,8 @@ NOT_REFERENCES: list[Any] = [
 HERE = object()
 W = "tester"
 LINK = "relates_to"
-DECIDED = {"title": "D", "text": "T", "reason": "R", "decided_by": "Marie"}
-NEWER = {"actor": W, "replaces": [1], "reason": "R", "text": "Newer", "source": "S"}
+DECIDED = {"text": "D\n\nT", "why": "R", "decided_by": "Marie"}
+NEWER = {"replaces": [1], "text": "Newer", "why": "S"}
 CHANGE = {"expected_version": 1, "title": "N"}
 
 
@@ -557,7 +570,7 @@ def use(
 
 
 # Every place in every tool where a node is named. Rule 1 is in story:1, rule 2 is in no story,
-# and decision 1 and fact 1 exist.
+# and note 1 exists.
 OLD = {"actor": W, "expected_version": 1}
 PLACES = [
     use("get_node", "node", "story", node=HERE),
@@ -582,19 +595,17 @@ PLACES = [
     use("list_nodes", "after", "story", after=HERE),
     use("ready_work", "after", "task", after=HERE),
     use("changes_since", "node", "story", node=HERE),
-    use("create_rule", "story", "story", actor=W, title="A rule", story=HERE),
-    use("list_rules", "story", "story", story=HERE),
-    use("place_rule", "story", "story", **OLD, rule_id=2, story=HERE),
-    use("move_rule", "new_story", "story", **OLD, rule_id=1, new_story=HERE),
+    use("create_rule", "node", "story", actor=W, title="A rule", node=HERE),
+    use("list_rules", "node", "story", node=HERE),
+    use("place_rule", "node", "story", **OLD, rule_id=2, node=HERE),
+    use("place_rule", "node", "story", **OLD, rule_id=1, node=HERE),
     use("coverage_report", "stories_after", "story", stories_after=HERE),
-    use("record_decision", "nodes", "story", actor=W, **DECIDED, nodes=[HERE]),
-    use("link_decision", "nodes", "task", actor=W, decision_id=1, nodes=[HERE]),
-    use("unlink_decision", "nodes", "story", actor=W, decision_id=1, nodes=[HERE]),
-    use("supersede_decision", "nodes", "story", actor=W, decision_id=1, **DECIDED, nodes=[HERE]),
-    use("retain_fact", "nodes", "story", actor=W, text="A fact", source="The call", nodes=[HERE]),
-    use("link_fact", "nodes", "task", actor=W, fact_id=1, nodes=[HERE]),
-    use("unlink_fact", "nodes", "story", actor=W, fact_id=1, nodes=[HERE]),
-    use("supersede_fact", "nodes", "story", **NEWER, nodes=[HERE]),
+    use("add_note", "nodes", "story", **DECIDED, nodes=[HERE]),
+    use("link_note", "nodes", "task", note_id=1, nodes=[HERE]),
+    use("unlink_note", "nodes", "story", note_id=1, nodes=[HERE]),
+    use("supersede_note", "nodes", "story", **NEWER, nodes=[HERE]),
+    use("list_notes", "node", "task", node=HERE),
+    use("list_notes", "within_node", "epic", within_node=HERE),
     use("recall", "node", "story", node=HERE),
     use("similar_items", "node", "story", node=HERE),
     use("find_overlaps", "epics", "epic", epics=[HERE]),
@@ -616,12 +627,12 @@ def put(value: Any, arguments: Any) -> Any:
 
 # Where a reference that names nothing is not refused as "There is no story 9999 in this project":
 # a page cursor is only a position, one change in a bulk update says why on its own, what a link
-# or a decision is linked to is checked against what is linked, and a rule's story is looked at
+# or a note is linked to is checked against what is linked, and a rule's story is looked at
 # after the rule.
 OTHER_WORDS = {
     ("list_nodes", "after"), ("ready_work", "after"), ("coverage_report", "stories_after"),
     ("update_nodes", "node"), ("remove_link", "source"), ("remove_link", "target"),
-    ("unlink_decision", "nodes"), ("unlink_fact", "nodes"), ("update_node", "parent"),
+    ("unlink_note", "nodes"), ("update_node", "parent"),
 }  # fmt: skip
 
 
@@ -630,7 +641,7 @@ NEW_STORY = {"actor": W, "kind": "story", "title": "N", "parent": "story:1"}
 NEW_TASK = {"actor": W, "kind": "task", "title": "N", "parent": "epic:1"}
 PLANNED = {"key": "e", "kind": "epic", "title": "N"}
 RULE = {"actor": W, "title": "N"}
-RULE_IN_A_STORY = "A rule belongs to a story, but "
+RULE_ON_A_NODE = "An acceptance criterion belongs to a story or a task, but "
 
 
 def case(tool: str, arguments: dict[str, Any], says: str) -> tuple[str, dict[str, Any], str]:
@@ -640,19 +651,16 @@ def case(tool: str, arguments: dict[str, Any], says: str) -> tuple[str, dict[str
 
 async def a_project_to_refuse_in(client: Client, word: str) -> None:
     """epic:1 and epic:2, story:1 and story:2 in epic:1, story:3 in epic:2, task:1 and task:2 in
-    story:1, task:3 in story:2, a rule in story:1 and one in no story, a decision and a fact."""
+    story:1, task:3 in story:2, a rule in story:1 and one in no story, and a note (a decision)."""
     await create(client, "epic", f"First epic {word}")
     await create(client, "epic", f"Second epic {word}")
     for title, parent in (("First", "epic:1"), ("Second", "epic:1"), ("Third", "epic:2")):
         await create(client, "story", f"{title} story {word}", parent)
     for title, parent in (("First", "story:1"), ("Second", "story:1"), ("Third", "story:2")):
         await create(client, "task", f"{title} task {word}", parent)
-    await ok(client, "create_rule", actor=W, title=f"Placed {word}", story="story:1")
+    await ok(client, "create_rule", actor=W, title=f"Placed {word}", node="story:1")
     await ok(client, "create_rule", actor=W, title=f"Unplaced {word}")
-    await ok(client, "record_decision", actor=W, nodes=["story:1"], **{**DECIDED, "title": word})
-    await ok(
-        client, "retain_fact", actor=W, text=f"Fact {word}", source="The call", nodes=["task:1"]
-    )
+    await ok(client, "add_note", **{**DECIDED, "text": f"{word}\n\nT"}, nodes=["story:1"])
 
 
 async def test_every_tool_refuses_what_is_not_a_reference_and_changes_nothing() -> None:
@@ -672,7 +680,10 @@ async def test_every_tool_refuses_what_is_not_a_reference_and_changes_nothing() 
                 assert "validation error" not in said and "Traceback" not in said, where
                 assert await newest_event(client) == latest, where
                 tried += 1
-        assert tried == len(NOT_REFERENCES) * len(PLACES) and len(PLACES) >= 40
+        assert tried == len(NOT_REFERENCES) * len(PLACES)
+        # (The decision tools and the fact tools, eight places in all, are four places of the note
+        # tools now, so the table is shorter by four than it was.)
+        assert len(PLACES) >= 38
         assert await whole_project(client, project) == before
 
 
@@ -740,26 +751,25 @@ async def test_a_reference_of_the_wrong_kind_is_refused_and_changes_nothing() ->
             case(
                 "update_node",
                 {**OLD, "node": "story:1", "title": "Changed", "parent": "epic:2"},
-                "move_node",
+                "a person moves it on the board",
             ),
             case(
                 "claim_node",
                 {"actor": W, "node": "epic:1"},
                 "epic:1 is an epic. Only stories and tasks can be claimed",
             ),
-            case("create_rule", {**RULE, "story": "task:1"}, RULE_IN_A_STORY + "task:1 is a task"),
-            case("create_rule", {**RULE, "story": "epic:1"}, RULE_IN_A_STORY + "epic:1 is an epic"),
+            case("create_rule", {**RULE, "node": "epic:1"}, RULE_ON_A_NODE + "epic:1 is an epic"),
             case(
                 "place_rule",
-                {**OLD, "rule_id": 2, "story": "epic:1"},
-                RULE_IN_A_STORY + "epic:1 is an epic",
+                {**OLD, "rule_id": 2, "node": "epic:1"},
+                RULE_ON_A_NODE + "epic:1 is an epic",
             ),
             case(
-                "move_rule",
-                {**OLD, "rule_id": 1, "new_story": "task:1"},
-                RULE_IN_A_STORY + "task:1 is a task",
+                "place_rule",
+                {**OLD, "rule_id": 1, "node": "epic:2"},
+                RULE_ON_A_NODE + "epic:2 is an epic",
             ),
-            case("list_rules", {"story": "epic:2"}, RULE_IN_A_STORY + "epic:2 is an epic"),
+            case("list_rules", {"node": "epic:2"}, RULE_ON_A_NODE + "epic:2 is an epic"),
             case(
                 "find_overlaps",
                 {"epics": ["story:1"]},
@@ -785,8 +795,8 @@ async def test_a_reference_of_the_wrong_kind_is_refused_and_changes_nothing() ->
             ),
             case(
                 "create_plan",
-                {"actor": W, "items": [PLANNED], "rules": [{"title": "N", "story": "task:1"}]},
-                "task:1 is not a story, and a rule belongs to a story",
+                {"actor": W, "items": [PLANNED], "rules": [{"title": "N", "node": "epic:1"}]},
+                "epic:1 is an epic, and an acceptance criterion belongs to a story or a task",
             ),
         ]
         for tool, arguments, says in wrong:
@@ -1024,10 +1034,12 @@ def next_numbers(document: dict[str, Any]) -> dict[str, int]:
     }
 
 
-async def a_project_with_uneven_numbers(client: Client) -> dict[str, dict[str, Any]]:
+async def a_project_with_uneven_numbers(
+    client: Client, project: Project
+) -> dict[str, dict[str, Any]]:
     """The rich world (1 epic, 2 stories, 3 tasks), then more of each kind, so that no two kinds
     end on the same number: 3 epics, 4 stories and 8 tasks."""
-    world = await rich_world(client)
+    world = await rich_world(client, project)
     story1, story2 = world["story1"]["ref"], world["story2"]["ref"]
     await ok(
         client,
@@ -1045,7 +1057,7 @@ async def a_project_with_uneven_numbers(client: Client) -> dict[str, dict[str, A
             {"key": "t5", "kind": "task", "title": "Eighth task", "parent": "s2"},
         ],
         links=[{"source": "t3", "target": world["task1"]["ref"], "link_type": "needs_first"}],
-        rules=[{"title": "A planned rule", "story": "s2"}],
+        rules=[{"title": "A planned rule", "node": "s2"}],
     )
     return world
 
@@ -1054,7 +1066,7 @@ async def test_an_export_loads_into_another_project_with_every_number_and_the_ne
     stack: SecondStack, tmp_path: Path
 ) -> None:
     async with fresh_project() as (first, client):
-        world = await a_project_with_uneven_numbers(client)
+        world = await a_project_with_uneven_numbers(client, first)
         original = await export_everything(client)
         assert next_numbers(original) == {"epic": 4, "story": 5, "task": 9}
 
@@ -1062,9 +1074,8 @@ async def test_an_export_loads_into_another_project_with_every_number_and_the_ne
         assert all(set(n) >= {"kind", "number", "parent"} for n in original["nodes"])
         assert all("id" not in n for n in original["nodes"])
         assert all({"id", "source", "target"} <= set(link) for link in original["links"])
-        assert all(set(rule) >= {"id", "story"} for rule in original["rules"])
-        assert all("nodes" in d and "node_ids" not in d for d in original["decisions"])
-        assert all("nodes" in f and "node_ids" not in f for f in original["facts"])
+        assert all(set(rule) >= {"id", "node"} for rule in original["rules"])
+        assert all("nodes" in note and "node_ids" not in note for note in original["notes"])
         assert all({"node", "other_node"} <= set(e) for e in original["events"])
         assert claims_of(first) != "", "the world holds a claim, which a file does not"
 
@@ -1081,7 +1092,7 @@ async def test_an_export_loads_into_another_project_with_every_number_and_the_ne
             assert loaded.returncode == 0, loaded.stdout + loaded.stderr
             assert f"Imported {sum(original['counts'].values())} items" in loaded.stdout
 
-            # Every number, link, decision, fact and event is as it was.
+            # Every number, link, note and event is as it was.
             assert await export_everything(second) == original
             for node in original["nodes"]:
                 ref = f"{node['kind']}:{node['number']}"
@@ -1112,10 +1123,10 @@ async def test_an_export_loads_into_another_project_with_every_number_and_the_ne
             mentions = await ok(second, "find_mentions", node=world["story2"]["ref"])
             assert [m["source"]["ref"] for m in mentions["items"]] == ["epic:3"]
 
-    # The Markdown copy has one file per item, named by kind and number.
+    # The Markdown copy has one file per item, named by kind and number, and the definition of done.
     files = files_of(copy)
-    items = sum(len(original[section]) for section in ("nodes", "rules", "decisions", "facts"))
-    assert len(files) == items
+    items = sum(len(original[section]) for section in ("nodes", "rules", "notes"))
+    assert len(files) == items + 1 and "definition-of-done.md" in files
     for node in original["nodes"]:
         folder = {"epic": "epics", "story": "stories", "task": "tasks"}[node["kind"]]
         prefix = f"{folder}/{node['kind']}-{node['number']}-"

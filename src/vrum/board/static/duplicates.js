@@ -1,13 +1,13 @@
-// Possible duplicates, a mode of the search drawer (`dups=1`): pairs of stories (or epics, or
-// requirements) in different epics that look like the same thing, with their scores from the
-// index, most alike first, and the two items side by side. A person can change the threshold and
-// the epics, and can mark a pair as `duplicates` or `relates_to` with one click, which is the same
-// add_link an agent calls. Looking never writes: nothing is linked unless a person clicks one of
-// the buttons of a pair, and one click makes exactly one link. The choices are in the address:
-// dup_type, dup_min, dup_epics (epic numbers, such as 3,7) and dup_unlinked.
+// Possible duplicates, the second tab of the Search page (`dups=1`): pairs of stories (or epics, or
+// acceptance criteria) in different epics that look like the same thing, with their scores from the
+// index, most alike first, as a table with the two items side by side. A person can change the
+// threshold and the epics, and can mark a pair as `duplicates` or `relates_to` with one click,
+// which is the same add_link an agent calls. Looking never writes: nothing is linked unless a
+// person clicks one of the buttons of a pair, and one click makes exactly one link. The choices are
+// in the address: dup_type, dup_min, dup_epics (epic numbers, such as 3,7) and dup_unlinked.
 
 import { Refusal, call, callAll } from './api.js';
-import { actor, notify, parseSel, recordLink, ui } from './ctx.js';
+import { can, itemLink, notify, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import { icon } from './icons.js';
 import { KIND, STATUS, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, statusChip } from './labels.js';
@@ -18,12 +18,10 @@ const PAGE = 20;
 const TYPES = [
   ['story', 'Stories'],
   ['epic', 'Epics'],
-  ['rule', 'Requirements'],
+  ['rule', 'Acceptance criteria'],
 ];
-const MARKS = {
-  duplicates: { button: 'Mark as duplicates', done: 'Already marked as duplicates', told: 'duplicates' },
-  relates_to: { button: 'Mark as related', done: 'Already marked as related', told: 'related' },
-};
+// How a pair is said to be linked, by the link's type.
+const MARKS = { duplicates: 'duplicates', relates_to: 'related' };
 const ASKING = ['dup_type', 'dup_min', 'dup_epics', 'dup_unlinked'];
 
 let root = null;
@@ -37,8 +35,9 @@ let bodies = new Map(); // ref -> details, for the side-by-side view
 let rest = null; // the pairs not yet shown, when only the unmarked ones are listed
 let generation = 0;
 let loadedFor = '';
+let opened = new Set(); // the items whose details were opened in full, kept across a redraw
 
-// What a person reads for an item: S-12 for work, #3 for a requirement.
+// What a person reads for an item: S-12 for work, #3 for an acceptance criterion.
 const codeOfItem = (item) => {
   const at = parseNodeRef(item.ref);
   return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
@@ -53,9 +52,10 @@ export function mount(element, initial) {
   params = initial;
   pairs = [];
   loadedFor = '';
+  opened = new Set();
   const type = h('select', { id: 'dup-type', 'aria-label': 'What to compare', onchange: () => ui.navigate({ dup_type: type.value === 'story' ? null : type.value }) }, TYPES.map(([value, label]) => h('option', { value }, label)));
-  const min = h('input', { id: 'dup-min', type: 'number', min: 0, max: 1, step: 0.01, 'aria-describedby': 'dup-help' });
-  const epics = h('input', { id: 'dup-epics', type: 'text', value: params.get('dup_epics') || '', placeholder: 'such as 3, 7', 'aria-describedby': 'dup-help' });
+  const min = h('input', { id: 'dup-min', type: 'number', min: 0, max: 1, step: 0.01 });
+  const epics = h('input', { id: 'dup-epics', type: 'text', value: params.get('dup_epics') || '', placeholder: 'such as 3, 7' });
   const unlinked = h('input', { id: 'dup-unlinked', type: 'checkbox', checked: params.get('dup_unlinked') === '1', onchange: () => ui.navigate({ dup_unlinked: unlinked.checked ? '1' : null }) });
   parts = {
     type,
@@ -72,30 +72,26 @@ export function mount(element, initial) {
     h(
       'form',
       {
-        class: 'drawer-form dup-form',
+        class: 'dup-form',
         onsubmit: (event) => {
           event.preventDefault();
           ui.navigate({ dup_min: min.value === '' ? null : min.value, dup_epics: epics.value.trim() || null });
         },
       },
-      h('div', { class: 'dup-fields' },
-        h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
-        h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike (0 to 1)'), min),
-        h('div', { class: 'field dup-epics-field' }, h('label', { for: 'dup-epics' }, 'Only pairs with something in epics (numbers)'), epics),
-      ),
-      h('label', { class: 'check', for: 'dup-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
       h(
         'div',
-        { class: 'buttons' },
-        h('button', { type: 'submit', class: 'primary', id: 'dup-apply' }, 'Apply'),
-        h('button', { type: 'button', id: 'dup-reset', onclick: () => ui.navigate({ dup_min: null, dup_epics: null, dup_unlinked: null }) }, 'Start again'),
+        { class: 'dup-fields' },
+        h('div', { class: 'field' }, h('label', { for: 'dup-type' }, 'Compare'), type),
+        h('div', { class: 'field' }, h('label', { for: 'dup-min' }, 'How alike (0 to 1)'), min),
+        h('div', { class: 'field dup-epics-field' }, h('label', { for: 'dup-epics' }, 'In epics'), epics),
+        h(
+          'div',
+          { class: 'buttons' },
+          h('button', { type: 'submit', id: 'dup-apply' }, 'Apply'),
+          h('button', { type: 'button', id: 'dup-reset', onclick: () => ui.navigate({ dup_min: null, dup_epics: null, dup_unlinked: null }) }, icon('clear', { size: 16 }), 'Clear'),
+        ),
       ),
-      h(
-        'details',
-        { class: 'drawer-help' },
-        h('summary', {}, icon('chevron_right', { size: 14 }), 'What this shows'),
-        h('p', { class: 'help', id: 'dup-help' }, 'Pairs in different epics that look like the same thing, most alike first. The threshold starts at the server’s setting, and the epics box leaves out every pair that has nothing in the epics you name. This only reports: nothing is linked unless you click one of the buttons on a pair.'),
-      ),
+      h('label', { class: 'check', for: 'dup-unlinked' }, unlinked, ' Only pairs nobody has marked yet'),
     ),
     parts.problem,
     parts.note,
@@ -163,7 +159,7 @@ async function readEvery() {
 }
 
 // The words of the items in these pairs, for the side-by-side view: the work items with their
-// details in one filtered read for each kind, and the requirements from those the board already holds.
+// details in one filtered read for each kind, and the acceptance criteria from those the board already holds.
 async function describe(items) {
   const wanted = items.filter((item) => !bodies.has(item.ref));
   for (const type of ['epic', 'story', 'task']) {
@@ -224,9 +220,18 @@ async function load(fresh) {
     pairs = all;
     threshold = first.threshold;
     parts.problem.textContent = '';
-    const fine = first.index.meaning === 'used' || first.index.meaning === 'not_requested';
-    parts.note.className = `index-note ${fine ? 'info' : 'warn'}`;
-    put(parts.note, first.index.note ? [icon(fine ? 'info' : 'alert', { size: 14 }), h('span', {}, first.index.note)] : null);
+    // Said only when there is something to know: meaning could not be used, or some items are not indexed yet.
+    const { meaning, note, waiting_to_index: waiting } = first.index;
+    const fine = meaning === 'used' || meaning === 'not_requested';
+    parts.note.className = fine ? 'index-line' : 'index-note';
+    put(
+      parts.note,
+      !fine && note
+        ? [icon('alert', { size: 14 }), h('span', {}, note)]
+        : fine && waiting
+          ? [icon('clock', { size: 14 }), h('span', {}, `${plural(waiting, 'item')} waiting to be indexed, so not compared by meaning yet.`)]
+          : null,
+    );
     if (fresh) parts.min.value = params.get('dup_min') ?? String(threshold);
     await describe(all.flatMap((pair) => [pair.first, pair.second]));
   } catch (error) {
@@ -264,40 +269,85 @@ async function more() {
 function draw() {
   const only = params.get('dup_unlinked') === '1';
   parts.summary.textContent = total
-    ? `${plural(total, 'pair')} at ${threshold} or more alike${only ? ', none of them marked yet' : ''}${pairs.length < total ? `; ${pairs.length} shown` : ''}.`
-    : `No pairs are ${threshold} or more alike${only ? ' that nobody has marked yet' : ''}.`;
+    ? `${plural(total, 'pair')} at ${threshold} or more alike${only ? ', none of them marked yet' : ''}${pairs.length < total ? `; ${pairs.length} shown` : ''}`
+    : `No pairs are ${threshold} or more alike${only ? ' that nobody has marked yet' : ''}`;
   put(
     parts.list,
-    total
-      ? h('ul', { class: 'plain pairs' }, pairs.map(pairRow))
-      : h('div', { class: 'empty drawer-empty' }, icon('link', { size: 20 }), h('p', {}, 'Nothing to compare at this level. Lower the number for “how alike” to see weaker pairs.')),
+    total ? pairTable() : h('div', { class: 'empty search-empty' }, icon('link', { size: 20 }), h('p', {}, 'Nothing to compare at this level. Lower the number for “how alike” to see weaker pairs.')),
     nextOffset !== null ? h('p', { class: 'more' }, h('button', { type: 'button', id: 'dup-more', onclick: more }, 'Show more pairs')) : null,
   );
+  // Details run a few lines at most; the ones that are longer can be opened in full.
+  requestAnimationFrame(fitSides);
+}
+
+function pairTable() {
+  const column = (name, label) => h('th', { scope: 'col', class: `col-${name}` }, label);
+  return h(
+    'div',
+    { class: 'result-table pair-table' },
+    h(
+      'table',
+      { class: 'pairs' },
+      h('caption', { class: 'sr-only' }, 'Pairs that look alike, most alike first'),
+      h('thead', {}, h('tr', {}, column('score', 'How alike'), column('first', 'One'), column('second', 'The other'), column('marks', 'What to do'))),
+      h('tbody', {}, pairs.map((pair) => pairRow(pair))),
+    ),
+  );
+}
+
+// "Show all" and "Show less" for the details of one item. The button's name says whose details,
+// since a page holds many of them.
+const toggleName = (open, title) => `${open ? 'Show less' : 'Show all'} of ${title}`;
+
+function toggleDetails(side, ref, button, title) {
+  const open = side.classList.toggle('open');
+  if (open) opened.add(ref);
+  else opened.delete(ref);
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', toggleName(open, title));
+  button.textContent = open ? 'Show less' : 'Show all';
+}
+
+function detailsToggle(side, ref, title) {
+  const open = side.classList.contains('open');
+  const button = h('button', { type: 'button', class: 'link side-toggle', 'aria-expanded': String(open), 'aria-label': toggleName(open, title) }, open ? 'Show less' : 'Show all');
+  button.addEventListener('click', () => toggleDetails(side, ref, button, title));
+  return button;
+}
+
+function fitSides() {
+  if (!root) return;
+  for (const side of parts.list.querySelectorAll('.side')) {
+    const body = side.querySelector('.side-body');
+    if (body && !side.querySelector('.side-toggle') && body.scrollHeight > body.clientHeight + 2) side.append(detailsToggle(side, side.dataset.ref, side.querySelector('.side-title').textContent));
+  }
 }
 
 function side(item) {
   const text = bodies.get(item.ref);
-  const at = parseSel(item.ref);
-  return h(
-    'div',
-    { class: 'side', dataset: { type: item.item_type, ref: item.ref } },
+  const open = opened.has(item.ref);
+  const element = h(
+    'td',
+    { class: `side${open ? ' open' : ''}`, dataset: { type: item.item_type, ref: item.ref } },
     h(
       'div',
-      { class: 'entry-head' },
+      { class: 'pair-head' },
       h('span', { class: `chip kind kind-${item.item_type}` }, kindIcon(item.item_type, 14), `${KIND[item.item_type].label} ${codeOfItem(item)}`),
       STATUS[item.status] ? statusChip(item.status) : h('span', { class: 'chip' }, item.status),
     ),
-    h('h4', {}, recordLink(at.kind, at.number, {}, item.title)),
+    h('p', { class: 'side-title' }, itemLink(item.ref, {}, item.title)),
     item.epic ? h('p', { class: 'quiet side-epic' }, `In epic ${codeOf(item.epic)} ${store.nodes.get(item.epic)?.title ?? ''}`.trim()) : null,
     h('div', { class: 'side-body' }, text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.')),
   );
+  if (open) element.append(detailsToggle(element, item.ref, item.title));
+  return element;
 }
 
 // One click, one link: the same add_link an agent calls.
 async function link(pair, type) {
   try {
-    await call('add_link', { actor: actor(), source: pair.first.ref, target: pair.second.ref, link_type: type });
-    notify(`Marked ${codeOfItem(pair.first)} and ${codeOfItem(pair.second)} as ${MARKS[type].told}.`);
+    await call('add_link', { source: pair.first.ref, target: pair.second.ref, link_type: type });
+    notify(`Marked ${codeOfItem(pair.first)} and ${codeOfItem(pair.second)} as ${MARKS[type]}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });
@@ -307,34 +357,42 @@ async function link(pair, type) {
 }
 
 function pairRow(pair) {
-  const linkable = pair.first.item_type !== 'rule';
+  const linkable = pair.first.item_type !== 'rule' && can('write');
+  // Each button names the two items it links, so a person can see what a click does.
+  const both = `${codeOfItem(pair.first)} and ${codeOfItem(pair.second)}`;
   const buttons = linkable
-    ? Object.keys(MARKS).map((type) =>
-        h(
+    ? Object.keys(MARKS).map((type) => {
+        const marked = pair.already_linked.includes(type);
+        return h(
           'button',
           {
             type: 'button',
             class: `mark mark-${type}${type === 'duplicates' ? '' : ' secondary'}`,
-            disabled: pair.already_linked.includes(type),
+            disabled: marked,
             onclick: () => link(pair, type),
           },
-          icon(pair.already_linked.includes(type) ? 'check' : 'link', { size: 14 }),
-          pair.already_linked.includes(type) ? MARKS[type].done : MARKS[type].button,
-        ),
-      )
-    : [h('span', { class: 'quiet' }, 'Requirements cannot be linked to each other. Open both to compare them.')];
+          icon(marked ? 'check' : 'link', { size: 14 }),
+          marked ? `${both} are marked as ${MARKS[type]}` : `Mark ${both} as ${MARKS[type]}`,
+        );
+      })
+    : [h('span', { class: 'quiet' }, pair.first.item_type === 'rule' ? 'Acceptance criteria cannot be linked to each other. Open both to compare them.' : 'You can look at the pair but not change it.')];
   return h(
-    'li',
+    'tr',
     { class: 'pair', dataset: { first: pair.first.ref, second: pair.second.ref, similarity: pair.similarity } },
     h(
-      'p',
-      { class: 'score' },
-      h('span', { class: 'meter', role: 'meter', 'aria-label': 'How alike', 'aria-valuemin': 0, 'aria-valuemax': 1, 'aria-valuenow': pair.similarity }, h('span', { css: { width: `${Math.round(pair.similarity * 100)}%` } })),
-      h('strong', {}, pair.similarity.toFixed(3)),
-      ' alike',
-      pair.already_linked.length ? h('span', { class: 'chip' }, `already linked: ${pair.already_linked.map((type) => MARKS[type]?.told || type).join(', ')}`) : null,
+      'td',
+      { class: 'cell-score' },
+      h(
+        'div',
+        { class: 'score' },
+        h('strong', {}, pair.similarity.toFixed(3)),
+        h('span', { class: 'meter', role: 'meter', 'aria-label': 'How alike', 'aria-valuemin': 0, 'aria-valuemax': 1, 'aria-valuenow': pair.similarity }, h('span', { css: { width: `${Math.round(pair.similarity * 100)}%` } })),
+      ),
+      pair.already_linked.length ? h('span', { class: 'chip' }, `Already linked: ${pair.already_linked.map((type) => MARKS[type] || type).join(', ')}`) : null,
     ),
-    h('div', { class: 'sides' }, side(pair.first), side(pair.second)),
-    h('div', { class: 'buttons' }, ...buttons),
+    side(pair.first),
+    side(pair.second),
+    h('td', { class: 'cell-marks' }, h('div', { class: 'buttons' }, ...buttons)),
   );
 }
+

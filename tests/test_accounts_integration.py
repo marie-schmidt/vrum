@@ -84,7 +84,11 @@ def test_registering_signs_the_person_in_with_a_cookie_the_page_cannot_read() ->
     assert who.status == 200 and who.body["account"]["name"] == "Ada"
     assert who.body["csrf"] == reply.body["csrf"]
     nobody = api(base, "GET", "/board/api/session")
-    assert nobody.status == 200 and nobody.body == {"account": None, "csrf": None}
+    # Signed out, the answer says nobody is here and what the sign-in page may offer: whether mail
+    # is set up and which providers there are (their names, never a setting or a secret).
+    assert nobody.status == 200 and nobody.body["account"] is None and nobody.body["csrf"] is None
+    assert set(nobody.body) == {"account", "csrf", "mail", "providers", "sso_create_accounts"}
+    assert all(set(provider) == {"id", "name", "kind"} for provider in nobody.body["providers"])
 
 
 def test_a_second_registration_with_the_same_address_is_refused_and_changes_nothing() -> None:
@@ -176,7 +180,7 @@ def test_signing_out_ends_the_session_on_the_server_and_replaying_it_reads_and_w
     for method, path, body in (
         ("POST", "/board/api/projects", {"name": "Sneaky"}),
         ("POST", f"{mine}/tool/create_node", {"actor": "x", "kind": "epic", "title": "Sneaky"}),
-        ("POST", f"{mine}/keys", {"label": "sneaky"}),
+        ("POST", f"{mine}/keys", {"name": "sneaky-agent"}),
         ("DELETE", "/board/api/session", None),
     ):
         again = api(person.base, method, path, body, cookie=old_cookie, csrf=old_csrf)
@@ -370,7 +374,7 @@ def test_another_persons_project_is_refused_in_the_same_words_as_one_that_does_n
         ("POST", f"{first}/tool/create_node", {"actor": "b", "kind": "epic", "title": "Theirs"}),
         ("POST", f"{first}/tool/list_nodes", {}),
         ("POST", f"{first}/try/list_nodes", {}),
-        ("POST", f"{first}/keys", {"label": "stolen"}),
+        ("POST", f"{first}/keys", {"name": "stolen-agent"}),
         ("DELETE", f"{first}/keys/1", None),
     ):
         refused = b.call(method, path, body)
@@ -391,16 +395,16 @@ async def test_a_key_is_shown_once_and_revoking_it_stops_a_connection_that_is_al
     owner = register()
     project = make_project(owner, "Keyed")
     path = f"/board/api/projects/{project.id}"
-    second = owner.call("POST", f"{path}/keys", {"label": "second agent"})
+    second = owner.call("POST", f"{path}/keys", {"name": "second-agent"})
     assert second.status == 201
     secret, key_id = second.body["secret"], second.body["key"]["id"]
     assert secret.startswith("vrk_") and secret not in json.dumps(second.body["key"])
 
-    # Listed later, a key shows its label and its first characters, never itself.
+    # Listed later, a key shows its name and its first characters, never itself.
     listed = owner.call("GET", f"{path}/keys")
     assert secret not in json.dumps(listed.body)
     row = next(one for one in listed.body["keys"] if one["id"] == key_id)
-    assert row["label"] == "second agent" and row["hint"] == secret[:8]
+    assert row["name"] == "second-agent" and row["hint"] == secret[:8]
     assert row["revoked_at"] is None and row["last_used_at"] is None
 
     async with connect(project.mcp_url, secret) as client:
@@ -437,7 +441,7 @@ async def test_another_account_can_neither_list_make_nor_revoke_a_projects_keys(
 
     for method, tail, body in (
         ("GET", "/keys", None),
-        ("POST", "/keys", {"label": "stolen"}),
+        ("POST", "/keys", {"name": "stolen-agent"}),
         ("DELETE", f"/keys/{key_id}", None),
     ):
         assert b.call(method, f"{mine}{tail}", body).status == 404
@@ -452,12 +456,12 @@ async def test_another_account_can_neither_list_make_nor_revoke_a_projects_keys(
         assert (await ok(client, "server_status"))["vrum_version"]
 
 
-async def test_a_key_label_is_required() -> None:
+async def test_a_key_name_is_required() -> None:
     owner = register()
     project = make_project(owner)
-    for label in ("", "  ", "x" * 101):
-        reply = owner.call("POST", f"/board/api/projects/{project.id}/keys", {"label": label})
-        assert reply.status == 400 and "Give the key a label" in said(reply)
+    for name in ("", "  ", "x" * 101):
+        reply = owner.call("POST", f"/board/api/projects/{project.id}/keys", {"name": name})
+        assert reply.status == 400 and "Give the key the name of the agent" in said(reply)
     assert len(owner.call("GET", f"/board/api/projects/{project.id}/keys").body["keys"]) == 1
 
 

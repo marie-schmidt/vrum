@@ -1,6 +1,9 @@
 """How the scripts in this folder connect to a running Vrum: with the agent key of one project, read
 from the VRUM_AGENT_KEY environment variable. The project's owner makes the key on the board
-(Agent access on the project's page). A key reaches that project and no other."""
+(Users, then Agents, on the project's page), and names it for the agent that will use it: that
+name is who the scripts are in the project's history. A key reaches that project and no other. The
+export and import scripts also need the key to be allowed `export_graph` and `import_graph`, which
+are not among the tools agents are offered by default (see docs/backup-and-export.md)."""
 
 import os
 import sys
@@ -27,7 +30,7 @@ async def connect(url: str) -> AsyncIterator[Client]:
     if not key:
         raise SystemExit(
             "VRUM_AGENT_KEY is not set. Every request to the server needs the agent key of a "
-            "project: make one on the project's board (Agent access), then run "
+            "project: make one on the project's board (Users, then Agents), then run "
             "`export VRUM_AGENT_KEY=<the key>` first."
         )
     async with (

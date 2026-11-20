@@ -1,4 +1,4 @@
-"""The semantic index: embeddings of epics, stories, requirements, decisions and facts. It is
+"""The semantic index: embeddings of epics, stories, acceptance criteria and notes. It is
 derived from the graph, can be dropped at any time, and never decides anything.
 
 This module is the only one that writes to the index tables (it also creates and drops them): the
@@ -10,7 +10,7 @@ current works for every project, so it runs with no project named; a request to 
 project and reports on that project.
 
 An item is kept in the index under its type and one number: an epic, story or task by its number
-within its kind (unique, since the type says which kind), a requirement, decision or fact by its
+within its kind (unique, since the type says which kind), a rule or note by its
 id."""
 
 import asyncio
@@ -39,7 +39,7 @@ from vrum.items import NamedItem, named
 log = logging.getLogger("vrum.indexing")
 
 # The types of thing that are embedded. A task is found by exact words only.
-INDEXED_TYPES = ("epic", "story", "rule", "decision", "fact")
+INDEXED_TYPES = ("epic", "story", "rule", "note")
 # The biggest vector PostgreSQL's vector type can hold.
 _MOST_DIMENSIONS = 16000
 
@@ -290,7 +290,9 @@ class Indexer:
                     f"The model's vectors are now {dimensions} numbers long and were "
                     f"{info['dimensions']}, so the index was rebuilt."
                 )
-            await conn.execute("DROP TABLE IF EXISTS semantic_index, semantic_index_info")
+            # Readers look at the info table first and the index second; dropping in the
+            # same order keeps a rebuild from deadlocking with a search that is reading.
+            await conn.execute("DROP TABLE IF EXISTS semantic_index_info, semantic_index")
             # `dimensions` is a whole number read from the service and checked above.
             await conn.execute(
                 "CREATE TABLE semantic_index ("

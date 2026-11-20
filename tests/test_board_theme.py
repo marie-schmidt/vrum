@@ -29,9 +29,10 @@ TINTS = [
     "--warn-soft",
     "--info-soft",
     "--danger-soft",
+    "--progress-soft",
     "--neutral-soft",
 ]
-SIGNALS = ["--accent-text", "--ok", "--warn", "--info", "--danger"]
+SIGNALS = ["--accent-text", "--ok", "--warn", "--info", "--progress", "--danger"]
 
 
 def test_the_colour_parser_reads_what_the_tokens_write_and_what_a_browser_reports() -> None:
@@ -110,6 +111,51 @@ def test_text_and_signals_on_every_surface_reach_four_and_a_half_to_one(theme: s
         assert ratio("--accent", back) >= 3, back
     # The bar of a meter against its track, and the plain text on the two ends of the track.
     assert ratio("--ok", "--surface-3") >= 3
+
+
+STATUS_COLOURS = {
+    "ready": {"--info", "--info-soft"},
+    "in_progress": {"--progress", "--progress-soft"},
+    "blocked": {"--danger", "--danger-soft"},
+    "done": {"--ok", "--ok-soft"},
+}
+STATUS_FAMILY = {colour for colours in STATUS_COLOURS.values() for colour in colours} | {
+    "--accent",
+    "--accent-text",
+    "--accent-soft",
+    "--warn",
+    "--warn-soft",
+}
+STATUS_SELECTOR = re.compile(
+    r"(?<![\w-])(?:status-|s-|tone-status-|graph-x-key-)(ready|in_progress|blocked|done)(?![\w-])"
+)
+
+
+def _comma_parts(selector: str) -> list[str]:
+    parts, depth, start = [], 0, 0
+    for at, char in enumerate(selector):
+        depth += char == "("
+        depth -= char == ")"
+        if char == "," and depth == 0:
+            parts.append(selector[start:at])
+            start = at + 1
+    return [*parts, selector[start:]]
+
+
+def test_a_status_has_the_same_colour_in_every_style_sheet() -> None:
+    # Ready is blue, in progress violet, blocked red and done green, wherever a rule colours
+    # something by its status: a chip, a column, a menu mark, a Roadmap bar, a mark of the Graph.
+    # A rule for one status that reaches for another's colour (or for the accent, or amber) fails.
+    wrong = []
+    for path in STYLES:
+        text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", text):
+            used = {f"--{name}" for name in re.findall(r"var\(--([\w-]+)", body)} & STATUS_FAMILY
+            for part in _comma_parts(selector):
+                found = set(STATUS_SELECTOR.findall(part))
+                if len(found) == 1 and not used <= STATUS_COLOURS[next(iter(found))]:
+                    wrong.append(f"{path.name}: {part.strip()} uses {sorted(used)}")
+    assert wrong == []
 
 
 def test_no_style_sheet_script_or_page_names_a_colour_of_its_own() -> None:

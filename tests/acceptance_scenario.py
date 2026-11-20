@@ -387,9 +387,9 @@ def a_plan() -> dict[str, Any]:
         {"source": "t7", "target": "t2", "link_type": "needs_first"},
     ]
     rules = [
-        {"title": "Every invoice has a number", "story": "s0", "status": "settled"},
-        {"title": "Totals are in euros", "story": "s0"},
-        {"title": "Credit notes keep the old number", "story": "s1", "body": "See finance."},
+        {"title": "Every invoice has a number", "node": "s0", "status": "settled"},
+        {"title": "Totals are in euros", "node": "s0"},
+        {"title": "Credit notes keep the old number", "node": "s1", "body": "See finance."},
         {"title": "Not placed yet"},
     ]
     return {"items": items, "links": links, "rules": rules}
@@ -736,7 +736,7 @@ async def working_together() -> None:
             link_type="needs_first",
         )
         rule = await ok(
-            client, "create_rule", actor="m", title="Invoices carry a number", story=story["ref"]
+            client, "create_rule", actor="m", title="Invoices carry a number", node=story["ref"]
         )
         on_epic = await make_decision(client, "Decided on the epic", nodes=[epic["ref"]])
         old = await make_decision(client, "The old way", nodes=[story["ref"]])
@@ -864,7 +864,7 @@ async def working_together() -> None:
             link_type="needs_first",
         )
         await set_status(client, t1, "blocked")
-        await ok(client, "create_rule", actor="m", title="A rule", story=story["ref"])
+        await ok(client, "create_rule", actor="m", title="A rule", node=story["ref"])
         await make_decision(client, "A decision", nodes=[epic["ref"]])
         await make_fact(client, "A fact", nodes=[story["ref"]])
         expected = [
@@ -1019,17 +1019,17 @@ async def requirements_and_decisions() -> None:
         rule = await ok(client, "create_rule", actor="ann", title="Every invoice has a number")
         placed = await ok(
             client, "place_rule", actor="ann", rule_id=rule["id"], expected_version=1,
-            story=first["ref"],
+            node=first["ref"],
         )  # fmt: skip
         message = await refused(
             client, "place_rule", actor="bob", rule_id=rule["id"], expected_version=2,
-            story=second["ref"],
+            node=second["ref"],
         )  # fmt: skip
-        in_second = await ok(client, "list_rules", story=second["ref"])
+        in_second = await ok(client, "list_rules", node=second["ref"])
         proof(
             "M3",
             "a rule cannot be placed in two stories",
-            placed["story"] == first["ref"]
+            placed["node"] == first["ref"]
             and f"already placed in {first['ref']}" in message
             and "move_rule" in message
             and in_second["items"] == [],
@@ -1050,8 +1050,8 @@ async def requirements_and_decisions() -> None:
             "move is in the history of the rule and of both stories",
             sum(accepted for accepted, _ in contenders) == 1
             and [e["action"] for e in events] == ["rule_created", "rule_placed", "rule_moved"]
-            and move["before"]["story"] == first["ref"]
-            and move["after"]["story"] == second["ref"]
+            and move["before"]["node"] == first["ref"]
+            and move["after"]["node"] == second["ref"]
             and move["id"] in in_first_history
             and move["id"] in in_second_history,
             f"moved by {move['actor']}",
@@ -1078,7 +1078,7 @@ async def requirements_and_decisions() -> None:
         )  # fmt: skip
         await ok(
             client, "place_rule", actor="ann", rule_id=loose["id"], expected_version=1,
-            story=bare["ref"],
+            node=bare["ref"],
         )  # fmt: skip
         unplaced, without = await whole_coverage(client)
         proof(
@@ -1189,7 +1189,7 @@ async def remembering() -> None:
         task = await ok(
             client, "create_node", actor="m", kind="task", title="A task", parent=story["ref"]
         )
-        rule = await ok(client, "create_rule", actor="m", title="A rule", story=story["ref"])
+        rule = await ok(client, "create_rule", actor="m", title="A rule", node=story["ref"])
 
         # -- facts
         fact = await make_fact(
@@ -1341,7 +1341,7 @@ async def remembering() -> None:
 
         # -- listing
         e2, s2, t2 = await tree(client, 1)
-        r2 = await ok(client, "create_rule", actor="m", title="R", story=s2["ref"])
+        r2 = await ok(client, "create_rule", actor="m", title="R", node=s2["ref"])
         e3, s3, *_ = await tree(client, 0)
         for n in range(20):
             await make_fact(client, f"On a task {n}", nodes=[t2["ref"]])

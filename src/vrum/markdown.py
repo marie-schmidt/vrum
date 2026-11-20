@@ -1,10 +1,13 @@
-"""A read-only Markdown copy of the graph (M7): one file per epic, story, task, requirement (the
-rules of the database), decision and fact, with its fields at the top and everything it is
-connected to written as `[[file name]]` references, so a person can read it in Obsidian or keep it
-in git. A decision or fact says in plain words what it is, whether it still counts (active,
-superseded by another, or withdrawn and why) and whether a person confirmed it. A reference a
-person wrote in a text (`[[story:12]]`, see references.py) becomes the same kind of link to that
-item's file.
+"""A read-only Markdown copy of the graph (M7): one file per epic, story, task, acceptance criterion
+(the rules of the database) and note, with its fields at the top and everything it is connected to
+written as `[[file name]]` references, so a person can read it in Obsidian or keep it in git. A
+note says in plain words where it stands (unconfirmed, confirmed by a person and when,
+superseded by another, or withdrawn and why), and who decided it and when, if somebody did. A
+note has no title: its first line is the file's title. A reference a person wrote in a text
+(`[[story:12]]`, see references.py) becomes the same kind of link to that item's file. The
+project's definition of done is one more file at the top of the copy (`definition-of-done.md`). A
+story or task that the definition of done has checks for lists them as a task list, ticked or
+not, with who ticked each one, when, and how it was checked. A node's size is in its fields.
 
 It is made from the export (see exchange.py) and from nothing else, so it can never say anything
 the export does not. The same graph always gives the same files, byte for byte: nothing in them
@@ -18,12 +21,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vrum.common import split_node_ref
+from vrum.definition_of_done import DefinitionItem, definition_items
+from vrum.records import headline_of
 from vrum.references import REFERENCE_PATTERN
 
 _REFERENCE = re.compile(REFERENCE_PATTERN)
 
 # The folders the export owns. A tool that writes it replaces these and touches nothing else.
-FOLDERS = ("epics", "stories", "tasks", "rules", "decisions", "facts")
+FOLDERS = ("epics", "stories", "tasks", "rules", "notes")
+# The one file at the top of the copy: the project's definition of done. The tool that writes the
+# copy replaces it as well.
+DEFINITION_FILE = "definition-of-done.md"
 
 _LONGEST_SLUG = 50
 # Fields written as they are, not as quoted text: whole numbers, days and times, and the words
@@ -35,12 +43,14 @@ _BARE = {
     "type",
     "status",
     "priority",
+    "size",
     "start_on",
     "target_on",
     "decided_on",
     "created_at",
     "updated_at",
     "recorded_at",
+    "recorded_by_kind",
     "confirmed_at",
 }
 _NODE_FIELDS = (
@@ -49,6 +59,7 @@ _NODE_FIELDS = (
     "title",
     "status",
     "priority",
+    "size",
     "start_on",
     "target_on",
     "version",
@@ -56,25 +67,17 @@ _NODE_FIELDS = (
     "updated_at",
 )
 _RULE_FIELDS = ("type", "id", "title", "status", "version", "created_at", "updated_at")
-_DECISION_FIELDS = (
+_DEFINITION_FIELDS = ("type", "version", "updated_at", "updated_by")
+_NOTE_FIELDS = (
     "type",
     "id",
-    "title",
     "status",
     "status_reason",
     "project_wide",
     "decided_by",
     "decided_on",
-    "confirmed_by",
-    "confirmed_at",
-    "recorded_at",
-)
-_FACT_FIELDS = (
-    "type",
-    "id",
-    "status",
-    "status_reason",
     "recorded_by",
+    "recorded_by_kind",
     "recorded_at",
     "confirmed_by",
     "confirmed_at",
@@ -87,10 +90,9 @@ _LABELS = (
     ("supersedes", "superseded by"),
     ("duplicates", "duplicates"),
     ("relates to", "relates to"),
-    ("story", "requirements"),
-    ("affects", "decisions that affect it"),
+    ("on", "acceptance criteria"),
+    ("concerns", "notes about it"),
     ("replaced by", "replaces"),
-    ("concerns", "facts about it"),
 )
 _ORDER: dict[str, int] = {}
 for _position, (_outgoing, _incoming) in enumerate(_LABELS):
@@ -125,37 +127,51 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def _standing(noun: str, item: Mapping[str, Any]) -> str:
-    """Where a decision or fact stands, in plain words: what it is, whether it still counts, and
-    whether a person confirmed it. A replacement is written as a reference, so that it becomes a
-    link to the file that replaced it. An ended record keeps the confirmation it had."""
-    kind = noun
-    if item.get("project_wide"):
-        kind = "project-wide decision (it applies throughout the project)"
+def _checklist(
+    node: str, items: list[DefinitionItem], ticks: Mapping[tuple[str, str], Mapping[str, Any]]
+) -> str:
+    """The checks of a story or task as a task list: an item that is ticked says by whom and when,
+    and how it was checked. A check only a person can judge keeps its [person] tag."""
+    lines = []
+    for item in items:
+        tick = ticks.get((node, item.item))
+        words = f"[person] {item.text}" if item.person_only else item.text
+        if tick is None:
+            lines.append(f"- [ ] {words}")
+            continue
+        how = f"by {_one_line(tick['checked_by'])}, {tick['checked_at'][:10]}"
+        if tick["evidence"]:
+            how += f": {_one_line(tick['evidence'])}"
+        lines.append(f"- [x] {words} ({how})")
+    return "## Definition of done\n\n" + "\n".join(lines)
+
+
+def _standing(item: Mapping[str, Any]) -> str:
+    """Where a note stands, in plain words: its status, and when somebody decided it or it applies
+    throughout the project. A replacement is written as a reference, so that it becomes a link to
+    the file that replaced it. An ended note keeps the confirmation it had."""
     status = item["status"]
     reason = _one_line(item.get("status_reason") or "")
+    by = ""
+    if item["confirmed_by"]:
+        by = f"by {_one_line(item['confirmed_by'])} on {item['confirmed_at'][:10]}"
     if status == "superseded":
         replacement = item["superseded_by_id"]
-        lifecycle = (
-            "superseded" if replacement is None else f"superseded by [[{noun}:{replacement}]]"
-        )
+        words = "superseded" if replacement is None else f"superseded by [[note:{replacement}]]"
     elif status == "withdrawn":
-        lifecycle = "withdrawn"
+        words = "withdrawn"
     else:
-        lifecycle = "active"
-    if reason and status != "active":
-        lifecycle += f". Why: {reason}"
-    if item["confirmed_by"]:
-        confirmation = (
-            f"confirmed by {_one_line(item['confirmed_by'])} on {item['confirmed_at'][:10]}"
-        )
-        if status != "active":
-            confirmation += ", as it was when it ended"
-    else:
-        confirmation = "not confirmed by a person"
-    return "\n".join(
-        [f"- Kind: {kind}", f"- Status: {lifecycle}", f"- Confirmation: {confirmation}"]
-    )
+        words = f"confirmed {by}" if by else "unconfirmed"
+    if reason and status in ("superseded", "withdrawn"):
+        words += f". Why: {reason}"
+    lines = [f"- Status: {words}"]
+    if by and status in ("superseded", "withdrawn"):
+        lines.append(f"- Confirmed: {by}, as it was when it ended")
+    if item.get("decided_by"):
+        lines.append(f"- Decided: by {_one_line(item['decided_by'])} on {item['decided_on']}")
+    if item.get("project_wide"):
+        lines.append("- Applies: throughout the project")
+    return "\n".join(lines)
 
 
 def _front_matter(entry: _Entry) -> list[str]:
@@ -208,9 +224,14 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
     def add(key: tuple[str, int], entry: _Entry) -> None:
         entries[key] = entry
 
+    definition = document["definition_of_done"]
+    checks = definition_items(definition[0]["body"]) if definition else []
+    ticks = {(tick["node"], tick["item"]): tick for tick in document["checks"]}
     for node in document["nodes"]:
         kind = node["kind"]
         body = [node["body"]] if node["body"].strip() else []
+        if kind != "epic" and checks:
+            body.append(_checklist(f"{kind}:{node['number']}", checks, ticks))
         add(
             (kind, node["number"]),
             _Entry(
@@ -235,32 +256,17 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
                 body,
             ),
         )
-    for decision in document["decisions"]:
+    for note in document["notes"]:
+        headline = headline_of(note["text"])
         add(
-            ("decision", decision["id"]),
+            ("note", note["id"]),
             _Entry(
-                f"decision-{decision['id']}-{_slug(decision['title'])}",
-                "decisions",
-                _DECISION_FIELDS,
-                {**decision, "type": "decision"},
-                decision["title"],
-                [
-                    _standing("decision", decision),
-                    decision["text"],
-                    f"## Reason\n\n{decision['reason']}",
-                ],
-            ),
-        )
-    for fact in document["facts"]:
-        add(
-            ("fact", fact["id"]),
-            _Entry(
-                f"fact-{fact['id']}-{_slug(fact['text'])}",
-                "facts",
-                _FACT_FIELDS,
-                {**fact, "type": "fact"},
-                f"Fact {fact['id']}",
-                [_standing("fact", fact), fact["text"], f"## Source\n\n{fact['source']}"],
+                f"note-{note['id']}-{_slug(headline)}",
+                "notes",
+                _NOTE_FIELDS,
+                {**note, "type": "note"},
+                headline,
+                [_standing(note), note["text"], f"## Why\n\n{note['why']}"],
             ),
         )
 
@@ -283,31 +289,38 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
         }[link["link_type"]]
         connect(split_node_ref(link["source"]), split_node_ref(link["target"]), label)
     for rule in document["rules"]:
-        if rule["story"] is not None:
-            connect(("rule", rule["id"]), split_node_ref(rule["story"]), "story")
-    for decision in document["decisions"]:
-        here = ("decision", decision["id"])
-        for ref in decision["nodes"]:
-            connect(here, split_node_ref(ref), "affects")
-        for rule_id in decision["rule_ids"]:
-            connect(here, ("rule", rule_id), "affects")
-        if decision["superseded_by_id"] is not None:
-            connect(here, ("decision", decision["superseded_by_id"]), "replaced by")
-    for fact in document["facts"]:
-        here = ("fact", fact["id"])
-        for ref in fact["nodes"]:
+        if rule["node"] is not None:
+            connect(("rule", rule["id"]), split_node_ref(rule["node"]), "on")
+    for note in document["notes"]:
+        here = ("note", note["id"])
+        for ref in note["nodes"]:
             connect(here, split_node_ref(ref), "concerns")
-        for rule_id in fact["rule_ids"]:
+        for rule_id in note["rule_ids"]:
             connect(here, ("rule", rule_id), "concerns")
-        for decision_id in fact["decision_ids"]:
-            connect(here, ("decision", decision_id), "concerns")
-        if fact["superseded_by_id"] is not None:
-            connect(here, ("fact", fact["superseded_by_id"]), "replaced by")
+        for about in note["note_ids"]:
+            connect(here, ("note", about), "concerns")
+        if note["superseded_by_id"] is not None:
+            connect(here, ("note", note["superseded_by_id"]), "replaced by")
 
-    # How a reference to each item is written (`[[fact:5]]`) is the kind it is keyed by.
+    # How a reference to each item is written (`[[note:5]]`) is the kind it is keyed by.
     stems = {key: entry.stem for key, entry in entries.items()}
     files: dict[str, str] = {}
     for entry in entries.values():
         entry.links.sort(key=lambda link: (_ORDER[link[0]], *_rank(link[1])))
         files[f"{entry.folder}/{entry.stem}.md"] = _link_references(_text(entry), stems)
+    files[DEFINITION_FILE] = _link_references(
+        _text(
+            _Entry(
+                "definition-of-done",
+                "",
+                _DEFINITION_FIELDS,
+                {"type": "definition_of_done", **(definition[0] if definition else {})},
+                "Definition of done",
+                [definition[0]["body"]]
+                if definition and definition[0]["body"].strip()
+                else ["Nobody has set a definition of done yet."],
+            )
+        ),
+        stems,
+    )
     return files
