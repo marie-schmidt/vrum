@@ -187,11 +187,12 @@ function leaveDialog() {
 // -- invitations ---------------------------------------------------------------------------------------------
 
 function inviteDialog() {
-  const choices = GIVEN.map((value, position) =>
+  // What the person can do is a decision, so no role is chosen when the dialog opens.
+  const choices = GIVEN.map((value) =>
     h(
       'label',
       { class: 'role-choice', for: `invite-role-${value}` },
-      h('input', { type: 'radio', name: 'role', value, id: `invite-role-${value}`, checked: position === 0 }),
+      h('input', { type: 'radio', name: 'role', value, id: `invite-role-${value}` }),
       h('span', { class: 'role-choice-text' }, h('strong', {}, ROLES[value].label), h('span', { class: 'quiet' }, ROLES[value].can)),
     ),
   );
@@ -205,6 +206,7 @@ function inviteDialog() {
     submit: 'Create invitation link',
     work: async () => {
       const chosen = choices.map((label) => label.querySelector('input')).find((input) => input.checked);
+      if (!chosen) throw new Refusal('Choose what the person can do.');
       fresh = { ...(await createInvite(chosen.value, email ? email.value.trim() : '')), resent: false };
       revealed = false;
       form.closest('dialog')?.close();
@@ -217,7 +219,13 @@ function inviteDialog() {
       submit.textContent = email.value.trim() ? 'Send invitation' : 'Create invitation link';
     });
   }
-  openDialog('Invite someone', [form]);
+  const box = openDialog('Invite someone', [form]);
+  // The address, when it is asked for, is the first thing to type in; otherwise the dialog itself has the focus, so that no role is lit.
+  if (email) email.focus();
+  else {
+    box.tabIndex = -1;
+    box.focus();
+  }
 }
 
 const sentence = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
@@ -267,7 +275,7 @@ function inviteRow(invite) {
       { class: 'invite-main' },
       h('div', { class: 'invite-line' }, roleChip(invite.role), h('code', { class: 'hint-code' }, `${invite.hint}…`)),
       invite.sent_to ? h('span', { class: 'invite-sent' }, icon('mail', { size: 14 }), invite.sent_at ? `Sent to ${invite.sent_to}, ${moment(invite.sent_at)}` : `For ${invite.sent_to}. The email was not sent.`) : null,
-      h('span', { class: 'quiet' }, `Created ${moment(invite.created_at)} by ${invite.created_by}; good until ${moment(invite.expires_at)}`),
+      h('span', { class: 'quiet' }, invite.sent_to ? `Good until ${moment(invite.expires_at)}` : `Created ${moment(invite.created_at)} by ${invite.created_by}; good until ${moment(invite.expires_at)}`),
     ),
     h(
       'div',

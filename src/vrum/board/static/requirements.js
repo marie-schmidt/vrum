@@ -9,11 +9,11 @@ import { coverageWords } from './coverage.js';
 import { can, hrefTo, notify } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { codeOf, criteriaCount, kindIcon, nodeWords, parseNodeRef } from './labels.js';
+import { codeOf, criteriaCount, kindIcon, parseNodeRef, ruleCode } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { mentionedInDetails } from './references.js';
-import { requirementDialog, openRecord, placeRequirementDialog, requirementKindChip, ruleStatusChip } from './records.js';
-import { epicOf, store, sync } from './store.js';
+import { requirementDialog, openRecord, placeRequirementDialog, ruleStatusChip } from './records.js';
+import { epicOf, store, sync, titleOf } from './store.js';
 import { connectionsDetails, matchesText, sectionFrame, selectOf, textInput, walkRows } from './list-parts.js';
 
 const STATUS_FILTER = [
@@ -110,7 +110,7 @@ export function createRequirements() {
         ondragstart: (event) => {
           dragging = rule.id;
           event.dataTransfer.setData('application/x-vrum-rule', String(rule.id));
-          event.dataTransfer.setData('text/plain', `acceptance criterion ${rule.id}`);
+          event.dataTransfer.setData('text/plain', `${ruleCode(rule.id)} ${rule.title}`);
           event.dataTransfer.effectAllowed = 'move';
         },
         ondragend: () => {
@@ -118,7 +118,7 @@ export function createRequirements() {
           document.querySelectorAll('.over').forEach((el) => el.classList.remove('over'));
         },
       },
-      h('div', { class: 'record-chips' }, requirementKindChip(rule), ruleStatusChip(rule)),
+      h('div', { class: 'record-chips' }, h('span', { class: 'chip kind kind-rule' }, kindIcon('rule', 14), ruleCode(rule.id)), ruleStatusChip(rule)),
       h('button', { type: 'button', class: 'link gv-open', onclick: () => openRecord('rule', rule.id) }, rule.title),
       rule.body ? renderMarkdown(rule.body, { className: 'markdown entry-text row-text' }) : null,
       can('write')
@@ -310,7 +310,7 @@ async function dropIn(rule, node) {
   const placing = rule.node === null;
   try {
     await call('place_rule', { rule_id: rule.id, expected_version: rule.version, node });
-    notify(`${placing ? 'Put' : 'Moved'} acceptance criterion #${rule.id} ${placing ? 'on' : 'to'} ${nodeWords(node)}.`);
+    notify(`${placing ? 'Put' : 'Moved'} “${rule.title}” ${placing ? 'on' : 'to'} “${titleOf(node)}”.`);
     await sync();
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;

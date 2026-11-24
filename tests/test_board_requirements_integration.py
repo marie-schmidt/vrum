@@ -42,8 +42,8 @@ from tests.board_helpers import (
     plain,
     record_rows,
 )
+from tests.helpers import code_of, ok, refused, whole_coverage_report
 from tests.helpers import number_of as number
-from tests.helpers import ok, refused, whole_coverage_report
 from tests.world import Project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -114,33 +114,46 @@ async def page_says(page: Page, client: Client, rule: int) -> dict[str, Any]:
     await expect(article).to_have_attribute("data-status", server["status"], timeout=SLOW)
     await expect(article).to_have_attribute("data-node", server["node"] or "")
     title = page.locator("#item-title")
-    await expect(title).to_contain_text(f"Acceptance criterion #{rule}")
+    await expect(title).to_contain_text(f"AC-{rule} ")
     await expect(title).to_contain_text(server["title"])
     chip = page.locator("#item-page .chip.rule-status")
     await expect(chip).to_have_text(server["status"].capitalize())
     place = page.locator("#item-page button.place-requirement")
+    # The button has a short label for a narrow window too; its words are the long one.
+    place_words = place.locator(".long-label")
+    placed_on = page.locator("#item-page dd.in-story")
     if server["node"] is None:
-        await expect(page.locator("#item-what")).to_have_text(
-            "It is not placed on a story or task yet."
-        )
-        await expect(place).to_have_text("Put on a story or task…")
+        await expect(placed_on).to_have_text("Not placed yet")
+        await expect(place_words).to_have_text("Put on a story or task…")
+        await expect(place).to_have_attribute("aria-label", "Put on a story or task…")
     else:
+        # What it is on is the step before it in the path, and the strip no longer says it.
         holder = await ok(client, "get_node", node=server["node"])
-        what = page.locator("#item-what")
-        letter = "S" if holder["kind"] == "story" else "T"
-        await expect(what).to_contain_text(f"On {letter}-{holder['number']} {holder['title']}")
-        assert await what.locator("a").get_attribute("href") is not None
-        await expect(place).to_have_text("Move to another story or task…")
+        holding = page.locator("nav.crumbs li.crumb-item a").last
+        await expect(holding).to_have_attribute(
+            "title", re.compile(rf"^{code_of(holder['ref'])} {re.escape(holder['title'])}$")
+        )
+        assert await holding.get_attribute("href") is not None
+        assert await placed_on.count() == 0
+        await expect(place_words).to_have_text("Move to another story or task…")
+        await expect(place).to_have_attribute("aria-label", "Move to another story or task…")
     return dict(server)
 
 
 async def choose_place(box: Locator, ref: str) -> None:
     """Pick the story or task in the picker of a dialog that puts an acceptance criterion
-    somewhere: the list shows every story and task, grouped by epic."""
+    somewhere: the list of every story and task, grouped by epic, is closed when the dialog opens
+    and opens when the box is pressed."""
+    picker = box.locator(".holder-picker input")
+    await expect(box.locator(".holder-list")).to_be_hidden()
+    await expect(picker).to_have_attribute("aria-expanded", "false")
+    await picker.click()
+    await expect(box.locator(".holder-list")).to_be_visible()
     await box.locator(f".holder-option[data-ref='{ref}']").click()
     await expect(box.locator(f".holder-option[data-ref='{ref}']")).to_have_attribute(
         "aria-selected", "true"
     )
+    await expect(box.locator(".holder-list")).to_be_hidden()
 
 
 async def move_by_drag(page: Page, source: Locator, target: Locator) -> None:
@@ -213,7 +226,7 @@ async def test_a_new_criterion_is_unplaced_until_it_is_placed_and_then_moved_in_
             await page.go_back()
             newest = page.locator("#unplaced-group li.requirement").first
             await expect(newest).to_contain_text("Created in the browser", timeout=SLOW)
-            await expect(newest.locator(".chip.kind")).to_contain_text(f"Criterion #{rule}")
+            await expect(newest.locator(".chip.kind")).to_have_text(f"AC-{rule}")
             await expect(newest).to_have_attribute("data-status", "open")
             order = await page.evaluate(
                 "[...document.querySelectorAll('#unplaced-group, #requirement-groups,"
@@ -243,14 +256,14 @@ async def test_a_new_criterion_is_unplaced_until_it_is_placed_and_then_moved_in_
             await expect(box).to_have_count(0, timeout=SLOW)
             placed = await page_says(page, client, rule)
             assert (placed["node"], placed["version"]) == (first, 2)
-            await expect(page.locator("nav.crumbs li").last).to_have_text(
-                f"AC-{rule}", timeout=SLOW
+            await expect(page.locator("#crumb-page")).to_have_attribute(
+                "title", f"AC-{rule} Created in the browser", timeout=SLOW
             )
-            assert (await crumbs(page))[2:] == [
+            assert await crumbs(page) == [
                 "Lists",
-                "E-1",
-                "S-1",
-                f"AC-{rule}",
+                "E-1 Criteria",
+                "S-1 First story",
+                f"AC-{rule} Created in the browser",
             ]
 
             # An acceptance criterion on a story is moved, from a dialog on its page, in one step,
@@ -596,36 +609,33 @@ async def test_a_storys_acceptance_criteria_are_a_table_that_opens_each_ones_pag
             assert [r["id"] for r in rows] == [first, second, dropped]
             heads = await page.locator("table.requirements-table thead th").all_text_contents()
             assert heads == ["Criterion", "Title", "Status"]
-            await expect(page.locator("#item-page [data-part=requirements] h3")).to_have_text(
-                "Acceptance criteria (3)"
-            )
-            # How many are met, out of how many still apply (a dropped one is not counted).
-            await expect(page.locator("#item-page .criteria-met")).to_have_text(
-                "1 of 2 met, 1 dropped"
-            )
+            # The heading says how many are met, out of how many still apply (a dropped one is
+            # not counted, and is said).
+            heading = page.locator("#item-page [data-part=requirements] h3")
+            await expect(heading).to_contain_text("Acceptance criteria")
+            await expect(heading.locator(".heading-count")).to_have_text("1 of 2 met, 1 dropped")
             # An epic holds none, so its page has no section for them.
             await open_item(w, epic, "roadmap")
             assert await page.locator("#item-page [data-part=requirements]").count() == 0
             assert await page.locator("#item-page [data-part=definition]").count() == 0
             # A row opens the acceptance criterion's page, in the same view, and the page leads
-            # back to its story: a link in the line under its title, and the path above it.
+            # back to its story: the step before it in the path.
             await open_item(w, other, "roadmap")
             await page.locator(f"tr.record-line[data-ref='rule:{third}'] a.record-title").click()
             await item_loaded(page, f"rule:{third}")
             assert (await current_address(page))[1]["from"] == "roadmap"
-            await expect(page.locator("#item-what a")).to_have_attribute(
-                "href", f"#/item?item={other}&from=roadmap"
+            holding = page.locator("nav.crumbs li.crumb-item a").last
+            await expect(holding).to_have_attribute("href", f"#/item?item={other}&from=roadmap")
+            await expect(page.locator("#crumb-page")).to_have_attribute(
+                "title", f"AC-{third} On the other story", timeout=SLOW
             )
-            await expect(page.locator("nav.crumbs li").last).to_have_text(
-                f"AC-{third}", timeout=SLOW
-            )
-            assert (await crumbs(page))[2:] == [
+            assert await crumbs(page) == [
                 "Roadmap",
-                "E-1",
-                "S-2",
-                f"AC-{third}",
+                "E-1 Placed on",
+                "S-2 Has one too",
+                f"AC-{third} On the other story",
             ]
-            await page.locator("#item-what a").click()
+            await holding.click()
             await item_loaded(page, other)
             assert [r["id"] for r in await record_rows(page, "requirements")] == [third]
             # Pressing anywhere on a row, away from its links and chips, opens the page as well.
@@ -658,9 +668,6 @@ async def test_a_task_has_its_own_acceptance_criteria_and_reads_its_storys(
             section = page.locator("#item-page [data-part=requirements]")
             await expect(section.locator(".details-empty")).to_be_visible(timeout=SLOW)
             await expect(section.locator(".details-empty .chip")).to_have_text("Empty")
-            await expect(page.locator(".item-jump[data-jump=requirements]")).to_contain_text(
-                "empty"
-            )
             inherited = section.locator("[data-group=from-story] tr.record-line")
             assert [await r.get_attribute("data-ref") for r in await inherited.all()] == [
                 f"rule:{on_story}"
@@ -675,8 +682,9 @@ async def test_a_task_has_its_own_acceptance_criteria_and_reads_its_storys(
             # Writing one from the task's page puts it on the task at once, and it stays there.
             await page.locator("#item-page .details-empty .add-requirement").click()
             box = dialog(page)
+            # The sentence names the task, as the board speaks of an item: by its name.
             await expect(box.locator("#requirement-on")).to_have_text(
-                "It goes on T-2 A task with none."
+                "It goes on “A task with none”."
             )
             await box.locator("#requirement-title").fill("The message names the dock")
             await box.get_by_role("button", name="Add the acceptance criterion").click()
@@ -686,21 +694,24 @@ async def test_a_task_has_its_own_acceptance_criteria_and_reads_its_storys(
             await expect(own).to_contain_text("The message names the dock")
             made_here = await ok(client, "list_rules", node=bare_task)
             assert [r["title"] for r in made_here["items"]] == ["The message names the dock"]
-            await expect(section.locator(".criteria-met")).to_have_text("0 of 1 met")
-            await expect(page.locator(".item-jump[data-jump=requirements]")).to_contain_text("0/1")
-            # The same criterion is in the list of sections' count, and the Board's card says it.
+            await expect(section.locator(".heading-count")).to_have_text("0 of 1 met")
+            # The Board's card says it with one small sign, which the tooltip explains.
             await go(page, w.board, "#/board")
             card = page.locator(f"article.card[data-ref='{bare_task}']")
-            await expect(card.locator(".chip.criteria")).to_have_text("0/1 criteria", timeout=SLOW)
+            sign = card.locator(".chip.progress-sign")
+            await expect(sign).to_have_text("0/1", timeout=SLOW)
+            await expect(sign).to_have_attribute("data-progress", "0/1")
+            await expect(sign).to_have_attribute("aria-label", "0 of 1 acceptance criterion met")
             assert (
-                await page.locator(f"article.card[data-ref='{task}'] .chip.criteria").count() == 0
+                await page.locator(f"article.card[data-ref='{task}'] .chip.progress-sign").count()
+                == 0
             )
             # The count follows the work: met, and a dropped one is not counted at all.
             mine = made_here["items"][0]
             await ok(client, "update_rule", rule_id=mine["id"], expected_version=1, status="met")
             await ok(client, "create_rule", title="Dropped", node=bare_task, status="dropped")
-            await expect(card.locator(".chip.criteria")).to_have_text("1/1 criteria", timeout=SLOW)
-            await expect(card.locator(".chip.criteria")).to_have_class(re.compile(r"\bok\b"))
+            await expect(sign).to_have_text("1/1", timeout=SLOW)
+            await expect(sign).to_have_class(re.compile(r"\bok\b"))
 
             # The picker offers stories and tasks, grouped under their epic, and finds them by
             # their code or a word of their title.
@@ -793,11 +804,23 @@ async def test_the_coverage_page_equals_coverage_report_and_acts_on_what_it_list
             # A story whose only acceptance criterion is dropped has none that count.
             assert sorted(story_refs) == sorted([s2, s3, s4])
 
+            # The top bar names the page, so its title is for a screen reader only; each row is a
+            # code and its name.
+            await expect(page.locator("#page h1")).to_have_text("Coverage")
+            await expect(page.locator("#page h1")).to_have_class(re.compile(r"\bsr-only\b"))
+            assert await page.locator("#page .page-title").count() == 0
+            loose_row = page.locator(f"#unplaced-rules tr[data-rule='{loose_b}']")
+            await expect(loose_row.locator(".item-code")).to_have_text(f"AC-{loose_b}")
+            await expect(loose_row.locator("a.record-title")).to_have_text("Loose B")
+            bare_row = page.locator(f"#stories-without-rules tr[data-story='{s4}']")
+            await expect(bare_row.locator(".item-code")).to_have_text(code_of(s4))
+            await expect(bare_row.locator("a.record-title")).to_have_text("Story four")
+
             # What it lists opens its page, in Coverage, and the way back is the report.
             await page.locator(f"#unplaced-rules tr[data-rule='{loose_b}'] a.record-title").click()
             await item_loaded(page, f"rule:{loose_b}")
             assert (await current_address(page))[1]["from"] == "coverage"
-            assert (await crumbs(page))[2] == "Coverage"
+            assert (await crumbs(page))[0] == "Coverage"
             await page.locator("nav.crumbs li.crumb-view a").click()
             await on_page(page, "coverage")
             await expect(page.locator("#unplaced-rules tr[data-rule]")).to_have_count(
@@ -839,7 +862,7 @@ async def test_the_coverage_page_equals_coverage_report_and_acts_on_what_it_list
             bare = page.locator(f"#stories-without-rules tr[data-story='{s2}']")
             await bare.get_by_role("button", name="Add an acceptance criterion…").click()
             box = dialog(page)
-            await expect(box.locator("#requirement-on")).to_contain_text("It goes on S-2")
+            await expect(box.locator("#requirement-on")).to_have_text("It goes on “Story two”.")
             await box.locator("#requirement-title").fill("Written for story two")
             await box.get_by_role("button", name="Add the acceptance criterion").click()
             await expect(box).to_have_count(0, timeout=SLOW)

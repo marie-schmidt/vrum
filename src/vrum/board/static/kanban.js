@@ -5,22 +5,27 @@
 // menu that does the same from the keyboard. Both ask the server, which decides; the board shows
 // its answer.
 // Above it is a filter box (`q`, the same filter language as list_nodes) that keeps only the cards it
-// asks for. A card that waits for other work shows one word, Waiting, and what it waits for is in a
-// hover card; a card with a handoff note says Handoff. A card, and the title of an epic's lane, open the page of that item: the title is a
+// asks for. A card is its code and title and at most a few quiet signs (see the Key): a priority only
+// when it is high or urgent, its size, its due day (red when late), how far its criteria and checks
+// are met, and, as small signs with their words in a tooltip, that it waits for other work, that it has
+// a handoff note and who holds it. A card, and the title of an epic's lane, open the page of that item: the title is a
 // link (the way in by keyboard), and the rest of the card does the same for a pointer. The columns
 // scroll sideways inside the board's own region when the window is too narrow for them, so the page
 // itself never does.
 
 import { Refusal, call } from './api.js';
 import { can, itemLink, notify, openItem, ui, viewLink } from './ctx.js';
-import { day, h, moment, plural, put } from './dom.js';
+import { fromDay, todayDay } from './dates.js';
+import { h, plural, put } from './dom.js';
 import { openCreate } from './create.js';
 import { filterBar, loadRows } from './filterbar.js';
 import { hoverCard } from './hovercard.js';
+import { heldBy, heldContent, heldWords } from './gates.js';
 import { icon } from './icons.js';
 import { keyButton } from './key-button.js';
-import { KIND, SIZES, SIZE_POINTS, STATUS, STATUSES, actorLabel, byRef, checksChip, codeOf, criteriaChip, itemSizeChip, kindIcon, noSizeChip, nodeCode, statusIcon } from './labels.js';
-import { priorityChip, statusChip } from './status-menu.js';
+import { KIND, SIZES, SIZE_POINTS, STATUS, STATUSES, byRef, codeOf, dueChip, itemSizeChip, kindIcon, noSizeChip, nodeCode, priorityIcon, progressChip, statusIcon } from './labels.js';
+import { beforeDue, heldChip, openDueChip } from './list-parts.js';
+import { priorityChip } from './status-menu.js';
 import { epicOf, epics, store, sync, titleOf } from './store.js';
 
 // The levels the Board can show. Tasks come first because that is the work people do; Stories is the
@@ -269,16 +274,17 @@ function fillEpicChoices(select) {
   select.value = chosen;
 }
 
+// The top bar names the page, so the h1 is only for assistive technology; what the header row holds is the page's actions.
 function header() {
   return h(
     'header',
-    { class: 'page-header' },
-    h('div', { class: 'page-title' }, h('h1', {}, 'Board')),
+    { class: 'page-header actions-only' },
+    h('h1', { class: 'sr-only' }, 'Board'),
     h(
       'div',
       { class: 'page-actions' },
       viewLink('coverage', {}, { id: 'show-coverage', class: 'link-button' }, icon('rule', { size: 16 }), 'Coverage'),
-      can('write') ? h('button', { type: 'button', class: 'primary', id: 'new-item', onclick: () => openCreate({ kind: 'epic' }) }, icon('plus', { size: 16 }), 'New item') : null,
+      can('write') ? h('button', { type: 'button', class: 'primary', id: 'new-item', onclick: () => openCreate({}) }, icon('plus', { size: 16 }), 'New item') : null,
     ),
   );
 }
@@ -469,15 +475,6 @@ function lane(epic, items, all) {
     h('span', { class: 'lane-icon' }, icon('epic', { size: 18 })),
     h('h2', { class: 'lane-heading' }, itemLink(epic.ref, { class: 'lane-title', 'data-focus-key': epic.ref }, epic.title)),
     itemLink(epic.ref, { class: 'id mono lane-code', tabindex: -1, 'aria-hidden': 'true' }, code),
-    h(
-      'span',
-      { class: 'lane-meta' },
-      statusChip(epic, { onChanged: refresh }),
-      epic.priority !== 'normal' ? priorityChip(epic, { onChanged: refresh }) : null,
-      epic.target_on ? h('span', { class: 'chip due' }, icon('calendar', { size: 13 }), `Due ${day(epic.target_on)}`) : null,
-      epic.overdue ? h('span', { class: 'chip danger overdue' }, icon('alert', { size: 13 }), 'Overdue') : null,
-      itemSizeChip(epic),
-    ),
     h('span', { class: 'lane-progress' }, h('span', { class: 'progress-text' }, tasksDone(done, total)), meter(done, total, `Tasks done in ${epic.title}`)),
     can('write') ? h('button', { type: 'button', class: 'add-story small', onclick: () => openCreate({ kind: 'story', parent: epic.ref }) }, icon('plus', { size: 14 }), 'New story') : null,
   );
@@ -514,29 +511,49 @@ function cell(epic, status, cards) {
 
 // -- the key ---------------------------------------------------------------------------------------------
 
-// What the Key button opens: the six statuses and the signs a card can carry. The signs are the very chips the cards
-// draw (same classes, same icons), so the key cannot drift from them.
+// What the Key button opens: the six statuses and every sign a card can carry. The signs are the very chips the cards
+// draw (the same helpers, classes and icons), so the key cannot drift from them.
 
 function keyContent() {
-  const item = (picture, ...words) => h('li', {}, h('span', { class: 'bk-mark', 'aria-hidden': 'true' }, picture), h('span', { class: 'bk-words' }, ...words));
+  const picture = (inside) => h('span', { class: 'bk-mark', 'aria-hidden': 'true' }, inside);
+  const item = (mark, ...words) => h('li', {}, picture(mark), h('span', { class: 'bk-words' }, h('span', {}, ...words)));
   const group = (title, className, ...items) => h('div', { class: `bk-group ${className}` }, h('h3', {}, title), h('ul', { class: 'plain' }, items));
   const sizes = SIZES.map((name, at) => [at ? ', ' : '', h('span', { class: 'nowrap' }, `${name.toUpperCase()} ${SIZE_POINTS[name]}`)]);
+  const soon = fromDay(todayDay() + 14);
+  const lastWeek = fromDay(todayDay() - 3);
+  const priority = (name) => h('span', { class: `chip priority priority-${name}` }, priorityIcon(name, 14));
+  const holder = { claimed_by: 'Priya', claimed_by_kind: 'person', claim_expires_at: new Date(Date.now() + 3600000).toISOString() };
   return h(
     'div',
     { class: 'bk-card' },
-    group('Status', 'is-status', STATUSES.map((status) => item(h('span', { class: `bk-status status-${status}` }, statusIcon(status, 16)), h('strong', {}, STATUS[status].label), h('span', { class: 'quiet' }, STATUS[status].hint)))),
-    group(
-      'On a card',
-      '',
-      item(h('span', { class: 'chip waiting' }, icon('clock', { size: 13 }), 'Waiting'), 'Needs work that is not done yet'),
-      item(h('span', { class: 'chip handoff-sign' }, icon('handoff', { size: 13 }), 'Handoff'), 'Has a handoff note'),
-      item(h('span', { class: 'chip criteria' }, icon('rule', { size: 13 }), '2/3 criteria'), 'Acceptance criteria met'),
-      item(h('span', { class: 'chip checks' }, icon('checklist', { size: 13 }), '4/6 checks'), 'Definition of done ticked'),
-      item(h('span', { class: 'chip size size-m' }, 'M'), 'Size, in points: ', sizes),
-      item(h('span', { class: 'chip size size-rollup' }, icon('size', { size: 13 }), '14 pts'), 'What a story or epic adds up to'),
-      item(h('span', { class: 'chip no-size' }, 'No size'), 'Not sized yet'),
-      item(h('span', { class: 'chip danger overdue' }, icon('alert', { size: 13 }), 'Overdue'), 'Past its due day'),
-      item(h('span', { class: 'bk-lock' }, icon('lock', { size: 14 })), 'Held by someone, until the time shown'),
+    h(
+      'div',
+      { class: 'bk-column' },
+      group('Status', 'is-status', STATUSES.map((status) => h('li', {}, picture(h('span', { class: `bk-status status-${status}` }, statusIcon(status, 16))), h('span', { class: 'bk-words' }, h('strong', {}, STATUS[status].label), h('span', { class: 'quiet' }, STATUS[status].hint))))),
+      group(
+        'Dates',
+        'is-wide',
+        item(dueChip({ target_on: soon }), 'The day it is due'),
+        item(dueChip({ target_on: lastWeek, overdue: true }), 'Late: past its due day'),
+        item(h('span', { class: 'chip warn conflict' }, icon('alert', { size: 13 }), 'Schedule conflict'), 'Planned to start before something it needs is due'),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'bk-column' },
+      group(
+        'On a card',
+        '',
+        item([priority('high'), priority('urgent')], 'High or urgent priority (normal and low show nothing)'),
+        item(h('span', { class: 'chip size size-m' }, 'M'), 'Size, in points: ', sizes),
+        item(h('span', { class: 'chip size size-rollup' }, icon('size', { size: 13 }), '14 pts'), 'What a story adds up to'),
+        item(noSizeChip({ kind: 'task', status: 'ready' }), 'Not sized yet'),
+        item(progressChip({ criteria_total: 3, criteria_met: 2, status: 'ready' }), 'Acceptance criteria met and checks ticked, out of all'),
+        item(h('span', { class: 'chip waiting' }, icon('clock', { size: 13 })), 'Waiting for work that is not done yet, or held by a gate or a plan that waits for approval'),
+        item(h('span', { class: 'chip handoff-sign' }, icon('handoff', { size: 13 })), 'Has a handoff note'),
+        item(heldChip(holder), 'Held by someone, until the time in its tooltip'),
+        item(heldChip({ lapsed_claim_by: 'Priya' }), 'A claim that ran out'),
+      ),
     ),
   );
 }
@@ -545,62 +562,80 @@ function keyContent() {
 
 let dragged = ''; // the ref of the card being dragged
 
-const note = (kind, glyph, ...words) => h('p', { class: `card-note ${kind}` }, icon(glyph, { size: 14 }), h('span', {}, ...words));
-
-// A card that waits for other work shows one word, Waiting, and what it waits for is in a hover card: on
-// the pointer's hover, on the keyboard's focus and on a tap. (Blocked is a status, which a person sets;
-// a card in the Blocked column says Blocked.) The chip is not a button (it does nothing but explain),
-// so a click on it stays here and a drag that starts on it moves the card. A card that is done or
-// dropped says so; the column it sits in is where it is changed.
-function doneChip(node) {
-  return h('span', { class: `chip status status-${node.status}`, title: STATUS[node.status].hint, 'data-status': node.status }, statusIcon(node.status, 14), STATUS[node.status].label);
-}
-
+// A card that waits for other work, or is held by a gate or a plan that waits for approval, shows a clock and nothing else, and what
+// it waits for is in a hover card: on the pointer's hover, on the keyboard's focus and on a tap. (Blocked is a status, which a
+// person sets; a card in the Blocked column says Blocked.) The chip is not a button (it does nothing but explain),
+// so a click on it stays here and a drag that starts on it moves the card.
 function waitingChip(node) {
-  if (!node.waiting_on.length) return null;
+  const holds = heldBy(node);
+  if (!node.waiting_on.length && !holds.length) return null;
+  const waits = node.waiting_on;
+  const label = holds.length ? (waits.length ? `Waiting and ${heldWords(node).toLowerCase()}` : heldWords(node)) : 'Waiting';
   const chip = h(
     'span',
-    { class: 'chip waiting card-waiting', tabindex: 0, dataset: { focusKey: `waiting-${node.ref}` }, onclick: (event) => event.stopPropagation() },
+    { class: `chip waiting card-waiting${holds.length ? ' held-chip' : ''}`, role: 'img', tabindex: 0, 'aria-label': label, dataset: { focusKey: `waiting-${node.ref}`, held: holds.length ? holds.join(' ') : null }, onclick: (event) => event.stopPropagation() },
     icon('clock', { size: 13 }),
-    'Waiting',
   );
-  const waits = node.waiting_on;
-  const card = hoverCard(chip, [
-    h('p', { class: 'hovercard-title' }, `Waiting for ${plural(waits.length, 'item')}`),
-    h(
-      'ul',
-      { class: 'plain hovercard-list' },
-      waits.map((ref) => h('li', {}, h('span', { class: 'id mono' }, codeOf(ref)), ' ', itemLink(ref, { tabindex: -1 }, titleOf(ref)))),
-    ),
-  ]);
+  const held = holds.length ? heldContent(node) : null;
+  const card = hoverCard(
+    chip,
+    [
+      held ? held.content : null,
+      waits.length
+        ? [
+            h('p', { class: 'hovercard-title' }, `Waiting for ${plural(waits.length, 'item')}`),
+            h(
+              'ul',
+              { class: 'plain hovercard-list' },
+              waits.map((ref) => h('li', {}, h('span', { class: 'id mono' }, codeOf(ref)), ' ', itemLink(ref, { tabindex: -1 }, titleOf(ref)))),
+            ),
+          ]
+        : null,
+    ],
+    held ? { onOpen: ({ update }) => held.load(update) } : {},
+  );
   return [chip, card];
 }
 
-function claimNote(node) {
-  if (node.claimed_by) return note('claim', 'lock', 'Held by ', actorLabel(node.claimed_by, node.claimed_by_kind), ` until ${moment(node.claim_expires_at)}`);
-  if (node.lapsed_claim_by) return note('claim lapsed', 'alert', actorLabel(node.lapsed_claim_by, node.lapsed_claim_by_kind), '’s claim ran out');
-  return null;
-}
+// A card with a handoff note says so with a sign alone: the note is on its page.
+const handoffChip = () => h('span', { class: 'chip handoff-sign', role: 'img', title: 'It has a handoff note: see its page', 'aria-label': 'Handoff' }, icon('handoff', { size: 13 }));
+
+// A priority is shown only when it is high or urgent: normal and low are what nearly everything is, and say nothing.
+const loud = (node) => node.priority === 'high' || node.priority === 'urgent';
 
 function card(node) {
   const parent = store.nodes.get(node.parent);
   const code = nodeCode(node.kind, node.number);
   const shut = folded.has(node.ref);
-  // A story shows how many of its tasks are done, as a bar; with no tasks there is nothing to count.
+  const finished = node.status === 'done' || node.status === 'dropped';
+  // A story shows how many of its tasks are done, as a bar; a task says which story it is in, by its code and name on one
+  // line. With no tasks, or no story, there is nothing to say.
   const context = node.progress_total
     ? h('div', { class: 'card-context progress-line' }, h('span', {}, tasksDone(node.progress_done, node.progress_total)), meter(node.progress_done, node.progress_total, 'Tasks done'))
-    : node.progress_total === 0
-      ? h('p', { class: 'card-context' }, 'No tasks yet')
-      : parent
-        ? h('p', { class: 'card-context' }, 'Under: ', h('span', { class: 'id mono' }, nodeCode(parent.kind, parent.number)), ` ${parent.title}`)
-        : h('p', { class: 'card-context' });
+    : node.kind === 'task' && parent
+      ? h('p', { class: 'card-context under', title: `${nodeCode(parent.kind, parent.number)} ${parent.title}` }, h('span', { class: 'id mono' }, nodeCode(parent.kind, parent.number)), ` ${parent.title}`)
+      : null;
+  // The small signs come first so that they share a line; the due day, which is wide, is last.
+  const signs = [
+    loud(node) ? priorityChip(node, { onChanged: refresh, compact: true }) : null,
+    itemSizeChip(node),
+    noSizeChip(node),
+    progressChip(node, { quietWhenDone: true }),
+    finished ? null : waitingChip(node),
+    handedOff.has(node.ref) ? handoffChip() : null,
+    heldChip(node),
+    node.schedule_conflicts.length
+      ? h('span', { class: 'chip warn conflict', title: `Planned to start ${beforeDue(node.schedule_conflicts)}` }, icon('alert', { size: 13 }), 'Schedule conflict')
+      : null,
+    openDueChip(node),
+  ];
   const element = h(
     'article',
     {
       class: `card kind-${node.kind} status-${node.status}${shut ? ' folded' : ''}`,
       draggable: can('write') ? 'true' : 'false',
       dataset: { ref: node.ref, kind: node.kind, number: node.number, status: node.status },
-      'aria-label': `${KIND[node.kind].label} ${node.number}: ${node.title}. ${STATUS[node.status].label}.`,
+      'aria-label': `${KIND[node.kind].label} ${code}: ${node.title}. ${STATUS[node.status].label}.`,
       // The title is the link for the keyboard and for assistive technology; the rest of the card
       // does the same for a pointer, except where a click means something else.
       onclick: (event) => {
@@ -612,7 +647,7 @@ function card(node) {
         dragged = node.ref;
         dragging = true;
         event.dataTransfer.setData('application/x-vrum-node', node.ref);
-        event.dataTransfer.setData('text/plain', code);
+        event.dataTransfer.setData('text/plain', `${code} ${node.title}`);
         event.dataTransfer.effectAllowed = 'move';
         element.classList.add('dragging');
       },
@@ -624,11 +659,11 @@ function card(node) {
     h(
       'div',
       { class: 'card-top' },
-      h('span', { class: 'card-kind', title: KIND[node.kind].label }, kindIcon(node.kind, 14)),
+      shownLevel === 'both' ? h('span', { class: 'card-kind', title: KIND[node.kind].label }, kindIcon(node.kind, 14)) : null,
       h('span', { class: 'id mono' }, code),
       h(
         'button',
-        { type: 'button', class: 'fold small icon-only ghost', title: foldWords(code, shut), 'aria-label': foldWords(code, shut), 'aria-expanded': String(!shut), 'data-focus-key': `foldcard-${node.ref}`, onclick: (event) => {
+        { type: 'button', class: 'fold small icon-only ghost', title: foldWords(node.title, shut), 'aria-label': foldWords(node.title, shut), 'aria-expanded': String(!shut), 'data-focus-key': `foldcard-${node.ref}`, onclick: (event) => {
           // The icon is replaced below, so the card could no longer tell that a button was clicked.
           event.stopPropagation();
           foldCard(node, element, event.currentTarget);
@@ -637,24 +672,8 @@ function card(node) {
       ),
     ),
     h('h3', { class: 'card-title' }, itemLink(node.ref, { 'data-focus-key': node.ref, draggable: 'false' }, node.title)),
-    h(
-      'div',
-      { class: 'chips card-chips' },
-      priorityChip(node, { onChanged: refresh }),
-      itemSizeChip(node),
-      noSizeChip(node),
-      node.target_on ? h('span', { class: 'chip due' }, icon('calendar', { size: 13 }), `Due ${day(node.target_on)}`) : null,
-      node.overdue ? h('span', { class: 'chip danger overdue' }, icon('alert', { size: 13 }), 'Overdue') : null,
-      node.schedule_conflicts.length
-        ? h('span', { class: 'chip warn conflict', title: `Planned to start before ${node.schedule_conflicts.map(codeOf).join(', ')} is due` }, icon('alert', { size: 13 }), 'Schedule conflict')
-        : null,
-      node.status === 'done' || node.status === 'dropped' ? doneChip(node) : waitingChip(node),
-      handedOff.has(node.ref) ? h('span', { class: 'chip handoff-sign', title: 'It has a handoff note: see its page' }, icon('handoff', { size: 13 }), 'Handoff') : null,
-      criteriaChip(node),
-      checksChip(node, { quietWhenDone: true }),
-    ),
+    signs.some(Boolean) ? h('div', { class: 'chips card-chips' }, signs) : null,
     context,
-    claimNote(node),
   );
   return element;
 }
@@ -665,17 +684,16 @@ function card(node) {
 // status change), not across a reload.
 const folded = new Set();
 
-const foldWords = (code, shut) => `${shut ? 'Show' : 'Fold away'} ${code}`;
+const foldWords = (title, shut) => `${shut ? 'Show' : 'Fold away'} “${title}”`;
 
 function foldCard(node, element, button) {
   const shut = !folded.has(node.ref);
   if (shut) folded.add(node.ref);
   else folded.delete(node.ref);
-  const code = nodeCode(node.kind, node.number);
   element.classList.toggle('folded', shut);
   button.setAttribute('aria-expanded', String(!shut));
-  button.setAttribute('aria-label', foldWords(code, shut));
-  button.title = foldWords(code, shut);
+  button.setAttribute('aria-label', foldWords(node.title, shut));
+  button.title = foldWords(node.title, shut);
   put(button, icon(shut ? 'chevron_right' : 'chevron_down', { size: 16 }));
 }
 
@@ -693,7 +711,7 @@ async function setStatus(node, status) {
           if (error instanceof Refusal) await sync().catch(() => {});
           throw error;
         }
-        notify(`${nodeCode(node.kind, node.number)} is now ${STATUS[status].label.toLowerCase()}.`);
+        notify(`“${node.title}” is now ${STATUS[status].label.toLowerCase()}.`);
       },
       onDone: async () => {
         await sync();
@@ -705,7 +723,7 @@ async function setStatus(node, status) {
   }
   try {
     await call('update_node', { node: node.ref, expected_version: node.version, status });
-    notify(`${nodeCode(node.kind, node.number)} is now ${STATUS[status].label.toLowerCase()}.`);
+    notify(`“${node.title}” is now ${STATUS[status].label.toLowerCase()}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });

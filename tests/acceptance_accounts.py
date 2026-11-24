@@ -15,7 +15,7 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
 from tests.acceptance_scenario import Failed, chapter, clip, proof
-from tests.board_helpers import SLOW, browser_page, item_loaded, made
+from tests.board_helpers import SLOW, browser_page, item_loaded, made, sign_out
 from tests.helpers import (
     all_nodes,
     code_of,
@@ -30,10 +30,12 @@ from tests.helpers import (
 from tests.test_accounts_integration import hashed, held, messages, said, sign_in
 from tests.test_board_accounts_integration import (
     create_in_the_browser,
+    make_key_on_the_page,
     register_in_the_browser,
     wait_until_healthy,
 )
 from tests.test_projects_isolation_integration import Side, nowhere, sql_refused, three_projects
+from tests.test_where_the_work_is_integration import end_yesterday, key_row, keys_path, tomorrow
 from tests.world import api, make_project, register, server_base
 
 PASSWORD = "a long enough password"
@@ -48,6 +50,7 @@ async def accounts() -> None:
         await walls()
         await switching()
         await keys()
+        await key_expiry()
         await secrets_are_kept()
     except BrowserError as error:
         raise Failed(
@@ -77,11 +80,7 @@ async def registering(base: str) -> None:
         epic = await create_in_the_browser(w, "epic", f"Portal {word}")
         story = await create_in_the_browser(w, "story", f"Sign in {word}", epic)
         task = await create_in_the_browser(w, "task", f"Login form {word}", story)
-        await w.go("#/access")
-        await w.page.locator("#key-label").fill("build agent")
-        await w.page.locator("#create-key").click()
-        await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
-        key = (await w.page.locator("#key-secret").inner_text()).strip()
+        key = await make_key_on_the_page(w, "build agent")
         async with connect(f"{base}/mcp", key) as agent:
             seen = {node["ref"]: node["title"] for node in (await ok(agent, "list_nodes"))["items"]}
         proof(
@@ -95,7 +94,7 @@ async def registering(base: str) -> None:
             == {epic: f"Portal {word}", story: f"Sign in {word}", task: f"Login form {word}"},
             f"project {found.group(1)}, items {epic}, {story}, {task}",
         )
-        await w.page.locator("#sign-out").click()
+        await sign_out(w.page)
         await expect(w.page.locator("#sign-in-form")).to_be_visible(timeout=SLOW)
         restarted = compose("restart", "app")
         assert restarted.returncode == 0, restarted.stderr
@@ -163,7 +162,7 @@ async def refusals(base: str) -> None:
             base,
             "POST",
             f"{mine}/tool/create_node",
-            {"actor": "x", "kind": "epic", "title": "Replayed"},
+            {"kind": "epic", "title": "Replayed"},
             cookie=old_cookie,
             csrf=old_csrf,
         ),
@@ -291,14 +290,14 @@ async def walls() -> None:
             counts = (await ok(side.client, "server_status"))["counts"]
             exported = found["export"]["counts"]
             checks.append(counts["events"] == exported["events"] == len(found["export"]["events"]))
-            # A decision that applies throughout its own project: this task is in no decision's
-            # links, and the project-wide one is in its recall, and no other project's is.
-            checks.append(side.world["wide"]["title"] in json.dumps(found["recall"]))
-            foreign = [other.world["wide"]["title"] for other in others]
+            # A note that applies throughout its own project: the project-wide note is in this
+            # project's recall, and no other project's is.
+            checks.append(side.world["wide"]["headline"] in json.dumps(found["recall"]))
+            foreign = [other.world["wide"]["headline"] for other in others]
             checks.append(all(title not in json.dumps(found["recall"]) for title in foreign))
         proof(
             "M15",
-            "exact and semantic search, similar items, overlaps, recall, project-wide decisions, "
+            "exact and semantic search, similar items, overlaps, recall, project-wide notes, "
             "coverage, claims, change feeds, counts and exports each show only the project's own "
             "records, though the three projects share the very same references (epic:1, story:1, "
             "task:3 and the rest) and the same record numbers",
@@ -314,7 +313,6 @@ async def walls() -> None:
             await refused(
                 a1.client,
                 "create_node",
-                actor="x",
                 kind="story",
                 title="orphan",
                 parent=there.epic,
@@ -322,27 +320,23 @@ async def walls() -> None:
             await refused(
                 a1.client,
                 "add_link",
-                actor="x",
                 source=a1.world["story1"]["ref"],
                 target=there.node,
                 link_type="relates_to",
             ),
             await refused(
                 a1.client,
-                "retain_fact",
-                actor="x",
+                "add_note",
                 text="t",
-                source="s",
-                decision_ids=[there.decision],
+                why="s",
+                note_ids=[there.decision],
             ),
             await refused(
                 a1.client,
-                "supersede_decision",
-                actor="x",
-                decision_id=there.decision,
-                title="t",
+                "supersede_note",
+                replaces=[there.decision],
                 text="t",
-                reason="r",
+                why="r",
                 decided_by="x",
             ),
         ]
@@ -359,25 +353,25 @@ async def walls() -> None:
                 project=one,
             ),
             sql_refused(
-                "INSERT INTO fact_decisions (project_id, fact_id, decision_id) "
+                "INSERT INTO note_notes (project_id, note_id, about_id) "
                 f"VALUES ({one}, {mine_ids['fact2']['id']}, {there.decision})"
             ),
             sql_refused(
-                f"UPDATE facts SET status = 'superseded', superseded_by_id = {there.fact}, "
-                f"status_reason = 'x' WHERE project_id = {one} AND id = {mine_ids['fact2']['id']}"
+                f"UPDATE notes SET status = 'superseded', superseded_by_id = {there.fact} "
+                f"WHERE project_id = {one} AND id = {mine_ids['fact2']['id']}"
             ),
             sql_refused(
-                f"UPDATE decisions SET status = 'superseded', superseded_by_id = {there.decision} "
+                f"UPDATE notes SET status = 'superseded', superseded_by_id = {there.decision} "
                 f"WHERE project_id = {one} AND id = {mine_ids['wide']['id']}"
             ),
         ]
         proof(
             "M15",
-            "a parent, a link, a fact's decision or a replacement in another project is refused "
+            "a parent, a link, a note's link or a replacement in another project is refused "
             "through the tools and, even for the database's owner, by direct database writes; "
             "nothing in either project changed",
             all("There is no" in text for text in by_tool)
-            and all("violates" in text or "must be an active" in text for text in by_database)
+            and all("violates" in text for text in by_database)
             and await export_everything(a1.client) == before_a1
             and await export_everything(b1.client) == before_b1,
             f"{len(by_tool)} refused by the tools, {len(by_database)} by the database",
@@ -410,9 +404,9 @@ async def walls() -> None:
         before_a2 = await export_everything(a2.client)
         loaded_project = make_project(owner_a, "Loaded")
         async with connect(loaded_project.mcp_url, loaded_project.key) as loaded:
-            await ok(loaded, "import_graph", actor="marie", document=document)
+            await ok(loaded, "import_graph", document=document)
             same = await export_everything(loaded) == document
-            second = await refused(loaded, "import_graph", actor="marie", document=document)
+            second = await refused(loaded, "import_graph", document=document)
         text = json.dumps(document)
         proof(
             "M15",
@@ -450,7 +444,7 @@ async def switching() -> None:
     ):
         epic_one = await made(one, "epic", f"Only in the first {word}")
         story_one = await made(one, "story", f"First story {word}", epic_one)
-        await ok(one, "retain_fact", actor="a", text=f"A first fact {word}", source="The first")
+        await ok(one, "add_note", text=f"A first note {word}", why="The first")
         await made(two, "epic", f"Only in the second {word}")
         async with browser_page(first.address, token=first.key, name=None, keep_bodies=True) as w:
             # The first project's Search page has been used and the page of one of its records is
@@ -512,8 +506,9 @@ async def switching() -> None:
             # however late its answers were.
             leaked = []
             for address in (
-                "#/graph?view=everything",
-                "#/graph?view=context&as=list",
+                "#/graph?tab=structure",
+                f"#/graph?tab=around&focus={epic_one}",
+                "#/lists?view=notes",
                 "#/roadmap",
                 "#/activity",
                 f"#/search?search=first+{word}",
@@ -530,7 +525,7 @@ async def switching() -> None:
                         f"Only in the first {word}",
                         f"News for the first {word}",
                         f"First story {word}",
-                        f"A first fact {word}",
+                        f"A first note {word}",
                     )
                     if gone in text
                 ]
@@ -545,7 +540,7 @@ async def switching() -> None:
                 not leaked
                 and bool(after)
                 and all(f"First story {word}" not in text for text in after)
-                and all(f"A first fact {word}" not in text for text in after)
+                and all(f"A first note {word}" not in text for text in after)
                 and not [url for url in w.requests[before:] if f"/projects/{first.id}/" in url],
                 f"{len(after)} responses of the second project read",
             )
@@ -576,26 +571,17 @@ async def keys() -> None:
     async with connect(other.mcp_url, other.key) as elsewhere:
         await made(elsewhere, "epic", f"Elsewhere {word}")
     async with browser_page(project.address, token=project.key, name=None) as w:
-        await w.open("#/access")
-        await w.page.locator("#key-label").fill(f"second agent {word}")
-        await w.page.locator("#create-key").click()
-        await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
-        secret = (await w.page.locator("#key-secret").inner_text()).strip()
+        await w.open("#/users")
+        secret = await make_key_on_the_page(w, f"second agent {word}")
         async with connect(project.mcp_url, secret) as agent:
             epic = await made(agent, "epic", f"Work {word}")
             story = await ok(
-                agent,
-                "create_node",
-                actor="agent",
-                kind="story",
-                title=f"A story {word}",
-                parent=epic,
+                agent, "create_node", kind="story", title=f"A story {word}", parent=epic
             )
-            taken = await ok(agent, "next_work", actor="agent-keyed")
+            taken = await ok(agent, "next_work")
             await ok(
                 agent,
                 "finish_work",
-                actor="agent-keyed",
                 node=story["ref"],
                 outcome="done",
                 note="Done with a key made on the board.",
@@ -615,7 +601,7 @@ async def keys() -> None:
             row = w.page.locator("#keys li.key", has_text=f"second agent {word}")
             await row.locator("button.revoke").click()
             await w.page.locator("dialog.modal button.primary").click()
-            await expect(w.page.locator("#keys li.key[data-state=revoked]")).to_have_count(
+            await expect(w.page.locator("#revoked li.key[data-state=revoked]")).to_have_count(
                 1, timeout=SLOW
             )
             connected = ""
@@ -629,13 +615,112 @@ async def keys() -> None:
                 await again.call_tool("list_nodes", {})
         except BaseException as error:  # noqa: BLE001
             newcomer = messages(error)
+        async with connect(project.mcp_url, project.key) as first_key:
+            still_works = bool((await ok(first_key, "list_nodes", limit=1))["items"])
         proof(
             "M15",
             "revoking the key on the board refuses the client that is already connected, and a "
             "new one, on their next requests; the project's other key still works",
-            "agent key is not valid" in connected and "agent key is not valid" in newcomer,
-            clip(newcomer, 60),
+            "agent key is not valid" in connected
+            and "agent key is not valid" in newcomer
+            and still_works,
+            "both told the key is not valid; the first key answered",
         )
+
+
+# -- 6b: agent keys that run out (M41)
+
+
+async def key_expiry() -> None:
+    owner = register(name=f"Keeper {unique_word()}")
+    project = make_project(owner, "Keys that run out")
+    base = keys_path(project)
+    last_day = tomorrow()
+    plain = owner.call("POST", base, {"name": "no-end-agent"})
+    dated = owner.call("POST", base, {"name": "dated-agent", "expires_on": last_day})
+    dated_id = dated.body["key"]["id"]
+    async with (
+        connect(project.mcp_url, plain.body["secret"]) as untouched,
+        connect(project.mcp_url, dated.body["secret"]) as open_connection,
+    ):
+        await ok(untouched, "list_nodes")
+        await ok(open_connection, "list_nodes")
+        proof(
+            "M41",
+            "an agent key made with a last day (the owner's choice, through the board's own API) "
+            "works until that day and says it, and a key made with none says nothing about it: "
+            "both work",
+            (plain.status, dated.status) == (201, 201)
+            and plain.body["key"]["expires_on"] is None
+            and plain.body["key"]["expired"] is False
+            and dated.body["key"]["expires_on"] == last_day
+            and dated.body["key"]["expired"] is False,
+            f"last day {last_day}",
+        )
+        end_yesterday(dated_id)
+        while_open = ""
+        try:
+            await open_connection.call_tool("list_nodes", {})
+        except BaseException as error:  # noqa: BLE001
+            while_open = messages(error)
+        as_new = ""
+        try:
+            async with connect(project.mcp_url, dated.body["secret"]) as newcomer:
+                await newcomer.call_tool("list_nodes", {})
+        except BaseException as error:  # noqa: BLE001
+            as_new = messages(error)
+        shown = key_row(project, dated_id)
+        await ok(untouched, "list_nodes")
+        proof(
+            "M41",
+            "once its last day has passed the key is refused in plain words on its next request, "
+            "on a connection that was already open and on a new one, with the day it ended and "
+            "that the owner can extend it (not as a wrong key); the board's list says it has "
+            "expired, and the project's key with no day still works",
+            "expired after" in while_open
+            and "extend it" in while_open
+            and "expired after" in as_new
+            and "not valid" not in as_new
+            and shown["expired"] is True
+            and shown["expires_on"] is not None,
+            f'"{clip(while_open, 100)}"',
+        )
+        extended = owner.call("PATCH", f"{base}/{dated_id}", {"expires_on": tomorrow()})
+        again = await ok(open_connection, "list_nodes")
+        end_yesterday(dated_id)
+        cleared = owner.call("PATCH", f"{base}/{dated_id}", {"expires_on": None})
+        after_clearing = await ok(open_connection, "list_nodes")
+        proof(
+            "M41",
+            "the owner extends the key to a day that has not passed and it works again at once, "
+            "on the same open connection; clearing the day makes it a key that never runs out",
+            extended.status == 200
+            and extended.body["key"]["expired"] is False
+            and again["items"] == []
+            and cleared.status == 200
+            and cleared.body["key"]["expires_on"] is None
+            and cleared.body["key"]["expired"] is False
+            and after_clearing["items"] == [],
+            "extended, then cleared",
+        )
+    refused_days = [
+        owner.call("PATCH", f"{base}/{dated_id}", {"expires_on": text})
+        for text in ("2001-01-01", "next week")
+    ]
+    stranger = register()
+    not_theirs = stranger.call("PATCH", f"{base}/{dated_id}", {"expires_on": last_day})
+    proof(
+        "M41",
+        "a day that has already passed, or text that is not a day, is refused in plain words and "
+        "changes nothing, and only the project's owner can change a key's day",
+        [r.status for r in refused_days] == [400, 400]
+        and "already passed" in refused_days[0].body["message"]
+        and "YYYY-MM-DD" in refused_days[1].body["message"]
+        and all("Nothing was changed" in r.body["message"] for r in refused_days)
+        and not_theirs.status in (403, 404)
+        and key_row(project, dated_id)["expires_on"] is None,
+        f'"{clip(refused_days[0].body["message"], 80)}"',
+    )
 
 
 # -- 7: secrets
@@ -647,10 +732,8 @@ async def secrets_are_kept() -> None:
     wrong = f"a-wrong-password-{unique_word()}"
     sign_in(person.base, person.email, wrong)
     async with connect(project.mcp_url, project.key) as client:
-        await ok(client, "create_node", actor="agent", kind="epic", title="Quiet")
-        leak = await client.call_tool(
-            "retain_fact", {"actor": "agent", "text": f"it is {project.key}", "source": "x"}
-        )
+        await ok(client, "create_node", kind="epic", title="Quiet")
+        leak = await client.call_tool("add_note", {"text": f"it is {project.key}", "why": "x"})
         events = await ok(client, "changes_since", after_event_id=0, limit=200)
         exported = await export_everything(client)
     stored = held(f"SELECT password_hash FROM accounts WHERE email = '{person.email}'")
@@ -661,7 +744,7 @@ async def secrets_are_kept() -> None:
         "M15",
         "passwords are stored only as salted scrypt hashes; raw passwords, sessions and agent "
         "keys are absent from the database, the logs, the graph's events and a project's export, "
-        "and a key cannot be written into a fact",
+        "and a key cannot be written into a note",
         stored.startswith("scrypt$")
         and person.password not in stored
         and all(secret not in dump for secret in (person.password, person.cookie, project.key))

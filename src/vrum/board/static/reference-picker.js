@@ -1,18 +1,18 @@
 // The pick-list a text box offers when a person types `[[`: items to refer to, narrowed as they
-// type (by code, as in S-12 or story:12, by a number, or by a word of the title), chosen with the
+// type (by code, as in S-12, R-3 or story:12, by a number, or by a word of the title), chosen with the
 // arrow keys and Enter or with the mouse, and written into the text as `[[story:12]]`. It only
 // writes text. A reference creates no link, so choosing one changes nothing in the graph until the
-// text is saved.
+// text is saved. The list shows what a person reads: an item's kind sign, its code and its name.
 
 import { h } from './dom.js';
-import { isNodeKind, itemCode, kindIcon, kindLabel } from './labels.js';
-import { loadTargets, refText } from './references.js';
+import { isNodeKind, kindIcon, kindLabel } from './labels.js';
+import { codeFor, loadTargets, refText } from './references.js';
 import { headlineOf, store } from './store.js';
 
 const SHOWN = 8;
 let counter = 0;
 const KINDS = ['epic', 'story', 'task', 'rule', 'note'];
-const LETTERS = { e: 'epic', s: 'story', t: 'task' };
+const LETTERS = { e: 'epic', s: 'story', t: 'task', n: 'note', ac: 'rule' };
 
 const clip = (text, size = 70) => {
   const one = String(text).replace(/\s+/g, ' ').trim();
@@ -36,7 +36,7 @@ export function offers(query) {
   const typed = query.trim().toLowerCase();
   const all = everything();
   const byKind = /^(epic|story|task|rule|note)\s*:?\s*#?(\d*)$/.exec(typed);
-  const byCode = /^([est])(?:-(\d*)|(\d+))$/.exec(typed);
+  const byCode = /^(ac|[estn])(?:-(\d*)|(\d+))$/.exec(typed);
   let found;
   let digits = '';
   if (typed === '') found = all.filter((item) => isNodeKind(item.kind)).sort((a, b) => b.created.localeCompare(a.created) || b.number - a.number);
@@ -50,7 +50,7 @@ export function offers(query) {
   } else {
     const words = typed.split(/\s+/);
     found = all.filter((item) => {
-      const hay = `${kindLabel(item.kind)} ${item.kind} ${itemCode(item.kind, item.number)} ${item.title}`.toLowerCase();
+      const hay = `${kindLabel(item.kind)} ${item.kind} ${codeFor(item.kind, item.number)} ${item.title}`.toLowerCase();
       return words.every((word) => hay.includes(word));
     });
   }
@@ -128,7 +128,7 @@ export function withReferences(control) {
             },
           },
           kindIcon(item.kind, 14),
-          h('code', {}, refText(item.kind, item.number)),
+          codeFor(item.kind, item.number) ? h('span', { class: 'ref-code item-code' }, codeFor(item.kind, item.number)) : null,
           h('span', { class: 'ref-title' }, item.title),
         ),
       ),

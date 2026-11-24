@@ -14,7 +14,15 @@ import re
 import pytest
 from playwright.async_api import Locator, Page, Route, expect
 
-from tests.board_helpers import SLOW, hold_back_news, item_address, made, open_editor, plain
+from tests.board_helpers import (
+    SLOW,
+    hold_back_news,
+    item_address,
+    item_loaded,
+    made,
+    open_editor,
+    plain,
+)
 from tests.board_theme import (
     THEMES,
     choose,
@@ -42,7 +50,6 @@ from tests.helpers import (
     connect_as,
     embeddings_stopped,
     make_note,
-    number_of,
     ok,
     ref_from_code,
     refused,
@@ -169,7 +176,7 @@ async def test_while_the_project_loads_the_page_says_so_and_is_never_blank(
         asking.release.set()
         await expect(page.locator("#search-results tr.result").first).to_be_visible(timeout=SLOW)
         claims = await hold_answers(page, project, "who_is_working")
-        await w.go("#/activity")
+        await w.go("#/activity?tab=working")
         await claims.arrived()
         await expect(page.locator("#working .loading")).to_have_text("Reading the claims…")
         await themed(page, scheme)
@@ -226,6 +233,36 @@ async def test_the_graph_says_it_is_loading_while_the_notes_are_read(
 
 # -- empty -----------------------------------------------------------------------------------------
 
+ORDER_ASKS = "Choose an epic, story or task above to see its order."
+
+
+@SCHEMES
+async def test_order_is_one_sentence_until_something_is_chosen_and_then_the_plan(
+    project: Project, scheme: str
+) -> None:
+    async with connect(project.mcp_url, project.key) as client:
+        epic = await made(client, "epic", f"Order epic {unique_word()}")
+        story = await made(client, "story", "Order story", epic)
+        await made(client, "task", "Order task", story)
+    async with themed_page(project.address, signed_in=True, scheme=scheme) as w:
+        page = w.page
+        await in_project(page, f"{project.address}#/board")
+        # With nothing chosen, and with an item that is not there, Order is only the sentence: no
+        # plan, no epic picked for the person.
+        for address in ("#/graph?tab=order", "#/graph?tab=order&focus=epic:99999"):
+            await w.go(address)
+            await says(page, "#graph-or-empty", ORDER_ASKS)
+            assert (await page.locator("#graph-or-empty").inner_text()).strip() == ORDER_ASKS
+            await expect(page.locator("#graph-view .graph-or")).to_have_count(0)
+            await themed(page, scheme)
+        await w.go(f"#/graph?tab=order&focus={epic}")
+        await expect(page.locator("#graph-view .graph-or")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#graph-or-empty")).to_have_count(0)
+        assert w.problems == [], w.problems
+
+
+# -- empty (a new project) -------------------------------------------------------------------------
+
 
 @SCHEMES
 async def test_a_new_project_shows_friendly_empty_states_with_a_next_step(
@@ -260,8 +297,13 @@ async def test_a_new_project_shows_friendly_empty_states_with_a_next_step(
         await w.go("#/lists")
         await says(page, ".gv-empty", "No work in this project yet", "New item")
         await themed(page, scheme)
+        # An address from the time of the Everything list opens the work list, without a word.
         await w.go("#/lists?view=everything")
+        await says(page, ".gv-empty", "No work in this project yet", "New item")
+        await w.go("#/lists?view=requirements")
         await says(page, "#ctx-requirements", "None yet.")
+        await themed(page, scheme)
+        await w.go("#/lists?view=notes")
         await says(page, "#ctx-notes", "None yet.")
         await themed(page, scheme)
 
@@ -279,8 +321,10 @@ async def test_a_new_project_shows_friendly_empty_states_with_a_next_step(
         await w.go("#/search?dups=1")
         await says(page, "#dup-pairs", "Nothing to compare at this level")
         await w.go("#/activity")
-        await says(page, "#working", "No claims in force", "Nobody has taken work yet")
         await says(page, "#feed", "Nothing has happened in this project yet")
+        await themed(page, scheme)
+        await w.go("#/activity?tab=working")
+        await says(page, "#working", "Nobody has taken work yet")
         await themed(page, scheme)
         await w.go("#/coverage")
         await expect(page.locator("#coverage-summary")).to_be_visible(timeout=SLOW)
@@ -338,6 +382,9 @@ async def test_a_blank_title_and_bad_dates_are_refused_in_the_servers_words_and_
         dialog = page.locator("dialog.modal")
         await expect(dialog).to_be_visible()
         async with connect(project.mcp_url, project.key) as client:
+            # The kind is the one thing that starts empty (it is chosen, as nothing is chosen for
+            # the person); the rest of the draft follows.
+            await dialog.locator("#new-kind").select_option("epic")
             # A blank title: the server says no, in its words, under the fields.
             mcp = await refused(client, "create_node", kind="epic", title="   ", priority="high")
             await dialog.locator("#new-body").fill("The details are kept")
@@ -449,7 +496,7 @@ async def test_bad_filter_text_is_refused_in_the_servers_words_on_every_view_and
                     await refusal_is_designed(problem, scheme, sign=False)
                     await themed(page, scheme)
                     # The page is still the page: not blank, not a broken view.
-                    await expect(page.locator("main#page h1").first).to_be_visible()
+                    await expect(page.locator("main#page h1").first).to_have_text(view.capitalize())
                 await page.locator("#clear-filter").click()
                 await expect(page.locator("#filter-problem")).to_be_empty(timeout=SLOW)
                 assert await page.locator("#filter").input_value() == ""
@@ -600,7 +647,7 @@ async def test_saving_over_an_agents_change_is_refused_in_the_servers_words_and_
             await page.locator("#edit-title").fill(f"Both agreed {word}")
             await page.get_by_role("button", name="Save changes").click()
             await expect(page.locator("#notices .notice.done")).to_contain_text(
-                f"Saved story {number_of(story)}", timeout=SLOW
+                f"Saved “Both agreed {word}”.", timeout=SLOW
             )
             saved = await ok(client, "get_node", node=story)
             assert saved["version"] == 3 and saved["title"] == f"Both agreed {word}"
@@ -676,7 +723,7 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
 
             async def search(text: str) -> None:
                 await page.locator("#search-box").fill(text)
-                await page.locator("#search-go").click()
+                await page.locator("#search-box").press("Enter")
 
             # With the service, a paraphrase is found by meaning. The row says how it matched, and
             # the page has no note to add: it speaks only when meaning could not be used.
@@ -717,15 +764,15 @@ async def test_without_embeddings_search_still_finds_exact_words_says_so_and_the
                 await expect(page.locator("#search-problem")).to_have_text("")
                 await expect(note).to_contain_text("Only exact words were searched")
                 assert (await note.inner_text()).strip() == found["index"]["note"]
-                # The page of the story that is not indexed yet says it too, in the server's words
-                # (this story's meaning cannot be worked out until the service is back).
-                similar = await refused(
-                    client, "similar_items", node=late, types=["story"], limit=5
-                )
+                # The page of the story that is not indexed yet draws without a Similar section:
+                # the server refuses to work out its meaning until the service is back, and the
+                # page shows nothing for a refusal (the Search page and the top bar say it).
+                await refused(client, "similar_items", node=late, types=["story"], limit=5)
                 await w.go(f"{item_address(late)}&from=search")
-                suggestion = page.locator("#item-page [data-part=overlaps]")
-                await expect(suggestion).to_contain_text("Might be the same as", timeout=SLOW)
-                await expect(suggestion).to_contain_text(words_of(similar), timeout=SLOW)
+                await item_loaded(page, late)
+                await page.wait_for_load_state("networkidle")
+                assert await page.locator("#item-page [data-part=similar]").count() == 0
+                assert await page.locator("#item-page .refusal, #item-page .notice").count() == 0
                 # The note is painted from the tokens of both themes.
                 for theme in THEMES:
                     await switch(page, theme)
@@ -956,9 +1003,12 @@ async def test_no_request_leaves_the_server_and_what_people_write_is_only_ever_t
             "#/coverage",
             "#/graph",
             f"#/graph?tab=around&focus={story}",
-            "#/lists?view=everything",
+            "#/lists",
+            "#/lists?view=requirements",
+            "#/lists?view=notes",
             "#/roadmap",
             "#/users",
+            "#/account",
             "#/tools",
             "#/status",
         ):

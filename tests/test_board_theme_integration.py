@@ -18,7 +18,17 @@ from urllib.parse import parse_qs
 import pytest
 from playwright.async_api import Page, Route, expect
 
-from tests.board_helpers import SLOW, hold_back_news, http, item_address, made, open_editor
+from tests.board_helpers import (
+    SLOW,
+    hold_back_news,
+    http,
+    item_address,
+    made,
+    open_account_menu,
+    open_editor,
+    sign_out,
+)
+from tests.board_layout import rested
 from tests.board_theme import (
     CHOICES,
     FIRST_PAINT,
@@ -171,9 +181,13 @@ async def test_the_choice_survives_signing_in_project_switching_reload_and_signi
         await page.locator("#sign-in-submit").click()
         await page.wait_for_selector("#app[data-shell=project]", timeout=SLOW)
         await settled(page, "dark", "dark")
-        # The control is in the top bar now, shows the choice, and there is only one of it.
+        # The choice is in the account menu now (the top bar has none), shows the choice, and
+        # there is only one group of choices on the page.
         assert (await look(page))["controls"] == 1
-        await expect(page.locator("#top [data-appearance=dark]")).to_be_checked()
+        assert await page.locator("#top .appearance, #top [data-appearance]").count() == 0
+        await expect(page.locator("#account-appearance-dark")).to_have_attribute(
+            "aria-checked", "true"
+        )
         cookies = {each["name"]: each["value"] for each in await page.context.cookies()}
         assert list(cookies) == ["vrum_session"]
         session = await page.evaluate("fetch('/board/api/session').then((r) => r.json())")
@@ -205,7 +219,7 @@ async def test_the_choice_survives_signing_in_project_switching_reload_and_signi
 
         # Signing out keeps the choice: the page that comes back is as the person left it.
         await choose(page, "dark")
-        await page.locator("#sign-out").click()
+        await sign_out(page)
         await page.wait_for_selector(".entry", timeout=SLOW)
         await settled(page, "dark", "dark")
         await expect(page.locator("#top [data-appearance=dark]")).to_be_checked()
@@ -832,7 +846,6 @@ BOARD = {
     "input": "#filter",
     "select": "#epic-filter",
     "primary": "#new-item",
-    "appearance": "#top .appearance",
 }
 FIELD = {"background": "--surface", "color": "--text", "border": "--border-strong"}
 ACCENT = {"background": "--accent", "color": "--on-accent", "border": "--accent"}
@@ -844,7 +857,6 @@ EXPECTED = {
     "input": FIELD,
     "select": FIELD,
     "primary": ACCENT,
-    "appearance": {"background": "--surface", "border": "--border-strong"},
 }
 
 
@@ -931,14 +943,13 @@ async def test_the_board_the_controls_and_the_pages_of_search_and_activity_use_t
             assert rgb_of(html["scrollbar"].split(") ")[0] + ")") == token(theme, "--border-strong")
 
         # Search is a page: its form, its filters and its table of results are painted from the
-        # tokens too, and so is Possible duplicates.
+        # tokens too, and so is Possible duplicates. The page has no button of its own: Enter asks.
         await w.go("#/search?search=log")
         await expect(page.locator("#search-results tr.result").first).to_be_visible(timeout=SLOW)
         search = await painted_in_both(
             page,
             {
                 "input": "#search-box",
-                "primary": "#search-go",
                 "facets": "#search-facets",
                 "head": "table.results thead th",
                 "row": "table.results tbody tr.result td",
@@ -951,21 +962,34 @@ async def test_the_board_the_controls_and_the_pages_of_search_and_activity_use_t
                 theme,
                 {
                     "input": FIELD,
-                    "primary": ACCENT,
                     "facets": {"background": "--surface", "border": "--border"},
                     "head": {"background": "--surface-2"},
                     "row": {"color": "--text"},
                 },
             )
-        differ(search, ["input", "facets", "head", "primary"], "background")
+        differ(search, ["input", "facets", "head"], "background")
         await w.go("#/search?dups=1")
         await expect(page.locator("#dup-count")).to_be_visible(timeout=SLOW)
         await painted_in_both(page, {"body": "body", "count": "#dup-count"})
 
-        # Activity is a page: the filters, the feed and who is working on what.
+        # Activity is a page with three views (Changes, Working, Free to take): the feed, who is
+        # working on what, and the filters (behind the Filter button, opened as a person opens
+        # them).
         await w.go("#/activity")
         await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
-        await expect(page.locator("#claims-live li.claim").first).to_be_visible(timeout=SLOW)
+        await page.locator("#activity-tab-working").click()
+        await expect(page.locator("#agents li.claim").first).to_be_visible(timeout=SLOW)
+        working = await painted_in_both(
+            page, {"body": "body", "working": "#working", "claim": "#agents li.claim"}
+        )
+        for theme in THEMES:
+            check_tokens(working[theme], theme, {"body": PAGE})
+            assert of(working, theme, "claim")["color"], theme
+        differ(working, ["body"], "background")
+        await page.locator("#activity-tab-changes").click()
+        await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
+        await page.locator("#activity-filter-toggle").click()
+        await expect(page.locator("#activity-filter")).to_be_visible()
         activity = await painted_in_both(
             page,
             {
@@ -974,7 +998,6 @@ async def test_the_board_the_controls_and_the_pages_of_search_and_activity_use_t
                 "field": "#a-actor",
                 "kind": "#a-kind",
                 "apply": "#apply-activity",
-                "working": "#working",
                 "event": "#feed li.event",
             },
         )
@@ -1014,7 +1037,6 @@ async def test_the_page_of_an_item_its_table_and_its_form_use_the_tokens_of_each
             {
                 "body": "body",
                 "details": "#item-details .card-main",
-                "nav": ".item-nav",
                 "pager": ".item-pager",
                 "summary": ".card-summary",
                 "head": "#item-table thead th",
@@ -1036,7 +1058,6 @@ async def test_the_page_of_an_item_its_table_and_its_form_use_the_tokens_of_each
                 {
                     "body": PAGE,
                     "details": {"background": "--surface", "border": "--border"},
-                    "nav": {"background": "--bg"},
                     "pager": {"background": "--surface", "border": "--border-strong"},
                     "summary": {"background": "--surface", "border": "--border"},
                     "head": {"background": "--surface-2"},
@@ -1050,7 +1071,7 @@ async def test_the_page_of_an_item_its_table_and_its_form_use_the_tokens_of_each
                     "primary": ACCENT,
                 },
             )
-        differ(found, ["body", "details", "head", "field", "primary", "nav", "pager"], "background")
+        differ(found, ["body", "details", "head", "field", "primary", "pager"], "background")
         differ(found, ["sort", "sorted", "title"], "color")
         # An epic, a task, an acceptance criterion, a decision and a plain note are themed the same.
         for ref in (
@@ -1088,6 +1109,8 @@ async def test_the_graph_in_every_tab_and_with_a_great_deal_of_work_uses_the_tok
         ):
             await w.go(address)
             await expect(page.locator(drawn).first).to_be_visible(timeout=SLOW)
+            if address == "#/graph":
+                await rested(page)
             await page.wait_for_load_state("networkidle")
             await transitions_done(page)
             for theme in THEMES:
@@ -1172,18 +1195,29 @@ async def test_a_refusal_the_graph_the_roadmap_the_menu_and_the_other_pages_use_
             "#/users",
             "#/tools",
             "#/status",
+            "#/account",
         ):
             await w.go(address)
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(300)
             await painted_in_both(page, {"body": "body"})
-        # The Settings menu, which floats over the page.
+        # The Settings menu and the account menu, which float over the page.
         await w.go("#/board")
         await page.locator("#settings-menu").click()
         await expect(page.locator("#settings-list")).to_be_visible()
         menu = await painted_in_both(page, {"menu": "#settings-list"})
         for theme in THEMES:
             assert rgb_of(of(menu, theme, "menu")["background"]) == token(theme, "--surface")
+        differ(menu, ["menu"], "background")
+        await open_account_menu(page)
+        menu = await painted_in_both(
+            page, {"menu": "#account-list", "checked": "#account-list [aria-checked=true]"}
+        )
+        for theme in THEMES:
+            check_tokens(
+                menu[theme], theme, {"menu": {"background": "--surface", "color": "--text"}}
+            )
+            assert of(menu, theme, "checked")["color"]
         differ(menu, ["menu"], "background")
         assert w.problems == [], w.problems
 
@@ -1252,9 +1286,17 @@ async def test_records_coverage_the_switcher_dialogs_and_a_new_key_use_the_token
             assert rgb_of(of(found, theme, "switcher")["background"]) == token(theme, "--surface")
         await page.keyboard.press("Escape")
 
-        # A new agent key, whose secret is shown once.
+        # A new agent key: its dialog, and then the secret, shown once.
         await w.go("#/users")
+        await page.locator("#key-open").click()
+        await expect(page.locator("#key-name")).to_be_visible(timeout=SLOW)
+        dialog = await painted_in_both(page, {"dialog": "dialog.modal", "field": "#key-name"})
+        for theme in THEMES:
+            assert rgb_of(of(dialog, theme, "dialog")["background"]) == token(theme, "--surface")
+        differ(dialog, ["dialog"], "background")
         await page.locator("#key-name").fill("Surveyed")
+        await page.locator("#key-call-tools").check()
+        await page.locator("#key-tools-choice-standard").click()
         await expect(page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await page.locator("#create-key").click()
         await expect(page.locator("#key-secret")).to_be_visible(timeout=SLOW)

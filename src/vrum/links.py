@@ -20,7 +20,7 @@ from vrum.common import (
 from vrum.db import Database
 from vrum.graph import require_node
 
-LINK_TYPES = ("needs_first", "supersedes", "duplicates", "relates_to")
+LINK_TYPES = ("needs_first", "supersedes", "duplicates", "relates_to", "discovered_from")
 # These two mean the same thing in either direction, so A to B is the same link as B to A.
 _TWO_WAY = ("duplicates", "relates_to")
 _LINK_COLUMNS = "id, source, target, link_type, created_at"
@@ -31,13 +31,15 @@ class Link(BaseModel):
     id: int
     source: str = Field(
         description="The reference of the node the link starts from, such as story:12. For "
-        "needs_first, the node that has to wait."
+        "needs_first, the node that has to wait. For discovered_from, the new work."
     )
     target: str = Field(
         description="The reference of the node the link points to. For needs_first, the node that "
-        "must be done first."
+        "must be done first. For discovered_from, the work it was found while doing."
     )
-    link_type: str = Field(description="needs_first, supersedes, duplicates or relates_to.")
+    link_type: str = Field(
+        description="needs_first, supersedes, duplicates, relates_to or discovered_from."
+    )
     created_at: datetime
 
 
@@ -69,6 +71,24 @@ async def insert_link(
         actor=actor,
         before=None,
         after=snapshot(row, _LINK_FIELDS),
+    )
+    return row
+
+
+async def delete_link(conn: AsyncConnection, *, actor: str, link_id: int) -> dict[str, Any]:
+    """Delete a link by its id, and record it in the history of both nodes. Returns the row."""
+    row = await fetch_one(
+        conn, f"DELETE FROM links WHERE id = %s RETURNING {_LINK_COLUMNS}", (link_id,)
+    )
+    assert row is not None
+    await record_event(
+        conn,
+        node=row["source"],
+        other_node=row["target"],
+        action="link_removed",
+        actor=actor,
+        before=snapshot(row, _LINK_FIELDS),
+        after={},
     )
     return row
 

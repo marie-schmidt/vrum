@@ -42,6 +42,8 @@ the database is first made.
 | `VRUM_SMTP_SECURITY` | `starttls` (the default: an ordinary connection that is made secure), `ssl` (secure from the first byte, usually port 465) or `none` (not secure: for a catcher on this machine only). |
 | `VRUM_SMTP_USER`, `VRUM_SMTP_PASSWORD` | The mail server's sign-in, if it wants one. Set both or neither. The password can instead be given as a file in `VRUM_SMTP_PASSWORD_FILE`. |
 | `VRUM_SMTP_FROM` | The address messages come from, such as `Vrum <vrum@example.com>`. Required when `VRUM_SMTP_HOST` is set. |
+| `VRUM_WEBHOOK_ALLOWED_HOSTS` | Names, addresses or networks (a comma separated list, such as `hooks.internal.example,10.0.0.0/8`) that a webhook may go to although they are not public addresses. Empty by default (see [Webhooks and nudges](#webhooks-and-email-nudges)). |
+| `VRUM_WEBHOOK_ALLOW_INSECURE_HTTP` | Whether a webhook's address may start with `http://`. `false` by default. Only for a receiver on this machine, for testing. |
 | `VRUM_OIDC_ISSUER`, `VRUM_GITHUB_CLIENT_ID`, `VRUM_LDAP_URL` | Each turns on one way of signing in with another provider, with its own settings. Optional: without them nothing changes (see [Sign in with another provider](#sign-in-with-another-provider)). |
 | `VRUM_AGENT_KEY` | Not read by the server. The agent key of one project, for the scripts in `scripts/` (see [backup and export](backup-and-export.md)). |
 
@@ -66,7 +68,7 @@ With a mail server, Vrum sends plain text messages for three things, and nothing
   for seven days, and only an account with that address can accept it. The owner can still copy
   the link, and can send it again (the old link then stops working).
 - **A link to confirm an address**, sent when someone registers and whenever they ask for it on
-  the Users page. It works once for 24 hours. Confirming gates nothing: an account whose address is
+  the Account page. It works once for 24 hours. Confirming gates nothing: an account whose address is
   not confirmed works fully. An invitation that was emailed to an address also confirms it when
   the account with that address accepts it.
 - **A link to choose a new password**, offered on the sign-in page ("Forgot your password?"). It
@@ -126,13 +128,13 @@ the server keeps to them whatever a provider sends:
   confirmed here (by a link that reached its mailbox, by an emailed invitation, by a password reset,
   or because a provider made the account). If the account's address was never confirmed, nobody is
   signed in and nothing is changed: whoever has that account signs in with its password and then
-  connects the provider from the Users page. Without this rule, someone could register another
+  connects the provider from the Account page. Without this rule, someone could register another
   person's address with a password of their own and be joined to that person's real sign-in.
   Without email set up, accounts that people made with a password are never confirmed, so they
-  connect a provider from the Users page.
+  connect a provider from the Account page.
 - **With no account at all, one is made** (when `VRUM_SSO_CREATE_ACCOUNTS` allows it): its name is
   the provider's name for the person, its address is the confirmed one the provider gave, and it has
-  no password. The person can set one on the Users page, and a password reset (when email is set
+  no password. The person can set one on the Account page, and a password reset (when email is set
   up) does the same. An account with no password cannot sign in with an email address until it has
   one.
 - **A provider that does not say the address is confirmed cannot create or join anything.** OpenID
@@ -144,7 +146,7 @@ the server keeps to them whatever a provider sends:
   (comma separated, such as `example.com,example.org`; empty means any) limit which email domains a
   first sign-in with that provider may use, for making an account and for joining one. A domain
   matches exactly: `example.com` does not include `mail.example.com`.
-- **The last way in cannot be taken away.** On the Users page a person can connect or disconnect a
+- **The last way in cannot be taken away.** On the Account page a person can connect or disconnect a
   provider, but not the only way they can sign in. Disconnecting a provider also ends the account's
   other sessions, in case it was disconnected because someone else got in there.
 
@@ -159,7 +161,7 @@ code, a token, a state, an address, a name or a password.
 
 | Setting | What it does |
 | --- | --- |
-| `VRUM_SSO_CREATE_ACCOUNTS` | Whether a first sign-in with a provider may make a new account. `true` by default. With `false`, only people who already have an account can use a provider (they connect it from the Users page first, or an account is joined by a confirmed address). |
+| `VRUM_SSO_CREATE_ACCOUNTS` | Whether a first sign-in with a provider may make a new account. `true` by default. With `false`, only people who already have an account can use a provider (they connect it from the Account page first, or an account is joined by a confirmed address). |
 | `VRUM_SSO_ALLOW_INSECURE_HTTP` | A provider's address must start with `https://`, because codes and tokens travel to it. Set `true` only for a test provider on this machine: the server then also accepts `http://` and says so in its log at every start. `false` by default. |
 | `VRUM_OIDC_ISSUER` | Turns on OpenID Connect. The provider's base address, the one that serves `/.well-known/openid-configuration`. Vrum insists that the description it finds there names this exact issuer, so write it exactly as the provider does (some end in a slash). |
 | `VRUM_OIDC_CLIENT_ID` | The client id the provider gave Vrum. Required with the issuer. |
@@ -239,7 +241,7 @@ audience, expiry and nonce. It accepts only RS256, ES256 and PS256 signatures. E
   (the issuer has to be exact, so the shared "common" address does not work), `VRUM_OIDC_NAME=Microsoft`.
   Entra usually does not say in its ID tokens that an email address is confirmed, so a first sign-in
   by Microsoft is refused with "did not give a confirmed email address". People there connect
-  Microsoft to their existing account from the Users page, after which it works.
+  Microsoft to their existing account from the Account page, after which it works.
 - **Okta**: create an OIDC Web App integration, add the redirect address.
   `VRUM_OIDC_ISSUER=https://your-company.okta.com` (or `https://your-company.okta.com/oauth2/default`
   for the default custom authorization server), `VRUM_OIDC_NAME=Okta`.
@@ -323,7 +325,65 @@ else is lost: accounts, connections and sessions are in the database.
 
 Changing any provider setting needs a restart (`./start.sh`). The accounts, connections and
 sessions are in the database, so people who signed in with a provider whose settings you remove can
-no longer use it: they sign in with a password (set one on the Users page first, or ask for a reset).
+no longer use it: they sign in with a password (set one on the Account page first, or ask for a reset).
+
+## Webhooks and email nudges
+
+A project's owner can have Vrum send a small signed message to an address when something happens
+that needs someone: a question or an approval waiting for a person (`ask.raised`), a drafted plan to
+approve (`plan.proposed`), a suggested move of work (`placement.proposed`), work blocked or finished,
+a claim that ran out, or "work that may be ready changed" (`work.available`, at most one every ten
+seconds). The owner adds them on the project's **Users** page and chooses the kinds of news. A
+message says the kind, the project's number, the event's number and the story or task's reference,
+and never what anything is called or what anyone wrote: a receiver that wants more reads it from
+Vrum with a key. **It is only a nudge**: the change feed (`changes_since`) stays the source of truth,
+so a receiver that missed a message loses nothing by reading the feed.
+
+- **Signed as the Standard Webhooks specification has it**, so any receiver with a Standard Webhooks
+  library can check it: the headers `webhook-id` (the same through every retry), `webhook-timestamp`
+  (the time of the attempt, in seconds) and `webhook-signature` (`v1,` and the base64 of an HMAC-SHA256
+  over `<id>.<timestamp>.<body>`, one signature for each secret in force).
+- **The secret** (`whsec_` and 32 random bytes) is made by the server and shown once, when the webhook
+  is added or its secret is replaced. Replacing it makes a new one; the old one keeps signing for a day
+  so that the receiver can change over without losing a message. The server has to keep it to sign
+  with, so it is in the database, in a table a project's work cannot read, and **a backup holds it**:
+  keep backups as private as the database. It is never in the graph, an export or a log.
+- **Retries.** A message that does not get a 2xx answer is sent again after 10 seconds, 1 minute,
+  5 minutes, 30 minutes and 2 hours, and then given up on. The Users page shows a webhook as failing,
+  with what went wrong in words, until a message gets through; it also shows what each message did.
+  A redirect is a failure: nothing is followed.
+- **Where it may go.** The address has to be `https` and public. An address that is loopback
+  (this machine), on a private network, link-local (which includes the metadata address of cloud
+  providers) or otherwise not public is refused when the webhook is saved and again before each call,
+  also when a name resolves to one, and the call goes to the address that was checked, so a name that
+  changes its answer in between gets nothing. On your own network, `VRUM_WEBHOOK_ALLOWED_HOSTS` opens
+  the names, addresses or networks you list; `VRUM_WEBHOOK_ALLOW_INSECURE_HTTP=true` allows `http` for
+  a receiver on this machine. Nothing is logged with an address in it: addresses often hold a token.
+- **Nothing is sent from inside a request.** A background job reads each project's log and sends, so a
+  dead or slow address cannot slow a tool call down.
+
+**Email nudges** use the mail server above. A person who has confirmed their address can ask, on the
+Account page, to be mailed when something waits for them in a project (a question, a plan, a suggested
+move, blocked work, a claim that ran out). The mail says what kind of news it is and the story or
+task's reference, with a link to the board, and nothing anyone wrote. It goes only to the person who
+asked, at most ten an hour, and stops if they leave the project.
+
+## Running code (the sandbox)
+
+A key can call Vrum by running code (see [calling by running code](agents.md#calling-by-running-code)).
+The scripts agents write run in the `sandbox` service of `compose.yaml`, never in the server itself. It
+is built from `sandbox/` with Deno inside at a pinned version, whose download is checked against a fixed
+SHA-256 when the image is built (so the first build needs the internet, as the rest of the build does,
+and nothing is downloaded when it runs). The container has no network at all, none of Vrum's secrets and
+no database, a read-only disk, no extra rights and no root user, and is held to 768 MB of memory and two
+processors. The server reaches it only through a socket in a volume they share (`vrum-sandbox`), and it
+publishes no port.
+
+There is nothing to set: the limits of a script (60 seconds, at most 120; 200 calls, 100 of them
+changing something; 256 KB of answer; 16 KB of log; four scripts at once) are fixed. The server does not
+wait for the sandbox: if it is stopped or still starting, `run` says so in plain words and everything
+else keeps working. To go without it, start with `docker compose up -d --build --wait --scale sandbox=0`.
+Keys that call one tool at a time never use it.
 
 ## Search by meaning
 

@@ -205,6 +205,23 @@ async def insert_rule(
     return row
 
 
+async def apply_rule_changes(
+    conn: AsyncConnection, actor: str, current: dict[str, Any], changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Save changes to a rule the caller has locked and read, and record them. Returns the row."""
+    row = await save_changes(conn, "rules", current["id"], changes, _RULE_COLUMNS)
+    await record_event(
+        conn,
+        rule_id=current["id"],
+        action="rule_updated",
+        actor=actor,
+        before={**snapshot(current, tuple(changes)), "version": current["version"]},
+        after={**changes, "version": row["version"]},
+        **_event_nodes(current["node"]),
+    )
+    return row
+
+
 class Rules:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -308,16 +325,7 @@ class Rules:
                     "gave, or you gave none. Give at least one of title, body or status with a "
                     "new value."
                 )
-            row = await save_changes(conn, "rules", rule_id, changes, _RULE_COLUMNS)
-            await record_event(
-                conn,
-                rule_id=rule_id,
-                action="rule_updated",
-                actor=actor,
-                before={**snapshot(current, tuple(changes)), "version": current["version"]},
-                after={**changes, "version": row["version"]},
-                **_event_nodes(current["node"]),
-            )
+            row = await apply_rule_changes(conn, actor, current, changes)
         return Rule.model_validate(row)
 
     async def place_rule(

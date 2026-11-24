@@ -9,7 +9,7 @@ from tests.acceptance_scenario import URL, chapter, clip, proof, sql_value, stor
 from tests.board_search import DUPLICATES
 from tests.helpers import (
     all_nodes,
-    confirm,
+    confirm_on_board,
     connect,
     embeddings_stopped,
     make_decision,
@@ -30,12 +30,12 @@ async def search(client: Client, query: str, **arguments: Any) -> dict[str, Any]
 
 
 def by_item(page: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The results of a search by reference: every kind has one (story:12, rule:3, fact:5)."""
+    """The results of a search by reference: every kind has one (story:12, rule:3, note:5)."""
     return {item["ref"]: item for item in page["items"]}
 
 
 async def listing(client: Client, tool: str, **filters: Any) -> list[dict[str, Any]]:
-    """Every rule, decision or fact a list tool has, following the pages."""
+    """Every acceptance criterion (rule) or note a list tool has, following the pages."""
     found: list[dict[str, Any]] = []
     after_id = None
     while True:
@@ -52,10 +52,7 @@ def text_of(item: dict[str, Any]) -> str:
 
 async def story_with(client: Client, title: str, body: str = "") -> dict[str, Any]:
     (epic,) = (await stories(client, 0))[:1]
-    return await ok(
-        client, "create_node", actor="marie", kind="story", title=title, body=body,
-        parent=epic["ref"],
-    )  # fmt: skip
+    return await ok(client, "create_node", kind="story", title=title, body=body, parent=epic["ref"])
 
 
 async def every_overlap(client: Client, **arguments: Any) -> dict[str, Any]:
@@ -72,23 +69,21 @@ async def finding() -> None:
     async with connect(URL, the_token()) as client:
         # -- exact words, at once, for every kind of item
         word = unique_word()
-        epic = await ok(client, "create_node", actor="a", kind="epic", title=f"Plan {word}")
+        epic = await ok(client, "create_node", kind="epic", title=f"Plan {word}")
         story = await ok(
-            client, "create_node", actor="a", kind="story", title="Checkout",
+            client, "create_node", kind="story", title="Checkout",
             body=f"We must handle {word} carefully.", parent=epic["ref"],
         )  # fmt: skip
         task = await ok(
-            client, "create_node", actor="a", kind="task", title=f"Do the {word} part",
-            parent=story["ref"],
-        )  # fmt: skip
+            client, "create_node", kind="task", title=f"Do the {word} part", parent=story["ref"]
+        )
         rule = await ok(
-            client, "create_rule", actor="a", title="A rule", body=f"Never skip {word}.",
-            node=story["ref"],
-        )  # fmt: skip
+            client, "create_rule", title="A rule", body=f"Never skip {word}.", node=story["ref"]
+        )
         decision = await make_decision(client, "A decision", text=f"We choose {word}.")
-        decision = await confirm(client, "decision", decision, "Marie")
+        decision = confirm_on_board("note", decision, "Marie")
         fact = await make_fact(client, f"The {word} service is slow.")
-        fact_ref, decision_ref = ref_of("fact", fact["id"]), ref_of("decision", decision["id"])
+        fact_ref, decision_ref = ref_of("note", fact["id"]), ref_of("note", decision["id"])
         expected = {
             epic["ref"], story["ref"], task["ref"], ref_of("rule", rule["id"]),
             decision_ref, fact_ref,
@@ -110,8 +105,7 @@ async def finding() -> None:
         lists = {
             **{kind: [n for n in nodes if n["kind"] == kind] for kind in ("epic", "story", "task")},
             "rule": await listing(client, "list_rules"),
-            "decision": await listing(client, "list_decisions"),
-            "fact": await listing(client, "list_facts"),
+            "note": await listing(client, "list_notes"),
         }
         from_lists = {
             kind: len([item for item in items if word in text_of(item)])
@@ -120,19 +114,21 @@ async def finding() -> None:
         proof(
             "M5",
             "the counts by item type equal what the list tools return",
-            page["counts_by_type"] == from_lists == {kind: 1 for kind in sorted(lists)},
+            page["counts_by_type"]
+            == from_lists
+            == {"epic": 1, "note": 2, "rule": 1, "story": 1, "task": 1},
             str(page["counts_by_type"]),
         )
         proof(
-            "M5",
-            "a fact and a decision are found by words, each carrying its confirmation and whether "
-            "it is in force, so an unconfirmed fact is never mistaken for a confirmed decision",
-            (results[fact_ref]["confirmation"], results[fact_ref]["status"])
-            == ("unconfirmed", "active")
-            and results[fact_ref]["label"].startswith("Fact, not confirmed by a person")
-            and results[decision_ref]["confirmation"] == "confirmed"
-            and results[decision_ref]["label"].startswith("Decision, confirmed by Marie on "),
-            results[fact_ref]["label"][:60],
+            "M27",
+            "two notes are found by words, one nobody decided and one a person decided and "
+            "confirmed, each carrying its status, so an unconfirmed note is never mistaken for a "
+            "confirmed one",
+            (results[fact_ref]["item_type"], results[fact_ref]["status"]) == ("note", "unconfirmed")
+            and results[decision_ref]["status"] == "confirmed"
+            and not {"label", "confirmation"}
+            & (results[fact_ref].keys() | results[decision_ref].keys()),
+            f"{results[fact_ref]['status']} and {results[decision_ref]['status']}",
         )
 
         # -- meaning
@@ -175,26 +171,22 @@ async def finding() -> None:
         by_meaning = by_item(
             await search(client, "Clients get a bill by mail", mode="meaning", limit=50)
         )
-        keys = [ref_of("fact", found_fact["id"]), ref_of("decision", found_decision["id"])]
+        keys = [ref_of("note", found_fact["id"]), ref_of("note", found_decision["id"])]
         proof(
-            "M5",
-            "a fact and a decision are found by words and by meaning, each labelled with its "
-            "confirmation and lifecycle",
+            "M27",
+            "two notes are found by words and by meaning, each carrying its status",
             all(k in by_words and by_words[k]["matched"] == "words" for k in keys)
             and all(k in by_meaning and by_meaning[k]["matched"] == "meaning" for k in keys)
-            and all(by_meaning[k]["confirmation"] == "unconfirmed" for k in keys)
-            and all("not confirmed by a person" in by_meaning[k]["label"] for k in keys),
+            and all(by_meaning[k]["status"] == "unconfirmed" for k in keys),
         )
 
         # -- the service goes away and comes back
         w3 = unique_word()
-        epic3 = await ok(client, "create_node", actor="a", kind="epic", title="An epic")
+        epic3 = await ok(client, "create_node", kind="epic", title="An epic")
         phrase = f"Customers get an invoice by email {w3}"
         paraphrase3 = "Clients get a bill by mail"
         with embeddings_stopped():
-            added = await ok(
-                client, "create_node", actor="a", kind="story", title=phrase, parent=epic3["ref"]
-            )
+            added = await ok(client, "create_node", kind="story", title=phrase, parent=epic3["ref"])
             page = await search(client, w3)
             hit = by_item(page)[added["ref"]]
             gap = added["ref"] in by_item(await search(client, paraphrase3))

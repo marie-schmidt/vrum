@@ -1,8 +1,9 @@
-// Status and export: how the server is, as the server says it: the versions, how much of each kind of
-// thing it holds, the state of the index and of the embedding service, whether it can send email, the
-// other ways to sign in, and a download of the whole export. The database password, the mail server's
-// user and password and the sign-in providers' secrets are not here, because the server never says
-// them. Import and backup are not done from a page.
+// Status and export: how the server is, as the server says it, and a download of the whole export. The page
+// says only what a person needs: that the server is running, the state of search by meaning, whether it can
+// send email, and the export. Everything else the server reports (versions, the state of the index and of the
+// embedding service, how much each kind of thing there is, the other ways to sign in) is behind one closed
+// Technical details. The database password, the mail server's user and password and the sign-in providers'
+// secrets are not here, because the server never says them. Import and backup are not done from a page.
 
 import { Refusal, call, get } from './api.js';
 import { h, moment, plural, put } from './dom.js';
@@ -27,27 +28,42 @@ const SERVICE = {
   unreachable: 'Not answering',
 };
 
-const MEANING = {
-  used: 'In use',
-  not_configured: 'Not set up (no embedding service)',
-  service_unreachable: 'Not answering (the last try to index could not reach the service)',
-  index_not_ready: 'Not ready (not built yet, or built with another model)',
-};
+// Search by meaning in one plain state. When it is in use and items are still waiting to be indexed, it says how many.
+function meaningWords(index) {
+  switch (index.meaning) {
+    case 'used':
+      return index.waiting_to_index > 0 ? `In use, ${plural(index.waiting_to_index, 'item')} waiting to be indexed` : 'In use';
+    case 'not_configured':
+      return 'Not set up';
+    case 'service_unreachable':
+      return 'Not answering: the last try to index could not reach the embedding service';
+    case 'index_not_ready':
+      return 'Not ready yet: the index is not built, or was built with another model';
+    default:
+      return index.meaning;
+  }
+}
 
 let root = null;
+let places = null; // the parts of the page that are drawn again with every answer
 let generation = 0;
 let timer = null;
 
 export function mount(element) {
   root = element;
+  // The technical details are made once and only their content is drawn again, so that a person who opened them is not shut out by the next answer.
+  places = {
+    summary: h('div', { id: 'status-body', class: 'status-body' }, h('p', { class: 'loading', role: 'status' }, 'Asking the server…')),
+    technical: h('div', { class: 'technical-body', id: 'technical-body' }),
+  };
   put(
     root,
-    h('div', { class: 'settings-page' }, [
+    h('div', { class: 'settings-page status-page' }, [
       pageHeader('Status and export'),
       h('p', { class: 'problem', role: 'alert', id: 'status-problem' }),
-      h('div', { id: 'status-body', class: 'status-grid' }, h('p', { class: 'loading', role: 'status' }, 'Asking the server…')),
+      places.summary,
       exportSection(),
-      moveSection(),
+      h('details', { id: 'technical', class: 'status-technical' }, h('summary', {}, 'Technical details'), places.technical),
     ]),
   );
   load();
@@ -57,6 +73,7 @@ export function mount(element) {
 export function unmount() {
   generation += 1;
   root = null;
+  places = null;
   clearInterval(timer);
   timer = null;
 }
@@ -90,19 +107,21 @@ const row = (name, label, value) => h('tr', { dataset: { name } }, h('th', { sco
 // A table of facts that scrolls inside its own box when it is wider than the page.
 const facts = (label, ...rows) => h('div', { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': label }, h('table', { class: 'status-facts' }, h('tbody', {}, rows)));
 
-// Whether the server can send email, in words, with what it sends as and through. Never a user name or a password:
-// the server does not say them.
+// Whether the server can send email, in words.
 function emailWords(mail) {
-  if (!mail || !mail.enabled) return 'Not set up: invitations are shared by link and passwords cannot be reset by email';
-  return `Set up: sending as ${mail.from} through ${mail.host}`;
+  return mail && mail.enabled ? 'Set up' : 'Not set up: invitations are shared by link and passwords cannot be reset by email';
 }
+
+// Whom the server sends email as and through, for the technical details. Never a user name or a password:
+// the server does not say them.
+const sendingWords = (mail) => `Sending as ${mail.from} through ${mail.host}`;
 
 const KINDS = { oidc: 'OpenID Connect', github: 'GitHub', ldap: 'LDAP directory' };
 
 // The other ways to sign in, when the server has any: each provider and the address it talks to, which
 // email domains may use it, and whether a first sign-in may make an account. Never a client secret, a
 // password or a user name: the server does not say them.
-function signInSection(signIn) {
+function signInRows(signIn) {
   if (!signIn || !Array.isArray(signIn.providers) || signIn.providers.length === 0) return null;
   const domains = signIn.allowed_domains || {};
   const who = (id) => (Array.isArray(domains[id]) && domains[id].length ? `Only email addresses at ${domains[id].join(', ')}` : 'Any email domain');
@@ -111,44 +130,37 @@ function signInSection(signIn) {
     h('tr', { dataset: { name } }, h('th', { scope: 'row' }, label), h('td', { class: 'value' }, value, note ? h('span', { class: 'value-note' }, note) : null));
   const rows = signIn.providers.map((provider) => line(`provider-${provider.id}`, provider.name, `${KINDS[provider.kind || provider.id] || provider.kind || provider.id}${provider.host ? `, at ${provider.host}` : ''}`, who(provider.id)));
   rows.push(line('create-accounts', 'New accounts', signIn.create_accounts === false ? 'A first sign-in makes no account: only people who already have one can use it' : 'A first sign-in makes a new account', null));
-  return h('section', { id: 'sign-in', class: 'settings-section' }, h('h2', {}, 'Sign-in'), facts('The other ways to sign in', rows));
+  return rows;
 }
+
+// A group of facts in the technical details, under a quiet heading.
+const group = (id, title, label, rows) => (rows ? h('section', { id, class: 'technical-group' }, h('h3', {}, title), facts(label, rows)) : null);
 
 function draw(status, mail, signIn) {
   const index = status.index;
   const last = index.last_reindex;
   put(
-    root.querySelector('#status-body'),
+    places.summary,
     h(
       'section',
-      { id: 'versions', class: 'settings-section' },
-      h('h2', {}, 'The server'),
+      { id: 'status-summary', class: 'settings-section' },
       h('p', { class: 'ok status-line' }, icon('check', { size: 16 }), h('strong', {}, 'The server is running and can reach its database.')),
-      facts('The server’s versions', row('vrum_version', 'Vrum', status.vrum_version), row('postgres_version', 'PostgreSQL', status.postgres_version), row('pgvector_version', 'pgvector', status.pgvector_version), row('checked_at', 'Checked', moment(status.checked_at))),
+      facts('Search by meaning and email', row('meaning', 'Search by meaning', meaningWords(index)), row('mail', 'Email', emailWords(mail))),
     ),
-    h('section', { id: 'sizes', class: 'settings-section' }, h('h2', {}, 'How much it holds'), facts('How much the project holds', SIZES.map(([name, label]) => row(name, label, String(status.counts[name]))))),
-    h(
-      'section',
-      { id: 'index', class: 'settings-section' },
-      h('h2', {}, 'Search by meaning'),
-      facts(
-        'The state of the index',
-        row('meaning', 'The index', MEANING[index.meaning] || index.meaning),
-        row('waiting', 'Waiting to be indexed', String(index.waiting_to_index)),
-        row('indexed', 'Items in the index', String(index.indexed)),
-        row('service', 'Embedding service', SERVICE[index.embedding_service] || index.embedding_service),
-        row('model', 'Embedding model', index.embedding_model || 'None'),
-        row('vector_size', 'Numbers in each vector', index.vector_size === null ? 'Not built yet' : String(index.vector_size)),
-        row('last_reindex', 'Last indexed', last ? `${moment(last.at)}: ${last.error ? `stopped early (${last.error})` : `${plural(last.embedded, 'item')} embedded${last.failed_total ? `, ${last.failed_total} refused` : ''}, ${last.waiting_after ?? 0} still waiting`}, in ${last.seconds} s` : 'Not since the server started'),
-      ),
-    ),
-    h(
-      'section',
-      { id: 'email', class: 'settings-section' },
-      h('h2', {}, 'Email'),
-      facts('Whether the server can send email', row('mail', 'Sending email', emailWords(mail))),
-    ),
-    signInSection(signIn),
+  );
+  put(
+    places.technical,
+    group('versions', 'The server', 'The server’s versions', [row('vrum_version', 'Vrum', status.vrum_version), row('postgres_version', 'PostgreSQL', status.postgres_version), row('pgvector_version', 'pgvector', status.pgvector_version), row('checked_at', 'Checked', moment(status.checked_at))]),
+    group('index', 'Search by meaning', 'The state of the index', [
+      row('indexed', 'Items in the index', String(index.indexed)),
+      row('service', 'Embedding service', SERVICE[index.embedding_service] || index.embedding_service),
+      row('model', 'Embedding model', index.embedding_model || 'None'),
+      row('vector_size', 'Numbers in each vector', index.vector_size === null ? 'Not built yet' : String(index.vector_size)),
+      row('last_reindex', 'Last indexed', last ? `${moment(last.at)}: ${last.error ? `stopped early (${last.error})` : `${plural(last.embedded, 'item')} embedded${last.failed_total ? `, ${last.failed_total} refused` : ''}, ${last.waiting_after ?? 0} still waiting`}, in ${last.seconds} s` : 'Not since the server started'),
+    ]),
+    group('email', 'Email', 'The mail server', mail && mail.enabled ? [row('mail-server', 'Mail server', sendingWords(mail))] : null),
+    group('sign-in', 'Sign-in', 'The other ways to sign in', signInRows(signIn)),
+    group('sizes', 'How much it holds', 'How much the project holds', SIZES.map(([name, label]) => row(name, label, String(status.counts[name])))),
   );
 }
 
@@ -191,6 +203,7 @@ function exportSection() {
     h('div', { class: 'actions' }, button),
     note,
     problem,
+    h('p', { class: 'quiet', id: 'moving' }, 'Backup, restore and import are done from the command line by whoever runs the server. The backup and export guide has the commands.'),
   );
 }
 
@@ -226,13 +239,4 @@ function save(document_) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 10000);
-}
-
-function moveSection() {
-  return h(
-    'section',
-    { id: 'moving', class: 'settings-section' },
-    h('h2', {}, 'Backup, restore and import'),
-    h('p', {}, 'Backup, restore and import are done from the command line by whoever runs the server. The backup and export guide has the commands.'),
-  );
 }

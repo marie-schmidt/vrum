@@ -1,15 +1,15 @@
 // The Lists page: everything in the project as a list you can filter. A kind switch chooses what is
-// listed: Work (the epics, stories and tasks as an outline that opens and closes), Acceptance criteria,
-// Notes (one table, with a filter for where each note stands), or Everything. The
-// filter box takes the same filter language as the Board and the
+// listed, and says how many of each the scope holds: Work (the epics, stories and tasks as an outline
+// that opens and closes), Acceptance criteria, or Notes (one table, with a filter for where each note
+// stands). The filter box takes the same filter language as the Board and the
 // Roadmap (`q`) and the epic box narrows to one epic (`epic`); both also narrow the acceptance criteria
 // and notes to those joined to that work. Each list has its own filters (status,
 // words) and the actions the record's page has. A row opens the page of its record
 // (from=lists), so the way back is this page as it was left.
 //
 // The page keeps no data of its own: it draws what the board already holds (the store) through
-// lists-data.js. Its choices are in the address: `view` (work, requirements, notes or
-// everything), `epic`, `q`, `mentions=1` (the lines a [[reference]] makes, written under each row) and
+// lists-data.js. Its choices are in the address: `view` (work, requirements or notes; anything else is
+// work), `epic`, `q`, `mentions=1` (the lines a [[reference]] makes, written under each row) and
 // `sel=<ref>` (a record to mark and bring into view).
 
 import { Refusal } from './api.js';
@@ -20,7 +20,7 @@ import { createContextList } from './context-list.js';
 import { openCreate } from './create.js';
 import { icon } from './icons.js';
 import { nodeCode } from './labels.js';
-import { LIST_KINDS, LIST_WORDS, chosenKey, epicNumber, needs, settings, showsContext, showsWork, universe, view } from './lists-data.js';
+import { LIST_KINDS, LIST_WORDS, chosenKey, epicNumber, needs, scopeCounts, settings, showsContext, showsWork, universe, view } from './lists-data.js';
 import { ensure, epics } from './store.js';
 import { createWorkList } from './work-list.js';
 
@@ -82,27 +82,29 @@ function check(name, label, checked, onchange, hint) {
 }
 
 function build() {
+  const counts = Object.fromEntries(LIST_KINDS.map((name) => [name, h('span', { class: 'lists-count', id: `lists-count-${name}`, hidden: true })]));
   const views = h(
     'div',
     { id: 'lists-views', class: 'segmented', role: 'group', 'aria-label': 'What to list' },
-    LIST_KINDS.map((name) => h('button', { type: 'button', id: `lists-view-${name}`, 'data-value': name, 'aria-pressed': 'false', onclick: () => ui.navigate({ view: name }) }, LIST_WORDS[name])),
+    LIST_KINDS.map((name) =>
+      h('button', { type: 'button', id: `lists-view-${name}`, 'data-value': name, 'aria-pressed': 'false', onclick: () => ui.navigate({ view: name }) }, LIST_WORDS[name], counts[name]),
+    ),
   );
   const epicSelect = h('select', { id: 'lists-epic', 'aria-label': 'Epic', onchange: () => ui.navigate({ epic: epicSelect.value || null }) });
   bar = filterBar({ value: params.get('q') || '', onSubmit: (text) => ui.navigate({ q: text || null }) });
   lists = { work: createWorkList(), context: createContextList() };
-  const workCount = h('span', { class: 'gv-count', id: 'work-list-count', role: 'status' });
   parts = {
     views,
+    counts,
     epicSelect,
     epicSignature: null,
     loaded: false,
     notice: h('div', { class: 'lists-notice', id: 'lists-notice', role: 'status' }),
     loading: h('p', { class: 'loading', id: 'lists-loading', role: 'status' }, 'Loading…'),
-    workCount,
     workSection: h(
       'section',
       { class: 'gv-section lists-work', id: 'work-list-section', 'aria-labelledby': 'work-list-heading' },
-      h('header', { class: 'gv-section-head' }, h('h2', { id: 'work-list-heading' }, 'Work'), workCount),
+      h('h2', { class: 'sr-only', id: 'work-list-heading' }, 'Work'),
       lists.work.element,
     ),
   };
@@ -111,12 +113,15 @@ function build() {
     h(
       'div',
       { class: 'lists-page', id: 'lists-page' },
-      h(
-        'header',
-        { class: 'page-header lists-head' },
-        h('div', { class: 'page-title' }, h('h1', {}, 'Lists')),
-        h('div', { class: 'page-actions' }, can('write') ? h('button', { type: 'button', class: 'primary', id: 'lists-new-item', onclick: newItem }, icon('plus', { size: 16 }), 'New item') : null),
-      ),
+      // The top bar names the page, so the h1 is only for assistive technology; a header row is drawn only when there is an action.
+      can('write')
+        ? h(
+            'header',
+            { class: 'page-header actions-only lists-head' },
+            h('h1', { class: 'sr-only' }, 'Lists'),
+            h('div', { class: 'page-actions' }, h('button', { type: 'button', class: 'primary', id: 'lists-new-item', onclick: newItem }, icon('plus', { size: 16 }), 'New item')),
+          )
+        : h('h1', { class: 'sr-only' }, 'Lists'),
       h(
         'div',
         { class: 'lists-toolbar' },
@@ -135,7 +140,7 @@ function build() {
 
 function newItem() {
   if (cfg.epic) openCreate({ kind: 'story', parent: cfg.epic });
-  else openCreate({ kind: 'epic' });
+  else openCreate({});
 }
 
 // -- working out what to draw ---------------------------------------------------------------------
@@ -169,15 +174,26 @@ async function draw() {
   const ctx = { cfg, all, shown };
   parts.workSection.hidden = !showsWork(cfg);
   lists.context.element.hidden = !showsContext(cfg);
-  if (showsWork(cfg)) {
-    lists.work.draw(ctx);
-    parts.workCount.textContent = `(${[...shown.dots.values()].filter((dot) => dot.isNode).length})`;
-  }
+  if (showsWork(cfg)) lists.work.draw(ctx);
   if (showsContext(cfg)) lists.context.draw(ctx);
+  drawCounts(scopeCounts(cfg, matched));
   scrollToChoice();
   drawNotice();
   parts.loading.hidden = true;
   parts.loaded = true;
+}
+
+// How many of each kind the scope holds, on the kind switch. Drawn only once it is known: the acceptance criteria and
+// the notes are not, while they could not be loaded.
+function drawCounts(counts) {
+  for (const name of LIST_KINDS) {
+    const known = name === 'work' || !problem;
+    const element = parts.counts[name];
+    element.hidden = !known;
+    element.textContent = known ? String(counts[name]) : '';
+    if (known) element.dataset.count = String(counts[name]);
+    else delete element.dataset.count;
+  }
 }
 
 function syncControls() {

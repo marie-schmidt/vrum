@@ -17,6 +17,21 @@ export const ICONS = {
   roadmap: [rect(3, 4, 9, 4, 1), rect(8, 10, 9, 4, 1), rect(13, 16, 8, 4, 1)],
   lists: [line(8, 6, 21, 6), line(8, 12, 21, 12), line(8, 18, 21, 18), circle(3.5, 6, 1, { fill: 'currentColor' }), circle(3.5, 12, 1, { fill: 'currentColor' }), circle(3.5, 18, 1, { fill: 'currentColor' })],
   activity: [path('M22 12h-4l-3 9L9 3l-3 9H2')],
+  // What waits for a person: a person with a mark beside them. An ask is a question mark in a circle.
+  needs: [circle(9, 7.5, 3.5), path('M2.5 20.5a6.5 6.5 0 0 1 10-5.5'), circle(18, 17, 4), line(18, 15.2, 18, 17.4), line(18, 19, 18, 19.1)],
+  ask: [circle(12, 12, 9), path('M9.4 9.4a2.7 2.7 0 1 1 3.8 2.5c-.8.4-1.2 1-1.2 1.8'), line(12, 17, 12, 17.1)],
+  // Work held for something outside the graph (a gate: two rails with bars across), a plan waiting to be approved (a clipboard),
+  // a proposal to move work (arrows both ways), a plan template (a layout) and a link that says where work was found (a bent arrow).
+  gate: [line(5, 3, 5, 21), line(19, 3, 19, 21), line(5, 8, 19, 8), line(5, 14, 19, 14)],
+  plan: [rect(5, 4, 14, 17, 2), path('M9 4h6v3H9z'), line(9, 12, 15, 12), line(9, 16, 13, 16)],
+  move: [line(12, 2, 12, 22), line(2, 12, 22, 12), path('M9 5l3-3 3 3'), path('M9 19l3 3 3-3'), path('M5 9l-3 3 3 3'), path('M19 9l3 3-3 3')],
+  template: [rect(3, 3, 18, 18, 2), line(3, 9, 21, 9), line(9, 9, 9, 21)],
+  discovered: [path('M4 4v6a4 4 0 0 0 4 4h10'), path('M14 10l4 4-4 4')],
+  // A change to review (a square with a plus above a minus) and what a reviewer marks as seen (an eye).
+  diff: [rect(3, 3, 18, 18, 2), line(12, 6.5, 12, 12.5), line(9, 9.5, 15, 9.5), line(9, 16.5, 15, 16.5)],
+  viewed: [path('M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z'), circle(12, 12, 3)],
+  // A comment on a line of a plan: a speech bubble.
+  comment: [path('M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z')],
   settings: [line(4, 6, 14, 6), line(18, 6, 20, 6), circle(16, 6, 2), line(4, 12, 6, 12), line(10, 12, 20, 12), circle(8, 12, 2), line(4, 18, 14, 18), line(18, 18, 20, 18), circle(16, 18, 2)],
   search: [circle(11, 11, 7), line(21, 21, 16.65, 16.65)],
   menu: [line(4, 6, 20, 6), line(4, 12, 20, 12), line(4, 18, 20, 18)],
@@ -65,6 +80,7 @@ export const ICONS = {
   chevron_left: [path('M15 6l-6 6 6 6')],
   chevron_right: [path('M9 6l6 6-6 6')],
   arrow_right: [line(5, 12, 19, 12), path('M13 6l6 6-6 6')],
+  logout: [path('M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'), path('M16 17l5-5-5-5'), line(21, 12, 9, 12)],
   link: [path('M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'), path('M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71')],
   lock: [rect(5, 11, 14, 10), path('M8 11V7a4 4 0 0 1 8 0v4')],
   // A note left for whoever takes the work next: a page with a folded corner and some lines.
@@ -84,6 +100,9 @@ export const ICONS = {
   // is the `hier` tree. They are plain shapes, not any company's logo.
   shield: [path('M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'), path('M9 12l2.2 2.2L15.4 10')],
   branch: [line(6, 3, 6, 15), circle(18, 6, 3), circle(6, 18, 3), path('M18 9a9 9 0 0 1-9 9')],
+  // Where the work is (whereabouts.js): a commit is a dot on a line, a pull request is two ends joined with an arrow into one.
+  commit: [circle(12, 12, 3.5), line(3, 12, 8.5, 12), line(15.5, 12, 21, 12)],
+  pull_request: [circle(6, 5, 2.5), circle(6, 19, 2.5), circle(18, 19, 2.5), line(6, 7.5, 6, 16.5), path('M18 16.5V9a2 2 0 0 0-2-2h-4'), path('M14.5 4.5L12 7l2.5 2.5')],
 
   // Appearance.
   sun: [circle(12, 12, 4), line(12, 2, 12, 4), line(12, 20, 12, 22), line(4.9, 4.9, 6.3, 6.3), line(17.7, 17.7, 19.1, 19.1), line(2, 12, 4, 12), line(20, 12, 22, 12), line(4.9, 19.1, 6.3, 17.7), line(17.7, 6.3, 19.1, 4.9)],
@@ -98,6 +117,9 @@ export const ICONS = {
   chevron_up: [path('M18 15l-6-6-6 6')],
   agent: [path('M8 8l-4 4 4 4'), path('M16 8l4 4-4 4'), line(13.5, 6, 10.5, 18)],
   hier: [circle(12, 5, 2.2), circle(6, 19, 2.2), circle(18, 19, 2.2), path('M12 7.2v4.3M12 11.5H6v5.3M12 11.5h6v5.3')],
+
+  // Needs a person, grouped by topic: work that is alike in meaning, a few dots drawn together.
+  topic: [circle(7, 8, 3), circle(17, 8, 3), circle(12, 17, 3), line(9.6, 9.5, 10.4, 14.6), line(14.4, 9.5, 13.6, 14.6), line(10, 8, 14, 8)],
 };
 
 export const hasIcon = (name) => Object.hasOwn(ICONS, name);

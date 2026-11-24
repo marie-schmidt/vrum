@@ -1,7 +1,7 @@
-/* The page of one epic, story, task, requirement or note: a header that says what it is and
-   how it stands, with the way to its neighbours, a list of its sections that stays in view, its
-   details beside what surrounds them, and the tables of what is under it and of what concerns it.
-   Everything that holds many rows (stories, tasks, requirements, notes) is a table across
+/* The page of one epic, story, task, acceptance criterion or note: a header that says what it is and
+   how it stands (its properties in one row), with the way to its neighbours, then one column of sections
+   under each other, with no list of them: the details, what is under it, its links and what concerns it.
+   Everything that holds many rows (stories, tasks, links, requirements, notes) is a table across
    the whole width of the page. Colours, sizes and spacing are the tokens (tokens.css), the shared
    controls are base.css, the table box is the shell's (board.css: .table-scroll) and the pieces
    common to every record (Markdown, chips, dialogs, forms) are records.css. Everything here is scoped
@@ -19,9 +19,6 @@
 .item-head h1 > .icon { margin-right: var(--space-2); color: var(--text-2); vertical-align: -0.12em; }
 .item-code { font-family: var(--font-mono); font-size: 0.8em; font-weight: 600; letter-spacing: 0.02em; color: var(--text-2); white-space: nowrap; }
 .item-head h1 .item-code { font-size: 0.7em; margin-right: var(--space-1); vertical-align: 0.08em; }
-.item-head .page-sub { margin-top: var(--space-1); overflow-wrap: anywhere; font-size: var(--text-sm); }
-.item-head .page-sub a { color: var(--text); text-decoration-color: var(--border-strong); }
-.item-head .page-sub a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
 .item-tools { grid-column: 2; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2) var(--space-3); }
 .item-tools:empty { display: none; }
 /* Where there is no pager, the buttons wrap in their own box rather than take the title's room. */
@@ -33,51 +30,43 @@
 .item-actions { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .item-edits { display: contents; }
 .icon.flip { transform: scaleX(-1); }
+.short-label { display: none; }
 
-/* Previous and next: one control with the two neighbours' codes and where this one stands. */
+/* Previous and next: one control with the two neighbours' codes (and, where there is room, their names, cut with an
+   ellipsis; the whole name is the tooltip) and where this one stands. */
 .item-pager { display: inline-flex; align-items: stretch; border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); overflow: hidden; }
-.pager-button { min-height: var(--control-h); padding: 0 var(--space-3); border: 0; border-radius: 0; background: transparent; font-size: var(--text-sm); }
+.pager-button { gap: var(--space-1); min-height: var(--control-h); padding: 0 var(--space-3); border: 0; border-radius: 0; background: transparent; font-size: var(--text-sm); }
 .pager-button .item-code { color: inherit; font-size: var(--text-sm); }
+.pager-name { display: none; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-width: 1500px) {
+  .pager-name { display: inline; }
+}
 .pager-button:disabled { opacity: 1; color: var(--text-3); }
 .pager-button:disabled .icon { opacity: 0.5; }
 .pager-button:focus-visible { outline-offset: -2px; }
 .item-position { display: inline-flex; align-items: center; padding: 0 var(--space-3); border-inline: var(--border-w) solid var(--border); color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-/* How it stands: its chips, then the facts that are read across. */
+/* How it stands: its properties in one row, each with its label over it (a group with nothing to say is not drawn). */
 .item-head .card-summary { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-6); margin-top: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
 .item-head .card-summary:empty { min-height: 4rem; visibility: hidden; }
-.card-summary .chips, .card-summary .record-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .card-summary .card-note { flex: 1 0 100%; margin: calc(-1 * var(--space-1)) 0 0; }
 .state-strip { display: flex; flex-wrap: wrap; flex: 1 1 auto; gap: var(--space-2) var(--space-6); margin: 0; min-width: 0; }
 .state-item { min-width: 0; }
 .state-item > dt { margin: 0 0 2px; color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
 .state-item > dd { margin: 0; min-width: 0; font-size: var(--text-sm); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.state-item > dd.target, .state-item > dd.claim { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .state-item .progress { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-.state-item .claim.quiet { color: var(--text-2); }
+.state-item .chip.conflict { max-width: 100%; white-space: normal; }
 .state-item a { color: var(--text); text-decoration-color: var(--border-strong); }
 .state-item a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
 .nowrap { white-space: nowrap; }
+/* A count after a heading: a quiet number. */
+.item-page .heading-count, .item-count { margin-left: var(--space-2); color: var(--text-2); font-size: var(--text-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
+.item-page .recall-disclosure .heading-count { margin-left: 0; }
 
-/* -- The sections, always in reach -------------------------------------------------------------------- */
-
-.item-nav { position: sticky; top: var(--top-now, 0px); z-index: 10; background: var(--bg); border-bottom: var(--border-w) solid var(--border); }
-.item-nav:empty { display: none; }
-.item-nav ul { position: relative; display: flex; gap: var(--space-1); margin: 0; padding: 0; overflow-x: auto; scrollbar-width: thin; }
-.item-nav li { flex: none; }
-.item-jump { min-height: var(--control-h); padding: 0 var(--space-3); border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--text-2); font-weight: 550; white-space: nowrap; }
-.item-jump:hover { background: var(--surface-2); border-bottom-color: var(--border-strong); color: var(--text); }
-.item-jump[aria-current] { background: transparent; border-bottom-color: var(--accent); color: var(--text); }
-.item-jump[aria-current]:hover { background: var(--surface-2); }
-.item-jump:focus-visible { outline-offset: -2px; }
-.item-jump-count { min-width: 1.25rem; padding: 0 var(--space-1); border-radius: 999px; background: var(--neutral-soft); color: var(--text); font-size: var(--text-xs); font-weight: 600; line-height: 1.25rem; text-align: center; font-variant-numeric: tabular-nums; }
-/* A jump leaves the heading just under the bar that stays in view. */
-.item-page [data-part], #item-children, #item-relations { scroll-margin-top: calc(var(--top-now, 0px) + var(--control-h) + var(--space-3)); }
-.item-page [data-part] > :is(h2, h3):focus, .part-head > h3:focus, .item-children-head > h2:focus { outline: none; }
-
-/* -- The page's body ------------------------------------------------------------------------------------
-   The details and what surrounds them are two sheets side by side when the page is wide and one above
-   the other when it is not; everything that holds many rows has the whole width, with its heading on
-   the page and its rows on a table of their own. */
+/* -- The body: one column of sections ------------------------------------------------------------------
+   The details are a sheet; everything that holds many rows has the whole width, with its heading on the
+   page and its rows on a table of their own. */
 
 .item-details { container-type: inline-size; min-width: 0; overflow-wrap: anywhere; }
 .item-details > .notice { margin: 0 0 var(--space-4); box-shadow: none; }
@@ -110,13 +99,6 @@
 .part-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
 .part-head > h3 { margin: 0; }
 .part-head > .actions-row { margin: 0; }
-.part-quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-4); }
-.part-quiet > h3 { margin: 0; }
-.part-quiet > .none { flex: 1 1 12rem; }
-.card-page > .part-quiet { margin-bottom: 0; }
-/* Beside the heading of the acceptance criteria: how many are met, and the way to add one. */
-.part-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
-.criteria-met { font-size: var(--text-sm); }
 /* What a task has from its story, under its own acceptance criteria. */
 .criteria-group { margin-top: var(--space-4); }
 .criteria-group > h4 { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-sm); font-weight: 650; }
@@ -127,9 +109,8 @@
 .actions-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 
 /* The last handoff note is what the next person to take the work most needs: it stands out. */
-.card-page [data-part="handoff"] { padding: var(--space-3) var(--space-4); border: 0; border-left: 3px solid var(--info); border-radius: var(--radius-md); background: var(--info-soft); }
-.card-main > [data-part="handoff"]:first-child { padding: var(--space-3) var(--space-4); }
-.card-page [data-part="handoff"] > h3 { margin-bottom: var(--space-1); font-size: var(--text-sm); }
+.card-page > .part[data-part="handoff"] { padding: var(--space-4) var(--space-5); border: 0; border-left: 3px solid var(--info); border-radius: var(--radius-md); background: var(--info-soft); }
+.card-page > .part[data-part="handoff"] > h3 { margin-bottom: var(--space-2); font-size: var(--text-md); }
 .card-page [data-part="handoff"] > p { margin: 0; }
 .card-page [data-part="handoff"] > .handoff-by { color: var(--text-2); font-size: var(--text-sm); }
 .card-page [data-part="handoff"] .handoff-text { margin-top: var(--space-1); }
@@ -151,24 +132,21 @@
 .notice.changed { align-items: flex-start; }
 .notice.changed > .icon { margin-top: 0.15rem; color: var(--info); }
 
-/* -- Links, what mentions it and what looks like it ------------------------------------------------------ */
+/* -- What looks like it -------------------------------------------------------------------------------------- */
 
-.links-table { table-layout: auto; }
-.links-table th, .links-table td { padding: var(--space-2) var(--space-2) var(--space-2) 0; vertical-align: baseline; border-bottom: var(--border-w) solid var(--border); overflow-wrap: anywhere; font-size: var(--text-sm); }
-.links-table tr:last-child > * { border-bottom: 0; }
-.links-table th.relation { width: 7rem; color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0; text-transform: none; }
-.links-table td.cell-remove { width: 1%; padding-right: 0; text-align: right; white-space: nowrap; }
-.links-table a { color: var(--text); text-decoration-color: var(--border-strong); }
-.links-table a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
-.overlaps li, .similar-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); font-size: var(--text-sm); }
-.similar-item > .icon { align-self: center; color: var(--text-2); }
+.similar-item { display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; font-size: var(--text-sm); }
+.similar-item > .icon { flex: none; align-self: center; color: var(--text-2); }
+.similar-item > a { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.similar-item > .quiet { flex: none; white-space: nowrap; }
+.similar-item a { color: var(--text); text-decoration-color: var(--border-strong); }
+.similar-item a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
 
-/* -- What is under it ---------------------------------------------------------------------------------------- */
+/* -- What is under it, and what it is linked to --------------------------------------------------------------- */
 
 .item-children { margin-top: 0; }
 .item-children-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
 .item-children-head h2 { font-size: var(--text-lg); overflow-wrap: anywhere; }
-.item-count { color: var(--text-2); font-size: var(--text-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
+.item-children-head .item-count { margin-left: calc(-1 * var(--space-2)); }
 .item-breakdown { color: var(--text-2); font-size: var(--text-sm); }
 .item-breakdown:empty { display: none; }
 .item-add { margin-left: auto; align-self: center; }
@@ -179,7 +157,6 @@
 .item-region { position: relative; }
 .item-region:focus-visible { outline-offset: 0; }
 .item-table { min-width: 48rem; }
-.item-table.relation-table { min-width: 42rem; }
 .item-table th, .item-table td { vertical-align: middle; }
 .item-table tbody th, .item-table tbody td { padding-block: var(--space-1); }
 .item-table thead th { padding: 0; white-space: nowrap; border-bottom: var(--border-w) solid var(--border-strong); background: var(--surface-2); }
@@ -206,22 +183,29 @@
 .item-code-link { display: inline-flex; align-items: center; gap: var(--space-1); }
 .item-code-link .item-code { color: inherit; font-size: var(--text-sm); }
 .item-table .cell-title { width: 100%; min-width: 12rem; overflow-wrap: anywhere; }
-.item-table .cell-status, .item-table .cell-priority, .item-table .cell-held, .item-table .cell-waiting, .item-table .cell-relation, .item-table .cell-due, .item-table .cell-progress { white-space: nowrap; }
+.item-table .cell-status, .item-table .cell-priority, .item-table .cell-held, .item-table .cell-waiting, .item-table .cell-relation, .item-table .cell-due, .item-table .cell-progress, .item-table .cell-code { white-space: nowrap; }
+/* What a row waits for: each by its code and name, one to a line, the name cut with an ellipsis (the whole is the link's tooltip). */
+.item-table .waiting-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.item-table .waiting-link { display: block; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-table .waiting-link .item-code { color: inherit; font-size: var(--text-sm); }
 .item-table .cell-relation { color: var(--text-2); font-size: var(--text-sm); font-weight: 550; }
-.item-due { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: var(--space-1) var(--space-2); white-space: nowrap; }
 .item-date { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .item-progress { display: grid; gap: var(--space-1); min-width: 5.5rem; white-space: nowrap; }
 .item-progress .meter { width: 100%; }
 .item-progress-text { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .item-table .cell-size { white-space: nowrap; }
+/* The Links table: the way to take a link off is the last cell. */
+.links-table { min-width: 56rem; }
+.links-table .cell-remove, .links-table th.col-remove { width: 1%; padding-right: var(--space-3); text-align: right; white-space: nowrap; }
+.links-table .cell-code { padding-right: var(--space-2); }
 /* What the rows add up to, under the last of them. */
 .item-table tfoot th, .item-table tfoot td { border-top: var(--border-w) solid var(--border-strong); border-bottom: 0; color: var(--text-2); font-size: var(--text-sm); font-weight: 600; white-space: nowrap; }
 .item-points { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 
-/* Size and points in the header: what an epic, or a story with tasks, adds up to. */
+/* How far an epic, or a story with tasks, has got, in the row of properties: its points, or its tasks, as one meter. */
 .points-rollup { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .points-total { font-weight: 600; }
-.points-rollup .meter { width: 5rem; }
+.points-rollup .meter, .state-item .progress .meter { width: 5rem; }
 
 /* -- The definition of done as checks: a box for each, who ticked it and when, and how it was checked --- */
 .check-intro { margin-bottom: var(--space-3); }
@@ -238,6 +222,8 @@
 button.link.check-how { color: var(--text-2); font-size: var(--text-sm); text-decoration-color: var(--border-strong); }
 button.link.check-how:hover { color: var(--accent-text); text-decoration-color: currentColor; }
 .check-evidence { margin: var(--space-1) 0 0 calc(1.5rem + var(--space-3)); color: var(--text-2); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* What a verifier reported about a pull request is not something Vrum looked at: one quiet line under the evidence says so. */
+.check-reported { margin: var(--space-1) 0 0 calc(1.5rem + var(--space-3)); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .check-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0 0 calc(1.5rem + var(--space-3)); }
 .check-how-field { flex: 1 1 16rem; min-width: 0; }
 .check-form .problem { flex: 1 0 100%; margin: 0; }
@@ -246,27 +232,8 @@ button.link.check-how:hover { color: var(--accent-text); text-decoration-color: 
   #app button.link.check-how { min-height: 2.75rem; padding-inline: var(--space-2); }
 }
 @media (max-width: 599.98px) {
-  .check-evidence, .check-form { margin-left: 0; }
+  .check-evidence, .check-reported, .check-form { margin-left: 0; }
 }
-
-/* Nothing under it yet. */
-.item-empty { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); }
-.item-empty p { margin: 0; }
-/* A task with no relations says so in one line. */
-#relations-empty { flex-direction: row; flex-wrap: wrap; justify-content: center; padding: var(--space-3) var(--space-4); }
-
-/* A task is part of a story: a card above its details. */
-.item-part { display: flex; align-items: center; gap: var(--space-3) var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-lg); }
-.item-part[hidden] { display: none; }
-.item-part-main { flex: 1 1 auto; min-width: 0; }
-.item-part h2 { font-size: var(--text-md); overflow-wrap: anywhere; }
-.item-part-label { color: var(--text-2); font-weight: 550; }
-.item-part h2 a { color: var(--text); text-decoration-color: var(--border-strong); }
-.item-part h2 a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
-.item-part-note { margin: var(--space-1) 0 0; }
-.item-part-note a { color: var(--text); text-decoration-color: var(--border-strong); }
-.item-part-progress { flex: none; display: flex; align-items: center; gap: var(--space-3); color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.item-part-meter { flex: none; width: 8rem; }
 
 /* -- Requirements and notes: tables across the whole width ------------------------------------------
    One line to a row. The text that can be long (a title, a first line, a why) is cut with an ellipsis
@@ -300,23 +267,28 @@ button.link.check-how:hover { color: var(--accent-text); text-decoration-color: 
 .record-from a { color: inherit; }
 .clamp-more { margin-left: var(--space-2); color: var(--text-2); font-size: var(--text-sm); }
 .record-table .cell-title { width: 100%; min-width: 10rem; }
-.record-table .cell-decided, .record-table .cell-applies, .record-table .cell-held, .record-table .cell-story { max-width: 11rem; font-size: var(--text-sm); }
+.record-table .cell-decided, .record-table .cell-applies, .record-table .cell-held, .record-table .cell-story { max-width: 12rem; font-size: var(--text-sm); }
 .record-table .cell-decided { color: var(--text-2); }
-/* What a note applies to lists codes, which are short: it takes more lines than a sentence before it is cut. */
-.record-table .cell-applies .clamp.clamp-wrap { -webkit-line-clamp: 6; line-clamp: 6; }
+/* What a note applies to: the names of the first few items, one to a line and cut with an ellipsis; the whole list is the tooltip. */
+.record-table .cell-applies, .record-table th.col-applies { min-width: 14rem; max-width: 14rem; }
+.applies-list { display: grid; gap: 2px; }
+.applies-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.applies-more { color: var(--text-2); }
 .record-table .cell-relation, .record-table .cell-kind { color: var(--text-2); font-size: var(--text-sm); font-weight: 550; }
 .record-table .kind-cell { display: inline-flex; align-items: center; gap: var(--space-2); }
 .record-table .cell-action { text-align: right; }
 .requirements-table .cell-status, .requirements-table th.col-status { width: 7rem; }
 .record-table .cell-on { color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.record-table .cell-recorded { font-size: var(--text-sm); }
+.cell-recorded .recorded-on { margin-left: var(--space-2); color: var(--text-2); }
 .record-table .chip { vertical-align: middle; }
 .coverage-table .cell-title { width: 55%; }
 
 /* Where the page is wide enough for the columns, the table has no box of its own to scroll in, so the
-   head of a long one stays under the list of sections while the rows go by. */
+   head of a long one stays under the top bar while the rows go by. */
 @container (min-width: 60rem) {
   .record-region, .item-region { overflow: visible; background-image: none; }
-  .record-table thead th, .item-table thead th { position: sticky; top: calc(var(--top-now, 0px) + var(--control-h) + var(--border-w)); z-index: 2; }
+  .record-table thead th, .item-table thead th { position: sticky; top: var(--top-now, 0px); z-index: 2; }
   .record-table thead tr > :first-child, .item-table thead tr > :first-child { border-top-left-radius: var(--radius-md); }
   .record-table thead tr > :last-child, .item-table thead tr > :last-child { border-top-right-radius: var(--radius-md); }
   .record-table tbody tr:last-child > :first-child, .item-table tbody tr:last-child > :first-child { border-bottom-left-radius: var(--radius-md); }
@@ -382,9 +354,8 @@ button.link.check-how:hover { color: var(--accent-text); text-decoration-color: 
   .state-strip { gap: var(--space-3) var(--space-5); }
   .card-page { gap: var(--space-5); }
   .card-main, .card-side { padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); }
-  .item-part { flex-wrap: wrap; padding: var(--space-3); }
-  .item-part-progress { width: 100%; }
-  .item-part-meter { flex: 1 1 auto; width: auto; }
-  .item-tools button, .item-jump, .pager-button { min-height: 2.75rem; }
+  .item-tools button, .pager-button { min-height: 2.75rem; }
+  .item-actions .long-label { display: none; }
+  .item-actions .short-label { display: inline; }
   .item-actions button { padding-inline: var(--space-2); }
 }

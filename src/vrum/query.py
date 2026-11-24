@@ -18,7 +18,9 @@ The language: words and `field:value` terms.
     the items with that number (with `kind:` to say which kind), and `parent:epic:3` the items
     directly under epic:3 (a parent is written as a reference, a kind and a number).
   - `start:` and `target:` take a day (2026-11-30), a range (2026-11-01..2026-12-31, either end
-    may be left off) or `none`. `is:overdue` finds the overdue ones.
+    may be left off) or `none`. `is:overdue` finds the overdue ones, and `is:unverified` the work
+    that is blocked, held by nobody and has a check only a verifier (or a person) may tick that is
+    still unticked: what is waiting for a verifier.
 Everything a person typed is passed to the database as a value, never as part of the statement."""
 
 import re
@@ -48,7 +50,7 @@ FIELDS = (
     "is",
     "no",
 )
-IS_FLAGS = ("overdue", "conflict", "waiting", "claimed", "lapsed")
+IS_FLAGS = ("overdue", "conflict", "waiting", "held", "claimed", "lapsed", "unverified")
 NO_FIELDS = ("start", "target", "claimed", "parent", "body", "waiting", "criteria", "size")
 # Words that mean "has one" on their own, and "has none" after a minus.
 BARE_FLAGS = ("claimed", "waiting")
@@ -73,8 +75,10 @@ _FLAG_SQL = {
     "overdue": "overdue",
     "conflict": "cardinality(schedule_conflicts) > 0",
     "waiting": "cardinality(waiting_on) > 0",
+    "held": "cardinality(held_by) > 0",
     "claimed": "claimed_by IS NOT NULL",
     "lapsed": "lapsed_claim_by IS NOT NULL",
+    "unverified": "(status = 'blocked' AND claimed_by IS NULL AND verifier_checks_open > 0)",
 }
 _EMPTY_SQL = {
     "start": "start_on IS NULL",

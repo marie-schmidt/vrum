@@ -1,18 +1,18 @@
-// Tools: how an agent connects to this project, and the reference of every MCP tool. There is one
-// MCP server, so the page reads top down as one thing: the endpoint and the key (Connect an
-// agent), then one list of tools. The tools are made from the server's own live tool list (name,
-// description, input fields, whether it changes anything, whether agents are offered it), so that
+// Tools: the reference of every MCP tool. The tools are made from the server's own live tool list
+// (name, description, input fields, whether it changes anything, whether agents are offered it), so that
 // it cannot drift from the code, and are grouped by the areas the server names only so that they are
 // easier to find. A client can take only so many tools, so an agent is offered a chosen set (a
 // quiet chip on each tool says which) and the rest are done on the board, or by a key whose owner
-// allows them; a switch shows either kind alone. What the list cannot know, the board adds from its
-// map: the area of each tool, and where on the board a person does the same thing, or that it has
-// no page and why. A tool that only reads has a "Try it" form built from its input fields; the
-// server decides which tools those are.
+// allows them; a switch shows either kind alone. A key that runs code is given two tools of its
+// own (the server marks them `code_mode`): they are neither offered to agents nor board only, so
+// they wear a chip of their own and are counted by their own switch. What the list cannot know,
+// the board adds from its map: the area of each tool, and where on the board a person does the
+// same thing, or that it has no page and why. A tool that only reads has a "Try it" form built
+// from its input fields; the server decides which tools those are. How to connect an agent, and
+// its keys, are on the Users page.
 
 import { Refusal, get, tryTool } from './api.js';
-import { can, ui, viewLink } from './ctx.js';
-import { copyButton } from './copy.js';
+import { ui, viewLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { refuse } from './forms.js';
 import { icon } from './icons.js';
@@ -25,11 +25,14 @@ let listing = null; // what the server said about its tools
 let generation = 0;
 let folded = new Set(); // the groups a person has folded away; every group starts open
 
-// Which tools the list shows: all of them, the ones agents are offered, or the rest.
+// Which tools the list shows: all of them, the ones agents are offered, the rest, or the two that a key that runs code
+// is given. A tool is in exactly one of the last three. The switch for the last is there only when the server has such tools.
+const forCode = (tool) => Boolean(tool.code_mode);
 const SHOWS = [
   { value: 'all', label: 'All tools', matches: () => true },
-  { value: 'offered', label: 'Offered to agents', matches: (tool) => Boolean(tool.offered_to_agents) },
-  { value: 'board', label: 'Board and administration only', matches: (tool) => !tool.offered_to_agents },
+  { value: 'offered', label: 'Offered to agents', matches: (tool) => !forCode(tool) && Boolean(tool.offered_to_agents) },
+  { value: 'board', label: 'Board and administration only', matches: (tool) => !forCode(tool) && !tool.offered_to_agents },
+  { value: 'code', label: 'For keys that run code', matches: forCode, onlyWhenAny: true },
 ];
 const showOf = (query) => SHOWS.find(({ value }) => value === query.get('show')) || SHOWS[0];
 
@@ -42,8 +45,13 @@ export async function mount(element, initial) {
   folded = new Set();
   const mine = ++generation;
   const search = h('input', { type: 'search', id: 'tool-search', name: 'q', value: params.get('q') || '', autocomplete: 'off', placeholder: 'Name, description or page', 'aria-label': 'Search the tools' });
+  const clear = h('button', { type: 'button', id: 'clear-tool-search', hidden: !search.value, onclick: () => ui.navigate({ q: null }) }, icon('clear', { size: 16 }), 'Clear');
+  search.addEventListener('input', () => {
+    clear.hidden = !search.value;
+  });
   parts = {
     search,
+    clear,
     summary: h('p', { class: 'count tools-lead', id: 'count', role: 'status' }),
     show: h(
       'div',
@@ -51,7 +59,6 @@ export async function mount(element, initial) {
       SHOWS.map(({ value, label }) => h('button', { type: 'button', id: `tools-show-${value}`, dataset: { show: value }, 'aria-pressed': 'false', onclick: () => ui.navigate({ show: value === 'all' ? null : value }) }, label)),
     ),
     problem: h('p', { class: 'problem', role: 'alert', id: 'tools-problem' }),
-    connect: h('section', { id: 'connecting', class: 'settings-section', 'aria-labelledby': 'connect-title' }),
     list: h('div', { id: 'tool-list' }, h('p', { class: 'loading', role: 'status' }, 'Loading the tools…')),
   };
   const form = h(
@@ -67,16 +74,14 @@ export async function mount(element, initial) {
     h('label', { for: 'tool-search', class: 'sr-only' }, 'Search'),
     icon('search', { size: 16, className: 'tools-search-icon' }),
     search,
-    h('button', { type: 'submit' }, 'Search'),
-    h('button', { type: 'button', id: 'clear-tool-search', onclick: () => ui.navigate({ q: null }) }, icon('clear', { size: 16 }), 'Clear'),
+    clear,
   );
   put(
     root,
     h('div', { class: 'settings-page tools-page' }, [
-      pageHeader('Tools'),
+      pageHeader('Tools', viewLink('users', {}, { id: 'tools-agent-keys', class: 'action-link' }, icon('key', { size: 16 }), 'Agent keys')),
       parts.problem,
-      parts.connect,
-      h('section', { id: 'tools-section', class: 'settings-section tools-section', 'aria-labelledby': 'tools-title' }, h('h2', { id: 'tools-title' }, 'Tools'), parts.summary, form, parts.show, parts.list),
+      h('section', { id: 'tools-section', class: 'settings-section tools-section', 'aria-labelledby': 'tools-title' }, h('h2', { id: 'tools-title', class: 'sr-only' }, 'Tools'), parts.summary, form, parts.show, parts.list),
     ]),
   );
   try {
@@ -90,7 +95,6 @@ export async function mount(element, initial) {
     parts.list.replaceChildren();
     return;
   }
-  drawConnect();
   draw();
 }
 
@@ -104,50 +108,23 @@ export function update(next) {
   params = next;
   if (!root || !listing) return;
   // Only a new search or a different switch changes the list: leaving the page alone keeps open forms and typed fields.
-  if ((next.get('q') || '') === (before.get('q') || '') && showOf(next) === showOf(before)) return;
-  parts.search.value = params.get('q') || '';
+  const searched = (next.get('q') || '') !== (before.get('q') || '');
+  if (!searched && showOf(next) === showOf(before)) return;
+  // Changing only the switch must not wipe words typed in the box and not yet searched for.
+  if (searched) {
+    parts.search.value = params.get('q') || '';
+    parts.clear.hidden = !parts.search.value;
+  }
   draw();
 }
 
 export function refresh() {}
 
-// -- connecting ---------------------------------------------------------------------------------------
-
-function drawConnect() {
-  const address = `${location.origin}${listing.mcp_path}`;
-  const command = `claude mcp add --transport http vrum ${address} --header "Authorization: Bearer $VRUM_AGENT_KEY"`;
-  const file = JSON.stringify({ mcpServers: { vrum: { type: 'http', url: address, headers: { Authorization: 'Bearer ${VRUM_AGENT_KEY}' } } } }, null, 2);
-  const endpoint = h('code', { id: 'endpoint' }, address);
-  const commandText = h('code', {}, command);
-  const fileText = h('code', {}, file);
-  put(
-    parts.connect,
-    h('div', { class: 'section-head' }, h('h2', { id: 'connect-title' }, 'Connect an agent'), can('manage') ? viewLink('users', {}, { class: 'action-link primary' }, icon('key', { size: 16 }), 'Create an agent key') : null),
-    can('manage') ? null : h('p', { class: 'quiet' }, 'Only the project’s owner creates agent keys.'),
-    h(
-      'dl',
-      { class: 'connect' },
-      h('dt', {}, 'Endpoint'),
-      h('dd', { class: 'endpoint-line' }, endpoint, copyButton(endpoint, 'Copy the endpoint address')),
-      h('dt', {}, 'Header'),
-      h('dd', {}, h('code', {}, 'Authorization: Bearer <the agent key>')),
-    ),
-    h(
-      'details',
-      { id: 'example' },
-      h('summary', {}, 'An example client configuration'),
-      h('div', { class: 'example-head' }, h('p', {}, 'Claude Code'), copyButton(commandText, 'Copy the command')),
-      h('pre', {}, commandText),
-      h('div', { class: 'example-head' }, h('p', {}, 'Project file (.mcp.json)'), copyButton(fileText, 'Copy the project file')),
-      h('pre', {}, fileText),
-    ),
-  );
-}
-
 // -- the list -----------------------------------------------------------------------------------------
 
 function words(tool) {
-  return `${tool.name} ${tool.area || ''} ${tool.description} ${tool.where || ''} ${tool.agents_only || ''} ${tool.offered_to_agents ? 'offered to agents' : 'board and administration only'}`.toLowerCase();
+  const offer = forCode(tool) ? 'for keys that run code' : tool.offered_to_agents ? 'offered to agents' : 'board and administration only';
+  return `${tool.name} ${tool.area || ''} ${tool.description} ${tool.where || ''} ${tool.agents_only || ''} ${offer}`.toLowerCase();
 }
 
 function draw() {
@@ -159,8 +136,10 @@ function draw() {
   parts.show.hidden = false;
   for (const button of parts.show.querySelectorAll('button')) {
     const choice = SHOWS.find(({ value }) => value === button.dataset.show);
+    const count = all.filter(choice.matches).length;
+    button.hidden = Boolean(choice.onlyWhenAny) && count === 0;
     button.setAttribute('aria-pressed', String(choice === show));
-    put(button, `${choice.label} `, h('span', { class: 'tools-show-count' }, String(all.filter(choice.matches).length)));
+    put(button, `${choice.label} `, h('span', { class: 'tools-show-count' }, String(count)));
   }
   const areas = [...listing.areas, ...new Set(shown.filter((tool) => !listing.areas.includes(tool.area)).map((tool) => tool.area))];
   put(
@@ -223,7 +202,6 @@ function fieldsOf(tool) {
 }
 
 function fieldTable(fields, toolName) {
-  if (!fields.length) return h('p', { class: 'quiet' }, 'It takes no fields.');
   return h(
     'div',
     { class: 'table-scroll', role: 'region', tabindex: '0', 'aria-label': `Fields of ${toolName}` },
@@ -250,8 +228,10 @@ function whereOnTheBoard(tool) {
   return h('p', { class: 'where' }, h('span', { class: 'chip info' }, 'On the board'), ' ', viewLink(tool.page, {}, {}, tool.where));
 }
 
-// Whether agents are offered the tool: a word and a sign, in a quiet chip, so that colour says nothing alone.
+// Whether agents are offered the tool: a word and a sign, in a quiet chip, so that colour says nothing alone. The two
+// tools of a key that runs code are not offered to agents in general, so they say who they are for instead.
 function offerChip(tool) {
+  if (forCode(tool)) return h('span', { class: 'chip tool-offer for-code', dataset: { offered: '0', code: '1' } }, icon('agent', { size: 14 }), 'For keys that run code');
   return tool.offered_to_agents
     ? h('span', { class: 'chip tool-offer offered', dataset: { offered: '1' } }, icon('bot', { size: 14 }), 'Offered to agents')
     : h('span', { class: 'chip tool-offer board-only', dataset: { offered: '0' } }, icon('board', { size: 14 }), 'Board and administration only');
@@ -262,7 +242,7 @@ function toolEntry(tool) {
   const [first, ...rest] = tool.description.split(/\n\s*\n/);
   return h(
     'article',
-    { class: 'tool', id: `tool-entry-${tool.name}`, dataset: { name: tool.name, changes: tool.changes_something ? '1' : '0', agents: tool.agents_only ? '1' : '0', offered: tool.offered_to_agents ? '1' : '0' } },
+    { class: 'tool', id: `tool-entry-${tool.name}`, dataset: { name: tool.name, changes: tool.changes_something ? '1' : '0', agents: tool.agents_only ? '1' : '0', offered: tool.offered_to_agents && !forCode(tool) ? '1' : '0', code: forCode(tool) ? '1' : '0' } },
     h(
       'div',
       { class: 'tool-head' },
@@ -276,7 +256,8 @@ function toolEntry(tool) {
       rest.length ? h('details', { class: 'more' }, h('summary', {}, 'The whole description'), rest.map((paragraph) => h('p', {}, paragraph.replace(/\s+/g, ' ')))) : null,
       whereOnTheBoard(tool),
       tool.people_only ? h('p', { class: 'offer-note' }, 'Only a person can do this: no agent key can be given it.') : null,
-      h('details', { class: 'fields-list' }, h('summary', {}, `Fields (${fields.length})`), fieldTable(fields, tool.name)),
+      forCode(tool) ? h('p', { class: 'offer-note' }, 'Only a key that runs code is given this tool. How a key calls Vrum is chosen on the Users page.') : null,
+      fields.length ? h('details', { class: 'fields-list' }, h('summary', {}, `Fields (${fields.length})`), fieldTable(fields, tool.name)) : null,
       tool.changes_something ? null : tryIt(tool, fields),
     ),
   );

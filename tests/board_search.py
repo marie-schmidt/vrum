@@ -76,7 +76,7 @@ async def on_view(page: Page, view: str) -> None:
     await expect(page.locator("#main-nav a[aria-current=page]")).to_have_count(1)
 
 
-SETTINGS = ("users", "definition", "tools", "status")
+SETTINGS = ("users", "definition", "templates", "tools", "status")
 
 
 async def open_settings(page: Page, name: str) -> None:
@@ -113,11 +113,11 @@ async def keyboard_to_activity(page: Page) -> None:
 
 
 async def search_on_page(page: Page, query: str) -> None:
-    """Type a search into the Search page's own box and press its button (the page must be on
-    show: see open_search, or search_for, which takes the person there from the top bar). The
-    page always asks for words and meaning together."""
+    """Type a search into the Search page's own box and press Enter, which asks (the page has no
+    button; it must be on show: see open_search, or search_for, which takes the person there from
+    the top bar). The page always asks for words and meaning together."""
     await page.locator("#search-box").fill(query)
-    await page.locator("#search-go").click()
+    await page.locator("#search-box").press("Enter")
 
 
 async def result_rows(page: Page, count: int) -> list[dict[str, Any]]:

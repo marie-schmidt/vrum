@@ -28,13 +28,17 @@ from tests.board_layout import (
     SHOTS,
     THEMES,
     UNBROKEN,
+    Point,
     Screen,
     Stop,
     World,
     cards,
+    crossing,
+    distance_to_segment,
     frames,
     layout_page,
     open_address,
+    rested,
     settle,
     shoot,
     stops,
@@ -215,7 +219,6 @@ HEADER = """
     title: rect(document.querySelector('.item-head .page-title')),
     heading: rect(document.querySelector('#item-title')),
     summary: rect(document.querySelector('.card-summary')),
-    nav: rect(document.querySelector('.item-nav')),
     details: rect(document.querySelector('#item-details')),
     tools: rect(document.querySelector('.item-tools')),
     pager: rect(document.querySelector('#item-pager')),
@@ -249,15 +252,15 @@ async def test_the_header_of_every_kind_of_page_lines_up_with_its_strip_and_its_
             await settle(page)
             found = await page.evaluate(HEADER)
             where = (name, kind, screen.name)
-            for part in ("title", "summary", "nav", "details", "tools"):
+            for part in ("title", "summary", "details", "tools"):
                 assert found[part] is not None, (*where, part)
-            # One page: the title, the strip, the list of sections and the details start at the
-            # same left edge, and the strip and the sections are as wide as the details.
-            lefts = {
-                part: round(found[part]["l"], 1) for part in ("title", "summary", "nav", "details")
-            }
+            # No list of sections stands between the strip and the details any more.
+            await expect(page.locator(".item-nav, .item-jump")).to_have_count(0)
+            # One page: the title, the strip and the details start at the same left edge, and the
+            # strip is as wide as the details.
+            lefts = {part: round(found[part]["l"], 1) for part in ("title", "summary", "details")}
             assert max(lefts.values()) - min(lefts.values()) <= TOLERANCE, (*where, lefts)
-            rights = {part: round(found[part]["r"], 1) for part in ("summary", "nav", "details")}
+            rights = {part: round(found[part]["r"], 1) for part in ("summary", "details")}
             assert max(rights.values()) - min(rights.values()) <= TOLERANCE, (*where, rights)
             summary = found["summary"]
             # Everything in the strip is inside it, a label stands over its value, and the facts
@@ -450,13 +453,22 @@ async def test_progress_bars_show_the_real_done_and_total_and_an_empty_epic_show
         assert lanes[world["E5"]]["ratio"] == pytest.approx(1)
         assert 0 < lanes[world["E1"]]["ratio"] < 1 or real[world["E1"]][0] == 0
         # The page of an epic or a story says the same numbers as its lane or card, in words and
-        # in its bar, and the table of what is under it says them for each child.
+        # in its bar, and the table of what is under it says them for each child. An epic with no
+        # tasks has nothing to say about progress, so its strip has no row and no empty bar.
         for name in ("E1", "E4", "E5", "S2", "S5"):
             ref = world[name]
             done, total = real[ref]
+            if not total:
+                await go_to(w, page_address(ref), f"#item-page[data-ref='{ref}'] .card-summary")
+                await expect(w.page.locator("#item-page .card-summary .meter")).to_have_count(0)
+                await expect(
+                    w.page.locator("#item-page .card-summary .progress-item")
+                ).to_have_count(0)
+                continue
             await go_to(w, page_address(ref), f"#item-page[data-ref='{ref}'] .card-summary .meter")
             strip = w.page.locator("#item-page .card-summary .progress")
-            assert (await strip.inner_text()).startswith(f"{done} of {total} tasks done"), name
+            assert (await strip.inner_text()).startswith(f"{done} of {total} task"), name
+            assert "done" in await strip.inner_text(), name
             bar = strip.locator(".meter")
             assert await bar.get_attribute("role") == "progressbar", name
             assert await bar.get_attribute("aria-valuenow") == str(done), name
@@ -517,7 +529,7 @@ async def test_no_card_text_is_clipped_or_runs_into_its_priority_context_or_note
         assert found[world["D3"]]["chips"] is not None
 
 
-# -- 6. the Structure map: no touching dots, no crossing lines, names that keep clear ----------
+# -- 6. the Structure map: no touching dots, few crossing lines, names that keep clear ----------
 
 
 def meets(first: dict[str, float], second: dict[str, float]) -> bool:
@@ -525,33 +537,6 @@ def meets(first: dict[str, float], second: dict[str, float]) -> bool:
     wide = min(first["r"], second["r"]) - max(first["l"], second["l"])
     high = min(first["b"], second["b"]) - max(first["t"], second["t"])
     return wide > 0.5 and high > 0.5
-
-
-Point = tuple[float, float]
-
-
-def crossing(first: tuple[Point, Point], second: tuple[Point, Point]) -> bool:
-    """Whether two segments cross each other properly: each one has the other's ends on its two
-    sides (touching at an end is not crossing)."""
-
-    def side(p: Point, q: Point, r: Point) -> float:
-        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-
-    (a, b), (c, d) = first, second
-    return side(c, d, a) * side(c, d, b) < -0.01 and side(a, b, c) * side(a, b, d) < -0.01
-
-
-def distance_to_segment(point: Point, segment: tuple[Point, Point]) -> float:
-    """How far a point is from a segment."""
-    (ax, ay), (bx, by) = segment
-    dx, dy = bx - ax, by - ay
-    length = dx * dx + dy * dy
-    at = (
-        0.0
-        if not length
-        else max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / length))
-    )
-    return float(((point[0] - (ax + at * dx)) ** 2 + (point[1] - (ay + at * dy)) ** 2) ** 0.5)
 
 
 def covers_dot(box: dict[str, float], dot: dict[str, Any], depth: float | None = None) -> bool:
@@ -567,7 +552,8 @@ def covers_dot(box: dict[str, float], dot: dict[str, Any], depth: float | None =
 
 async def open_structure(w: Any, address: str) -> dict[str, Any]:
     """Open the Graph's Structure tab at an address (from another page, so that it is drawn afresh),
-    wait until its dots and names are drawn, and give the map as it is on the screen."""
+    wait until its dots and names are drawn and the live map has come to rest, and give the map as
+    it is on the screen."""
     await w.page.evaluate("(hash) => { location.hash = hash; }", "#/board")
     await w.page.wait_for_selector(".card[data-ref]", timeout=SLOW)
     await w.page.evaluate("(hash) => { location.hash = hash; }", address)
@@ -575,18 +561,41 @@ async def open_structure(w: Any, address: str) -> dict[str, Any]:
         "#graph-view[data-tab=structure] svg.graph-st-svg g.graph-st-node", timeout=SLOW
     )
     await w.page.wait_for_selector(".graph-st-names .graph-st-name", state="attached", timeout=SLOW)
+    await rested(w.page)
     await settle(w.page)
     return await structure_map(w.page)
 
 
+def line_ends(segment: tuple[Point, Point], dots: list[dict[str, Any]]) -> list[str]:
+    """The two dots a line of the tree joins (the project, which is no dot of the list, is
+    'root'): a line is drawn from the rim of one to the rim of the other."""
+    ends = []
+    for end in segment:
+        rim, near = min(
+            (abs(math.hypot(dot["x"] - end[0], dot["y"] - end[1]) - dot["r"]), dot["ref"])
+            for dot in dots
+        )
+        ends.append(near if rim < 1.5 else "root")
+    return ends
+
+
+# The map is a live layout that has come to rest, not a drawing with room for every line: lines of
+# the tree can cross and can run behind a sibling task of the same story, but only a few do. These
+# are what the project below measures (no crossing, and 7 lines of 45 behind a sibling at 1600 and
+# 1280), with room.
+MOST_CROSSINGS = 2
+MOST_BEHIND_A_SIBLING = 0.25
+
+
 @pytest.mark.parametrize("screen", [WIDE, BY_NAME["1280"]], ids=["1600", "1280"])
 @themes
-async def test_the_structure_map_has_no_touching_dots_no_crossing_lines_and_names_that_keep_clear(
+async def test_the_structure_map_has_no_touching_dots_few_crossing_lines_and_names_that_keep_clear(
     server_url: str, theme: str, screen: Any
 ) -> None:
     world = await the_world(server_url)
     async with connect(server_url, world.project.key) as client:
         nodes = await all_nodes(client)
+    parents = {one["ref"]: one["parent"] for one in nodes}
     by_kind = {kind: sum(1 for one in nodes if one["kind"] == kind) for kind in KIND_NAMES}
     scopes = [
         ("the whole project", "#/graph?tab=structure", KIND_NAMES),
@@ -625,16 +634,28 @@ async def test_the_structure_map_has_no_touching_dots_no_crossing_lines_and_name
                     gap = math.hypot(first["x"] - second["x"], first["y"] - second["y"])
                     if gap < first["r"] + second["r"] - 0.5:
                         problems.append(f"{name}: {first['ref']} touches {second['ref']}")
-            # No line of the tree crosses another, and none runs through a dot.
+            # Few lines of the tree cross another; none runs over an epic or a story, and one
+            # runs over a task only when the task is a sibling on the story it leaves from.
             segments = [(tuple(line["from"]), tuple(line["to"])) for line in lines]
             assert len(segments) == len(dots), name
+            crossings = 0
+            behind = 0
             for at, first_line in enumerate(segments):
-                for second_line in segments[at + 1 :]:
-                    if crossing(first_line, second_line):
-                        problems.append(f"{name}: two lines of the tree cross")
+                crossings += sum(
+                    crossing(first_line, second_line) for second_line in segments[at + 1 :]
+                )
+                ends = line_ends(first_line, dots)
                 for dot in dots:
-                    if distance_to_segment((dot["x"], dot["y"]), first_line) < dot["r"] - 1.5:
-                        problems.append(f"{name}: a line of the tree runs through {dot['ref']}")
+                    if distance_to_segment((dot["x"], dot["y"]), first_line) >= dot["r"] - 1.5:
+                        continue
+                    if dot["kind"] != "task" or parents[dot["ref"]] not in ends:
+                        problems.append(f"{name}: a line of the tree runs over {dot['ref']}")
+                    else:
+                        behind += 1
+            if crossings > MOST_CROSSINGS:
+                problems.append(f"{name}: {crossings} lines of the tree cross")
+            if behind > MOST_BEHIND_A_SIBLING * len(segments):
+                problems.append(f"{name}: {behind} lines run behind a sibling task")
             # The names are inside the map, keep clear of each other, and cover no dot but the
             # hub they are written in.
             for named in names:
@@ -735,17 +756,7 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
     world = await the_world(server_url)
     async with connect(server_url, world.project.key) as client:
         nodes = await all_nodes(client)
-        held = (await ok(client, "list_rules", status="open", limit=1))["total"]
-        settled = (await ok(client, "list_rules", status="met", limit=1))["total"]
-        in_force = (await ok(client, "list_notes", status="in_force", limit=1))["total"]
     work = [node for node in nodes if node["kind"] != "epic"]
-    everything = str(len(nodes) + held + settled + in_force)
-    expected_counts = [
-        str(len(work)),
-        everything,
-        str(sum(1 for node in nodes if node["span_start"] or node["span_end"])),
-        everything,
-    ]
     epics = sorted((node for node in nodes if node["kind"] == "epic"), key=lambda n: n["number"])
     statuses = ("new", "ready", "in_progress", "blocked", "done", "dropped")
 
@@ -764,14 +775,13 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         await open_address(w, "#/board")
         await settle(page)
         await shoot(page, f"board-{theme}")
-        # The sidebar: the four views, each with an icon, its word and its real count.
+        # The sidebar: the four views, each with an icon and its word, and no number beside any.
         views = ("board", "graph", "roadmap", "lists")
         links = page.locator("#main-nav a[data-page]")
         assert await links.count() == 4
         words = [await links.nth(at).locator(".side-label").inner_text() for at in range(4)]
         assert words == ["Board", "Graph", "Roadmap", "Lists"]
-        counts = [await links.nth(at).locator(".nav-count").inner_text() for at in range(4)]
-        assert counts == expected_counts, (counts, expected_counts)
+        await expect(page.locator("#main-nav .nav-count")).to_have_count(0)
         for at, name in enumerate(views):
             assert await links.nth(at).locator(f"svg.icon-{name}").count() == 1
         await expect(links.nth(0)).to_have_attribute("aria-current", "page")
@@ -799,31 +809,40 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
             )
             assert await row.get_attribute("aria-expanded") == ("false" if has_stories else None)
         assert await tree.locator("li[aria-level='2']").count() == 0
-        # At its foot: Activity and Settings. The appearance control is in the top bar, once.
+        # At its foot: Activity, Settings and the account menu. The look of the board is chosen
+        # in the account menu, once, and nowhere else on the page.
         await expect(page.locator("#sidebar #activity-open")).to_be_visible()
         await expect(page.locator("#sidebar #settings-menu")).to_be_visible()
+        await expect(page.locator("#sidebar #account")).to_be_visible()
         assert await page.locator("#sidebar .appearance").count() == 0
-        choices = page.locator("#top [role=radiogroup][aria-label=Appearance] input")
+        assert await page.locator("#top .appearance, #top [data-appearance]").count() == 0
+        await page.locator("#account").click()
+        choices = page.locator("#account-list [role=menuitemradio]")
         assert [await choices.nth(at).get_attribute("data-appearance") for at in range(3)] == [
             "light",
             "dark",
             "system",
         ]
-        assert await page.locator("[role=radiogroup][aria-label=Appearance]").count() == 1
-        await expect(page.locator(f"#top input[data-appearance={theme}]")).to_be_checked()
-        # The top: where you are, and the search with the key of the quick switcher beside it
-        # (the quick switcher has no button of its own).
+        await expect(page.locator(f"#account-appearance-{theme}")).to_have_attribute(
+            "aria-checked", "true"
+        )
+        await page.keyboard.press("Escape")
+        # The top: where you are (the view, and nothing before it), and the search with the key of
+        # the quick switcher beside it (the quick switcher has no button of its own).
         crumbs = [text.strip() for text in await page.locator(".crumbs li").all_inner_texts()]
-        assert crumbs == ["Projects", world.project.name, "Board"], crumbs
+        assert crumbs == ["Board"], crumbs
         assert (
             await page.locator("#global-search").get_attribute("placeholder")
             == "Search the project…"
         )
         assert await page.locator("#switcher-open").count() == 0
         assert await page.locator("#search-hint kbd").text_content() in {"Ctrl K", "⌘K"}
-        # The page: its name, and its one main action with a plus.
-        assert await page.locator(".board-page h1").inner_text() == "Board"
-        assert await page.locator(".board-page .page-sub").count() == 0
+        # The page: its name is for a screen reader only (the top bar says it, so nothing on the
+        # page repeats it), and its one main action has a plus.
+        board_title = page.locator(".board-page h1")
+        assert await board_title.inner_text() == "Board"
+        assert "sr-only" in (await board_title.get_attribute("class") or "")
+        assert await page.locator(".board-page .page-sub, .board-page .page-title").count() == 0
         new = page.locator("#new-item")
         assert "primary" in (await new.get_attribute("class") or "")
         assert (
@@ -872,9 +891,13 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         await expect(
             page.locator(f"g.graph-st-node.is-sel[data-ref='{world['S2']}']")
         ).to_have_count(1)
+        await rested(page)
         await settle(page)
         await shoot(page, f"graph-chosen-{theme}")
-        assert await page.locator(".graph-title h1").inner_text() == "Graph"
+        graph_title = page.locator("#page h1")
+        assert await graph_title.inner_text() == "Graph"
+        assert "sr-only" in (await graph_title.get_attribute("class") or "")
+        await expect(page.locator(".graph-title")).to_have_count(0)
         assert [
             t.strip() for t in await page.locator("#graph-tabs .graph-tab-name").all_inner_texts()
         ] == [
@@ -891,6 +914,10 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         assert await page.get_by_role("button", name="Zoom in").count() == 1
         assert await page.get_by_role("button", name="Zoom out").count() == 1
         assert await page.get_by_role("button", name="Fit the whole project in view").count() == 1
+        # The toolbar ends with Forces (its panel closed when the page opens) and Tidy.
+        await expect(page.locator("#graph-st-forces")).to_have_attribute("aria-expanded", "false")
+        await expect(page.locator("#graph-st-forces-panel")).to_be_hidden()
+        await expect(page.locator("#graph-st-tidy")).to_be_visible()
         drawn = await structure_map(page)
         assert len(drawn["nodes"]) == len(nodes)
         # A note is not a dot: Around draws it in the middle and opens its page, which is what MCP
@@ -909,24 +936,28 @@ async def test_the_board_has_the_structure_of_the_reference_with_the_real_number
         )
         await expect(page.locator("#item-title")).to_contain_text(record["headline"])
         label = " ".join((await page.locator("#item-title").inner_text()).split()).lower()
-        assert label.startswith(f"note #{world.number('X1')} "), label
+        assert label.startswith(f"n-{world.number('X1')} "), label
         assert await page.locator("#item-title svg.icon").count() == 1
-        chips = await page.locator(".card-summary .record-chips").first.inner_text()
-        assert "Confirmed" in chips, chips
+        strip = await page.locator(".card-summary").first.inner_text()
+        assert "Confirmed" in strip, strip
         assert (
             record["text"].split("\n\n")[-1]
             in await page.locator("#item-details [data-part=record]").inner_text()
         )
         assert record["why"] in await page.locator("#item-details [data-part=why]").inner_text()
-        jumps: list[str] = await page.locator(".item-nav .item-jump").evaluate_all(
-            "els => els.map((e) => e.dataset.jump)"
+        # The sections follow one another down the page, with no list of them to jump about in.
+        await expect(page.locator(".item-nav, .item-jump")).to_have_count(0)
+        parts: list[str] = await page.locator("#item-details [data-part]").evaluate_all(
+            "els => els.map((e) => e.dataset.part)"
         )
-        assert jumps[:4] == ["record", "why", "confirmation", "concerns"], jumps
+        assert parts[:4] == ["record", "why", "confirmation", "concerns"], parts
+        # The strip says only what is not on the page already: where the note stands, and who
+        # decided it; who recorded it and when are in its history.
         facts = [
             text.strip()
             for text in await page.locator(".card-summary .state-item dt").all_text_contents()
         ]
-        assert facts[:2] == ["Recorded by", "Recorded"], facts
+        assert facts[0] == "Status" and "Recorded by" not in facts, facts
 
 
 # -- 8. the page of an item: its real children in a table, its details beside each other ----
@@ -938,8 +969,11 @@ TABLE = """
     return e ? e.textContent.replace(/\\s+/g, ' ').trim() : null;
   };
   return { ref: tr.dataset.ref, id: tr.id, code: text('th.cell-item'), title: text('td.cell-title'),
-    status: text('td.cell-status'), priority: text('td.cell-priority'), held: text('td.cell-held'),
-    date: text('.item-date'), due: text('td.cell-due'), overdue: !!tr.querySelector('.overdue'),
+    status: text('td.cell-status'), held: text('td.cell-held'),
+    priorityChips: tr.querySelectorAll('td.cell-priority .chip').length,
+    priorityTitle: (tr.querySelector('td.cell-priority .chip') || {}).title || null,
+    due: text('td.cell-due'), overdue: !!tr.querySelector('.chip.due.overdue'),
+    dueChips: tr.querySelectorAll('td.cell-due .chip').length,
     waiting: [...tr.querySelectorAll('td.cell-waiting a')]
       .map((a) => [a.textContent.trim(), a.getAttribute('href')]),
     waitingText: text('td.cell-waiting'),
@@ -985,8 +1019,8 @@ PAGE_BOXES = """
     return { l: r.left, t: r.top, r: r.right, b: r.bottom };
   };
   return { title: box('#item-title'), details: box('#item-details'), main: box('.card-main'),
-    side: box('.card-side'), summary: box('.card-summary'), children: box('#item-children'),
-    region: box('#item-region'), part: box('#item-part'),
+    summary: box('.card-summary'), children: box('#item-children'),
+    region: box('#item-region'), links: box('#item-links'),
     requirements: box('#item-details [data-part=requirements]'),
     definition: box('#item-details [data-part=definition]'),
     context: box('#item-details [data-part=context]'),
@@ -1020,6 +1054,17 @@ COLUMNS = {
 }
 
 
+def drawn_columns(kind: str, children: list[dict[str, Any]]) -> list[str]:
+    """The columns of a table of children that some row has a value in: the rest are not drawn."""
+    empty = {
+        "Priority": all(child["priority"] == "normal" for child in children),
+        "Held by": not any(child["claimed_by"] for child in children),
+        "Due": not any(child["target_on"] for child in children),
+        "Waiting for": not any(child["waiting_on"] for child in children),
+    }
+    return [name for name in COLUMNS[kind] if not empty.get(name, False)]
+
+
 def item_stop(world: World, name: str, ready: str = "#item-table tbody tr") -> Stop:
     return Stop(name, page_address(world[name]), ready, "item")
 
@@ -1032,6 +1077,7 @@ async def test_an_items_page_names_it_by_its_code_and_tables_its_real_children(
     world = await the_world(server_url)
     truth: dict[str, tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]] = {}
     async with connect(server_url, world.project.key) as client:
+        titles = {one["ref"]: one["title"] for one in await all_nodes(client)}
         for name in ("E1", "E3", "S2", "S5"):
             node = await ok(client, "get_node", node=world[name])
             parent = await ok(client, "get_node", node=node["parent"]) if node["parent"] else None
@@ -1049,18 +1095,21 @@ async def test_an_items_page_names_it_by_its_code_and_tables_its_real_children(
             assert title == f"{code_of(ref)} {node['title']}", title
             assert await page.locator("#item-what").count() == 0
             # What is under it: how many, said the same way in the count, the heading and the
-            # table's caption (which names what it is in).
+            # table's caption (which names what it is in, by its code and its name).
             heading = await page.locator("#item-children-title").inner_text()
             assert heading == under.capitalize(), heading
-            assert await page.locator("#item-count").inner_text() == f"({len(children)})"
+            assert await page.locator("#item-count").inner_text() == str(len(children))
             assert await page.locator("#item-table caption").inner_text() == (
-                f"{heading} in {code_of(ref)}"
+                f"{heading} in {code_of(ref)} {node['title']}"
             )
             heads: list[str] = await page.locator("#item-table thead th button.sort").evaluate_all(
                 "els => els.map((e) => e.textContent.trim())"
             )
-            assert heads == COLUMNS[node["kind"]], heads
-            # The rows are what MCP lists as its children, by number, each with its own numbers.
+            assert heads == drawn_columns(node["kind"], children), heads
+            # The rows are what MCP lists as its children, by number, each with its own numbers. A
+            # cell with nothing to say is empty: no "Nobody", "Not set" or "Nothing", a priority
+            # only when it is not normal (as a small sign with its words in its title) and a due
+            # day as the one chip that is red when the work is late.
             rows = await page.evaluate(TABLE)
             assert [row["ref"] for row in rows] == [child["ref"] for child in children]
             for row, child in zip(rows, children, strict=True):
@@ -1069,17 +1118,26 @@ async def test_an_items_page_names_it_by_its_code_and_tables_its_real_children(
                 assert row["code"] == code_of(child["ref"]), where
                 assert row["title"] == child["title"], where
                 assert row["status"] == STATUS_WORDS[child["status"]], where
-                assert row["priority"] == child["priority"].capitalize(), where
-                assert row["held"] == (child["claimed_by"] or "Nobody"), where
-                assert row["date"] == (str(child["target_on"])[:10] if child["target_on"] else None)
-                assert (row["due"] == "Not set") == (not child["target_on"]), where
+                assert row["priorityChips"] == int(child["priority"] != "normal"), where
+                if child["priority"] != "normal":
+                    assert row["priorityTitle"] == f"{child['priority'].capitalize()} priority", (
+                        where
+                    )
+                assert row["held"] == (
+                    (child["claimed_by"] or "") if "Held by" in heads else None
+                ), where
+                if child["target_on"]:
+                    assert row["due"] == f"Due {str(child['target_on'])[:10]}", where
+                else:
+                    assert row["due"] in ("", None) and row["dueChips"] == 0, where
                 assert row["overdue"] == bool(child["overdue"]), where
-                assert [code for code, _ in row["waiting"]] == [
-                    code_of(other) for other in child["waiting_on"]
+                # What it waits for is each thing's code and then its name, one to a line.
+                assert [text for text, _ in row["waiting"]] == [
+                    f"{code_of(other)} {titles[other]}" for other in child["waiting_on"]
                 ], where
-                assert (row["waitingText"] == "Nothing") == (not child["waiting_on"]), where
-                for code, href in row["waiting"]:
-                    assert href == page_address(ref_from_code(code)), where
+                assert (row["waitingText"] in ("", None)) == (not child["waiting_on"]), where
+                for text, href in row["waiting"]:
+                    assert href == page_address(ref_from_code(text.split(" ", 1)[0])), where
                 # A row opens a page, by its code and by its title; nothing opens beside it.
                 assert row["link"] == page_address(child["ref"]), where
                 assert row["titleLink"] == page_address(child["ref"]), where
@@ -1087,7 +1145,7 @@ async def test_an_items_page_names_it_by_its_code_and_tables_its_real_children(
                 if node["kind"] == "epic":
                     done, total = child["progress_done"], child["progress_total"]
                     assert row["progress"] == (f"{done} of {total} done" if total else None), where
-                    assert (row["progressCell"] == "No tasks") == (not total), where
+                    assert (row["progressCell"] == "") == (not total), where
             # The words of every cell but the title stay on one line, however the title is made:
             # a word is never broken to make room for a long one.
             wrapped = await page.evaluate(
@@ -1112,40 +1170,46 @@ async def test_an_items_page_lays_its_details_out_to_the_width_and_lines_up_with
             await visit(w, item_stop(world, name))
             await shoot(page, f"item-{name}-{theme}-{screen.name}")
             found = await page.evaluate(PAGE_BOXES)
-            for part in ("title", "details", "main", "side", "children", "region"):
+            for part in ("title", "details", "main", "children", "region", "links"):
                 assert found[part] is not None, (name, part)
-            main, side = found["main"], found["side"]
+            main = found["main"]
+            # One column at every width: no side column, and the sheet of details is as wide as
+            # the page's content.
+            await expect(page.locator(".card-side, .card-columns")).to_have_count(0)
+            assert abs(main["l"] - found["details"]["l"]) <= TOLERANCE, (name, main)
+            assert abs(main["r"] - found["details"]["r"]) <= TOLERANCE, (name, main)
             # One page: the title, the details and the table start at the same left edge, and
             # the table's region is as wide as they are.
             lefts = {part: round(found[part]["l"], 1) for part in ("title", "details", "children")}
             assert max(lefts.values()) - min(lefts.values()) <= TOLERANCE, (name, lefts)
             assert abs(found["region"]["r"] - found["details"]["r"]) <= TOLERANCE, (name, found)
-            # The sheets of details come first, the table of what is under the item under them,
-            # never beside them, and then what concerns the item, each across the whole width.
-            below = max(main["b"], side["b"])
-            assert found["children"]["t"] >= below - 0.5, (name, found)
+            # The sheet of details comes first, the table of what is under the item under it,
+            # never beside it, and then what concerns the item, each across the whole width.
+            assert found["children"]["t"] >= main["b"] - 0.5, (name, found)
             # An epic holds no acceptance criteria and no definition of done: the sections that are
-            # there follow one another down the page.
+            # there follow one another down the page, in the order of the page.
             order = [
                 part
-                for part in ("children", "requirements", "definition", "context", "history")
+                for part in (
+                    "children",
+                    "links",
+                    "requirements",
+                    "definition",
+                    "context",
+                    "history",
+                )
                 if found[part] is not None
             ]
-            assert order[0] == "children" and order[-2:] == ["context", "history"], (name, order)
+            assert order[:2] == ["children", "links"] and order[-2:] == ["context", "history"], (
+                name,
+                order,
+            )
             assert (name == "E1") == ("requirements" not in order), (name, order)
             for before, after in zip(order, order[1:], strict=False):
                 assert found[after]["t"] >= found[before]["b"] - 0.5, (name, before, after, found)
             for part in order[1:]:
                 assert abs(found[part]["l"] - found["details"]["l"]) <= TOLERANCE, (name, part)
                 assert abs(found[part]["r"] - found["details"]["r"]) <= TOLERANCE, (name, part)
-            # A main column and a side column when the page is wide enough, one column when not.
-            two = screen.width >= 1100
-            if two:
-                assert side["l"] >= main["r"] - 0.5, (name, "side beside main", main, side)
-                assert abs(side["t"] - main["t"]) <= TOLERANCE, (name, main, side)
-            else:
-                assert side["t"] >= main["b"] - 0.5, (name, "side under main", main, side)
-                assert abs(side["l"] - main["l"]) <= TOLERANCE, (name, main, side)
             # Nothing of the page is outside the window.
             for part, box in found.items():
                 if box is not None:
@@ -1162,13 +1226,16 @@ async def test_an_items_page_with_nothing_under_it_says_so_and_offers_the_first_
         page = w.page
         await open_address(w, "#/board")
         ref = world["E4"]
-        await visit(w, item_stop(world, "E4", "#item-empty .empty-text"))
-        assert await page.locator("#item-count").inner_text() == "(0)"
-        assert await page.locator("#item-empty .empty-text").inner_text() == "No stories yet."
+        await visit(w, item_stop(world, "E4", "#item-children #new-child"))
+        # With nothing under it the section is its heading and the way to add one: no count, no
+        # box that says "No stories yet", and no table.
+        await expect(page.locator("#item-children-title")).to_have_text("Stories")
+        assert await page.locator("#item-count").inner_text() == ""
+        await expect(page.locator("#item-empty")).to_have_count(0)
         await expect(page.locator("#item-region")).to_be_hidden()
         assert await page.locator("#item-table").count() == 0
-        # The one button that adds a story under this epic is in the empty state; it opens the form
-        # for a story in this epic.
+        # The one button that adds a story under this epic is there; it opens the form for a story
+        # in this epic.
         add = page.locator("#new-child")
         assert (await add.inner_text()).strip() == "New story"
         assert "small" in (await add.get_attribute("class") or "")
@@ -1180,15 +1247,22 @@ async def test_an_items_page_with_nothing_under_it_says_so_and_offers_the_first_
         assert await dialog.locator("#new-parent").input_value() == ref
         await page.keyboard.press("Escape")
         await expect(dialog).to_be_hidden()
-        # A task has no table at all: it says which story it is part of, and links to it.
-        await visit(w, item_stop(world, "D1", "#item-part-title"))
-        part = " ".join((await page.locator("#item-part-title").inner_text()).split())
+        # A task has no table at all and no band that says which story it is part of: the
+        # breadcrumb names its epic and story, and links to them.
+        await visit(w, item_stop(world, "D1", "#item-links"))
+        assert await page.locator("#item-table").count() == 0
+        await expect(page.locator("#item-part, #item-part-title")).to_have_count(0)
         async with connect(server_url, world.project.key) as client:
             story = await ok(client, "get_node", node=world["S5"])
-        assert part == f"Part of {code_of(world['S5'])} {story['title']}", part
-        href = await page.locator("#item-part-title a").get_attribute("href")
+        crumb = page.locator(f"nav.crumbs li.crumb-item a[href='{page_address(world['S5'])}']")
+        await expect(crumb).to_have_attribute("title", f"{code_of(world['S5'])} {story['title']}")
+        # The step is its code and its name (the name is cut when there is no room), and no
+        # label of its own repeats what it says.
+        await expect(crumb.locator(".crumb-code")).to_have_text(code_of(world["S5"]))
+        await expect(crumb.locator(".crumb-name")).to_have_text(story["title"])
+        assert await crumb.get_attribute("aria-label") is None
+        href = await crumb.get_attribute("href")
         assert href is not None and href == page_address(world["S5"]), href
-        assert await page.locator("#item-table").count() == 0
 
 
 # -- 9. the owner's case: nine long project-wide decisions and linked facts under one epic ----
@@ -1361,7 +1435,7 @@ async def test_an_epic_with_nine_long_project_wide_notes_has_full_width_one_line
         # wait closed behind a line that says how many there are. The earlier ones are fewer than
         # five, so they are open.
         wide = shown["disclosures"]["project_wide_notes"]
-        assert wide["open"] is False and "(9)" in wide["summary"], wide
+        assert wide["open"] is False and re.match(r"Project-wide notes\s*9", wide["summary"]), wide
         assert shown["disclosures"]["past_notes"]["open"] is True, shown["disclosures"]
         labels = [region["label"] for region in shown["regions"]]
         assert any(label.startswith("Notes in force") for label in labels), labels
@@ -1396,11 +1470,15 @@ async def test_an_epic_with_nine_long_project_wide_notes_has_full_width_one_line
             heights = {round(row["h"]) for row in region["rows"]}
             assert region["rows"], where
             assert max(heights) < 130, (*where, heights)
-            # No dead column: each column of a table has something in a cell, and when the table
-            # is not scrolling, only the column that carries the words (the title, what it says)
-            # takes more than a third of the table, so no column is blank space.
-            for column in region["columns"]:
-                assert column["filled"] > 0, (*where, "an empty column", column)
+            # No dead column: each column of a table of notes has something in a cell, and when
+            # the table is not scrolling, only the column that carries the words (the title, what
+            # it says) takes more than a third of the table, so no column is blank space. The
+            # table of the stories under the epic is left out of the first rule: a cell with
+            # nothing to say (a priority that is normal, nobody holding it, no due day) is blank
+            # by design, so a column of them is empty when the work has none of that to say.
+            if not region["label"].startswith(("Stories in", "Tasks in")):
+                for column in region["columns"]:
+                    assert column["filled"] > 0, (*where, "an empty column", column)
             if region["scroll"][0] <= region["scroll"][1] + 1:
                 table_width = region["table"]["r"] - region["table"]["l"]
                 for column in region["columns"]:

@@ -16,6 +16,7 @@ from tests.board_helpers import (
     crumbs,
     current_address,
     item_loaded,
+    item_name,
     made,
     no_panel_or_drawer,
     on_page,
@@ -71,8 +72,9 @@ async def test_the_page_lists_mcps_pairs_with_its_scores_threshold_epics_and_pag
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/graph")
-        # Possible duplicates is the second tab of the Search page, which the top bar opens.
-        await page.locator("#global-search-go").click()
+        # Possible duplicates is the second tab of the Search page, which the top bar's box opens
+        # (Enter in it asks; there is no button).
+        await page.locator("#global-search").press("Enter")
         await on_page(page, "search")
         await no_panel_or_drawer(page)
         await page.locator("#search-tab-dups").click()
@@ -168,6 +170,11 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
         # Both sides show their details as Markdown.
         await expect(row.locator(".side strong")).to_have_count(2)
         await expect(row.locator(".side li")).to_have_count(4)
+        # Each side names its kind with its code and the epic it is in with its code and name.
+        await expect(row.locator(".side .chip.kind").first).to_have_text(f"Story {code_of(first)}")
+        await expect(row.locator(".side-epic").first).to_have_text(
+            f"In epic {await item_name(client, epic_a)}"
+        )
 
         before = {
             "links": await link_count(client),
@@ -193,7 +200,7 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
         await row.locator("td.side").first.locator(".side-title a").click()
         await item_loaded(page, first)
         assert (await current_address(page))[1]["from"] == "search"
-        assert (await crumbs(page))[2] == "Search"
+        assert (await crumbs(page))[0] == "Search"
         await view_crumb(page).click()
         await on_page(page, "search")
         await pairs_on(page)
@@ -205,16 +212,20 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
             "latest_event_id"
         ] == before["latest"]
 
-        # Each button says which two items it links.
-        both = f"{code_of(first)} and {code_of(second)}"
-        await row.get_by_role("button", name=f"Mark {both} as duplicates").click()
+        # Each button says what it does, and its name and tooltip say which two items, by name.
+        both = f"“{pair[0]}” and “{pair[1]}”"
+        await row.get_by_role("button", name=f"Mark as duplicates: {both}").click()
         # The notice goes away by itself after a few seconds, so it is read first.
         await expect(page.locator("#notices .notice")).to_contain_text(
             f"Marked {both} as duplicates."
         )
         await expect(
-            row.get_by_role("button", name=f"{both} are marked as duplicates")
+            row.get_by_role("button", name=f"Marked as duplicates: {both}")
         ).to_be_disabled(timeout=SLOW)
+        assert await row.locator("button.mark-duplicates").inner_text() == "Marked as duplicates"
+        assert await row.locator("button.mark-duplicates").get_attribute("title") == (
+            f"Marked as duplicates: {both}"
+        )
         assert await links_of(client, first, second) == {
             first: [(first, second, "duplicates")],
             second: [(first, second, "duplicates")],
@@ -226,10 +237,10 @@ async def test_searching_links_nothing_and_a_click_on_a_pair_makes_exactly_one_l
         assert w.problems == []
 
         # The other button makes the other kind of link, and only that one.
-        await row.get_by_role("button", name=f"Mark {both} as related").click()
-        await expect(
-            row.get_by_role("button", name=f"{both} are marked as related")
-        ).to_be_disabled(timeout=SLOW)
+        await row.get_by_role("button", name=f"Mark as related: {both}").click()
+        await expect(row.get_by_role("button", name=f"Marked as related: {both}")).to_be_disabled(
+            timeout=SLOW
+        )
         assert await links_of(client, first) == {
             first: [(first, second, "duplicates"), (first, second, "relates_to")]
         }
@@ -257,11 +268,9 @@ async def test_a_linked_pair_says_so_and_can_be_left_out_and_a_bad_epic_is_refus
         await w.open(f"#/search?dups=1&dup_epics={number(epic_a)},{number(epic_b)}")
         assert await pairs_on(page) == pair_triples(on_server)
         row = page.locator(f"tr.pair[data-first='{firsts[2]}'][data-second='{seconds[2]}']")
-        both = f"{code_of(firsts[2])} and {code_of(seconds[2])}"
-        await expect(
-            row.get_by_role("button", name=f"{both} are marked as related")
-        ).to_be_disabled()
-        await expect(row.get_by_role("button", name=f"Mark {both} as duplicates")).to_be_enabled()
+        both = f"“{DUPLICATES[2][0]}” and “{DUPLICATES[2][1]}”"
+        await expect(row.get_by_role("button", name=f"Marked as related: {both}")).to_be_disabled()
+        await expect(row.get_by_role("button", name=f"Mark as duplicates: {both}")).to_be_enabled()
         await expect(row).to_contain_text("Already linked: related")
         # Leaving out the pairs somebody has marked gives the server's pairs without a link.
         await redrawn(page, "#dup-pairs", page.locator("#dup-unlinked").check())
@@ -319,4 +328,45 @@ async def test_acceptance_criteria_are_compared_too_and_cannot_be_linked(
         await expect(row).to_contain_text("Acceptance criteria cannot be linked")
         assert await row.locator("button").count() == 0
         assert await link_count(client) == before
+        assert w.problems == []
+
+
+async def test_tasks_are_compared_too_and_a_pair_of_them_can_be_linked(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic_a = await made(client, "epic", f"Tasks A {word}")
+    epic_b = await made(client, "epic", f"Tasks B {word}")
+    story_a = await made(client, "story", f"Billing A {word}", epic_a)
+    story_b = await made(client, "story", f"Billing B {word}", epic_b)
+    one = f"Customers receive an invoice by email {word}"
+    other = f"Clients receive a bill by mail {word}"
+    task_a = await made(client, "task", one, story_a)
+    task_b = await made(client, "task", other, story_b)
+    await reindexed(client)
+    before = await link_count(client)
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/search?dups=1&dup_type=task&dup_epics={number(epic_a)},{number(epic_b)}")
+        shown = await pairs_on(page)
+        server = await every_overlap(client, item_type="task", epics=[epic_a, epic_b])
+        assert shown == pair_triples(server)
+        assert (task_a, task_b) in {(a, b) for a, b, _ in shown}
+        row = page.locator(f"tr.pair[data-first='{task_a}'][data-second='{task_b}']")
+        await expect(row).to_be_visible()
+        # A task names its kind with its code and the epic it is in, not the story it is under.
+        await expect(row.locator(".side .chip.kind").first).to_have_text(f"Task {code_of(task_a)}")
+        await expect(row.locator(".side-epic").first).to_have_text(
+            f"In epic {await item_name(client, epic_a)}"
+        )
+        both = f"“{one}” and “{other}”"
+        await row.get_by_role("button", name=f"Mark as duplicates: {both}").click()
+        await expect(
+            row.get_by_role("button", name=f"Marked as duplicates: {both}")
+        ).to_be_disabled(timeout=SLOW)
+        assert await link_count(client) == before + 1
+        assert await links_of(client, task_a, task_b) == {
+            task_a: [(task_a, task_b, "duplicates")],
+            task_b: [(task_a, task_b, "duplicates")],
+        }
         assert w.problems == []

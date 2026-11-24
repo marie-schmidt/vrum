@@ -23,8 +23,11 @@ import { can, notify } from './ctx.js';
 import { calendarButton } from './datepicker.js';
 import { day, h } from './dom.js';
 import { icon } from './icons.js';
-import { PRIORITIES, PRIORITY, REQUIREMENT_STATUS, REQUIREMENT_STATUSES, SETTABLE, SIZES, SIZE_POINTS, SIZE_WORDS, STATUS, nodeCode, noteStatusLook, pointsWords, priorityIcon, requirementStatusLook, sizeWords, statusIcon } from './labels.js';
+import { PRIORITIES, PRIORITY, REQUIREMENT_STATUS, REQUIREMENT_STATUSES, SETTABLE, SIZES, SIZE_POINTS, SIZE_WORDS, STATUS, noteStatusLook, pointsWords, priorityIcon, requirementStatusLook, sizeWords, statusIcon } from './labels.js';
 import { store, sync } from './store.js';
+
+// What a message calls an epic, story or task: its name in curly quotes, never a code.
+const named = (node) => `“${node.title}”`;
 
 const EDGE = 8; // What is kept free between the menu and the edge of the window, in pixels.
 const GAP = 4; // What is left between the menu and its chip, in pixels.
@@ -392,7 +395,7 @@ export function statusChip(node, { onChanged = null, version = () => node.versio
     onPick: async ({ value }) => {
       if (value === 'new' && node.status === 'ready') return;
       const change = (extra = {}) =>
-        changeNode(node, { status: value, ...extra }, `${nodeCode(node.kind, node.number)} is now ${STATUS[value].label.toLowerCase()}.`, {
+        changeNode(node, { status: value, ...extra }, `${named(node)} is now ${STATUS[value].label.toLowerCase()}.`, {
           version,
           onChanged,
           redraw: (result) => redrawn(trigger, () => statusChip({ ...node, ...result }, { onChanged, version })),
@@ -417,20 +420,21 @@ export function statusChip(node, { onChanged = null, version = () => node.versio
   return trigger;
 }
 
-export function priorityChip(node, { onChanged = null, version = () => node.version } = {}) {
+// `compact` is the sign alone, with the word in its tooltip, for a card (which shows a priority only when it is high or urgent).
+export function priorityChip(node, { onChanged = null, version = () => node.version, compact = false } = {}) {
   const known = PRIORITY[node.priority] || { label: node.priority };
-  const props = { class: `chip priority priority-${node.priority}`, 'data-priority': node.priority, 'data-menu': 'priority' };
-  const content = [priorityIcon(node.priority, 14), known.label];
+  const props = { class: `chip priority priority-${node.priority}`, 'data-priority': node.priority, 'data-menu': 'priority', title: compact ? `${known.label} priority` : null };
+  const content = compact ? [priorityIcon(node.priority, 14)] : [priorityIcon(node.priority, 14), known.label];
   const trigger = chip(props, content, {
     options: () => [...PRIORITIES].reverse().map((name) => ({ value: name, label: PRIORITY[name].label, mark: priorityIcon(name, 16), tone: `priority-${name}`, checked: node.priority === name })),
     label: 'Priority',
     name: `Priority: ${known.label}`,
     focusKey: `priority:${node.ref}`,
     onPick: async ({ value }) => {
-      await changeNode(node, { priority: value }, `${nodeCode(node.kind, node.number)} priority is now ${PRIORITY[value].label.toLowerCase()}.`, {
+      await changeNode(node, { priority: value }, `${named(node)} priority is now ${PRIORITY[value].label.toLowerCase()}.`, {
         version,
         onChanged,
-        redraw: (result) => redrawn(trigger, () => priorityChip({ ...node, ...result }, { onChanged, version })),
+        redraw: (result) => redrawn(trigger, () => priorityChip({ ...node, ...result }, { onChanged, version, compact })),
       });
     },
   });
@@ -459,8 +463,8 @@ export function sizeControl(node, { onChanged = null, version = () => node.versi
     name: `Size: ${words.toLowerCase()}`,
     focusKey: `size:${node.ref}`,
     onPick: async ({ value }) => {
-      const code = nodeCode(node.kind, node.number);
-      await changeNode(node, value ? { size: value } : { clear_size: true }, value ? `${code} is now sized ${SIZE_WORDS[value].toLowerCase()}.` : `Took the size off ${code}.`, {
+      const what = named(node);
+      await changeNode(node, value ? { size: value } : { clear_size: true }, value ? `${what} is now sized ${SIZE_WORDS[value].toLowerCase()}.` : `Took the size off ${what}.`, {
         version,
         onChanged,
         redraw: (result) => redrawn(trigger, () => sizeControl({ ...node, ...result }, { onChanged, version, compact })),
@@ -487,10 +491,10 @@ export function dateChip(node, name, { onChanged = null, version = () => node.ve
   const trigger = h('button', { type: 'button', class: 'date-value', 'aria-label': `${words}: ${value || 'Not set'}`, dataset: { field: name, focusKey: `date:${node.ref}:${name}` } }, shown, icon('calendar', { size: 14, className: 'date-mark' }));
   const save = async (picked) => {
     if (picked === value) return;
-    const code = nodeCode(node.kind, node.number);
+    const what = named(node);
     trigger.setAttribute('aria-busy', 'true');
     try {
-      await changeNode(node, picked ? { [name]: picked } : { [`clear_${name}`]: true }, picked ? `${code} ${words.toLowerCase()} is now ${picked}.` : `${code} ${words.toLowerCase()} date cleared.`, {
+      await changeNode(node, picked ? { [name]: picked } : { [`clear_${name}`]: true }, picked ? `${what} ${words.toLowerCase()} is now ${picked}.` : `${what} ${words.toLowerCase()} date cleared.`, {
         version,
         onChanged,
         redraw: (result) => redrawn(trigger, () => dateChip({ ...node, ...result }, name, { onChanged, version })),
@@ -516,7 +520,7 @@ export function requirementStatusChip(rule, { onChanged = null, version = () => 
     focusKey: `status:rule:${rule.id}`,
     onPick: async ({ value }) => {
       const result = await call('update_rule', { rule_id: rule.id, expected_version: version(), status: value });
-      notify(`Acceptance criterion #${rule.id} is now ${REQUIREMENT_STATUS[value].label.toLowerCase()}.`);
+      notify(`“${rule.title}” is now ${REQUIREMENT_STATUS[value].label.toLowerCase()}.`);
       redrawn(trigger, () => requirementStatusChip({ ...rule, ...result }, { onChanged, version }));
       await sync();
       onChanged?.(result);

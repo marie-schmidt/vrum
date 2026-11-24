@@ -83,7 +83,7 @@ async def searching() -> None:
         await switching()
     except BrowserError as error:
         raise Failed(
-            f"M16: the board did not do what a proof needs: {clip(str(error), 220)}"
+            f"M20: the board did not do what a proof needs: {clip(str(error), 220)}"
         ) from error
 
 
@@ -173,7 +173,7 @@ async def exact_words_from_every_view() -> None:
                         )
                         await no_panel_or_drawer(page)
                         path = await crumbs(page)
-                        assert path[0] == "Projects" and path[2] == "Search", path
+                        assert path[0] == "Search", path
                         assert await sidebar_current(page) == [], record
                         # The way back is the Search page as it was left.
                         await view_crumb(page).click()
@@ -193,10 +193,10 @@ async def exact_words_from_every_view() -> None:
         "(the search is always for words and meaning together), labelled exact words, a story "
         "made while the service was down at once (one item waiting), says in the server's words "
         "that meaning could not be used, and a result of "
-        "every kind opens its own page (its breadcrumb starts Projects, the project, Search) from "
+        "every kind opens its own page (its breadcrumb starts with Search) from "
         "which the breadcrumb's Search returns the results as they were; merely searching "
         "writes nothing. Every result names itself by its reference (story:12, note:7), and "
-        "only requirements and notes also have an id",
+        "only acceptance criteria and notes also have an id",
         {i["ref"] for i in on_server["items"]} == wanted
         and said_so
         and all(("id" in i) == (i["item_type"] not in WORK) for i in on_server["items"])
@@ -248,7 +248,7 @@ async def meaning_and_paging() -> None:
         async with browser_page(board, token=project.key) as w:
             page = w.page
             await w.open("#/roadmap")
-            await page.locator("#global-search-go").click()
+            await page.locator("#global-search").press("Enter")
             await on_page(page, "search")
             await expect(page.locator("#search-waiting")).to_have_attribute("data-waiting", "0")
             await search_on_page(page, paraphrase)
@@ -291,7 +291,7 @@ async def meaning_and_paging() -> None:
             await page.locator("#search-facets [data-facet=type] button[data-value=task]").click()
             tasks = [i for i in big["items"] if i["item_type"] == "task"]
             await expect(page.locator("#search-count")).to_have_text(
-                f"{len(tasks)} results of 63.", timeout=SLOW
+                f"{len(tasks)} results of 63", timeout=SLOW
             )
             kind_in_address = (await address(page))[1]["search_type"] == "task"
             same_as_server(await whole_list(page, len(tasks)), tasks)
@@ -309,7 +309,7 @@ async def meaning_and_paging() -> None:
             ).click()
             under = [i for i in big["items"] if epics.get(i["ref"]) == epic]
             await expect(page.locator("#search-count")).to_have_text(
-                f"{len(under)} results of 63.", timeout=SLOW
+                f"{len(under)} results of 63", timeout=SLOW
             )
             same_as_server(await whole_list(page, len(under)), under)
             await page.locator(
@@ -325,7 +325,7 @@ async def meaning_and_paging() -> None:
             await on_page(page, "search")
             back = (await address(page))[1]
             await expect(page.locator("#search-count")).to_have_text(
-                f"{len(under)} results of 63.", timeout=SLOW
+                f"{len(under)} results of 63", timeout=SLOW
             )
             assert w.problems == []
     proof(
@@ -384,7 +384,7 @@ async def possible_duplicates() -> None:
         async with browser_page(board, token=project.key) as w:
             page = w.page
             await w.open("#/graph")
-            await page.locator("#global-search-go").click()
+            await page.locator("#global-search").press("Enter")
             await on_page(page, "search")
             await page.locator("#search-tab-dups").click()
             await expect(page.locator(".search-page")).to_have_attribute("data-mode", "duplicates")
@@ -483,18 +483,18 @@ async def marking_links() -> None:
                 ]
                 == before["latest"]
             )
-            names = f"{code_of(first)} and {code_of(second)}"
-            await row.get_by_role("button", name=f"Mark {names} as duplicates").click()
+            names = f"“{pair[0]}” and “{pair[1]}”"
+            await row.get_by_role("button", name=f"Mark as duplicates: {names}").click()
             await expect(
-                row.get_by_role("button", name=f"{names} are marked as duplicates")
+                row.get_by_role("button", name=f"Marked as duplicates: {names}")
             ).to_be_disabled(timeout=SLOW)
             one = await links_of(client, first, second)
             one_count = await link_count(client)
             link = (await ok(client, "list_links", node=first))["items"][0]
             await expect(row).to_contain_text("Already linked: duplicates")
-            await row.get_by_role("button", name=f"Mark {names} as related").click()
+            await row.get_by_role("button", name=f"Mark as related: {names}").click()
             await expect(
-                row.get_by_role("button", name=f"{names} are marked as related")
+                row.get_by_role("button", name=f"Marked as related: {names}")
             ).to_be_disabled(timeout=SLOW)
             both = await links_of(client, first)
             final = await link_count(client)
@@ -570,7 +570,7 @@ async def references() -> None:
         decided = await make_note(client, f"Decided {word}", "Because", decided_by="Marie")
         known = await make_note(client, f"Known {word}")
         missing = "story:987654321"
-        # Only epics, stories, tasks, requirements and notes are references: [[decision:N]],
+        # Only epics, stories, tasks, acceptance criteria and notes are references: [[decision:N]],
         # [[fact:N]], [[belief:N]] and [[node:N]] are not, and each stays the text it is.
         body = (
             f"See [[{target}]], [[rule:{rule['id']}]], [[note:{decided['id']}]], "
@@ -624,7 +624,7 @@ async def references() -> None:
             await item_loaded(page, decision_ref)
             await no_panel_or_drawer(page)
             path = await crumbs(page)
-            by_page = path[2] == "Board" and path[-1] == f"N-{decided['id']}"
+            by_page = path[0] == "Board" and path[-1].startswith(f"N-{decided['id']} ")
             same_links = await links_of(client, target, mentioner) == before
             same_status = (await ok(client, "get_node", node=mentioner))["version"] == (
                 status_before["version"]
@@ -701,7 +701,7 @@ async def switching() -> None:
             )
             by_word = (
                 await hash_params(page) == {"item": story, "from": "roadmap"}
-                and (await crumbs(page))[2] == "Roadmap"
+                and (await crumbs(page))[0] == "Roadmap"
                 and await sidebar_current(page) == ["roadmap"]
             )
             # By the code a person reads for it (S-1), which is its kind and number.
@@ -725,7 +725,7 @@ async def switching() -> None:
             await item_loaded(page, f"note:{note['id']}")
             by_kind = (
                 await hash_params(page) == {"item": f"note:{note['id']}", "from": "graph"}
-                and (await crumbs(page))[2] == "Graph"
+                and (await crumbs(page))[0] == "Graph"
             )
             await page.keyboard.press("Control+k")
             await page.keyboard.type("activity")

@@ -1,6 +1,7 @@
 // The Graph page. It opens on "Structure", the whole project at once, and a search box at the top (the
 // "Find an epic, story, task, acceptance criterion or note to look at" box, graph-focus.js) chooses what the tabs
-// look at, so nothing has to be searched for first. Under it three ways to look, one question each:
+// look at, so nothing has to be searched for first. Under it three ways to look, one question each (the question
+// is the tab's tooltip, not words on the page):
 //   Structure  how does it all fit together?                       (graph-structure.js)
 //   Around     what do we know and what was decided about this?   (graph-around.js)
 //   Order      what must come first, and what does this block?     (graph-order.js)
@@ -180,7 +181,7 @@ function newItem() {
   const focus = resolve(focusOf(params));
   if (focus?.kind === 'epic') openCreate({ kind: 'story', parent: focus.ref });
   else if (focus?.kind === 'story') openCreate({ kind: 'task', parent: focus.ref });
-  else openCreate({ kind: 'epic' });
+  else openCreate({});
 }
 
 // -- the page ---------------------------------------------------------------------------------------------
@@ -203,6 +204,7 @@ function build() {
           'aria-controls': 'graph-view',
           tabindex: '-1',
           onclick: () => toTab(tab.id),
+          title: tab.ask,
           onkeydown: (event) => {
             const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
             const to = event.key === 'Home' ? 0 : event.key === 'End' ? TABS.length - 1 : step ? (index + step + TABS.length) % TABS.length : null;
@@ -213,7 +215,7 @@ function build() {
           },
         },
         icon(tab.icon, { size: 18 }),
-        h('span', { class: 'graph-tab-text' }, h('span', { class: 'graph-tab-name' }, tab.name), h('span', { class: 'graph-tab-ask' }, tab.ask)),
+        h('span', { class: 'graph-tab-name' }, tab.name),
       ),
     ),
   );
@@ -231,7 +233,7 @@ function build() {
       h(
         'header',
         { class: 'graph-head' },
-        h('div', { class: 'graph-title' }, h('h1', {}, 'Graph')),
+        h('h1', { class: 'sr-only' }, 'Graph'),
         focusBar.element,
         parts.actions,
       ),

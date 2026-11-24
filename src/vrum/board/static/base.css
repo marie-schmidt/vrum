@@ -38,8 +38,11 @@ hr { border: 0; border-top: var(--border-w) solid var(--border); margin: var(--s
 
 /* Who did something or holds something: the name with a sign before it, a person or an agent (a
    robot head), so that they are told apart by shape as well as by colour. */
-.actor { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
-.actor .icon { margin-right: 0.3em; color: var(--text-2); }
+.actor { display: inline-flex; align-items: baseline; max-width: 100%; white-space: nowrap; vertical-align: baseline; }
+.actor .icon { position: relative; top: 0.2em; margin-right: 0.3em; color: var(--text-2); }
+.chip .actor { align-items: center; }
+.chip .actor .icon { top: 0; }
+.actor-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .actor-agent .icon { color: var(--info); }
 /* In a warning (a claim that ran out) the sign takes the warning's colour, like the words. */
 .lapsed .actor .icon { color: inherit; }
@@ -129,8 +132,8 @@ legend { padding: 0 var(--space-1); font-size: var(--text-sm); font-weight: 600;
 /* A size: its letter (XS to XL), or what a story or epic adds up to; a rollup with nothing sized has a dashed edge. */
 .chip.size { justify-content: center; min-width: 1.75rem; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
 .chip.size-none { background: transparent; border: var(--border-w) dashed var(--border-strong); color: var(--text-2); }
-/* Two quiet chips: a check only a person can judge, and work that has no size yet (it is not a button, and is fainter than a size). */
-.chip.person-only { background: transparent; border: var(--border-w) solid var(--border); color: var(--text-2); font-weight: 500; }
+/* Quiet chips: a check only a person (or a verifier) can judge, and work that has no size yet (it is not a button, and is fainter than a size). */
+.chip:is(.person-only, .verifier-only, .github-only) { background: transparent; border: var(--border-w) solid var(--border); color: var(--text-2); font-weight: 500; }
 .chip.no-size { background: transparent; border: var(--border-w) dashed var(--border); color: var(--text-3); font-weight: 500; }
 
 /* A segmented control: one choice out of a few, side by side. */

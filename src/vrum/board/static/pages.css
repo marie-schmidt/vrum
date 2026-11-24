@@ -40,7 +40,6 @@
 .search-field { position: relative; display: flex; flex: 1 1 22rem; align-items: center; min-width: 0; }
 .search-field > .icon { position: absolute; left: var(--space-3); color: var(--text-3); pointer-events: none; }
 #search-box { width: 100%; padding-left: calc(var(--space-3) + 16px + var(--space-2)); }
-#search-go { flex: none; padding: 0 var(--space-5); }
 
 .search-notices { display: grid; gap: var(--space-2); }
 .search-notices:not(:has(> :not(:empty))) { display: none; }
@@ -181,16 +180,25 @@ td.side { min-width: 0; }
   table.pairs tr.pair { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* -- activity: the filters and the feed ----------------------------------------------------------- */
+/* -- activity: the toggle, the filters and the feed ----------------------------------------------- */
 
-.activity-layout { display: grid; gap: var(--space-4); align-items: start; }
-.activity-layout > .activity-side { order: -1; }
-@media (min-width: 1280px) {
-  .activity-layout { grid-template-columns: minmax(0, 1fr) minmax(20rem, 25rem); }
-  .activity-layout > .activity-side { order: 0; position: sticky; top: calc(var(--top-now, 0px) + var(--space-4)); max-height: calc(100vh - var(--top-now, 0px) - var(--space-6)); max-height: calc(100dvh - var(--top-now, 0px) - var(--space-6)); overflow-y: auto; overscroll-behavior: contain; }
+/* The toggle under the title: Changes | Working | Free to take, centred; the chosen view takes the whole width. */
+.activity-switch { display: flex; justify-content: center; margin: 0 0 var(--space-4); }
+.activity-tabs { max-width: 100%; }
+.activity-tabs button { display: inline-flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-3); font-size: var(--text-sm); white-space: nowrap; }
+.activity-tabs .tab-count { min-width: 1.25rem; padding: 0 var(--space-1); border-radius: 999px; background: var(--neutral-soft); color: var(--text); font-size: var(--text-xs); font-variant-numeric: tabular-nums; line-height: 1.25rem; text-align: center; }
+.activity-tabs .tab-count[hidden] { display: none; }
+@media (max-width: 479.98px) {
+  .activity-switch { justify-content: stretch; }
+  .activity-tabs { display: flex; width: 100%; }
+  .activity-tabs button { flex: 1 1 auto; justify-content: center; gap: var(--space-1); padding: 0 var(--space-2); }
 }
 .activity-feed { container-type: inline-size; }
-.activity-feed > h2 { margin: 0 0 var(--space-3); font-size: var(--text-lg); }
+.activity-feed-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0 0 var(--space-3); }
+.activity-feed-head #activity-count { margin: 0; }
+button.filter-toggle { gap: var(--space-2); }
+button.filter-toggle[aria-expanded="true"] { background: var(--surface-3); }
+.filter-count { display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 var(--space-1); border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: var(--text-xs); font-weight: 650; font-variant-numeric: tabular-nums; }
 
 .filter-form { margin: 0 0 var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
 .act-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); align-items: end; }
@@ -222,6 +230,12 @@ td.side { min-width: 0; }
 .event .handoff-note { margin-top: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--surface-2); border-left: 3px solid var(--border-strong); border-radius: var(--radius-sm); font-size: var(--text-sm); }
 .event .handoff-note > :first-child { margin-top: 0; }
 .event .handoff-note > :last-child { margin-bottom: 0; }
+.checks-run { margin-top: var(--space-1); }
+.run-checks { margin: var(--space-2) 0 0; border-left: 2px solid var(--border); }
+.run-check { padding: var(--space-1) 0 var(--space-1) var(--space-3); }
+.run-check-words { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+.run-check-time { flex: none; font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.run-check-evidence { margin-top: 2px; color: var(--text-2); font-size: var(--text-sm); }
 @container (max-width: 35.99rem) {
   .event { grid-template-columns: 1.75rem minmax(0, 1fr) auto; grid-template-areas: "icon actor time" "body body body"; gap: var(--space-1) var(--space-3); align-items: center; padding: var(--space-3); }
   .event-icon { grid-area: icon; }
@@ -231,26 +245,8 @@ td.side { min-width: 0; }
   .event-line { padding-top: 0; }
 }
 
-/* -- activity: who holds what --------------------------------------------------------------------- */
+/* -- activity: who holds what, and what is free ----------------------------------------------------- */
 
-.activity-side { background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
-.activity-side > summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); cursor: pointer; list-style: none; }
-.activity-side > summary::-webkit-details-marker { display: none; }
-.activity-side > summary h2 { margin: 0; font-size: var(--text-lg); }
-.side-count { margin: 0 0 0 auto; text-align: right; }
-.fold-chevron { color: var(--text-2); transition: transform var(--ease); }
-.activity-side[open] .fold-chevron { transform: rotate(90deg); }
-.working-body { padding: 0 var(--space-4) var(--space-4); }
-.working-body > section { margin-top: var(--space-4); padding-top: var(--space-3); border-top: var(--border-w) solid var(--border); }
-.working-body h3 { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
-@media (max-width: 699.98px) {
-  .activity-side > summary { flex-wrap: wrap; row-gap: var(--space-1); }
-  .side-count { flex-basis: 100%; margin: 0 0 0 calc(16px + var(--space-2)); text-align: left; }
-}
-@media (min-width: 1280px) {
-  .activity-side > summary { cursor: default; pointer-events: none; }
-  .fold-chevron, .side-count { display: none; }
-}
 #acting-as { margin: 0; }
 .claims { display: grid; gap: 0; }
 /* li.claim: the rows of Activity. (The Board's card note and the item page's Claim fact also carry
@@ -260,30 +256,52 @@ li.claim + li.claim { border-top: var(--border-w) solid var(--border); }
 li.claim:first-child { padding-top: 0; }
 li.claim.lapsed { margin: 0 calc(-1 * var(--space-2)); padding: var(--space-3) var(--space-2); background: var(--warn-soft); border-radius: var(--radius-sm); }
 .claim-main { display: flex; align-items: flex-start; gap: var(--space-2); grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
-.claim-main .icon { margin-top: 0.2em; color: var(--text-2); }
 .claim-main a { color: var(--text); font-weight: 600; text-decoration-color: var(--border-strong); }
 .claim-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); color: var(--text-2); font-size: var(--text-sm); }
-.holder, .claim-time { display: inline-flex; align-items: center; gap: var(--space-1); }
+.claim-time { display: inline-flex; align-items: center; gap: var(--space-1); }
 .countdown { font-variant-numeric: tabular-nums; }
 li.claim.lapsed .claim-meta, li.claim.lapsed .countdown { color: var(--warn); }
-.claims.free { max-height: 16rem; overflow: auto; }
-.claims.free li.claim { align-items: center; }
-.claims.free .claim-main { grid-column: 1; }
-.agents { display: grid; gap: 0; }
-.agent { display: grid; gap: var(--space-1); padding: var(--space-2) 0; font-size: var(--text-sm); }
-.agent + .agent { border-top: var(--border-w) solid var(--border); }
-.agent:first-child { padding-top: 0; }
+
+/* Working: a block for each person or agent, as many across as the width holds. */
+.agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr)); gap: var(--space-3); align-items: start; }
+.agent { display: grid; gap: var(--space-1); padding: var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
 .agent-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .agent-line .actor { font-weight: 650; }
 .agent-line .chip .icon { color: var(--text-2); }
+.agent .claims { margin: var(--space-1) 0 0; }
+.agent li.claim { padding: var(--space-2) 0; }
+.agent li.claim:first-child { padding-top: var(--space-1); }
+.agent li.claim.lapsed { padding: var(--space-2); }
+.agent-handoff { margin: var(--space-1) 0 0; }
 .chip.state-working { background: var(--accent-soft); color: var(--accent-text); }
 .chip.state-lapsed { background: var(--warn-soft); color: var(--warn); }
 .chip.state-finished { background: var(--ok-soft); color: var(--ok); }
-.free-controls { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: var(--space-3); align-items: end; margin: 0 0 var(--space-3); }
+
+/* Free to take: who is claiming and for how long, then the work, one row each across the whole width. */
+.free-wrap { display: grid; gap: var(--space-3); }
+.free-controls { display: grid; grid-template-columns: 9rem minmax(0, 32rem); gap: var(--space-3); align-items: end; }
 .free-controls .field, .free-controls form { margin: 0; }
 .lease-field input { width: 100%; }
+@media (max-width: 599.98px) {
+  .free-controls { grid-template-columns: minmax(0, 1fr); }
+}
+.claims.free { background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.claims.free li.claim { padding: var(--space-3) var(--space-4); }
+.claims.free .claim-main { grid-column: 1; }
 .claim-by-id-row { display: flex; gap: var(--space-2); }
 .claim-by-id-row input { flex: 1; min-width: 0; }
+
+/* The short list of items a word of a title finds, under the About box and the box to claim by name (activity.js). */
+.suggest-host { position: relative; flex: 1; min-width: 0; }
+.suggest-host input { width: 100%; }
+.item-suggest { position: absolute; z-index: 20; top: calc(100% + var(--space-1)); left: 0; right: 0; max-height: 16rem; margin: 0; padding: var(--space-1); overflow: auto; background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); }
+.item-suggest[hidden] { display: none; }
+.item-suggest-option { display: flex; align-items: center; gap: var(--space-2); min-height: var(--control-h-sm); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); font-size: var(--text-sm); cursor: pointer; }
+.item-suggest-option > .icon { flex: none; color: var(--text-2); }
+.item-suggest-code { flex: none; color: var(--text-2); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 600; }
+.item-suggest-option:hover, .item-suggest-option[aria-selected="true"] { background: var(--surface-3); }
+.item-suggest-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-suggest-context { flex: 0 1 38%; min-width: 0; overflow: hidden; color: var(--text-2); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 
 @media (pointer: coarse) {
   :is(.facet-button, button.small) { min-height: 2.5rem; }
@@ -310,10 +328,15 @@ li.claim.lapsed .claim-meta, li.claim.lapsed .countdown { color: var(--warn); }
 .tools-section .tools-lead { margin: 0 0 var(--space-3); color: var(--text); font-size: var(--text-md); }
 .tools-section .tools-lead:empty { display: none; }
 .tools-section form.tools-search { max-width: 36rem; margin: 0 0 var(--space-3); }
-/* Which tools to list: all, the ones agents are offered, or the rest. */
+/* Which tools to list: all, the ones agents are offered, the rest, or the two for keys that run code. Four
+   switches are wider than a medium page, so they stack sooner than the tools do. */
 .tools-show { max-width: 100%; margin: 0 0 var(--space-4); }
 .tools-show button { padding-inline: var(--space-3); white-space: nowrap; }
 .tools-show-count { margin-left: var(--space-1); color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
+@container (max-width: 56rem) {
+  .tools-show { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .tools-show button { justify-content: flex-start; text-align: left; }
+}
 
 .tools-section .tool-area { margin: 0; border-top: var(--border-w) solid var(--border); }
 .tool-group-title { margin: 0; font-size: var(--text-md); font-weight: 600; letter-spacing: 0; }
@@ -345,8 +368,6 @@ li.claim.lapsed .claim-meta, li.claim.lapsed .countdown { color: var(--warn); }
 @container (max-width: 42rem) {
   .tools-section .tool { grid-template-columns: minmax(0, 1fr); }
   .tool-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-  .tools-show { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .tools-show button { justify-content: flex-start; text-align: left; }
 }
 
 /* -- coverage: on a narrow page each row is a small card, so that a title is read whole and its button is

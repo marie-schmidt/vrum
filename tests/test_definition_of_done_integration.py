@@ -56,14 +56,10 @@ async def test_a_project_starts_empty_and_a_person_changes_it_with_the_version()
         assert (first.body["updated_by"], first.body["updated_by_kind"]) == (owner.name, "person")
         assert first.body["updated_at"]
         # Its list lines are its checks, each with a key that comes from its words.
+        plain = {"person_only": False, "verifier_only": False, "github": False, "ticks": 0}
         assert first.body["items"] == [
-            {"item": key_of("Tests pass"), "text": "Tests pass", "person_only": False, "ticks": 0},
-            {
-                "item": key_of("A person can try it"),
-                "text": "A person can try it",
-                "person_only": False,
-                "ticks": 0,
-            },
+            {"item": key_of("Tests pass"), "text": "Tests pass", **plain},
+            {"item": key_of("A person can try it"), "text": "A person can try it", **plain},
         ]
 
         second = set_it(owner, project, "- Tests pass\n- Docs updated", 2)

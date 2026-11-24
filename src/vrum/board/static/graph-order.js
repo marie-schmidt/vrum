@@ -4,8 +4,8 @@
 // at a time with a stepper, and with sizes a phase breaks into batches that fit a points budget. The other
 // way to look is chains (graph-chains.js): the "needs first" pictures, one chain at a time, and last the
 // loose items that have no links; a box opens the item's page, and pointing at one lights its chain. The
-// epic is the focus's epic; with nothing chosen it is the first epic the project has, and the page says
-// so. A chosen story or task is highlighted in it.
+// epic is the chosen item's epic, and a chosen story or task is highlighted in it. With nothing chosen
+// (or an item that is not there) there is no plan, only the sentence that asks for a choice.
 //
 // The address keys of this view: `mode=chains` (phases when there is none), `phase=<n>` and `chain=<n>`
 // (the step shown; the first when there is none), `budget=<points>` (5, 8, 13 or 21; 8 when there is none),
@@ -19,9 +19,10 @@ import { icon } from './icons.js';
 import { SIZES, SIZE_POINTS, SIZE_WORDS, kindIcon, kindLabel, parseItemRef, pointsOf, pointsWords, sizeChip } from './labels.js';
 import { chainPicture, chainsOf, orderSample } from './graph-chains.js';
 import { keyChip, statusChips, viewKey } from './graph-key.js';
+import { resolve } from './graph-model.js';
 import { doneGroup, phaseSection, storyGroups } from './graph-phases.js';
 import { BUDGETS, DEFAULT_BUDGET, inPlace, leavesOf, planOf, sumPoints } from './graph-plan.js';
-import { clip, codeOf, toggle, viewMessage, workModel } from './graph-shared.js';
+import { clip, code, codeOf, toggle, viewMessage, workModel } from './graph-shared.js';
 import { store } from './store.js';
 
 export const KEYS = ['mode', 'phase', 'chain', 'budget', 'blocked', 'pick'];
@@ -71,35 +72,36 @@ function render() {
     return;
   }
   const focus = focusRef ? model.node(focusRef) : null;
-  // With nothing chosen (or something that is not there), the first epic the project has.
-  const epic = focus ? model.epicOf(focus.ref) : model.epics[0] || null;
-  const byDefault = !focus;
-  const missing = Boolean(focusRef && !focus);
+  if (!focus) {
+    put(root, h('div', { class: 'graph-xv' }, model.epics.length ? chooseSomething() : nothingToOrder()));
+    return;
+  }
+  const epic = model.epicOf(focus.ref);
   if (!epic) {
     put(root, h('div', { class: 'graph-xv' }, nothingToOrder()));
     return;
   }
-  const lead = byDefault ? `${missing ? 'That item is not there, so this is' : 'This is'} the first epic.` : null;
   const leaves = leavesOf(model, epic.ref);
   if (!leaves.length) {
-    put(root, h('div', { class: 'graph-xv' }, nothingHere(epic, lead)));
+    put(root, h('div', { class: 'graph-xv' }, nothingHere(epic)));
     return;
   }
   const plan = planOf(model, leaves, store.links);
   const scope = model.subtree(epic.ref);
   const asked = api.params.get('pick');
-  const highlight = asked && scope.has(asked) ? asked : focus && focus.kind !== 'epic' ? focus.ref : null;
+  const highlight = asked && scope.has(asked) ? asked : focus.kind !== 'epic' ? focus.ref : null;
   const mode = api.params.get('mode') === 'chains' ? 'chains' : 'phases';
   const c = { model, plan, epic, scope, highlight };
   const view = mode === 'chains' ? chainsView(c) : phasesView(c);
 
   const toolbar = h('div', { class: 'graph-or-toolbar' }, modeSwitch(mode), view.controls, view.key);
+  const epicLabel = focus.ref === epic.ref ? null : h('span', { class: 'graph-or-scope', title: `${codeOf(epic)} ${epic.title}` }, kindIcon('epic', 14), code(codeOf(epic)), h('span', { class: 'graph-or-scope-name' }, clip(epic.title, 60)));
   const main = h(
     'section',
     { class: 'graph-x-panel graph-or-main', 'aria-labelledby': 'graph-or-title', onkeydown: view.arrows },
-    h('div', { class: 'graph-x-head' }, h('h2', { id: 'graph-or-title' }, `Order of work in ${codeOf(epic)} ${clip(epic.title, 60)}`), lead ? h('p', { class: 'quiet', id: 'graph-or-lead' }, lead) : null),
+    h('h2', { id: 'graph-or-title', class: 'sr-only' }, `Order of work in ${codeOf(epic)} ${clip(epic.title, 60)}`),
     toolbar,
-    h('div', { class: 'graph-or-summary' }, view.summary),
+    epicLabel || view.summary ? h('p', { class: 'graph-or-summary quiet' }, epicLabel, view.summary || null) : null,
     view.content,
   );
   put(root, h('div', { class: 'graph-xv' }, h('div', { class: 'graph-or', 'data-mode': mode }, main)));
@@ -146,8 +148,6 @@ function arrowsFor(index, count, go) {
   };
 }
 
-const chip = (...children) => h('span', { class: 'chip' }, ...children);
-
 // -- phases -------------------------------------------------------------------------------------------
 
 function phasesView({ model, plan, highlight }) {
@@ -193,12 +193,13 @@ function phasesView({ model, plan, highlight }) {
   }
   const unsized = plan.open.filter((node) => pointsOf(node) === null).length;
   const summary = [
-    chip(`${plan.open.length} to do`),
-    plan.done.length ? h('span', { class: 'chip ok' }, icon('done', { size: 14 }), `${plan.done.length} done`) : null,
-    plan.dropped.length ? chip(`${plan.dropped.length} dropped not shown`) : null,
-    sized ? chip(plural(sumPoints(plan.open, pointsOf), 'point')) : null,
-    sized && unsized ? chip(`${unsized} not sized`) : null,
-  ];
+    plan.open.length ? `${plan.open.length} to do` : null,
+    sized && plan.open.length ? plural(sumPoints(plan.open, pointsOf), 'point') : null,
+    sized && unsized ? `${unsized} not sized` : null,
+    plan.dropped.length ? `${plan.dropped.length} dropped not shown` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
   // The group of finished work opens by itself when the item being looked for is in it.
   const doneOpenNow = doneOpen || plan.done.some((node) => node.ref === highlight);
   const content = h(
@@ -219,7 +220,7 @@ function phasesView({ model, plan, highlight }) {
         ].filter(Boolean),
       },
       sized ? { label: 'Sizes', chips: SIZES.map((size) => keyChip(sizeChip({ size }), `${SIZE_WORDS[size]}, ${pointsWords(SIZE_POINTS[size])}`)) } : null,
-      { label: 'Marks', chips: [...statusChips(), keyChip(icon('clock', { size: 14 }), 'Overdue: how many days late', { className: 'graph-key-late' }), sized ? keyChip(h('span', { class: 'chip graph-or-big' }, 'Bigger than a run'), 'Bigger than the budget, so a batch of its own') : null].filter(Boolean) },
+      { label: 'Marks', chips: [...statusChips(), keyChip(icon('alert', { size: 14 }), 'Overdue: how many days late', { className: 'graph-key-late' }), sized ? keyChip(h('span', { class: 'chip graph-or-big' }, 'Bigger than a run'), 'Bigger than the budget, so a batch of its own') : null].filter(Boolean) },
     ],
   });
   return { controls, key, summary, content, fix, arrows: count ? arrowsFor(phase, count, go) : null };
@@ -255,23 +256,18 @@ function chainsView({ model, plan, scope, highlight }) {
 
   let content;
   let picture = null;
-  const summary = [chip(plural(chains.length, 'chain')), loose.length ? chip(`${plural(loose.length, 'loose item')}`) : null];
+  let summary = '';
   if (chain) {
     picture = chainPicture(model, chain, { scope, pick: highlight, blocked, open: api.open });
     stop.push(picture.stop);
     const count = (test) => chain.refs.filter((ref) => test(model.node(ref), ref)).length;
     const blockedCount = count((node) => node.status === 'blocked');
     const lateCount = count((_, ref) => model.late(ref) > 0);
-    summary.push(
-      chip(plural(chain.refs.length, 'item'), ' in this chain'),
-      blockedCount ? h('span', { class: 'chip status status-blocked' }, icon('blocked', { size: 14 }), `${blockedCount} blocked`) : null,
-      lateCount ? h('span', { class: 'chip warn' }, icon('clock', { size: 14 }), `${lateCount} overdue`) : null,
-      h('span', { class: 'chip ok' }, icon('done', { size: 14 }), `${count((node) => node.status === 'done')} done`),
-    );
+    summary = [`${plural(chain.refs.length, 'item')} in this chain`, blockedCount ? `${blockedCount} blocked` : null, lateCount ? `${lateCount} overdue` : null, `${count((node) => node.status === 'done')} done`].filter(Boolean).join(', ');
     content = h('section', { class: 'graph-or-chain', id: 'graph-or-chain', 'data-stop': at, 'aria-label': `Chain ${at} of ${chains.length}` }, picture.element);
   } else if (onLoose) {
     const ctx = { model, plan, highlight, jump: () => {} };
-    content = h('section', { class: 'graph-or-loose', id: 'graph-or-loose', 'aria-labelledby': 'graph-or-loose-title' }, h('h3', { class: 'graph-or-phase-head', id: 'graph-or-loose-title' }, `Loose items (${loose.length})`), storyGroups(ctx, loose));
+    content = h('section', { class: 'graph-or-loose', id: 'graph-or-loose', 'aria-labelledby': 'graph-or-loose-title' }, h('h3', { class: 'sr-only', id: 'graph-or-loose-title' }, `Loose items (${loose.length})`), storyGroups(ctx, loose));
   } else {
     content = h('p', { class: 'graph-x-note quiet' }, 'Nothing is left to order here.');
   }
@@ -282,7 +278,7 @@ function chainsView({ model, plan, scope, highlight }) {
         label: 'Boxes and lines',
         chips: [
           ...statusChips(),
-          keyChip(icon('clock', { size: 14 }), 'Overdue: how many days late', { className: 'graph-key-late' }),
+          keyChip(icon('alert', { size: 14 }), 'Overdue: how many days late', { className: 'graph-key-late' }),
           picture && picture.outside.length ? keyChip(h('span', { class: 'graph-or-dash-box' }), 'Dashed box: outside this epic') : null,
           chain && blocked ? keyChip(orderSample('is-hot'), 'Red: blocked work and what waits on it') : null,
           picture ? keyChip(orderSample('is-on-path'), 'Highlighted: what it needs first and what waits for it') : null,
@@ -325,13 +321,19 @@ function restoreFocus(keep) {
 function otherKind(model, ref, parsed) {
   const record = (store[{ rule: 'rules', note: 'notes' }[parsed.kind]] || []).find((one) => one.id === parsed.id);
   const concerned = parsed.kind === 'rule' ? (record?.node ? [record.node] : []) : record?.nodes || [];
+  const item = resolve(ref);
   return viewMessage(
-    `${kindLabel(parsed.kind)} ${parsed.number} is not work`,
+    item ? `${item.code} ${clip(item.title, 80)} is not work` : `A ${kindLabel(parsed.kind).toLowerCase()} is not work`,
     'Order follows "needs first" links between epics, stories and tasks. Find one of those in the box above and see what must come first.',
     concerned.length
-      ? [h('p', { class: 'graph-x-h' }, 'It concerns'), h('div', { class: 'graph-x-chips is-centred' }, concerned.map((one) => (model.node(one) ? h('button', { class: 'chip graph-x-chip-link', type: 'button', title: model.node(one).title, onclick: () => api.setFocus(one) }, kindIcon(model.node(one).kind, 14), codeOf(model.node(one))) : null)))]
+      ? [h('p', { class: 'graph-x-h' }, 'It concerns'), h('div', { class: 'graph-x-chips is-centred' }, concerned.map((one) => (model.node(one) ? h('button', { class: 'chip graph-x-chip-link', type: 'button', title: `${codeOf(model.node(one))} ${model.node(one).title}`, onclick: () => api.setFocus(one) }, kindIcon(model.node(one).kind, 14), code(codeOf(model.node(one))), h('span', { class: 'graph-x-chip-name' }, model.node(one).title)) : null)))]
       : null,
   );
+}
+
+// Nothing is chosen, or what was chosen is not there: there is no plan to show, only the way to one.
+function chooseSomething() {
+  return h('section', { class: 'graph-x-panel graph-x-empty', id: 'graph-or-empty' }, h('p', { class: 'quiet' }, 'Choose an epic, story or task above to see its order.'));
 }
 
 // There is no work in the project, so nothing to order.
@@ -344,10 +346,10 @@ function nothingToOrder() {
 }
 
 // The epic has no stories or tasks, so there is no work in it to order.
-function nothingHere(epic, lead) {
+function nothingHere(epic) {
   return viewMessage(
-    `Nothing in ${codeOf(epic)} to order yet`,
-    `${lead ? `${lead} ` : ''}It has no stories or tasks.`,
+    `Nothing in ${codeOf(epic)} ${clip(epic.title, 60)} to order yet`,
+    'It has no stories or tasks.',
     h('div', { class: 'graph-actions' }, viewLink('board', {}, { class: 'link-button' }, 'Go to the Board')),
   );
 }

@@ -28,15 +28,34 @@ NOT_TOOLS = {
     "in_progress",
     "needs_first",
     "person_only",
+    "verifier_only",
+    "pull_request",
     "relates_to",
     "email_verified",
     "sso_login",
     "certificate_not_accepted",
     "directory_error",
     "service_account_refused",
+    "poll_after_seconds",
+    "new_epic",
+    "after_id",
+    "context_chars",
+    "cut_note",
+    "left_out",
+    "max_chars",
+    "next_after_id",
+    "not_before",
+    "held_by",
+    "discovered_from",
+    "event_id",
+    "routine_why",
+    "scores_note",
+    "changes_requested",
+    "plan_changes_requested",
+    "look_into",
 }
 # Files the text names that are made when it is used, or that live in the reader's own project.
-NOT_IN_THE_REPOSITORY = {".env", ".mcp.json"}
+NOT_IN_THE_REPOSITORY = {".env", ".mcp.json", "CLAUDE.md"}
 
 
 def prose(text: str) -> str:

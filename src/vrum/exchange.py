@@ -29,12 +29,15 @@ were held or settled) into the words of now, a version 4 file (a rule on a `stor
 definition of done) into one of version 5, and a version 5 file (no sizes, no checks) into one of
 version 6, before anything here looks at it.
 
+A claim or handoff event may say where the work was (repository, branch, commit, pull_request) and
+which run it was (run_label, client_name): the words of whereabouts.py, which the import checks.
+
 Left out on purpose: claims (a claim is a lease that runs out, not part of the graph; the events
 that recorded it are exported) and everything that is worked out from the rest (what is ready, the
 search columns and the semantic index, which the server rebuilds)."""
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
@@ -43,6 +46,8 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError
 
+from vrum.asks import EFFECTS as ASK_EFFECTS
+from vrum.asks import KINDS as ASK_KINDS
 from vrum.common import (
     NODE_KINDS,
     Refusal,
@@ -68,6 +73,7 @@ from vrum.exchange_shapes import (
     problems_in,
     refuse_file,
 )
+from vrum.whereabouts import WHERE_FIELDS, clean_whereabouts
 
 FORMAT = "vrum-export"
 # Version 6 carries the size of a story or task and the ticks of the definition of done's checks.
@@ -242,7 +248,7 @@ class LinkItem(Item):
     id: Id
     source: NodeRef
     target: NodeRef
-    link_type: Literal["needs_first", "supersedes", "duplicates", "relates_to"]
+    link_type: Literal["needs_first", "supersedes", "duplicates", "relates_to", "discovered_from"]
     created_at: Moment
 
 
@@ -327,6 +333,20 @@ class EventItem(Item):
         "note_unlinked",
         "note_confirmed",
         "note_unconfirmed",
+        "ask_raised",
+        "ask_answered",
+        "gate_added",
+        "gate_removed",
+        "plan_proposed",
+        "plan_revised",
+        "plan_changes_requested",
+        "plan_approved",
+        "plan_rejected",
+        "plan_template_saved",
+        "plan_template_deleted",
+        "placement_proposed",
+        "placement_accepted",
+        "placement_rejected",
     ]
     actor: str
     actor_kind: ActorKind
@@ -425,7 +445,7 @@ def _event_problems(place: str, event: EventItem) -> list[str]:
     elif action.startswith("note_"):
         wrong = event.note_id is None
         needs = "note_id"
-    elif action == "definition_of_done_changed":
+    elif action in _ABOUT_NOTHING:
         wrong = any(
             value is not None
             for value in (
@@ -445,7 +465,328 @@ def _event_problems(place: str, event: EventItem) -> list[str]:
             or event.other_note_id is not None
         )
         needs = "node, and no rule_id, note_id or other_note_id"
-    return [f"{place}: the action '{action}' needs {needs}"] if wrong else []
+    problems = [f"{place}: the action '{action}' needs {needs}"] if wrong else []
+    if action in _WHERE_ACTIONS:
+        for side, data in (("before", event.before), ("after", event.after)):
+            problems.extend(_where_problems(f"{place} {side}", data or {}))
+    if action in _EVENT_SHAPES:
+        problems.extend(_EVENT_SHAPES[action](place, event))
+    if action == "ask_raised":
+        problems.extend(_ask_raised_problems(place, event))
+    if action == "ask_answered":
+        problems.extend(_ask_answered_problems(place, event))
+    return problems
+
+
+# The events that are about the whole project and no one node.
+_ABOUT_NOTHING = (
+    "definition_of_done_changed",
+    "plan_proposed",
+    "plan_revised",
+    "plan_changes_requested",
+    "plan_approved",
+    "plan_rejected",
+    "plan_template_saved",
+    "plan_template_deleted",
+    "placement_proposed",
+    "placement_accepted",
+    "placement_rejected",
+)
+_TEMPLATE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
+_MOMENT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def _whole(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _gate_added_problems(place: str, event: "EventItem") -> list[str]:
+    after = event.after
+    if after.get("kind") == "timer":
+        if not (
+            isinstance(after.get("not_before"), str) and _MOMENT.fullmatch(after["not_before"])
+        ):
+            return [f"{place}: a timer gate needs not_before as YYYY-MM-DDTHH:MM:SSZ"]
+    elif after.get("kind") == "approval":
+        if not _whole(after.get("ask")):
+            return [f"{place}: an approval gate needs ask, the number of its ask"]
+    else:
+        return [f"{place}: kind must be timer or approval"]
+    return []
+
+
+def _gate_removed_problems(place: str, event: "EventItem") -> list[str]:
+    return [] if _whole(event.after.get("gate")) else [f"{place}: gate must be a gate's number"]
+
+
+def _plan_proposed_problems(place: str, event: "EventItem") -> list[str]:
+    after = event.after
+    problems = []
+    if not _text_of(after, "title"):
+        problems.append(f"{place}: a plan needs its title")
+    items = after.get("items")
+    if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
+        problems.append(f"{place}: items must be the references the plan made")
+    if not _snapshot_ok(after.get("snapshot")):
+        problems.append(f"{place}: snapshot must list what the plan held, an entry for each item")
+    return problems
+
+
+def _snapshot_ok(snapshot: Any) -> bool:
+    return isinstance(snapshot, list) and all(
+        isinstance(one, dict) and isinstance(one.get("ref"), str) for one in snapshot
+    )
+
+
+def _plan_revised_problems(place: str, event: "EventItem") -> list[str]:
+    after = event.after
+    problems = []
+    if not _whole(after.get("plan")):
+        problems.append(f"{place}: plan must be the number of the plan revised")
+    revision = after.get("revision")
+    if not _whole(revision) or int(revision or 0) < 2:
+        problems.append(f"{place}: revision must be a number from 2")
+    items = after.get("items")
+    if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
+        problems.append(f"{place}: items must be the references the revision holds")
+    if not _snapshot_ok(after.get("snapshot")):
+        problems.append(
+            f"{place}: snapshot must list what the revision held, an entry for each item"
+        )
+    return problems
+
+
+def _plan_changes_requested_problems(place: str, event: "EventItem") -> list[str]:
+    after = event.after
+    problems = []
+    if not _whole(after.get("plan")):
+        problems.append(f"{place}: plan must be the number of the plan")
+    if not _whole(after.get("revision")):
+        problems.append(f"{place}: revision must be the number of the revision reviewed")
+    if not _text_of(after, "summary"):
+        problems.append(f"{place}: a request for changes needs its summary")
+    comments = after.get("comments")
+    if not isinstance(comments, list) or not all(
+        isinstance(one, dict) and isinstance(one.get("item"), str) and _text_of(one, "text")
+        for one in comments
+    ):
+        problems.append(f"{place}: comments must each name an item and say something")
+    if event.actor_kind != "person":
+        problems.append(f"{place}: only a person asks for changes to a plan")
+    return problems
+
+
+def _plan_decided_problems(place: str, event: "EventItem") -> list[str]:
+    problems = []
+    if not _whole(event.after.get("plan")):
+        problems.append(f"{place}: plan must be the number of the plan decided")
+    if not _whole(event.after.get("revision")):
+        problems.append(f"{place}: revision must be the number of the revision decided")
+    if event.actor_kind != "person":
+        problems.append(f"{place}: a plan is decided by a person")
+    return problems
+
+
+def _placement_proposed_problems(place: str, event: "EventItem") -> list[str]:
+    after = event.after
+    problems = []
+    items = after.get("items")
+    if not (
+        isinstance(items, list)
+        and 1 <= len(items) <= 20
+        and all(
+            isinstance(i, dict) and isinstance(i.get("ref"), str) and "from_parent" in i
+            for i in items
+        )
+    ):
+        problems.append(f"{place}: items must be 1 to 20 of {{ref, title, from_parent}}")
+    if not _text_of(after, "reason"):
+        problems.append(f"{place}: a proposal needs its reason")
+    parent, epic = after.get("parent"), after.get("new_epic")
+    if (isinstance(parent, str)) == (isinstance(epic, dict)):
+        problems.append(f"{place}: give parent or new_epic, and not both")
+    elif isinstance(epic, dict) and not _text_of(epic, "title"):
+        problems.append(f"{place}: new_epic needs its title")
+    return problems
+
+
+def _placement_decided_problems(place: str, event: "EventItem") -> list[str]:
+    problems = []
+    if not _whole(event.after.get("placement")):
+        problems.append(f"{place}: placement must be the number of the proposal decided")
+    if event.actor_kind != "person":
+        problems.append(f"{place}: a proposal is decided by a person")
+    return problems
+
+
+def _template_problems(place: str, event: "EventItem") -> list[str]:
+    problems = []
+    name = event.after.get("name")
+    if not (isinstance(name, str) and _TEMPLATE_NAME.fullmatch(name)):
+        problems.append(f"{place}: name must be a template's name, such as release-checklist")
+    if event.action == "plan_template_saved" and not isinstance(event.after.get("template"), dict):
+        problems.append(f"{place}: a saved template needs its template")
+    return problems
+
+
+_EVENT_SHAPES: dict[str, Callable[[str, "EventItem"], list[str]]] = {
+    "gate_added": _gate_added_problems,
+    "gate_removed": _gate_removed_problems,
+    "plan_proposed": _plan_proposed_problems,
+    "plan_revised": _plan_revised_problems,
+    "plan_changes_requested": _plan_changes_requested_problems,
+    "plan_approved": _plan_decided_problems,
+    "plan_rejected": _plan_decided_problems,
+    "plan_template_saved": _template_problems,
+    "plan_template_deleted": _template_problems,
+    "placement_proposed": _placement_proposed_problems,
+    "placement_accepted": _placement_decided_problems,
+    "placement_rejected": _placement_decided_problems,
+}
+
+
+def _text_of(data: dict[str, Any], field: str) -> str:
+    value = data.get(field)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _ask_raised_problems(place: str, event: EventItem) -> list[str]:
+    """An ask says what is asked, as the database requires and as `clean_ask` writes it."""
+    after = event.after
+    problems = []
+    if not _text_of(after, "question"):
+        problems.append(f"{place}: an ask needs its question")
+    if after.get("kind") not in ASK_KINDS:
+        problems.append(f"{place}: kind must be {' or '.join(ASK_KINDS)}")
+    if after.get("effect") not in ASK_EFFECTS:
+        problems.append(f"{place}: effect must be {' or '.join(ASK_EFFECTS)}")
+    choices = after.get("choices")
+    if choices is not None and not (
+        isinstance(choices, list) and all(isinstance(c, str) and c.strip() for c in choices)
+    ):
+        problems.append(f"{place}: choices must be a list of words")
+    return problems
+
+
+def _ask_answered_problems(place: str, event: EventItem) -> list[str]:
+    after = event.after
+    problems = []
+    if not isinstance(after.get("ask"), int) or isinstance(after.get("ask"), bool):
+        problems.append(f"{place}: ask must be the number of the ask it answers")
+    if not _text_of(after, "answer"):
+        problems.append(f"{place}: an answer cannot be empty")
+    if event.actor_kind != "person":
+        problems.append(f"{place}: an ask is answered by a person")
+    return problems
+
+
+def _ask_cross_problems(events: list[EventItem]) -> list[str]:
+    """Every answer names an ask in the file, about the same story or task, and an ask is answered
+    at most once."""
+    raised = {e.id: e for e in events if e.action == "ask_raised"}
+    seen: set[int] = set()
+    problems = []
+    for index, event in enumerate(events):
+        if event.action != "ask_answered" or not isinstance(event.after.get("ask"), int):
+            continue
+        place = f"events[{index}] (id {event.id})"
+        number = event.after["ask"]
+        if number not in raised:
+            problems.append(f"{place}: ask={number} is not an ask in the file")
+        elif raised[number].node != event.node:
+            problems.append(
+                f"{place}: ask={number} is about {raised[number].node}, not {event.node}"
+            )
+        if number in seen:
+            problems.append(f"{place}: ask {number} is answered twice")
+        seen.add(number)
+    return problems
+
+
+def _gate_and_plan_cross_problems(events: list[EventItem]) -> list[str]:
+    """An approval gate names an ask in the file (about the same item), a lifted gate names a gate
+    in the file once, and a decided plan or proposal to move work names one in the file once."""
+    raised = {e.id: e for e in events if e.action == "ask_raised"}
+    gates = {e.id: e for e in events if e.action == "gate_added"}
+    plans = {e.id for e in events if e.action == "plan_proposed"}
+    placements = {e.id for e in events if e.action == "placement_proposed"}
+    lifted: set[int] = set()
+    decided: set[int] = set()
+    placed: set[int] = set()
+    revised: set[tuple[int, int]] = set()
+    asked: set[tuple[int, int]] = set()
+    problems = []
+    for index, event in enumerate(events):
+        place = f"events[{index}] (id {event.id})"
+        after = event.after
+        if event.action == "gate_added" and after.get("kind") == "approval":
+            ask = after.get("ask")
+            if _whole(ask) and ask not in raised:
+                problems.append(f"{place}: ask={ask} is not an ask in the file")
+            elif isinstance(ask, int) and raised[ask].node != event.node:
+                problems.append(f"{place}: ask={ask} is about {raised[ask].node}, not {event.node}")
+        elif event.action == "gate_removed" and _whole(after.get("gate")):
+            gate = after["gate"]
+            if gate not in gates:
+                problems.append(f"{place}: gate={gate} is not a gate in the file")
+            elif gates[gate].node != event.node:
+                problems.append(
+                    f"{place}: gate={gate} is about {gates[gate].node}, not {event.node}"
+                )
+            if gate in lifted:
+                problems.append(f"{place}: gate {gate} is lifted twice")
+            lifted.add(gate)
+        elif event.action in ("plan_approved", "plan_rejected") and _whole(after.get("plan")):
+            plan = after["plan"]
+            if plan not in plans:
+                problems.append(f"{place}: plan={plan} is not a plan in the file")
+            if plan in decided:
+                problems.append(f"{place}: plan {plan} is decided twice")
+            decided.add(plan)
+        elif event.action in ("plan_revised", "plan_changes_requested") and _whole(
+            after.get("plan")
+        ):
+            plan = after["plan"]
+            if plan not in plans:
+                problems.append(f"{place}: plan={plan} is not a plan in the file")
+            revision = after.get("revision")
+            if isinstance(revision, int) and _whole(revision):
+                seen = revised if event.action == "plan_revised" else asked
+                if (plan, revision) in seen:
+                    problems.append(
+                        f"{place}: revision {revision} of plan {plan} is "
+                        f"{'made' if event.action == 'plan_revised' else 'asked for changes'} twice"
+                    )
+                seen.add((plan, revision))
+        elif event.action in ("placement_accepted", "placement_rejected") and _whole(
+            after.get("placement")
+        ):
+            placement = after["placement"]
+            if placement not in placements:
+                problems.append(f"{place}: placement={placement} is not a proposal in the file")
+            if placement in placed:
+                problems.append(f"{place}: proposal {placement} is decided twice")
+            placed.add(placement)
+    return problems
+
+
+# The events that may say where the work is (see whereabouts.py).
+_WHERE_ACTIONS = ("claimed", "claim_renewed", "claim_released", "handoff")
+
+
+def _where_problems(place: str, data: dict[str, Any]) -> list[str]:
+    """What an event says about where the work is and which run it was has to be what the server
+    itself writes (see `clean_whereabouts`): it is shown to people and to other agents."""
+    said = {field: data[field] for field in WHERE_FIELDS if field in data}
+    if not all(isinstance(value, str) for value in said.values()):
+        return [f"{place}: {', '.join(said)} must be text"]
+    try:
+        cleaned = clean_whereabouts(**said)
+    except Refusal as refusal:
+        return [f"{place}: {str(refusal).removesuffix(' Nothing was changed.')}"]
+    if cleaned != said:
+        return [f"{place}: {', '.join(said)} must be written as the server writes them"]
+    return []
 
 
 def _check_references(document: Document, origins: dict[int, str]) -> list[str]:
@@ -548,6 +889,8 @@ def _check_references(document: Document, origins: dict[int, str]) -> list[str]:
         need(place, "note_id", notes, event.note_id)
         need(place, "other_note_id", notes, event.other_note_id)
         problems.extend(_event_problems(place, event))
+    problems.extend(_ask_cross_problems(document.events))
+    problems.extend(_gate_and_plan_cross_problems(document.events))
     return problems
 
 
@@ -754,10 +1097,17 @@ async def _load(conn: AsyncConnection, doc: Document) -> None:
     # The items of the checklist are worked out from the text, as when a person sets it.
     await _insert(
         conn,
-        "INSERT INTO definition_items (item_key, position, text, person_only) "
-        "VALUES (%s, %s, %s, %s)",
+        "INSERT INTO definition_items (item_key, position, text, person_only, verifier_only, "
+        "github) VALUES (%s, %s, %s, %s, %s, %s)",
         (
-            (item.item, position, item.text, item.person_only)
+            (
+                item.item,
+                position,
+                item.text,
+                item.person_only,
+                item.verifier_only,
+                item.github,
+            )
             for d in doc.definition_of_done
             for position, item in enumerate(definition_items(d.body), 1)
         ),

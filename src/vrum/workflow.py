@@ -8,13 +8,17 @@ node or a plan also says whether something like it already exists.
 Everything in the context of a piece of work comes by exact link, from the graph. The only thing
 that comes by meaning is the list of similar items, and it is labelled as suggestions."""
 
+import base64
+import binascii
+import json
 from datetime import date
 from typing import Any
 
 import psycopg
 from psycopg import AsyncConnection
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from vrum.asks import AskState, asks_of, raise_ask
 from vrum.checks import checks_of, refuse_while_unticked
 from vrum.claims import (
     HANDOFF_OUTCOMES,
@@ -37,11 +41,15 @@ from vrum.common import (
     page_size,
     parse_day,
     parse_node_ref,
+    record_event,
+    refuse_secrets,
     split_node_ref,
     split_page,
 )
 from vrum.db import Database
 from vrum.definition_of_done import read_definition
+from vrum.gates import MOST_TITLE_CHARS as MOST_PLAN_TITLE_CHARS
+from vrum.gates import PLAN_PROPOSED, plan_snapshot
 from vrum.graph import (
     EVENT_COLUMNS,
     KINDS,
@@ -68,6 +76,18 @@ from vrum.lineage import (
 )
 from vrum.links import LINK_TYPES, insert_link
 from vrum.notes import require_note
+from vrum.plan_checks import circle_through
+from vrum.plan_templates import (
+    MOST_TEMPLATE_BYTES,
+    PlanTemplateInfo,
+    PlanTemplatePage,
+    TemplateProblems,
+    clean_name,
+    expand,
+    parse_template,
+    sample_refs,
+    sample_values,
+)
 from vrum.records import IN_FORCE
 from vrum.rules import RULE_STATUSES, insert_rule, require_rule
 from vrum.search import Searcher, SearchResult
@@ -82,6 +102,7 @@ _URGENCY = (
 # so it is not handed out as well.
 _FREE_WORK = (
     "s.kind IN ('story', 'task') AND s.claimed_by IS NULL AND cardinality(s.waiting_on) = 0 "
+    "AND cardinality(s.held_by) = 0 "
     "AND (s.status = 'ready' OR (s.status = 'in_progress' AND s.lapsed_claim_by IS NOT NULL)) "
     "AND (s.kind = 'task' OR NOT EXISTS (SELECT 1 FROM nodes t WHERE t.parent = s.ref "
     "AND t.status NOT IN ('done', 'dropped'))) "
@@ -96,8 +117,10 @@ _SIMILAR_WANTED = 5
 _SECTION_NAMES = {
     "parents": "parents",
     "acceptance_criteria": "acceptance criteria",
+    "asks": "asks",
     "handoffs": "handoff notes",
     "prerequisites": "prerequisites",
+    "discovered_from": "items it was discovered from",
     "notes": "notes",
     "project_wide_notes": "project-wide notes",
     "past_notes": "past notes",
@@ -136,6 +159,15 @@ class DefinitionCheck(BaseModel):
     person_only: bool = Field(
         description="True when only a person can judge this check: do not tick it. Say in your "
         "handoff note what they should look at."
+    )
+    verifier_only: bool = Field(
+        description="True when only a verifier that did not do the work on this item may tick "
+        "this check (and a person): if that is not you, do not tick it. Finish the item as "
+        "blocked and say in the handoff note that it is ready for a verifier."
+    )
+    github: bool = Field(
+        description="True when a verifier's tick of this check starts its evidence with a GitHub "
+        "pull request address, then says what was seen there."
     )
     checked: bool = Field(description="True when it is already ticked on this item.")
 
@@ -211,13 +243,24 @@ class WorkContext(BaseModel):
         "ticked or not. Before you finish it as done, do what each says (run the tests, and so "
         "on), then tick each one with set_check, saying how you checked. A check with "
         "person_only is not yours to tick: finish the item as blocked and say in the handoff "
-        "note what a person should look at."
+        "note what a person should look at. One with verifier_only is for a verifier that did "
+        "not do the work on this item: if that is not you, finish the item as blocked and say "
+        "in the handoff note that it is ready for a verifier."
+    )
+    asks: list[AskState] = Field(
+        description="What was asked of a person about this very item, the open ones first and "
+        "then the latest answered, each with the person's answer when there is one. An answer is "
+        "final: read it before you start. An ask still open means you are waiting for a person."
     )
     handoffs: list[Handoff] = Field(
         description="Notes left by earlier holders of this very item, oldest first."
     )
     prerequisites: list[Prerequisite] = Field(
         description="What it needs first (needs_first), with the notes left on each."
+    )
+    discovered_from: list[Brief] = Field(
+        description="The work this was found while doing (a discovered_from link): where it came "
+        "from, so you can read why it exists. It never made this wait."
     )
     notes: list[ContextNote] = Field(
         description="Notes in force linked to this item or its parents, other than project-wide "
@@ -318,7 +361,9 @@ class PlanLink(BaseModel):
     target: Ref = Field(
         description="A key in this plan, or the reference (such as story:12) of an existing node."
     )
-    link_type: str = Field(description="needs_first, supersedes, duplicates or relates_to.")
+    link_type: str = Field(
+        description="needs_first, supersedes, duplicates, relates_to or discovered_from."
+    )
 
 
 class PlanRule(BaseModel):
@@ -352,6 +397,13 @@ class PlanResult(BaseModel):
         description="The new acceptance criteria (rules), in the order you gave them."
     )
     counts: dict[str, int]
+    plan: int | None = Field(
+        description="For a draft, the plan's number (list_plans, approve_plan). Empty otherwise."
+    )
+    draft: bool = Field(
+        description="True when the plan was proposed: its work is held until a person approves "
+        "the plan, and no agent can claim it before."
+    )
     similar: list[PlanSimilar] = Field(
         description="For the epics and stories that look like something that already exists: "
         "what it looks like. Suggestions. Everything was created anyway."
@@ -392,6 +444,31 @@ class UpdateNodesResult(BaseModel):
     refused: int
 
 
+# The feed's cursor says where to continue, and says nothing else: it is opaque on purpose, so that
+# what it holds can change without anyone reading it.
+_CURSOR_PREFIX = "vrum-feed:1:"
+DEFAULT_POLL_SECONDS = 5.0
+
+
+def feed_cursor(event_id: int) -> str:
+    """The opaque cursor that continues the change feed after an event."""
+    return base64.urlsafe_b64encode(f"{_CURSOR_PREFIX}{event_id}".encode()).decode().rstrip("=")
+
+
+def feed_position(cursor: str) -> int:
+    """The event a cursor continues after, or a refusal in words when it is not one of ours."""
+    try:
+        text = base64.urlsafe_b64decode(cursor.strip() + "=" * (-len(cursor.strip()) % 4)).decode()
+        if text.startswith(_CURSOR_PREFIX) and text[len(_CURSOR_PREFIX) :].isdigit():
+            return int(text[len(_CURSOR_PREFIX) :])
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        pass
+    raise Refusal(
+        "That cursor is not one this server gave. Pass the cursor of the last answer unchanged, "
+        "or start again with after_event_id 0."
+    )
+
+
 class ChangesPage(BaseModel):
     items: list[Event]
     next_after_id: int | None = Field(
@@ -407,9 +484,65 @@ class ChangesPage(BaseModel):
         "pass it as after_event_id next time to see only what is new. Events still being written "
         "by another call are not counted until that call is done, so nothing is ever skipped."
     )
+    cursor: str = Field(
+        description="Opaque: pass it as cursor next time to read only what comes after this "
+        "answer. It continues from the end of this page when there is more, and from "
+        "latest_event_id when there is not."
+    )
+    truncated: bool = Field(
+        description="True when this page does not hold everything: there is more to read right "
+        "now, so ask again at once with cursor."
+    )
+    poll_after_seconds: float = Field(
+        description="How long to wait before asking again for what is new when truncated is false."
+    )
 
 
 # -- planning: checking a plan before anything is created --------------------------------------
+
+
+def _listed(lead: str, problems: list[str], verb: str) -> str:
+    shown = "\n".join(f"{number}. {problem}" for number, problem in enumerate(problems, 1))
+    return (
+        f"{lead}, because of {len(problems)} problem{'s' if len(problems) != 1 else ''}:\n{shown}\n"
+        f"Nothing was {verb}. Fix them and send it again."
+    )
+
+
+def _model_problems(what: str, number: int, error: ValidationError) -> list[str]:
+    return [
+        f"{what} {number}: {'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
+        for problem in error.errors()
+    ]
+
+
+def _plan_models(
+    items: list[dict[str, Any]], links: list[dict[str, Any]], rules: list[dict[str, Any]]
+) -> tuple[list[PlanItem], list[PlanLink], list[PlanRule]]:
+    """The plan models for expanded template dictionaries. A field the plan does not take is a
+    problem, listed with the rest."""
+    problems: list[str] = []
+    made_items: list[PlanItem] = []
+    made_links: list[PlanLink] = []
+    made_rules: list[PlanRule] = []
+    for number, raw in enumerate(items, start=1):
+        try:
+            made_items.append(PlanItem.model_validate(raw))
+        except ValidationError as error:
+            problems.extend(_model_problems("Item", number, error))
+    for number, raw in enumerate(links, start=1):
+        try:
+            made_links.append(PlanLink.model_validate(raw))
+        except ValidationError as error:
+            problems.extend(_model_problems("Link", number, error))
+    for number, raw in enumerate(rules, start=1):
+        try:
+            made_rules.append(PlanRule.model_validate(raw))
+        except ValidationError as error:
+            problems.extend(_model_problems("Acceptance criterion", number, error))
+    if problems:
+        raise TemplateProblems(problems)
+    return made_items, made_links, made_rules
 
 
 def _existing(value: str) -> str | None:
@@ -602,26 +735,9 @@ def _circles(links: list[PlanLink], edges: set[tuple[str, str]]) -> list[str]:
     reported: set[frozenset[str]] = set()
     problems: list[str] = []
     for source, target in own:
-        # A circle is made when the target can reach the source again.
-        path: dict[str, str | None] = {target: None}
-        queue = [target]
-        while queue and source not in path:
-            here = queue.pop(0)
-            for following in sorted(graph.get(here, ())):
-                if following not in path:
-                    path[following] = here
-                    queue.append(following)
-        if source not in path:
+        names = circle_through(graph, source, target)
+        if names is None:
             continue
-        # The route from the target back to the source, so the circle reads source, target, ...,
-        # source.
-        route: list[str] = []
-        step: str | None = source
-        while step is not None:
-            route.append(step)
-            step = path[step]
-        route.reverse()
-        names = [source, *route]
         nodes = frozenset(names)
         if nodes in reported:
             continue
@@ -636,10 +752,17 @@ def _circles(links: list[PlanLink], edges: set[tuple[str, str]]) -> list[str]:
 
 
 class Workflow:
-    def __init__(self, database: Database, graph: Graph, searcher: Searcher) -> None:
+    def __init__(
+        self,
+        database: Database,
+        graph: Graph,
+        searcher: Searcher,
+        poll_seconds: float = DEFAULT_POLL_SECONDS,
+    ) -> None:
         self._database = database
         self._graph = graph
         self._searcher = searcher
+        self._poll_seconds = poll_seconds
 
     # -- creating -----------------------------------------------------------------------------
 
@@ -690,23 +813,48 @@ class Workflow:
         items: list[PlanItem],
         links: list[PlanLink],
         rules: list[PlanRule],
+        draft: bool = False,
+        title: str | None = None,
+        template: str | None = None,
+        values: dict[str, Any] | None = None,
     ) -> PlanResult:
-        if not items and not links and not rules:
+        if template is not None and (items or links or rules):
             raise Refusal(
-                "The plan is empty: give at least one item, link or acceptance criterion."
+                "Give either a template (with values) or the plan's own items, links and "
+                "acceptance criteria, not both. Nothing was created."
             )
-        referenced = sorted(
-            {
-                reference
-                for value in (
-                    *(item.parent for item in items),
-                    *(end for link in links for end in (link.source, link.target)),
-                    *(rule.node for rule in rules),
-                )
-                if value is not None and (reference := _existing(value)) is not None
-            }
-        )
+        if template is None and values:
+            raise Refusal(
+                "values go with a template: name one, or leave values out. Nothing was created."
+            )
+        plan_title = None if title is None or not title.strip() else title.strip()
+        if plan_title is not None and len(plan_title) > MOST_PLAN_TITLE_CHARS:
+            raise Refusal(
+                f"A plan's title may be at most {MOST_PLAN_TITLE_CHARS} characters. Nothing was "
+                "created."
+            )
+        if plan_title is not None and not draft:
+            raise Refusal(
+                "A title is for a draft plan, which a person approves. Nothing was created."
+            )
         async with self._database.transaction() as conn:
+            if template is not None:
+                items, links, rules = await self._template_plan(conn, template, values or {})
+            if not items and not links and not rules:
+                raise Refusal(
+                    "The plan is empty: give at least one item, link or acceptance criterion."
+                )
+            referenced = sorted(
+                {
+                    reference
+                    for value in (
+                        *(item.parent for item in items),
+                        *(end for link in links for end in (link.source, link.target)),
+                        *(rule.node for rule in rules),
+                    )
+                    if value is not None and (reference := _existing(value)) is not None
+                }
+            )
             existing = {
                 row["ref"]
                 for row in await fetch_all(
@@ -747,6 +895,22 @@ class Workflow:
                     "The plan was not created: one of its links already exists between those "
                     "nodes. Nothing was created."
                 ) from None
+            plan_id: int | None = None
+            if draft:
+                first_epic = next((c.title for c in created if c.kind == "epic"), None)
+                named = plan_title or first_epic or template or f"Plan of {len(created)} items"
+                plan_id = await record_event(
+                    conn,
+                    action=PLAN_PROPOSED,
+                    actor=actor,
+                    before=None,
+                    after={
+                        "title": named[:MOST_PLAN_TITLE_CHARS],
+                        "items": [c.ref for c in created],
+                        "snapshot": await plan_snapshot(conn, [c.ref for c in created]),
+                        **({"template": template} if template else {}),
+                    },
+                )
         bodies = {item.key: item.body for item in items}
         indexed = [item for item in created if item.kind in ("epic", "story")]
         found, note = await self._searcher.possible_duplicates(
@@ -766,8 +930,149 @@ class Workflow:
             link_ids=link_ids,
             rule_ids=rule_ids,
             counts=counts,
+            plan=plan_id,
+            draft=draft,
             similar=similar,
             similar_note=None if note.meaning == "used" else note.note,
+        )
+
+    # -- plan templates -------------------------------------------------------------------------
+
+    async def _template_plan(
+        self, conn: AsyncConnection, name: str, values: dict[str, Any]
+    ) -> tuple[list[PlanItem], list[PlanLink], list[PlanRule]]:
+        """The plan a saved template makes for these values, ready for the plan checks (which are
+        the very ones a plan written by hand meets)."""
+        row = await fetch_one(
+            conn,
+            "SELECT template FROM plan_template_state "
+            "WHERE name = %s AND last_action = 'plan_template_saved'",
+            (name,),
+        )
+        if row is None:
+            raise Refusal(
+                f"There is no plan template called {name!r}. list_plan_templates shows the ones "
+                "this project has. Nothing was created."
+            )
+        try:
+            made = expand(parse_template(row["template"]), values)
+            return _plan_models(*made)
+        except TemplateProblems as refused:
+            raise Refusal(
+                _listed("The plan was not created", refused.problems, "created")
+            ) from None
+
+    async def save_template(
+        self, *, actor: str, name: str, template: dict[str, Any]
+    ) -> PlanTemplateInfo:
+        """Save a plan template (a newer save of the same name replaces it, and every version stays
+        in the history). It is checked whole: its shape, its variables and the plan it makes, and
+        every problem is listed at once."""
+        name = clean_name(name)
+        if len(json.dumps(template, default=str)) > MOST_TEMPLATE_BYTES:
+            raise Refusal(
+                f"A template may be at most {MOST_TEMPLATE_BYTES:,} characters. Nothing was saved."
+            )
+        refuse_secrets(template)
+        try:
+            parsed = parse_template(template)
+            problems: list[str] = []
+            if not parsed.items:
+                problems.append("A template needs at least one item.")
+            else:
+                items, links, rules = _plan_models(*expand(parsed, sample_values(parsed)))
+                problems = _plan_problems(items, links, rules, sample_refs(parsed), set())
+            if problems:
+                raise TemplateProblems(problems)
+        except TemplateProblems as refused:
+            raise Refusal(
+                _listed("The template was not saved", refused.problems, "saved")
+            ) from None
+        stored = parsed.model_dump(mode="json", exclude_defaults=True)
+        async with self._database.transaction() as conn:
+            await record_event(
+                conn,
+                action="plan_template_saved",
+                actor=actor,
+                before=None,
+                after={"name": name, "template": stored},
+            )
+            info = await self._template_info(conn, name, detail=True)
+        assert info is not None
+        return info
+
+    async def delete_template(self, *, actor: str, name: str) -> PlanTemplateInfo:
+        name = clean_name(name)
+        async with self._database.transaction() as conn:
+            info = await self._template_info(conn, name, detail=False)
+            if info is None:
+                raise Refusal(
+                    f"There is no plan template called {name!r}. list_plan_templates shows the "
+                    "ones this project has. Nothing was changed."
+                )
+            await record_event(
+                conn,
+                action="plan_template_deleted",
+                actor=actor,
+                before=None,
+                after={"name": name},
+            )
+        return info
+
+    async def list_templates(self, *, name: str | None, detail: bool) -> PlanTemplatePage:
+        """The project's plan templates by name; with a name (or `detail`) each carries its whole
+        template."""
+        async with self._database.transaction() as conn:
+            if name is not None:
+                found = await self._template_info(conn, clean_name(name), detail=True)
+                if found is None:
+                    raise Refusal(
+                        f"There is no plan template called {name!r}. list_plan_templates without "
+                        "a name shows the ones this project has."
+                    )
+                return PlanTemplatePage(items=[found], total=1)
+            names = [
+                row["name"]
+                for row in await fetch_all(
+                    conn,
+                    "SELECT name FROM plan_template_state "
+                    "WHERE last_action = 'plan_template_saved' ORDER BY name",
+                )
+            ]
+            infos = [await self._template_info(conn, n, detail=detail) for n in names]
+        return PlanTemplatePage(items=[i for i in infos if i is not None], total=len(names))
+
+    async def _template_info(
+        self, conn: AsyncConnection, name: str, *, detail: bool
+    ) -> PlanTemplateInfo | None:
+        row = await fetch_one(
+            conn,
+            "SELECT name, template, saved_by, saved_by_kind, saved_at, "
+            "(SELECT count(*) FROM events v WHERE v.action = 'plan_template_saved' "
+            "AND v.after->>'name' = s.name) AS version "
+            "FROM plan_template_state s WHERE name = %s AND last_action = 'plan_template_saved'",
+            (name,),
+        )
+        if row is None:
+            return None
+        parsed = parse_template(row["template"])
+        kinds = [item.kind for item in parsed.items]
+        return PlanTemplateInfo(
+            name=row["name"],
+            description=parsed.description,
+            variables=parsed.variables,
+            counts={
+                "epics": kinds.count("epic"),
+                "stories": kinds.count("story"),
+                "tasks": kinds.count("task"),
+                "links": len(parsed.links),
+                "acceptance criteria": len(parsed.rules),
+            },
+            version=int(row["version"]),
+            saved_by=row["saved_by"],
+            saved_by_kind=row["saved_by_kind"],
+            saved_at=row["saved_at"],
+            template=parsed.model_dump(mode="json", exclude_defaults=True) if detail else None,
         )
 
     async def _build(
@@ -886,8 +1191,13 @@ class Workflow:
         limit: int,
         newest: bool = False,
         before_event_id: int | None = None,
+        cursor: str | None = None,
     ) -> ChangesPage:
         limit = page_size(limit)
+        if cursor is not None and cursor.strip():
+            if after_event_id:
+                raise Refusal("Give either cursor or after_event_id, not both.")
+            after_event_id = feed_position(cursor)
         if after_event_id < 0:
             raise Refusal(f"after_event_id must be 0 or more, but it is {after_event_id}.")
         if before_event_id is not None and before_event_id < 1:
@@ -916,7 +1226,7 @@ class Workflow:
                 await require_rule(conn, rule_id)
             if note_id is not None:
                 await require_note(conn, note_id)
-            cursor = {"xid": "0", "id": 0}
+            position = {"xid": "0", "id": 0}
             if after_event_id:
                 found = await fetch_one(
                     conn, "SELECT xid::text AS xid, id FROM events WHERE id = %s", (after_event_id,)
@@ -927,7 +1237,7 @@ class Workflow:
                         "beginning, or the latest_event_id or next_after_id an earlier answer "
                         "gave you."
                     )
-                cursor = {"xid": found["xid"], "id": found["id"]}
+                position = {"xid": found["xid"], "id": found["id"]}
             ceiling = None
             if before_event_id is not None:
                 top = await fetch_one(
@@ -960,7 +1270,7 @@ class Workflow:
                 "OR e.other_note_id = %(note)s) "
                 f"ORDER BY e.xid {order}, e.id {order} LIMIT %(fetch)s",
                 {
-                    **cursor,
+                    **position,
                     **(ceiling or {"bxid": "0", "bid": None}),
                     "actor": actor.strip() if actor and actor.strip() else None,
                     "node": node,
@@ -981,32 +1291,59 @@ class Workflow:
                 next_after_id=None,
                 next_before_id=older,
                 latest_event_id=int(latest["id"]) if latest else 0,
+                cursor=feed_cursor(int(latest["id"]) if latest else 0),
+                truncated=older is not None,
+                poll_after_seconds=self._poll_seconds,
             )
         page, next_after_id = split_page(rows, limit)
+        newest_id = int(latest["id"]) if latest else 0
         return ChangesPage(
             items=[Event.model_validate(row) for row in page],
             next_after_id=next_after_id,
             next_before_id=None,
-            latest_event_id=int(latest["id"]) if latest else 0,
+            latest_event_id=newest_id,
+            cursor=feed_cursor(next_after_id if next_after_id is not None else newest_id),
+            truncated=next_after_id is not None,
+            poll_after_seconds=self._poll_seconds,
         )
 
     # -- ending work --------------------------------------------------------------------------
 
-    async def finish_work(self, *, actor: str, node: str, outcome: str, note: str) -> FinishResult:
+    async def finish_work(
+        self,
+        *,
+        actor: str,
+        node: str,
+        outcome: str,
+        note: str,
+        where: dict[str, str] | None = None,
+        ask: dict[str, Any] | None = None,
+    ) -> FinishResult:
         check_choice("outcome", outcome, HANDOFF_OUTCOMES)
         note = clean_note(note)
+        if ask is not None and outcome not in ("blocked", "released"):
+            raise Refusal(
+                "An ask is for work that is not finished: give it with outcome blocked (the work "
+                "waits for the answer) or released (it stays free to take), or leave ask out. "
+                "Nothing was changed."
+            )
         async with self._database.transaction() as conn:
             current = await require_node(conn, node, lock=True)
             await release_in(
-                conn, actor=actor, node=node, outcome=outcome, note=note, verb="finish"
+                conn,
+                actor=actor,
+                node=node,
+                outcome=outcome,
+                note=note,
+                verb="finish",
+                where=where,
             )
             if outcome == "done":
                 await refuse_while_unticked(
                     conn,
                     node,
                     instead="finish it as released or blocked, and say why in the note",
-                    person_instead="finish it as blocked, saying in the handoff note what the "
-                    "person should look at; a person then judges it on the board and marks it done",
+                    block="finish it as blocked, saying in the handoff note",
                 )
             # Released work goes back to not started, if it was in progress. The other outcomes
             # are the status itself.
@@ -1017,6 +1354,14 @@ class Workflow:
             )
             if status != current["status"]:
                 await change_status(conn, actor, current, status)
+            if ask is not None:
+                await raise_ask(
+                    conn,
+                    actor=actor,
+                    node=node,
+                    ask=ask,
+                    effect="blocks" if outcome == "blocked" else "parks",
+                )
             finished = await node_state(conn, node)
             handoff = (await handoffs_of(conn, node, newest_first=True))[0]
             unblocked = [
@@ -1042,6 +1387,7 @@ class Workflow:
         peek: bool,
         lease_seconds: int,
         context_chars: int,
+        where: dict[str, str] | None = None,
     ) -> NextWork:
         lease_seconds = lease_seconds_ok(lease_seconds)
         if not 1000 <= context_chars <= 1_000_000:
@@ -1085,7 +1431,12 @@ class Workflow:
                 if stored["status"] == "new":
                     await change_status(conn, actor, stored, "in_progress")
                 claim_row = await take_claim(
-                    conn, actor=actor, node=ref, lease_seconds=lease_seconds, current=current
+                    conn,
+                    actor=actor,
+                    node=ref,
+                    lease_seconds=lease_seconds,
+                    current=current,
+                    where=where,
                 )
                 claim = Claim.model_validate(claim_row)
                 if lapsed is not None:
@@ -1128,6 +1479,7 @@ class Workflow:
             "SELECT count(*) FILTER (WHERE s.claimed_by IS NOT NULL) AS held, "
             "count(*) FILTER (WHERE s.status = 'new' AND cardinality(s.waiting_on) > 0) "
             "AS waiting, "
+            "count(*) FILTER (WHERE cardinality(s.held_by) > 0) AS held_back, "
             "count(*) FILTER (WHERE s.status = 'blocked') AS blocked, "
             # Free as far as this answer can see, yet not handed out: another agent has it in
             # the same moment.
@@ -1148,6 +1500,10 @@ class Workflow:
                     f"{counts['being_taken']} being picked up by someone else this very moment",
                 ),
                 (counts["waiting"], f"{counts['waiting']} waiting for other work to be done"),
+                (
+                    counts["held_back"],
+                    f"{counts['held_back']} held by a gate or a plan waiting for approval",
+                ),
                 (counts["blocked"], f"{counts['blocked']} marked blocked"),
             )
             if number
@@ -1235,6 +1591,17 @@ class Workflow:
                 (work.ref,),
             )
         ]
+        found_in = [
+            Brief.model_validate(row)
+            for row in await fetch_all(
+                conn,
+                "SELECT t.ref, t.kind, t.title, t.status, t.size FROM links l "
+                "JOIN node_state t ON t.ref = l.target "
+                "WHERE l.source = %s AND l.link_type = 'discovered_from' "
+                "ORDER BY t.kind_rank, t.number",
+                (work.ref,),
+            )
+        ]
         dependents = [
             Dependent(
                 node=Brief.model_validate(row),
@@ -1267,12 +1634,16 @@ class Workflow:
                     item=check.item,
                     text=check.text,
                     person_only=check.person_only,
+                    verifier_only=check.verifier_only,
+                    github=check.github,
                     checked=check.checked,
                 )
                 for check in await checks_of(conn, work.ref)
             ],
+            "asks": await asks_of(conn, work.ref),
             "handoffs": await handoffs_of(conn, work.ref),
             "prerequisites": prerequisites,
+            "discovered_from": found_in,
             "notes": [n for n in notes if n.status in IN_FORCE and not n.project_wide],
             "project_wide_notes": [n for n in notes if n.status in IN_FORCE and n.project_wide],
             "past_notes": [n for n in notes if n.status not in IN_FORCE],

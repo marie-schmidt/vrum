@@ -1,5 +1,5 @@
 // Possible duplicates, the second tab of the Search page (`dups=1`): pairs of stories (or epics, or
-// acceptance criteria) in different epics that look like the same thing, with their scores from the
+// tasks, or acceptance criteria) in different epics that look like the same thing, with their scores from the
 // index, most alike first, as a table with the two items side by side. A person can change the
 // threshold and the epics, and can mark a pair as `duplicates` or `relates_to` with one click,
 // which is the same add_link an agent calls. Looking never writes: nothing is linked unless a
@@ -7,7 +7,7 @@
 // in the address: dup_type, dup_min, dup_epics (epic numbers, such as 3,7) and dup_unlinked.
 
 import { Refusal, call, callAll } from './api.js';
-import { can, itemLink, notify, ui } from './ctx.js';
+import { can, itemLink, notify, recordCode, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import { icon } from './icons.js';
 import { KIND, STATUS, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, statusChip } from './labels.js';
@@ -18,6 +18,7 @@ const PAGE = 20;
 const TYPES = [
   ['story', 'Stories'],
   ['epic', 'Epics'],
+  ['task', 'Tasks'],
   ['rule', 'Acceptance criteria'],
 ];
 // How a pair is said to be linked, by the link's type.
@@ -37,10 +38,10 @@ let generation = 0;
 let loadedFor = '';
 let opened = new Set(); // the items whose details were opened in full, kept across a redraw
 
-// What a person reads for an item: S-12 for work, #3 for an acceptance criterion.
+// What a person reads for an item, before its name: S-12 for work, AC-3 for an acceptance criterion.
 const codeOfItem = (item) => {
   const at = parseNodeRef(item.ref);
-  return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
+  return at ? nodeCode(at.kind, at.number) : recordCode(item.item_type, item.id);
 };
 const asking = (from) => ASKING.map((name) => from.get(name) || '').join('|');
 const itemType = () => (TYPES.some(([value]) => value === params.get('dup_type')) ? params.get('dup_type') : 'story');
@@ -336,7 +337,7 @@ function side(item) {
       STATUS[item.status] ? statusChip(item.status) : h('span', { class: 'chip' }, item.status),
     ),
     h('p', { class: 'side-title' }, itemLink(item.ref, {}, item.title)),
-    item.epic ? h('p', { class: 'quiet side-epic' }, `In epic ${codeOf(item.epic)} ${store.nodes.get(item.epic)?.title ?? ''}`.trim()) : null,
+    item.epic ? h('p', { class: 'quiet side-epic' }, `In epic ${codeOf(item.epic)} ${store.nodes.get(item.epic)?.title ?? item.epic_title ?? ''}`.trim()) : null,
     h('div', { class: 'side-body' }, text ? renderMarkdown(text) : h('p', { class: 'quiet' }, 'No details.')),
   );
   if (open) element.append(detailsToggle(element, item.ref, item.title));
@@ -347,7 +348,7 @@ function side(item) {
 async function link(pair, type) {
   try {
     await call('add_link', { source: pair.first.ref, target: pair.second.ref, link_type: type });
-    notify(`Marked ${codeOfItem(pair.first)} and ${codeOfItem(pair.second)} as ${MARKS[type]}.`);
+    notify(`Marked “${pair.first.title}” and “${pair.second.title}” as ${MARKS[type]}.`);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     notify(error.message, { refusal: true });
@@ -358,21 +359,25 @@ async function link(pair, type) {
 
 function pairRow(pair) {
   const linkable = pair.first.item_type !== 'rule' && can('write');
-  // Each button names the two items it links, so a person can see what a click does.
-  const both = `${codeOfItem(pair.first)} and ${codeOfItem(pair.second)}`;
+  // The two items are side by side in the row, so the buttons say what is done to them; the button's
+  // tooltip and its name for a screen reader say which two items, in full.
+  const both = `“${pair.first.title}” and “${pair.second.title}”`;
   const buttons = linkable
     ? Object.keys(MARKS).map((type) => {
         const marked = pair.already_linked.includes(type);
+        const words = marked ? `Marked as ${MARKS[type]}` : `Mark as ${MARKS[type]}`;
         return h(
           'button',
           {
             type: 'button',
             class: `mark mark-${type}${type === 'duplicates' ? '' : ' secondary'}`,
             disabled: marked,
+            title: `${words}: ${both}`,
+            'aria-label': `${words}: ${both}`,
             onclick: () => link(pair, type),
           },
           icon(marked ? 'check' : 'link', { size: 14 }),
-          marked ? `${both} are marked as ${MARKS[type]}` : `Mark ${both} as ${MARKS[type]}`,
+          words,
         );
       })
     : [h('span', { class: 'quiet' }, pair.first.item_type === 'rule' ? 'Acceptance criteria cannot be linked to each other. Open both to compare them.' : 'You can look at the pair but not change it.')];

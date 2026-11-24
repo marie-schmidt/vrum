@@ -1,18 +1,19 @@
 // The bar at the top of the Graph page: what the tabs below look at. It is a search box in the look of the
 // filter box of the Board, the Roadmap and Lists, that finds an epic, story, task, acceptance criterion or note by a
-// word of its title or by its code (S-12, story 12, criterion 3, note 7). It has no filter language. A short
+// word of its title or by its code (S-12, AC-3, N-7). It has no filter language. A short
 // list of what it finds hangs under the box from the body, so no column and no edge of the window cuts it
-// off. With the box focused and empty the list is the epics, so there is a way to browse. The item chosen is
+// off. With the box clicked and empty the list is the epics, so there is a way to browse. The item chosen is
 // shown in the box (its icon, code and title), with a small x to look at the whole project again. Beside the
 // box, the way back through the items looked at (Back and the trail); under it, only when the address names
 // something that is not there, a line that says so. Choosing only says so (`choose(ref)`, `clear()`); what
 // the page does about it is the page's business.
 //
-// The box is a combobox: the arrow keys move through the list, Enter chooses, Escape closes it (and then
+// The box is a combobox that opens only on the person's action (a click, typing, Down or Enter): the arrow
+// keys move through the list, Enter chooses, Escape closes it (and then
 // clears what was typed), Tab leaves it.
 
 import { announce, h, plural, put } from './dom.js';
-import { resolve } from './graph-model.js';
+import { named, resolve } from './graph-model.js';
 import { icon } from './icons.js';
 import { REQUIREMENT_STATUS, STATUS, inForce, isNodeKind, itemCode, kindIcon, kindLabel, noteStatusWords } from './labels.js';
 import { store } from './store.js';
@@ -25,9 +26,6 @@ const GAP = 4; // between the box and its list
 const EDGE = 8; // the list keeps this far from the edge of the window
 const LEAST_ROOM = 96; // a list never gets smaller than this, whatever the keyboard leaves
 
-// What a person reads for an item: S-12 for work, "Acceptance criterion #3" and "Note #7" for the rest.
-const codeText = (kind, number) => (isNodeKind(kind) ? itemCode(kind, number) : `${kindLabel(kind)} ${itemCode(kind, number)}`);
-
 // The word that says an item is no longer live, or null: done or dropped work, a dropped acceptance criterion,
 // a replaced or withdrawn note.
 function endedWord(kind, record) {
@@ -37,9 +35,20 @@ function endedWord(kind, record) {
   return inForce(record) ? null : noteStatusWords(record.status);
 }
 
+// What tells two items of one name apart: the story or epic a piece of work is under, the item a
+// criterion is placed on.
+function contextOf(kind, record) {
+  const holder = isNodeKind(kind) ? record?.parent : kind === 'rule' ? record?.node : null;
+  return (holder && store.nodes.get(holder)?.title) || null;
+}
+
+// One step of the trail: its code, then its title, which is cut with an ellipsis when it is long.
+const trailStep = (entry) => [h('span', { class: 'graph-code' }, entry.code), h('span', { class: 'graph-trail-name' }, entry.title)];
+
 function entryOf({ kind, number, title }) {
   const ref = `${kind}:${number}`;
-  return { ref, kind, number, title, code: codeText(kind, number), ended: endedWord(kind, resolve(ref)?.record) };
+  const found = resolve(ref);
+  return { ref, kind, number, code: itemCode(kind, number), title: found ? found.title : title, context: contextOf(kind, found?.record), ended: endedWord(kind, found?.record) };
 }
 
 const epicEntries = () =>
@@ -98,8 +107,7 @@ export function createFocusBar({ choose, clear, back, jump }) {
 
   // -- the list -------------------------------------------------------------------------------------
 
-  // What the list holds for what is in the box: the epics when it is empty, otherwise what the words
-  // or the code find.
+  // What the list holds for what is in the box: the epics when it is empty, otherwise what the words find.
   function found() {
     const typed = input.value.trim();
     if (!typed) {
@@ -111,7 +119,7 @@ export function createFocusBar({ choose, clear, back, jump }) {
       heading: items.length ? plural(items.length, 'match', 'matches') : '',
       entries: items.slice(0, MOST_FOUND).map(entryOf),
       total: items.length,
-      nothing: `Nothing matches "${typed}". Try a word of the title, or a code such as S-12, criterion 3 or note 7.`,
+      nothing: `Nothing matches "${typed}". Try a word of the title, or a code such as S-12, AC-3 or N-7.`,
       more: 'Type more to narrow it.',
     };
   }
@@ -133,6 +141,7 @@ export function createFocusBar({ choose, clear, back, jump }) {
       kindIcon(entry.kind, 16),
       h('span', { class: 'graph-code graph-find-code' }, entry.code),
       h('span', { class: 'graph-find-title', title: entry.title }, entry.title),
+      entry.context ? h('span', { class: 'graph-find-context', title: entry.context }, entry.context) : null,
       done ? h('span', { class: 'graph-find-ended' }, done) : null,
       entry.ref === chosenRef ? h('span', { class: 'graph-find-check' }, icon('check', { size: 14 })) : null,
     );
@@ -243,7 +252,7 @@ export function createFocusBar({ choose, clear, back, jump }) {
 
   const itemName = (ref) => {
     const item = resolve(ref);
-    return item ? `${kindLabel(item.kind)} ${item.code}` : ref;
+    return item ? `${kindLabel(item.kind)} ${named(item)}` : 'the item';
   };
 
   function pick(entry) {
@@ -272,7 +281,8 @@ export function createFocusBar({ choose, clear, back, jump }) {
     setActive((active + step + entries.length) % entries.length, { scroll: true });
   }
 
-  input.addEventListener('focus', () => openList({ first: !input.value }));
+  // The list opens when the person clicks the box, types, or presses Down or Enter in it, never because the box
+  // was given the keyboard (a Tab, or the page handing it back after a change).
   input.addEventListener('click', () => {
     if (!isOpen) openList({ first: !input.value });
   });
@@ -324,12 +334,14 @@ export function createFocusBar({ choose, clear, back, jump }) {
     form.classList.toggle('has-item', Boolean(item));
     form.classList.toggle('is-missing', missing);
     put(kindSlot, item ? kindIcon(item.kind, 16) : missing ? icon('alert', { size: 16 }) : null);
-    put(shown, item ? [h('span', { class: 'graph-code' }, codeText(item.kind, item.number)), h('span', { class: 'graph-find-chosen-title' }, item.title)] : missing ? h('span', { class: 'graph-find-chosen-title' }, 'Not found') : null);
+    put(shown, item ? [h('span', { class: 'graph-code' }, item.code), h('span', { class: 'graph-find-chosen-title' }, item.title)] : missing ? h('span', { class: 'graph-find-chosen-title' }, 'Not found') : null);
     shown.hidden = !(item || missing);
     if (item) shown.dataset.ref = item.ref;
     else delete shown.dataset.ref;
-    input.title = item ? `${codeText(item.kind, item.number)} ${item.title}` : '';
-    now.textContent = item ? `Looking at ${kindLabel(item.kind)} ${item.code}: ${item.title}.` : missing ? 'What the address names was not found.' : 'Looking at the whole project.';
+    // The tooltip is on the field, so that the pointer anywhere over the box (the words drawn over the input are cut
+    // short in a narrow window) is told the whole name.
+    field.title = item ? named(item) : '';
+    now.textContent = item ? `Looking at ${itemName(item.ref)}.` : missing ? 'What the address names was not found.' : 'Looking at the whole project.';
     sync();
     put(
       trail,
@@ -342,7 +354,7 @@ export function createFocusBar({ choose, clear, back, jump }) {
               'ol',
               { class: 'plain' },
               path.map((entry, index) =>
-                h('li', {}, index === path.length - 1 ? h('span', { class: 'graph-trail-here', 'aria-current': 'true' }, entry.code) : h('button', { type: 'button', class: 'link', title: entry.title, onclick: () => jump(index) }, entry.code)),
+                h('li', {}, index === path.length - 1 ? h('span', { class: 'graph-trail-here', title: named(entry), 'aria-current': 'true' }, trailStep(entry)) : h('button', { type: 'button', class: 'link', title: named(entry), onclick: () => jump(index) }, trailStep(entry))),
               ),
             ),
           )

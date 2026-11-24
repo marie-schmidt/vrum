@@ -6,7 +6,7 @@
 import { Refusal } from './api.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
-import { SIZES, SIZE_POINTS, SIZE_WORDS, codeOf, readNodeRef } from './labels.js';
+import { SIZES, SIZE_POINTS, SIZE_WORDS, codeOf, kindIcon, noteCode, parseNodeRef, readNodeRef, ruleCode } from './labels.js';
 import { store, titleOf, headlineOf } from './store.js';
 
 let counter = 0;
@@ -48,14 +48,31 @@ export const clip = (text, size = 90) => {
 // The plain words a Markdown text says, on one line (see markdown.js).
 export { plainText } from './markdown.js';
 
-// A modal dialog that removes itself when it closes. `content` is what goes under the heading.
+// A modal dialog that removes itself when it closes. `content` is what goes under the heading. Opening it opens nothing else: the
+// browser puts the focus on the first control it can, and when that is a select (whose menu a key press would open) the focus
+// goes to the first plain text field instead, or to the dialog itself when there is none.
 export function openDialog(title, content, { wide = false } = {}) {
-  const heading = h('h2', { id: uid('dialog-') }, title);
-  const box = h('dialog', { class: `modal${wide ? ' wide' : ''}`, 'aria-labelledby': heading.id }, heading, ...content);
+  // The heading is words, or a list of words and nodes when it quotes somebody's title (which is marked as theirs).
+  const heading = h('h2', { id: uid('dialog-') }, ...(Array.isArray(title) ? title : [title]));
+  const box = h('dialog', { class: `modal${wide ? ' wide' : ''}`, 'aria-labelledby': heading.id, tabindex: -1 }, heading, ...content);
   box.addEventListener('close', () => box.remove());
   document.getElementById('dialogs').append(box);
   box.showModal();
+  if (document.activeElement instanceof HTMLSelectElement && box.contains(document.activeElement)) {
+    (box.querySelector('textarea, input:not([type=checkbox], [type=radio], [type=hidden], [type=button], [type=submit])') || box).focus();
+  }
   return box;
+}
+
+// The empty first option of a select that asks for a decision: it is what the select shows until the person chooses, in a
+// quiet look (the `choose` class), so that a menu never starts with an answer already picked.
+export const chooseOption = (words) => h('option', { value: '', class: 'choose' }, words);
+
+// An input's list of suggestions (`list`) is given to it only when the person acts on it (a press, an arrow key or typing), so
+// that focusing it, as a dialog does when it opens, can never show the suggestions.
+export function suggestOnAction(input, listId) {
+  const give = () => input.setAttribute('list', listId);
+  for (const type of ['pointerdown', 'keydown', 'input']) input.addEventListener(type, give, { once: true });
 }
 
 // A form that does `work` when it is sent (and `also` for any further buttons, each with its own
@@ -105,29 +122,58 @@ export function dialogForm({ fields, submit, cancel = null, work, also = [] }) {
 
 // What is chosen is { type, id }: `type` is node, rule or note, and `id` is the reference
 // (story:12) of an epic, story or task and the number of an acceptance criterion or a note.
-const refName = {
-  node: (ref) => codeOf(ref),
-  rule: (id) => `Criterion #${id}`,
-  note: (id) => `Note #${id}`,
-};
 // The reference a chosen item is known by on the page: story:12, rule:3, note:5.
 export const pickedRef = (item) => (item.type === 'node' ? item.id : `${item.type}:${item.id}`);
+
+// The kind of what was chosen (epic, story, task, rule or note), for its icon.
+export const pickedKind = (item) => (item.type === 'node' ? parseNodeRef(item.id)?.kind || 'story' : item.type);
 
 function titleOfRef(type, id) {
   if (type === 'node') return titleOf(id);
   const list = type === 'rule' ? store.rules : store.notes;
   const found = (list || []).find((item) => item.id === id);
-  if (!found) return `${type === 'rule' ? 'Criterion' : 'Note'} #${id}`;
+  if (!found) return '';
   return type === 'note' ? headlineOf(found) : found.title;
 }
 
-// What was typed or picked: S-12 or story 12 for an epic, story or task, "criterion 3" (or "rule 3")
-// and "note 5". A bare number names nothing, since each kind is numbered on its own.
+// What a chosen item is called in a list or a chip: its code, then its name (S-12 Unlock by typing the bike number,
+// AC-3 A rider can have only one open ride, N-7 The apps support the last two major versions).
+export function wordsOfRef(type, id) {
+  const code = type === 'node' ? codeOf(id) : type === 'rule' ? ruleCode(id) : noteCode(id);
+  return [code, titleOfRef(type, id)].filter(Boolean).join(' ');
+}
+
+// What a person is offered to pick from, each as { type, id, kind, title, label }: the label is the code and the name.
+// `kinds` is what can be offered (node, rule, note) and `except` an epic, story or task to leave out.
+export function choicesOf(kinds, { except = null } = {}) {
+  const found = [];
+  if (kinds.includes('node')) {
+    for (const node of store.nodes.values()) if (node.ref !== except) found.push({ type: 'node', id: node.ref, kind: node.kind, title: node.title });
+  }
+  if (kinds.includes('rule')) for (const rule of store.rules || []) found.push({ type: 'rule', id: rule.id, kind: 'rule', title: rule.title });
+  if (kinds.includes('note')) for (const note of store.notes || []) found.push({ type: 'note', id: note.id, kind: 'note', title: clip(headlineOf(note), 90) });
+  return found.map((one) => ({ ...one, label: `${one.type === 'node' ? codeOf(one.id) : one.type === 'rule' ? ruleCode(one.id) : noteCode(one.id)} ${one.title}` }));
+}
+
+// The item a typed or picked label or name stands for. 'several' when more than one has that name, and null when none does.
+export function findChoice(text, choices) {
+  const typed = text.trim().toLowerCase();
+  if (!typed) return null;
+  for (const test of [(one) => one.label.toLowerCase() === typed, (one) => one.title.toLowerCase() === typed]) {
+    const found = choices.filter(test);
+    if (found.length === 1) return found[0];
+    if (found.length > 1) return 'several';
+  }
+  return null;
+}
+
+// What was typed as a code or in words: S-12 or story 12 for an epic, story or task, AC-3 ("criterion 3" or "rule 3") for an
+// acceptance criterion and N-5 ("note 5") for a note. A bare number names nothing, since each kind is numbered on its own.
 export function parseRef(text, kinds) {
   const typed = text.trim();
-  let found = /^(?:rule|requirement|(?:acceptance\s+)?criterion)\s*[:#]?\s*#?(\d+)/i.exec(typed);
+  let found = /^(?:rule|requirement|(?:acceptance\s+)?criterion|ac)\s*[:#-]?\s*#?(\d+)/i.exec(typed);
   if (found && kinds.includes('rule')) return { type: 'rule', id: Number(found[1]) };
-  found = /^note\s*[:#]?\s*#?(\d+)/i.exec(typed);
+  found = /^(?:note|n)\s*[:#-]?\s*#?(\d+)/i.exec(typed);
   if (found && kinds.includes('note')) return { type: 'note', id: Number(found[1]) };
   const node = readNodeRef(typed);
   if (node && kinds.includes('node')) return { type: 'node', id: node };
@@ -139,31 +185,36 @@ export function parseRef(text, kinds) {
 export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = null }) {
   const refs = new Map();
   const listId = uid('picker-list-');
-  const options = [];
-  if (kinds.includes('node')) for (const node of store.nodes.values()) options.push(`${codeOf(node.ref)} ${node.title}`);
-  if (kinds.includes('rule')) for (const rule of store.rules || []) options.push(`Criterion #${rule.id} ${rule.title}`);
-  if (kinds.includes('note')) for (const note of store.notes || []) options.push(`Note #${note.id} ${headlineOf(note)}`);
-  const input = h('input', { type: 'text', list: listId, autocomplete: 'off', 'aria-label': `${label}: type a code or pick from the list`, placeholder: 'a code such as S-12, or a title' });
+  const choices = choicesOf(kinds);
+  const input = h('input', { type: 'text', autocomplete: 'off', 'aria-label': `${label}: type a code or pick from the list`, placeholder: 'a code such as S-12, or a title' });
+  suggestOnAction(input, listId);
   const problem = h('p', { class: 'problem', role: 'alert' });
   const shown = h('ul', { class: 'chips plain picker-chosen', 'aria-label': `${label}: chosen` });
 
   const draw = () =>
     shown.replaceChildren(
-      ...[...refs.values()].map((ref) =>
-        h(
+      ...[...refs.values()].map((ref) => {
+        const words = wordsOfRef(ref.type, ref.id);
+        return h(
           'li',
-          { class: 'chip', dataset: { ref: pickedRef(ref) } },
-          h('span', { class: 'chip-text' }, `${refName[ref.type](ref.id)} ${clip(titleOfRef(ref.type, ref.id), 40)}`),
-          h('button', { type: 'button', class: 'chip-remove ghost icon-only small', 'aria-label': `Remove ${refName[ref.type](ref.id)}`, onclick: () => { refs.delete(pickedRef(ref)); draw(); } }, icon('close', { size: 12 })),
-        ),
-      ),
+          { class: 'chip', title: words, dataset: { ref: pickedRef(ref) } },
+          kindIcon(pickedKind(ref), 14),
+          h('span', { class: 'chip-text' }, clip(words, 60)),
+          h('button', { type: 'button', class: 'chip-remove ghost icon-only small', 'aria-label': `Remove ${words}`, onclick: () => { refs.delete(pickedRef(ref)); draw(); } }, icon('close', { size: 12 })),
+        );
+      }),
     );
   const add = () => {
     problem.replaceChildren();
     if (!input.value.trim()) return;
-    const ref = parseRef(input.value, kinds);
+    const named = findChoice(input.value, choices);
+    if (named === 'several') {
+      refuse(problem, 'More than one item has that name. Pick one from the list.');
+      return;
+    }
+    const ref = named ? { type: named.type, id: named.id } : parseRef(input.value, kinds);
     if (!ref) {
-      refuse(problem, 'Type a code such as S-12 (criterion 3 for an acceptance criterion, note 5 for a note), or pick from the list.');
+      refuse(problem, 'Type a code such as S-12 (AC-3 for an acceptance criterion, N-5 for a note), or pick from the list.');
       return;
     }
     refs.set(pickedRef(ref), ref);
@@ -184,7 +235,7 @@ export function picker({ label, kinds = ['node', 'rule'], chosen = [], help = nu
     { class: 'field picker' },
     h('label', { for: (input.id = uid()) }, label),
     h('div', { class: 'picker-row' }, input, h('button', { type: 'button', onclick: add }, 'Add')),
-    h('datalist', { id: listId }, options.map((value) => h('option', { value }))),
+    h('datalist', { id: listId }, choices.map((one) => h('option', { value: one.label }))),
     shown,
     help ? h('p', { class: 'hint' }, help) : null,
     problem,

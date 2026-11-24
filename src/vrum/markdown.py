@@ -7,7 +7,11 @@ note has no title: its first line is the file's title. A reference a person wrot
 (`[[story:12]]`, see references.py) becomes the same kind of link to that item's file. The
 project's definition of done is one more file at the top of the copy (`definition-of-done.md`). A
 story or task that the definition of done has checks for lists them as a task list, ticked or
-not, with who ticked each one, when, and how it was checked. A node's size is in its fields.
+not, with who ticked each one, when, and how it was checked. A node's size is in its fields. A story
+or task whose holders said where the work was (its repository, branch, commit and pull request) and
+which run it was says so in a section of its own, from the latest claim or handoff that did. A
+story or task that agents asked a person about lists each ask as Q-12 with what was asked, who
+asked, and the answer, who gave it and when, when there is one.
 
 It is made from the export (see exchange.py) and from nothing else, so it can never say anything
 the export does not. The same graph always gives the same files, byte for byte: nothing in them
@@ -24,6 +28,7 @@ from vrum.common import split_node_ref
 from vrum.definition_of_done import DefinitionItem, definition_items
 from vrum.records import headline_of
 from vrum.references import REFERENCE_PATTERN
+from vrum.whereabouts import WHERE_FIELDS
 
 _REFERENCE = re.compile(REFERENCE_PATTERN)
 
@@ -90,6 +95,7 @@ _LABELS = (
     ("supersedes", "superseded by"),
     ("duplicates", "duplicates"),
     ("relates to", "relates to"),
+    ("discovered from", "led to"),
     ("on", "acceptance criteria"),
     ("concerns", "notes about it"),
     ("replaced by", "replaces"),
@@ -131,11 +137,21 @@ def _checklist(
     node: str, items: list[DefinitionItem], ticks: Mapping[tuple[str, str], Mapping[str, Any]]
 ) -> str:
     """The checks of a story or task as a task list: an item that is ticked says by whom and when,
-    and how it was checked. A check only a person can judge keeps its [person] tag."""
+    and how it was checked. A check keeps the tags that say who may tick it: [person], and
+    [github] or [verifier]."""
     lines = []
     for item in items:
         tick = ticks.get((node, item.item))
-        words = f"[person] {item.text}" if item.person_only else item.text
+        tags = "".join(
+            f"[{name}] "
+            for name, on in (
+                ("person", item.person_only),
+                ("github", item.github),
+                ("verifier", item.verifier_only and not item.github),
+            )
+            if on
+        )
+        words = f"{tags}{item.text}"
         if tick is None:
             lines.append(f"- [ ] {words}")
             continue
@@ -144,6 +160,68 @@ def _checklist(
             how += f": {_one_line(tick['evidence'])}"
         lines.append(f"- [x] {words} ({how})")
     return "## Definition of done\n\n" + "\n".join(lines)
+
+
+_WHERE_LABELS = (
+    ("repository", "Repository"),
+    ("branch", "Branch"),
+    ("commit", "Commit"),
+    ("pull_request", "Pull request"),
+)
+# The events that carry the words a holder said about where the work is.
+_WHERE_ACTIONS = ("claimed", "claim_renewed", "handoff")
+
+
+def _where_sections(events: list[Mapping[str, Any]]) -> dict[str, str]:
+    """For each story or task, what its latest claim or handoff said about where the work is and
+    which run it was, as a section; none for one that never said."""
+    latest: dict[str, Mapping[str, Any]] = {}
+    for event in events:
+        if event["action"] in _WHERE_ACTIONS and any(f in event["after"] for f in WHERE_FIELDS):
+            latest[event["node"]] = event
+    sections = {}
+    for node, event in latest.items():
+        said = event["after"]
+        lines = [f"- {label}: {said[name]}" for name, label in _WHERE_LABELS if name in said]
+        run = " ".join(
+            f"{said[name]}" if name == "run_label" else f"({said[name]})"
+            for name in ("run_label", "client_name")
+            if name in said
+        )
+        if run:
+            lines.append(f"- Run: {run}")
+        lines.append(f"- Said by: {_one_line(event['actor'])}, {event['at'][:10]}")
+        sections[node] = "## Where the work is\n\n" + "\n".join(lines)
+    return sections
+
+
+def _ask_sections(events: list[Mapping[str, Any]]) -> dict[str, str]:
+    """For each story or task that has asks, a section with a line for each: what was asked and
+    by whom, whether the work waited for the answer, and the answer when there is one."""
+    answers = {e["after"]["ask"]: e for e in events if e["action"] == "ask_answered"}
+    lines: dict[str, list[str]] = {}
+    for event in events:
+        if event["action"] != "ask_raised":
+            continue
+        said = event["after"]
+        waited = "work waited" if said["effect"] == "blocks" else "work stayed free"
+        line = f"- Q-{event['id']} ({waited}): {_one_line(said['question'])}"
+        if said.get("choices"):
+            line += f" Choices: {', '.join(_one_line(c) for c in said['choices'])}."
+        line += f" Asked by {_one_line(event['actor'])}, {event['at'][:10]}."
+        answer = answers.get(event["id"])
+        if answer is None:
+            line += " Not answered yet."
+        else:
+            given = answer["after"]
+            line += (
+                f" Answer: {_one_line(given['answer'])}, by {_one_line(answer['actor'])}, "
+                f"{answer['at'][:10]}."
+            )
+            if given.get("comment"):
+                line += f" Comment: {_one_line(given['comment'])}"
+        lines.setdefault(event["node"], []).append(line)
+    return {node: "## Questions\n\n" + "\n".join(found) for node, found in lines.items()}
 
 
 def _standing(item: Mapping[str, Any]) -> str:
@@ -227,9 +305,15 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
     definition = document["definition_of_done"]
     checks = definition_items(definition[0]["body"]) if definition else []
     ticks = {(tick["node"], tick["item"]): tick for tick in document["checks"]}
+    where = _where_sections(document["events"])
+    asked = _ask_sections(document["events"])
     for node in document["nodes"]:
         kind = node["kind"]
         body = [node["body"]] if node["body"].strip() else []
+        if f"{kind}:{node['number']}" in where:
+            body.append(where[f"{kind}:{node['number']}"])
+        if f"{kind}:{node['number']}" in asked:
+            body.append(asked[f"{kind}:{node['number']}"])
         if kind != "epic" and checks:
             body.append(_checklist(f"{kind}:{node['number']}", checks, ticks))
         add(
@@ -286,6 +370,7 @@ def render(document: Mapping[str, Any]) -> dict[str, str]:
             "supersedes": "supersedes",
             "duplicates": "duplicates",
             "relates_to": "relates to",
+            "discovered_from": "discovered from",
         }[link["link_type"]]
         connect(split_node_ref(link["source"]), split_node_ref(link["target"]), label)
     for rule in document["rules"]:

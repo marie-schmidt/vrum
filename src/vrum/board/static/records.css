@@ -28,13 +28,17 @@
 .snippet { overflow-wrap: anywhere; }
 
 .card-page .field, dialog.modal .field { position: relative; }
+/* A dialog that has nothing to type in takes the focus itself; it shows no ring around the whole box. */
+dialog.modal:focus { outline: none; }
+/* A select that asks for a decision shows its empty first option quietly until a choice is made. */
+select:has(> option.choose:checked) { color: var(--text-2); }
 .ref-picker { position: absolute; left: 0; z-index: 30; width: min(26rem, 100%); max-height: 13rem; margin: var(--space-1) 0 0; padding: var(--space-1); list-style: none; overflow-y: auto; background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); }
 .ref-option { display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); }
-.ref-option .icon { align-self: center; color: var(--text-2); }
-.ref-option code { flex: none; }
+.ref-option .icon { align-self: center; flex: none; color: var(--text-2); }
+.ref-option .item-code { flex: none; }
 .ref-option .ref-title { min-width: 0; overflow-wrap: anywhere; }
 .ref-option[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
-.ref-option[aria-selected="true"] .icon { color: inherit; }
+.ref-option[aria-selected="true"] .icon, .ref-option[aria-selected="true"] .item-code { color: inherit; }
 
 /* -- Chips of a record ------------------------------------------------------------------------------------
    Every chip says its word, and carries its own icon. */
@@ -47,8 +51,8 @@
    pointed at: the accent is kept for what matters most. Lists of links have no line until then. */
 .card-page a, .ctx-section a { color: var(--text); text-decoration-color: var(--border-strong); }
 .card-page a:hover, .ctx-section a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
-.mentions a, .overlaps a, .similar-item a, .record-title, .record-heading a, .gv-connections a { text-decoration: none; }
-.mentions a:hover, .overlaps a:hover, .similar-item a:hover, .record-heading a:hover { text-decoration: underline; }
+.mentions a, .similar-item a, .record-title, .record-heading a, .gv-connections a { text-decoration: none; }
+.mentions a:hover, .similar-item a:hover, .record-heading a:hover { text-decoration: underline; }
 
 /* -- Forms in a page ---------------------------------------------------------------------------------------- */
 
@@ -69,7 +73,7 @@
 /* Moving an item is one line: what it is, where it is now, and the button. */
 .inline-form.move { display: flex; flex-wrap: wrap; align-items: center; }
 .inline-form.move > label { flex: none; }
-.inline-form.move > .inline-row { flex: 1 1 14rem; }
+.inline-form.move > .inline-row { flex: 0 1 36rem; }
 .inline-form.move > .problem { flex: 1 0 100%; }
 /* On a page there is room for the four small fields in one row. */
 @container (min-width: 34rem) {
@@ -191,14 +195,9 @@
 .handoff-item > .handoff-text > :first-child { margin-top: 0; }
 .handoff-item > .handoff-text > :last-child { margin-bottom: 0; }
 .show-all-handoffs { margin-top: var(--space-3); }
-.card-page .card-main [data-part="needs-handoff"] { padding: var(--space-3) var(--space-4); border: 0; border-left: 3px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-2); }
-.card-page .card-main [data-part="needs-handoff"] > h3 { margin-bottom: var(--space-2); font-size: var(--text-sm); }
+.card-page > .part[data-part="needs-handoff"] { padding: var(--space-4) var(--space-5); border: 0; border-left: 3px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-2); }
+.card-page > .part[data-part="needs-handoff"] > h3 { margin-bottom: var(--space-2); font-size: var(--text-md); }
 
-/* Who made it and when it last changed, a row of its own under how it stands, and quieter. */
-.card-summary .state-strip.state-meta { flex: 1 0 100%; }
-.state-meta .state-item > dd { color: var(--text-2); }
-.state-meta .version { display: block; font-size: var(--text-xs); }
-.claim-help { display: block; font-size: var(--text-xs); }
 .state-item .release-claim { margin-left: var(--space-2); vertical-align: baseline; }
 
 /* A table cell of words that wrap to three lines, and all of them on request. */

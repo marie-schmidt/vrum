@@ -5,7 +5,9 @@ work, confirmed by a named person through its one status chip, replaced and with
 that applies throughout its project is in that project's recall and briefings and no other's. Its
 status is one of Unconfirmed, Confirmed, Replaced and Withdrawn, said in words and an icon and
 never by colour alone, and the Notes list has one Status filter. Every note has a full page of its
-own (nothing opens at the side). Every figure is compared with what a real MCP client reads
+own (nothing opens at the side). An acceptance criterion is written in Lists, is placed nowhere
+until a person puts it on a story or task, and is moved in one step; the sentence above the list
+says what the coverage report says. Every figure is compared with what a real MCP client reads
 (`get_note`, `list_notes`, `recall`, the histories), and every refusal is compared word for word
 with what the same attempt gets through MCP. Each part works in a project of its own, so that
 nothing but what it made is on the page."""
@@ -33,6 +35,7 @@ from tests.board_helpers import (
     browser_page,
     detail,
     item_loaded,
+    item_page,
     made,
     open_item,
     part,
@@ -49,8 +52,22 @@ from tests.test_board_context_integration import (
     listed_refs,
     notes_open,
     ref_of_note,
+    status_chip,
     status_filter,
+    strip,
 )
+from tests.test_board_requirements_integration import (
+    LIST,
+    choose_place,
+    group,
+    history,
+    move_by_drag,
+    page_says,
+    rule_in,
+    rule_row,
+    summary_says,
+)
+from tests.test_board_requirements_integration import graph_open as criteria_open
 
 
 async def context() -> None:
@@ -61,9 +78,10 @@ async def context() -> None:
         await ending()
         await filtering()
         await project_wide()
+        await criteria()
     except BrowserError as error:
         raise Failed(
-            f"M16: the board did not do what a proof needs: {clip(str(error), 220)}"
+            f"M30: the board did not do what a proof needs: {clip(str(error), 220)}"
         ) from error
 
 
@@ -86,7 +104,7 @@ async def adding() -> None:
             await expect(box.get_by_label("Decided by (optional)")).to_have_value("")
             await box.locator("#add-note-text").fill(f"Note about {word}")
             await box.locator("#add-note-why").fill(f"The call with Marie {word}")
-            await chosen_picker(page, f"requirement {rule}")
+            await chosen_picker(page, f"criterion {rule}")
             await box.get_by_role("button", name="Add the note").click()
             await expect(box).to_have_count(0, timeout=SLOW)
             # From the Notes list, with a person who decided it and the day.
@@ -129,10 +147,10 @@ async def adding() -> None:
             # The page of a note someone decided says so in a quiet line, and the history is the
             # server's.
             await open_item(w, ref_of_note(second), "lists")
-            await expect(page.locator("#item-title")).to_contain_text(f"Note #{second['id']}")
-            await expect(page.locator("#item-what")).to_contain_text(
-                f"Decided by {MARIE} on 2026-11-02"
+            await expect(page.locator("#item-title")).to_contain_text(
+                f"N-{second['id']} Decided {word}"
             )
+            decided_by = (await strip(page)).get("Decided by")
             history = await history_actions(client, "note_history", "note_id", second["id"])
             # Recall, section by section, as the story's page draws it: the note someone decided
             # comes first.
@@ -147,10 +165,11 @@ async def adding() -> None:
         "M30",
         "a note added on the board, from the page of a story and from the Notes list, with its "
         "why and, when a person decided it, who and when in two optional fields, is the same "
-        "record everywhere: the fields of get_note, one Unconfirmed chip in the list, the quiet "
-        "'Decided by' detail on its page, and exact recall of the story with the decided note "
+        "record everywhere: the fields of get_note, one Unconfirmed chip in the list, who decided "
+        "it and when on its page, and exact recall of the story with the decided note "
         "first",
         fields_hold
+        and decided_by == f"{MARIE} on 2026-11-02"
         and history == ["note_recorded", "note_linked"]
         and in_recall == shown == [decided["id"], plain_note["id"]],
         f"notes {first['id']} and {second['id']}, added by {ADA}",
@@ -170,7 +189,7 @@ async def confirming() -> None:
         async with browser_page(board, token=project.key) as w:
             page = w.page
             await open_item(w, key, "lists")
-            chip = page.locator("#item-page .record-chips .chip.note-status")
+            chip = status_chip(page)
             await expect(chip).to_have_attribute("data-status", "unconfirmed", timeout=SLOW)
             # The chip's menu: confirm, replace, withdraw, change what it concerns.
             await chip.click()
@@ -305,9 +324,7 @@ async def ending() -> None:
             await box.get_by_role("button", name="Withdraw", exact=True).click()
             await expect(box).to_have_count(0, timeout=SLOW)
             withdrawn = await ok(client, "get_note", note_id=wrong["id"])
-            await expect(page.locator("#item-page .record-chips .chip.note-status")).to_have_text(
-                "Withdrawn", timeout=SLOW
-            )
+            await expect(status_chip(page)).to_have_text("Withdrawn", timeout=SLOW)
             assert w.problems == [], w.problems
     proof(
         "M30",
@@ -406,7 +423,7 @@ async def project_wide() -> None:
                 "data-project-wide", "true", timeout=SLOW
             )
             await expect(listed(page, key).locator("td.cell-applies")).to_contain_text(
-                "Whole project"
+                "The whole project"
             )
             recalled = await ok(a, "recall", node=story_a)
             in_recall = [i["note"]["headline"] for i in recalled["project_wide_notes"]["items"]]
@@ -437,3 +454,131 @@ async def project_wide() -> None:
         and re.fullmatch(r"note:\d+", key) is not None,
         f"{key} in one project, none in the other",
     )
+
+
+# -- an acceptance criterion: written, placed on a story, moved, refused when blank ---------------
+
+
+async def criteria() -> None:
+    async with fresh_project(URL) as (client, board, project):
+        epic = await made(client, "epic", "Acceptance criteria")
+        first = await made(client, "story", "First story", epic)
+        second = await made(client, "story", "Second story", epic)
+        await made(client, "story", "Third story", epic)
+        await rule_in(client, "Anchor", second)
+        async with browser_page(board, token=project.key, name=ADA) as w:
+            page = w.page
+            await criteria_open(w, LIST)
+            start = await summary_says(page, client)
+            # Written in the browser, a criterion is placed nowhere: it opens on a page of its own
+            # that says so.
+            await page.locator("#new-requirement").click()
+            box = dialog(page)
+            await box.locator("#requirement-title").fill("Created in the browser")
+            await box.get_by_role("button", name="Add the acceptance criterion").click()
+            await expect(item_page(page)).to_have_attribute("data-kind", "rule", timeout=SLOW)
+            ref = await item_page(page).get_attribute("data-ref") or ""
+            rule = int(ref.split(":")[1])
+            loose = await page_says(page, client, rule)
+            # Back on the list it is the first of those placed nowhere, and the sentence above the
+            # list says what the coverage report says.
+            await page.go_back()
+            newest = page.locator("#unplaced-group li.requirement").first
+            await expect(newest).to_contain_text("Created in the browser", timeout=SLOW)
+            after_new = await summary_says(page, client)
+            # Placed on the first story from its own page, and moved to the second, each in one
+            # step.
+            await (
+                newest.locator("a, button").filter(has_text="Created in the browser").first.click()
+            )
+            await item_loaded(page, ref)
+            await page.locator("#item-page button.place-requirement").click()
+            box = dialog(page)
+            await choose_place(box, first)
+            await box.get_by_role("button", name="Put it there").click()
+            await expect(box).to_have_count(0, timeout=SLOW)
+            placed = await page_says(page, client, rule)
+            await page.locator("#item-page button.place-requirement").click()
+            box = dialog(page)
+            await choose_place(box, second)
+            await box.get_by_role("button", name="Move it there").click()
+            await expect(box).to_have_count(0, timeout=SLOW)
+            moved_once = await page_says(page, client, rule)
+            # The list follows it, and a drag onto a story that has nothing moves it again.
+            await criteria_open(w, LIST)
+            await expect(group(page, second).locator(f"li[data-id='{rule}']")).to_be_visible(
+                timeout=SLOW
+            )
+            after_move = await summary_says(page, client)
+            await page.locator("#stories-without-requirements summary").click()
+            bare = page.locator(f"#stories-without-requirements li[data-story='{first}']")
+            await expect(bare).to_be_visible()
+            await move_by_drag(page, rule_row(page, rule), bare)
+            await expect(group(page, first).locator(f"li[data-id='{rule}']")).to_be_visible(
+                timeout=SLOW
+            )
+            after_drag = await summary_says(page, client)
+            moved = await ok(client, "get_rule", rule_id=rule)
+            # A blank title is refused as an agent's is, and writes nothing; so is a move to the
+            # story it is already on.
+            total = (await ok(client, "list_rules", limit=1))["total"]
+            blank = await refused(client, "create_rule", title="", body="", status="open")
+            await page.locator("#new-requirement").click()
+            box = dialog(page)
+            await box.locator("#requirement-body").fill("A body with no title")
+            await box.get_by_role("button", name="Add the acceptance criterion").click()
+            await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
+            blank_words = await refusal_in(page).inner_text()
+            kept = await box.locator("#requirement-body").input_value()
+            await box.get_by_role("button", name="Cancel").click()
+            same = await refused(
+                client, "place_rule", rule_id=rule, expected_version=moved["version"], node=first
+            )
+            await (
+                rule_row(page, rule)
+                .get_by_role("button", name="Move to another story or task…")
+                .click()
+            )
+            box = dialog(page)
+            await choose_place(box, first)
+            await box.get_by_role("button", name="Move it there").click()
+            await expect(refusal_in(page)).to_be_visible(timeout=SLOW)
+            same_words = await refusal_in(page).inner_text()
+            await box.get_by_role("button", name="Cancel").click()
+            assert w.problems == [], w.problems
+        events = await history(client, rule)
+        plain(blank_words, blank)
+        plain(same_words, same)
+        proof(
+            "M30",
+            "an acceptance criterion written in Lists is placed nowhere, opens on a page of its "
+            "own that says so and is first among those placed nowhere when the list is back, is "
+            "put on a story from a dialog, moved to another and dragged to a story that had "
+            "none, each in one step and each time the sentence above the list says what "
+            "coverage_report says; its history names the person",
+            loose["node"] is None
+            and after_new == (start[0] + 1, start[1])
+            and (placed["node"], placed["version"]) == (first, 2)
+            and (moved_once["node"], moved_once["version"]) == (second, 3)
+            and after_move == start
+            and after_drag == (start[0], start[1] - 1)
+            and (moved["node"], moved["version"]) == (first, 4)
+            and [(e["action"], e["actor"]) for e in events]
+            == [
+                ("rule_created", ADA),
+                ("rule_placed", ADA),
+                ("rule_moved", ADA),
+                ("rule_moved", ADA),
+            ],
+            f"placed nowhere {start[0]} -> {after_new[0]} -> {after_move[0]}, "
+            f"stories without {start[1]} -> {after_drag[1]}",
+        )
+        proof(
+            "M30",
+            "a blank acceptance criterion title and a move to the story it is already on are "
+            "refused in the words of the tools that own them, what was typed stays, and nothing "
+            "is written",
+            kept == "A body with no title"
+            and (await ok(client, "list_rules", limit=1))["total"] == total,
+            f'"{clip(same_words, 70)}"',
+        )

@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "types": ["./decl.d.ts"],
+    "strict": true,
+    "noImplicitAny": false,
+    "useUnknownInCatchVariables": false,
+    "skipLibCheck": true
+  }
+}

@@ -64,9 +64,32 @@ NOTES = {
     "note_history",
 }
 CONFIRMATION = {"set_confirmation"}
+# What a person is asked (M45): agents ask with an argument of finish_work and update_node.
+ASKS = {"list_asks", "answer_ask", "needs_a_person"}
 DEFINITION = {"get_definition_of_done", "set_definition_of_done", "set_check"}
+# Gates, plan approval and plan templates (M47).
+GATES = {
+    "add_gate",
+    "remove_gate",
+    "list_plans",
+    "approve_plan",
+    "request_plan_changes",
+    "revise_plan",
+    "save_plan_template",
+    "list_plan_templates",
+    "delete_plan_template",
+}
+# Where work belongs (M43): suggestions, and proposals that a person decides.
+PLACING = {"suggest_parent", "propose_placement", "list_placements", "decide_placement"}
 # The tools only a person may use: no key is offered them.
-PEOPLE_ONLY = CONFIRMATION | {"set_definition_of_done"}
+PEOPLE_ONLY = CONFIRMATION | {
+    "set_definition_of_done",
+    "answer_ask",
+    "remove_gate",
+    "approve_plan",
+    "request_plan_changes",
+    "decide_placement",
+}
 
 # Tools that only read: the board's Try it may run exactly these.
 READS = {
@@ -77,6 +100,12 @@ READS = {
     "list_links",
     "ready_work",
     "who_is_working",
+    "list_asks",
+    "needs_a_person",
+    "list_plans",
+    "list_plan_templates",
+    "suggest_parent",
+    "list_placements",
     "changes_since",
     "get_rule",
     "list_rules",
@@ -131,7 +160,10 @@ GONE = {
     "move_rule",
 }
 
-EVERY_TOOL = WORK | CRITERIA | FINDING | NOTES | CONFIRMATION | DEFINITION
+EVERY_TOOL = WORK | CRITERIA | FINDING | NOTES | CONFIRMATION | DEFINITION | ASKS | GATES | PLACING
+# The two tools of a key that calls Vrum by running code: the board lists them, but a key that
+# calls one tool at a time is never offered them.
+CODE_TOOLS = {"explore", "run"}
 
 
 def tools_on_the_board() -> list[dict[str, Any]]:
@@ -147,11 +179,11 @@ async def test_the_client_lists_the_tools(client: Client) -> None:
     names = {tool.name for tool in tools}
     # The key the tests use is allowed every tool a key can have: all but the ones a person uses.
     assert names == EVERY_TOOL - PEOPLE_ONLY
-    assert len(tools) == len(names) == 45
-    assert not names & GONE
+    assert len(tools) == len(names) == 56
+    assert not names & GONE and not names & CODE_TOOLS
     assert all(tool.description for tool in tools)
     on_the_board = {tool["name"] for tool in tools_on_the_board()}
-    assert on_the_board == EVERY_TOOL and len(on_the_board) == 47
+    assert on_the_board == EVERY_TOOL | CODE_TOOLS and len(on_the_board) == 65
 
 
 async def test_exactly_the_reading_tools_are_marked_as_only_reading(client: Client) -> None:

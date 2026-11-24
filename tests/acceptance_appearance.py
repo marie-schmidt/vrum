@@ -5,11 +5,12 @@ design; Light, Dark and System are chosen before and after signing in, kept acro
 signing out, applied before the first paint, and only System follows the operating system;
 switching appearance keeps a filter, a draft, the words in the search box and the open branches of
 the sidebar's tree; no screen scrolls sideways at 390, 768, 1280 and 1600 CSS pixels or at 200%
-zoom, in either theme, on the three views, Search (with Possible duplicates), Activity, the coverage
-report and the page of each kind of record; cards, progress bars and icons are what the records say;
-the keyboard does the work (a card's title opens its page, the next button moves on) with a visible
-focus and reduced motion stops the transitions; and a lost connection is told and then forgiven.
-Every proof reads values from the page; none is a picture.
+zoom, in either theme, on the Board, the three tabs of the Graph, the Roadmap, the Lists, Search
+(with Possible duplicates), Activity (changes and who is working), the coverage report and the page
+of each kind of record; cards, progress bars and icons are what the records say; the keyboard does
+the work (a card's title opens its page, the next button moves on, the back arrow goes one step
+back) with a visible focus and reduced motion stops the transitions; and a lost connection is told
+and then forgiven. Every proof reads values from the page; none is a picture.
 
 The chapter makes its own account, project and agent key, so it needs nothing from the chapters
 before it. Set VRUM_LAYOUT_SHOTS to a folder outside the repository to also keep screenshots of the
@@ -36,6 +37,7 @@ from tests.board_helpers import (
     no_panel_or_drawer,
     open_editor,
     pager,
+    sign_out,
     tree_expand,
     tree_item,
     view_crumb,
@@ -63,11 +65,10 @@ from tests.helpers import (
     REPO_ROOT,
     all_nodes,
     code_of,
-    confirm,
+    confirm_on_board,
     connect,
     day,
-    make_decision,
-    make_fact,
+    make_note,
     ok,
     set_status,
     unique_word,
@@ -133,7 +134,8 @@ async def appearance() -> None:
 @dataclass
 class World:
     """An account, a project and its agent key, made as a person would, and the references of the
-    work made through MCP by short name (task:12), and the ids of a decision and a fact."""
+    work made through MCP by short name (task:12), and the ids of an acceptance criterion and two
+    notes."""
 
     project: Project
     ids: dict[str, Any] = field(default_factory=dict)
@@ -149,7 +151,7 @@ class World:
 async def build_world() -> World:
     """Work of every length and context linked to it: an epic that is dense in one column and
     sparse in another, a small epic with two of its five tasks done, an epic of long words, dates,
-    a dependency, a requirement, a confirmed decision and a fact with a long source."""
+    a dependency, an acceptance criterion, a confirmed decision and a note with a long source."""
     project = make_project(register(server_base(), "Appearance tester"), "Appearance walk")
     world = World(project)
     ids = world.ids
@@ -190,31 +192,32 @@ async def build_world() -> World:
         await ok(
             client,
             "add_link",
-            actor="agent-1",
             source=ids["D3"],
             target=ids["D1"],
             link_type="needs_first",
         )
 
-        rule = await ok(
-            client, "create_rule", actor="ann", title="Keep who, when and why", node=ids["S1"]
-        )
+        rule = await ok(client, "create_rule", title="Keep who, when and why", node=ids["S1"])
         ids["R1"] = rule["id"]
-        decision = await make_decision(
+        decision = await make_note(
             client,
-            "Claims expire; work stays visible",
-            text="A claim has a lease that expires. At most one actor holds a claim at a time.",
-            reason="Coordinate work without a permanent lock when an agent stops.",
+            "Claims expire; work stays visible\n\n"
+            "A claim has a lease that expires. At most one actor holds a claim at a time.",
+            "Coordinate work without a permanent lock when an agent stops.",
+            decided_by="Ann",
             nodes=[ids["S1"]],
             rule_ids=[rule["id"]],
         )
         ids["X1"] = decision["id"]
-        await confirm(client, "decision", decision)
-        fact = await make_fact(
-            client, "The team call agreed the lease is ten minutes", nodes=[ids["S1"]]
+        confirm_on_board("note", decision, project=project)
+        fact = await make_note(
+            client,
+            "The team call agreed the lease is ten minutes",
+            "Said on the team call",
+            nodes=[ids["S1"]],
         )
         ids["Y1"] = fact["id"]
-        await make_fact(client, f"{UNBROKEN} {LONG_TITLE}", source=LONG_SOURCE, nodes=[ids["D1"]])
+        await make_note(client, f"{UNBROKEN} {LONG_TITLE}", LONG_SOURCE, nodes=[ids["D1"]])
     return world
 
 
@@ -279,7 +282,7 @@ async def accounts_in_the_new_design(base: str) -> None:
         held += await secrets_held(page, secrets)
 
         # Signing out keeps the choice, and keeps nothing else.
-        await page.locator("#sign-out").click()
+        await sign_out(page)
         await page.wait_for_selector(".entry", timeout=SLOW)
         await settled(page, "dark", "dark")
         after_sign_out = await stored_in_browser(page)
@@ -547,7 +550,8 @@ async def switching_keeps_what_was_typed(world: World) -> None:
 
 
 def views(world: World) -> list[Stop]:
-    ready = "svg#graph-svg[data-ready=true]"
+    # The Structure map is a live layout: it is looked at once it rests.
+    structure = "#graph-view[data-tab=structure] svg.graph-st-svg[data-resting=true]"
     rows = "#item-table tbody tr"
     record = "article.record-detail"
 
@@ -558,20 +562,34 @@ def views(world: World) -> list[Stop]:
 
     return [
         Stop("the Board", "#/board", ".card[data-ref]", "board"),
-        Stop("the Graph map", "#/graph?view=everything&as=map", ready, "graph"),
-        Stop("the Graph list", "#/graph?view=everything&as=list", ".gv-record", "graph"),
+        Stop("the Graph's Structure map", "#/graph", structure, "graph"),
+        Stop(
+            "the Graph's Around",
+            f"#/graph?tab=around&focus={world['S2']}",
+            ".graph-around",
+            "graph",
+        ),
+        Stop("the Graph's Order", f"#/graph?tab=order&focus={world['E1']}", ".graph-or", "graph"),
         Stop("the Roadmap", "#/roadmap", ".rm-bar", "roadmap"),
+        Stop("the Lists of work", "#/lists?view=work", "#work-tree li", "lists"),
+        Stop("the Lists of notes", "#/lists?view=notes", "tr.record-line[data-kind=note]", "lists"),
         Stop("Search", "#/search?search=card", "#search-results tr.result", "search"),
         Stop("Possible duplicates", "#/search?dups=1", "#dup-pairs > *", "search"),
         Stop("Activity", "#/activity", "#feed .event", "activity"),
+        Stop("Activity, who is working", "#/activity?tab=working", "#agents", "activity"),
         Stop("the coverage report", "#/coverage", "#coverage-summary[data-unplaced]", "coverage"),
         page_of("an epic's page", world["E1"], rows),
         page_of("a story's page", world["S2"], rows, "graph"),
-        page_of("a task's page", world["D1"], "#item-part-title"),
-        page_of("a requirement's page", f"rule:{world['R1']}", record, "coverage"),
+        page_of("a task's page", world["D1"], "#item-links"),
+        page_of("an acceptance criterion's page", f"rule:{world['R1']}", record, "coverage"),
         page_of("a decided note's page", f"note:{world['X1']}", record, "search"),
         page_of("a note's page", f"note:{world['Y1']}", record, "activity"),
     ]
+
+
+def view_named(world: World, name: str) -> Stop:
+    """One of the screens of `views`, by its name."""
+    return next(stop for stop in views(world) if stop.name == name)
 
 
 OVERFLOW = """() => ({
@@ -593,7 +611,7 @@ async def reach_what_is_hidden(w: Watched, screen: Screen, world: World) -> list
     scroll in their own region, which can be moved by its arrows while the page does not move."""
     page = w.page
     problems: list[str] = []
-    await visit(w, views(world)[0])
+    await visit(w, view_named(world, "the Board"))
     toggle, nav = page.locator("#sidebar-toggle"), page.locator("#main-nav")
     if screen.narrow:
         if await nav.is_visible() or not await toggle.is_visible():
@@ -692,18 +710,18 @@ async def no_screen_scrolls_sideways(world: World) -> None:
                     for problem in await reach_what_is_hidden(w, screen, world)
                 ]
                 if screen.name == "1600":
-                    chosen = f"#/graph?view=everything&as=map&sel=decision:{world['X1']}"
-                    await visit(w, Stop("the Graph", chosen, "#graph-chosen[data-key]", "graph"))
+                    chosen = f"#/graph?tab=around&focus=note:{world['X1']}"
+                    await visit(w, Stop("the Graph", chosen, "#graph-hub", "graph"))
                     await shoot(w.page, f"graph-chosen-{theme}")
-                    await visit(w, views(world)[8])
+                    await visit(w, view_named(world, "an epic's page"))
                     await shoot(w.page, f"epic-page-{theme}")
     proof(
         "M20",
         "at 390, 768, 1280 and 1600 CSS pixels wide, and at 200% zoom (640 CSS pixels at twice the "
-        "pixels), the Board, the Graph's map and list, the Roadmap, Search (results and Possible "
-        "duplicates), Activity, the coverage report and the pages of an epic, a story, a task, a "
-        "requirement, a decision and a fact never make the page scroll sideways, in Light and in "
-        "Dark",
+        "pixels), the Board, the three tabs of the Graph, the Roadmap, the Lists, Search (results "
+        "and Possible duplicates), Activity (its changes and who is working), the coverage report "
+        "and the pages of an epic, a story, a task, an acceptance criterion and two notes never "
+        "make the page scroll sideways, in Light and in Dark",
         visits == len(SCREENS) * len(THEMES) * len(views(world)) and not wide,
         clip("; ".join(wide), 160) or f"{visits} screens measured",
     )
@@ -855,6 +873,9 @@ async def cards_progress_and_icons(world: World) -> None:
                 if small is None or small["text"] != "2 of 5 tasks done" or small["ratio"] > 0.41:
                     wrong_meters.append(f"{where}: the small epic does not show 2 of 5")
 
+                # Stories and tasks carry their kind's icon only when the Board shows both.
+                await open_address(w, "#/board?show=both")
+                await settle(page)
                 icons: dict[str, Any] = await page.evaluate(ICONS)
                 for group in ("statuses", "kinds", "lanes"):
                     drawn = icons[group]
@@ -949,6 +970,13 @@ async def the_keyboard_and_reduced_motion(world: World) -> None:
             if f"item={world['A3']}&" not in page.url:
                 problems.append(f"Enter on the next button did not go to the next task {where}")
             await start_of_page(page)
+            await tab_to(page, "#back-to-view")
+            await ring(page, f"the back arrow {where}")
+            await page.keyboard.press("Enter")
+            await item_loaded(page, task)
+            if f"item={task}&" not in page.url:
+                problems.append(f"Enter on the back arrow did not go one step back {where}")
+            await start_of_page(page)
             await tab_to(page, "nav.crumbs li.crumb-view a")
             await ring(page, f"the breadcrumb's way back {where}")
             await page.keyboard.press("Enter")
@@ -962,17 +990,18 @@ async def the_keyboard_and_reduced_motion(world: World) -> None:
             await expect(page.locator(card)).to_have_class(re.compile(r"\bfolded\b"))
             await page.keyboard.press("Enter")
             await expect(page.locator(card)).not_to_have_class(re.compile(r"\bfolded\b"))
-            if not (await focused(page)).startswith(f"button Show {code_of(task)}") and not (
+            name = (await page.locator(f"{card} .card-title").inner_text()).strip()
+            if not (await focused(page)).startswith(f"button Show “{name}”") and not (
                 await focused(page)
-            ).startswith(f"button Fold away {code_of(task)}"):
+            ).startswith(f"button Fold away “{name}”"):
                 problems.append(f"the fold button lost the focus when it was used {where}")
     proof(
         "M20",
         "with the keyboard alone on the Board, a card's title is followed with Enter to the page "
-        "of the task, the next button there goes to the next task, the breadcrumb's way back "
-        "returns to the Board, and the card's fold button folds it and opens it again; every "
-        "control the keyboard stops on shows an outline of at least 2 pixels that stands out "
-        "from what is around it",
+        "of the task, the next button there goes to the next task, the back arrow goes one step "
+        "back to the task before, the breadcrumb's way back returns to the Board, and the card's "
+        "fold button folds it and opens it again; every control the keyboard stops on shows an "
+        "outline of at least 2 pixels that stands out from what is around it",
         not problems and len(seen) >= 10,
         clip("; ".join(problems), 160) or f"{len(seen)} stops checked at 1280 and 768",
     )

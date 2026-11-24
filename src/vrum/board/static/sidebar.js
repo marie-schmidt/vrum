@@ -1,28 +1,26 @@
-// The sidebar of an open project: the brand, the project switcher, the four views with how much
-// each holds, the navigator (the epics, and under them stories and tasks), and, at the foot,
-// Activity, the Settings menu and the account. On a narrow window it is off
-// to the left and opens over the page (the button in the top bar), closing again on Escape, on a
-// click outside it, or when a place is chosen.
+// The sidebar of an open project: the brand, the project switcher, the four views, the navigator (the
+// epics, and under them stories and tasks), and, at the foot, Needs a person, Activity, the Settings menu and the account
+// menu (Account, the appearance, Sign out). On a narrow window it is off to the left and opens over the
+// page (the button in the top bar), closing again on Escape, on a click outside it, or when a place is
+// chosen.
 //
-// The numbers are real and cheap, read from what the board already holds:
-//   Board    stories and tasks (what the Board draws in its lanes; epics are the lanes themselves)
-//   Graph    work items, plus the acceptance criteria and the notes still in force (what it can
-//            look around). It waits for the context to be read, and shows nothing until it has been.
-//   Roadmap  items with a date of their own or one worked out from their children (what it draws)
-//   Lists    the same as the Graph: every work item, and the acceptance criteria and notes
-//            still in force (what "Everything" lists)
-//   Activity the items someone holds right now (a claim that has not run out)
+// The views carry no numbers: how much there is is on each page. The live numbers are Activity's, the items someone
+// holds right now (a claim that has not run out), and the one of Needs a person, how many things wait for a person, which is
+// drawn only while there are any.
 //
 // The navigator is a tree: every epic, a chevron to open its stories, and on each story a chevron
 // to open its tasks. Only what is open is drawn. A title opens that record's page; the record
 // being looked at is marked and the ones above it are opened for it. It scrolls on its own, so it
-// never makes the sidebar longer.
+// never makes the sidebar longer. It is shown on the pages about the work (the views, Search, Activity,
+// the coverage report and the page of a record) and not on the settings pages or the Account page.
 
+import { appearanceMenuItems } from './appearance.js';
 import { wordmark } from './brand.js';
-import { SETTINGS, itemAddress, itemLink, openItem, ui, viewLink } from './ctx.js';
+import { SETTINGS, WORK_PAGES, itemAddress, itemLink, openItem, ui, viewLink } from './ctx.js';
 import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, inForce, nodeCode, roleWords } from './labels.js';
+import { KIND, nodeCode, roleWords } from './labels.js';
+import { needsTotal, onNeeds, watchNeeds } from './needs-state.js';
 import { describeItem, store } from './store.js';
 
 const aside = document.getElementById('sidebar');
@@ -30,7 +28,7 @@ const scrim = document.getElementById('sidebar-scrim');
 const column = document.getElementById('main-column');
 const NARROW = matchMedia('(max-width: 1099.98px)');
 
-const SETTINGS_ICONS = { users: 'person', definition: 'checklist', tools: 'settings', status: 'info' };
+const SETTINGS_ICONS = { users: 'person', definition: 'checklist', templates: 'template', tools: 'settings', status: 'info' };
 
 let parts = null; // the elements of the open project's sidebar
 let opener = null; // what had the focus before it opened, to give it back
@@ -72,22 +70,13 @@ NARROW.addEventListener('change', () => {
   if (!NARROW.matches) closeSidebar({ restore: false });
 });
 
-// -- the Settings menu ----------------------------------------------------------------------------------------
+// -- the menus at the foot -----------------------------------------------------------------------------------
 
-// A button that opens a short list of links, with the keyboard behaviour of a menu (Enter, Space or
-// an arrow opens it, the arrows, Home and End move, Escape closes it).
-function settingsMenu(settings, titles) {
-  const button = h(
-    'button',
-    { type: 'button', id: 'settings-menu', class: 'side-item', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'settings-list' },
-    icon('settings', { size: 18 }),
-    h('span', { class: 'side-label' }, 'Settings and tools'),
-    icon('chevron_down', { size: 14, className: 'side-chevron' }),
-  );
-  const items = settings.map((name) =>
-    viewLink(name, {}, { id: `settings-${name}`, role: 'menuitem', tabindex: '-1', dataset: { page: name } }, icon(SETTINGS_ICONS[name], { size: 16 }), titles[name]),
-  );
-  const list = h('div', { id: 'settings-list', class: 'menu menu-list', role: 'menu', 'aria-label': 'Settings and tools', hidden: true }, items);
+// A button that opens a short menu of links, choices and buttons, with the keyboard behaviour of a menu (Enter, Space or
+// an arrow opens it, the arrows, Home and End move, Escape closes it, and so does a click or the focus going outside it).
+// Choosing something closes it. `items` are the things that take the focus, in order; `list` may hold more (a heading, a
+// separator). The Settings menu and the account menu are both this.
+function popupMenu(button, list, items) {
   const wrap = h('div', { class: 'menu-wrap' }, button, list);
   const outside = (event) => {
     if (!wrap.contains(event.target)) close();
@@ -133,11 +122,54 @@ function settingsMenu(settings, titles) {
       close(true);
     } else if (event.key === 'Tab') close();
   });
-  list.addEventListener('click', () => close());
+  // A choice that stays on the page (the appearance) gives the focus back to the button; a link takes it to its page.
+  list.addEventListener('click', (event) => close(event.target.closest('[role=menuitemradio]') !== null));
   wrap.addEventListener('focusout', (event) => {
     if (!list.hidden && !wrap.contains(event.relatedTarget)) close();
   });
-  return { wrap, button };
+  return wrap;
+}
+
+// Settings and tools: the pages of the project's settings, as links.
+function settingsMenu(settings, titles) {
+  const button = h(
+    'button',
+    { type: 'button', id: 'settings-menu', class: 'side-item', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'settings-list' },
+    icon('settings', { size: 18 }),
+    h('span', { class: 'side-label' }, 'Settings and tools'),
+    icon('chevron_down', { size: 14, className: 'side-chevron' }),
+  );
+  const items = settings.map((name) =>
+    viewLink(name, {}, { id: `settings-${name}`, role: 'menuitem', tabindex: '-1', dataset: { page: name } }, icon(SETTINGS_ICONS[name], { size: 16 }), titles[name]),
+  );
+  const list = h('div', { id: 'settings-list', class: 'menu menu-list', role: 'menu', 'aria-label': 'Settings and tools', hidden: true }, items);
+  return { wrap: popupMenu(button, list, items), button };
+}
+
+// The account menu, in the place the account block was: the person's name with a chevron. Its list has the Account page,
+// the appearance (Light, Dark and System, one radio item each) and Sign out.
+function accountMenu(session, leaveBoard) {
+  const name = h('span', { class: 'account-name side-label' }, session.account.name);
+  const button = h(
+    'button',
+    { type: 'button', id: 'account', class: 'side-item account-button', title: session.account.email, 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'account-list' },
+    h('span', { class: 'avatar small', 'aria-hidden': 'true' }, icon('person', { size: 16 })),
+    name,
+    icon('chevron_down', { size: 14, className: 'side-chevron' }),
+  );
+  const page = viewLink('account', {}, { id: 'account-page', role: 'menuitem', tabindex: '-1', dataset: { page: 'account' } }, icon('person', { size: 16 }), 'Account');
+  const choices = appearanceMenuItems();
+  const signOut = h('button', { type: 'button', id: 'sign-out', role: 'menuitem', tabindex: '-1', onclick: leaveBoard }, icon('logout', { size: 16 }), 'Sign out');
+  const list = h(
+    'div',
+    { id: 'account-list', class: 'menu menu-list', role: 'menu', 'aria-label': 'Account', hidden: true },
+    page,
+    h('div', { class: 'menu-separator', role: 'separator' }),
+    h('div', { class: 'menu-group', role: 'group', 'aria-labelledby': 'appearance-heading' }, h('div', { id: 'appearance-heading', class: 'menu-heading' }, 'Appearance'), choices),
+    h('div', { class: 'menu-separator', role: 'separator' }),
+    signOut,
+  );
+  return { wrap: popupMenu(button, list, [page, ...choices, signOut]), button, name };
 }
 
 // -- building it ---------------------------------------------------------------------------------------------
@@ -167,9 +199,7 @@ function projectSwitch(project, projectList) {
 }
 
 function navLink(page, iconName, title) {
-  const count = h('span', { class: 'nav-count', hidden: true });
-  const link = viewLink(page, {}, { class: 'side-item', dataset: { page } }, icon(iconName, { size: 18 }), h('span', { class: 'side-label' }, title), count);
-  return { link, count };
+  return viewLink(page, {}, { class: 'side-item', dataset: { page } }, icon(iconName, { size: 18 }), h('span', { class: 'side-label' }, title));
 }
 
 // What is built once for an open project: the pieces that change are filled in by updateSidebar.
@@ -177,11 +207,14 @@ export function showSidebar({ session, project, projectList, views, settings, ti
   const nav = views.map((page) => navLink(page, page, titles[page]));
   const tree = h('ul', { id: 'epic-list', class: 'plain side-tree', role: 'tree', 'aria-label': 'Epics, stories and tasks' });
   const none = h('p', { class: 'quiet side-note', hidden: true }, 'No epics yet.');
+  const epics = h('section', { class: 'side-epics', 'aria-labelledby': 'epics-heading' }, h('h2', { id: 'epics-heading', class: 'side-heading' }, 'Epics'), none, tree);
   const activityCount = h('span', { id: 'sidebar-activity-count', class: 'nav-count', hidden: true });
   const activity = viewLink('activity', {}, { id: 'activity-open', class: 'side-item', title: 'Who is working on what, and what changed', dataset: { page: 'activity' } }, icon('activity', { size: 18 }), h('span', { class: 'side-label' }, 'Activity'), activityCount);
+  const needsCount = h('span', { id: 'sidebar-needs-count', class: 'nav-count needs-badge', role: 'img', hidden: true });
+  const needs = viewLink('needs', {}, { id: 'needs-open', class: 'side-item', title: 'What only a person can settle', dataset: { page: 'needs' } }, icon('needs', { size: 18 }), h('span', { class: 'side-label' }, 'Needs a person'), needsCount);
   const menu = settingsMenu(settings, titles);
-  const accountName = h('span', { class: 'account-name' }, session.account.name);
-  parts = { nav, tree, none, activity, activityCount, settings: menu.button, accountName };
+  const account = accountMenu(session, leaveBoard);
+  parts = { nav, epics, tree, none, activity, activityCount, needs, needsCount, settings: menu.button, account: account.button, accountName: account.name, epicsScroll: 0 };
   put(
     aside,
     h(
@@ -191,22 +224,15 @@ export function showSidebar({ session, project, projectList, views, settings, ti
       h('button', { type: 'button', id: 'sidebar-close', class: 'ghost icon-only', 'aria-label': 'Close the menu', onclick: () => closeSidebar() }, icon('close', { size: 18 })),
     ),
     projectSwitch(project, projectList),
-    h('nav', { id: 'main-nav', 'aria-label': 'Views' }, nav.map((item) => item.link)),
-    h('section', { class: 'side-epics', 'aria-labelledby': 'epics-heading' }, h('h2', { id: 'epics-heading', class: 'side-heading' }, 'Epics'), none, tree),
-    h(
-      'div',
-      { class: 'side-foot' },
-      activity,
-      menu.wrap,
-      h(
-        'div',
-        { class: 'account-block' },
-        viewLink('users', {}, { id: 'account', class: 'account-link', title: `${session.account.email}. Your account.` }, h('span', { class: 'avatar small', 'aria-hidden': 'true' }, icon('person', { size: 16 })), accountName),
-        h('button', { type: 'button', id: 'sign-out', class: 'small', onclick: leaveBoard }, 'Sign out'),
-      ),
-    ),
+    h('nav', { id: 'main-nav', 'aria-label': 'Views' }, nav),
+    epics,
+    h('div', { class: 'side-foot' }, needs, activity, menu.wrap, account.wrap),
   );
   aside.hidden = false;
+  stopNeeds();
+  stopNeeds = watchNeeds();
+  unlistenNeeds();
+  unlistenNeeds = onNeeds((list) => drawNeeds(list.total));
   updateSidebar();
 }
 
@@ -217,9 +243,13 @@ export function hideSidebar() {
   parts = null;
   epicTree.reset();
   clearTimeout(claimTimer);
+  stopNeeds();
+  stopNeeds = () => {};
+  unlistenNeeds();
+  unlistenNeeds = () => {};
 }
 
-// The name the person is shown as, after they changed it on the Users page.
+// The name the person is shown as, after they changed it on the Account page.
 export function updateAccount(name) {
   if (parts) parts.accountName.textContent = name;
 }
@@ -239,7 +269,7 @@ const epicTree = (() => {
   let revealed = null; // the record whose ancestors were last opened
   let drawn = ''; // what the tree last drew, to draw it again only when that changes
 
-  const nameOf = (node) => `${KIND[node.kind].label} ${node.number}: ${node.title}`;
+  const nameOf = (node) => `${KIND[node.kind].label} ${nodeCode(node.kind, node.number)}: ${node.title}`;
 
   // Every epic, and under each story and task by number; a node is listed under its parent.
   function childIndex() {
@@ -326,7 +356,7 @@ const epicTree = (() => {
     const twisty = hasKids
       ? h(
           'button',
-          { type: 'button', class: 'tree-twisty', tabindex: -1, 'aria-label': `${open ? 'Collapse' : 'Expand'} ${code}`, title: `${open ? 'Hide' : 'Show'} ${node.kind === 'epic' ? 'the stories' : 'the tasks'} of ${code}`, onclick: () => setOpen(node.ref, !open) },
+          { type: 'button', class: 'tree-twisty', tabindex: -1, 'aria-label': `${open ? 'Collapse' : 'Expand'} “${node.title}”`, title: `${open ? 'Hide' : 'Show'} ${node.kind === 'epic' ? 'the stories' : 'the tasks'} of “${node.title}”`, onclick: () => setOpen(node.ref, !open) },
           icon(open ? 'chevron_down' : 'chevron_right', { size: 14 }),
         )
       : h('span', { class: 'tree-twisty none', 'aria-hidden': 'true' });
@@ -428,27 +458,21 @@ const epicTree = (() => {
 
 // -- what changes ----------------------------------------------------------------------------------------------
 
-// How much each view holds, or null where it is not known yet.
-export function counts() {
-  const nodes = [...store.nodes.values()];
-  const loaded = store.rules !== null && store.notes !== null;
-  const everything = loaded ? nodes.length + (store.rules || []).filter((rule) => rule.status !== 'dropped').length + (store.notes || []).filter(inForce).length : null;
-  return {
-    board: nodes.filter((node) => node.kind !== 'epic').length,
-    graph: everything,
-    roadmap: nodes.filter((node) => node.span_start || node.span_end).length,
-    lists: everything,
-  };
-}
-
-const MEANING = {
-  board: (n) => `${plural(n, 'story', 'stories')} and tasks on the Board`,
-  graph: (n) => `${plural(n, 'work item')} and records in force in the Graph`,
-  roadmap: (n) => `${plural(n, 'item')} with dates on the Roadmap`,
-  lists: (n) => `${plural(n, 'work item')} and records in force in Lists`,
-};
-
 let claimTimer = null;
+let stopNeeds = () => {};
+let unlistenNeeds = () => {};
+
+// How many rows the page of what needs a person has, as the server counted them: nothing is drawn while there are none.
+function drawNeeds(total) {
+  if (!parts) return;
+  const { needsCount } = parts;
+  const waiting = total ?? 0;
+  needsCount.hidden = waiting === 0;
+  needsCount.textContent = waiting ? String(waiting) : '';
+  if (waiting) needsCount.setAttribute('aria-label', `${waiting} waiting for a person`);
+  else needsCount.removeAttribute('aria-label');
+  needsCount.title = waiting ? `${waiting} waiting for a person` : '';
+}
 
 // The items someone holds now. A claim runs out without any news, so the number is worked out again
 // when the next one is due to.
@@ -466,33 +490,35 @@ function drawClaims() {
   }
 }
 
-// Marks where the person is and refreshes the numbers and the navigator. On the page of a record
-// the sidebar stays in the page the record was reached from, so that view is the one marked.
+// Marks one place of the sidebar as the page the person is on.
+function mark(element, on) {
+  element.classList.toggle('current', on);
+  if (on) element.setAttribute('aria-current', 'page');
+  else element.removeAttribute('aria-current');
+}
+
+// The navigator is for the pages about the work; the settings pages and the Account page have none. Its scroll is
+// kept for when it comes back.
+function showEpics(on) {
+  if (on === !parts.epics.hidden) return;
+  if (!on) parts.epicsScroll = parts.tree.scrollTop;
+  parts.epics.hidden = !on;
+  if (on) parts.tree.scrollTop = parts.epicsScroll;
+}
+
+// Marks where the person is and refreshes the navigator. On the page of a record the sidebar stays in the page the
+// record was reached from, so that view is the one marked.
 export function updateSidebar() {
   if (!parts) return;
-  const now = counts();
-  const here = ui.page === 'item' ? ui.from : ui.page;
-  for (const { link, count } of parts.nav) {
-    const page = link.dataset.page;
-    const on = page === here;
-    link.classList.toggle('current', on);
-    if (on) link.setAttribute('aria-current', 'page');
-    else link.removeAttribute('aria-current');
-    const number = now[page];
-    count.hidden = number === null;
-    if (number !== null) {
-      count.textContent = String(number);
-      count.title = MEANING[page](number);
-    }
-  }
-  const settingsOn = SETTINGS.includes(ui.page);
-  parts.settings.classList.toggle('current', settingsOn);
-  if (settingsOn) parts.settings.setAttribute('aria-current', 'page');
-  else parts.settings.removeAttribute('aria-current');
-  const activityOn = here === 'activity';
-  parts.activity.classList.toggle('current', activityOn);
-  if (activityOn) parts.activity.setAttribute('aria-current', 'page');
-  else parts.activity.removeAttribute('aria-current');
+  const here = ui.page === 'item' || ui.page === 'review' ? ui.from : ui.page;
+  for (const link of parts.nav) mark(link, link.dataset.page === here);
+  mark(parts.settings, SETTINGS.includes(ui.page));
+  mark(parts.account, ui.page === 'account');
+  mark(parts.activity, here === 'activity');
+  mark(parts.needs, here === 'needs');
+  drawNeeds(needsTotal());
   drawClaims();
-  epicTree.draw();
+  const onWork = WORK_PAGES.includes(ui.page);
+  showEpics(onWork);
+  if (onWork) epicTree.draw();
 }

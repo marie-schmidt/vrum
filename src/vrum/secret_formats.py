@@ -28,6 +28,7 @@ _FORMATS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a Vrum invitation", re.compile(r"\bvri_[A-Za-z0-9_-]{30,}")),
     ("a Vrum email confirmation token", re.compile(r"\bvrv_[A-Za-z0-9_-]{30,}")),
     ("a Vrum password reset token", re.compile(r"\bvrr_[A-Za-z0-9_-]{30,}")),
+    ("a webhook signing secret", re.compile(r"\bwhsec_[A-Za-z0-9+/]{30,}={0,2}")),
     ("a Vrum sign-in cookie", re.compile(r"\bvrt_[A-Za-z0-9_-]{30,}")),
     ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
     ("a SendGrid key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}")),

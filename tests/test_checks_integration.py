@@ -400,8 +400,22 @@ async def test_the_briefing_carries_the_checks_of_the_item_an_agent_is_given() -
         define(owner, project, f"The rules.\n- {TESTS}\n- {DOCS}")
         context = (await ok(agent, "next_work", peek=True))["context"]
         assert context["definition_checks"] == [
-            {"item": key_of(TESTS), "text": TESTS, "person_only": False, "checked": False},
-            {"item": key_of(DOCS), "text": DOCS, "person_only": False, "checked": False},
+            {
+                "item": key_of(TESTS),
+                "text": TESTS,
+                "person_only": False,
+                "verifier_only": False,
+                "github": False,
+                "checked": False,
+            },
+            {
+                "item": key_of(DOCS),
+                "text": DOCS,
+                "person_only": False,
+                "verifier_only": False,
+                "github": False,
+                "checked": False,
+            },
         ]
         # The text is still there for the lines that are not checks.
         assert context["definition_of_done"].startswith("The rules.")

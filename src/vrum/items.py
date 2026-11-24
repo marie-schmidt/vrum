@@ -33,6 +33,9 @@ class NamedItem(BaseModel):
         default=None,
         description="Only for a rule or note: its id. An epic, story or task has "
         "none (leave this out): its ref names it.",
+        # The serializer below leaves it out when it is empty, so a result does not always hold it
+        # (the TypeScript an agent that runs code sees, sdk.py, reads this mark).
+        json_schema_extra={"x-left-out-when-empty": True},
     )
 
     @model_serializer(mode="wrap")

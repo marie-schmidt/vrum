@@ -3,8 +3,8 @@
 // fetched with the same tools an agent uses and refreshed from the same change feed. The server is
 // the only place anything is kept.
 
-import { call, callAll, callPaged, exported, get, indexState } from './api.js';
-import { isNodeKind, kindLabel, nodeCode } from './labels.js';
+import { call, callAll, callPaged, exported, get, indexState, useNames } from './api.js';
+import { isNodeKind, noteCode, nodeCode, ruleCode } from './labels.js';
 
 const listeners = new Set();
 
@@ -196,12 +196,11 @@ export function restOf(note) {
   return first < 0 ? '' : lines.slice(first + 1).join(' ').replace(/\s+/g, ' ').trim();
 }
 
-// What the path and the browser's tab call any of the five kinds of record: { kind, number, name,
-// title, parent }. `name` is what is written before the title ("S-12", "Acceptance criterion #3", "Note #7");
-// `parent` is the story or task an acceptance criterion is on (the only
-// kind that has one besides the work itself). A note has no title, so the first line of its text
-// stands for one. Null when the record is not known (not found, or the acceptance criteria and notes are
-// not read yet).
+// What the path, the browser's tab and a refusal call any of the five kinds of record: { kind, number, name,
+// title, parent }. `name` is the code written before the title ("S-12", "AC-3", "N-7"); a note's title is its
+// headline (the first line of its text). `parent` is the story or task an acceptance criterion is on (the only
+// kind that has one besides the work itself). Null when the record is not known (not found, or the acceptance
+// criteria and notes are not read yet).
 export function describeItem(ref) {
   const found = /^(epic|story|task|rule|note):([1-9][0-9]*)$/.exec(String(ref ?? ''));
   if (!found) return null;
@@ -216,8 +215,11 @@ export function describeItem(ref) {
   return {
     kind,
     number,
-    name: `${kindLabel(kind)} #${number}`,
+    name: kind === 'rule' ? ruleCode(number) : noteCode(number),
     title: kind === 'note' ? headlineOf(record) : record.title,
     parent: kind === 'rule' ? record.node || null : null,
   };
 }
+
+// What a sentence that names a record by its reference should say instead (see api.js namesIn).
+useNames(describeItem);

@@ -256,6 +256,8 @@ def test_roles_are_applied_to_every_route_on_every_request_by_the_servers_own_re
     owners_only = [
         ("GET", "/keys", None),
         ("POST", "/keys", {"name": "sneaky-agent"}),
+        ("POST", "/keys", {"name": "sneaky-coder", "code_mode": True}),
+        ("PATCH", "/keys/1", {"code_mode": True}),
         ("DELETE", "/keys/1", None),
         ("GET", "/invites", None),
         ("POST", "/invites", {"role": "editor"}),
@@ -384,7 +386,7 @@ def test_no_two_people_of_a_project_share_a_name_when_joining_or_when_renaming()
     twin = register(name=f"LENA {word}")
     taken = (
         f"Someone in this project already uses the name {twin.name}. "
-        "Change your name on the Users page first."
+        "Change your name on the Account page first."
     )
     link = f"/board/api/invites/{token}"
     assert twin.call("GET", link).body["invite"]["problem"] == taken

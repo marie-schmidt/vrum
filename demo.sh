@@ -2,9 +2,10 @@
 # Look around Vrum with sample data, without touching your own install.
 #
 #   ./demo.sh         starts a separate copy of Vrum with a made-up project in it (Riverside
-#                     Bike Share: about 12 epics, 50 stories, 180 tasks, with requirements, notes
-#                     (some with the person who decided them), claims and handoff notes), then says where it is and
-#                     how to sign in. Running it again starts again from a fresh database.
+#                     Bike Share: 13 epics, 65 stories, 190 tasks, with requirements, notes
+#                     (some with the person who decided them), claims and handoff notes), then
+#                     says where it is and how to sign in. Running it again starts again from a
+#                     fresh database.
 #   ./demo.sh stop    removes the demo: its containers, its data and its image.
 #
 # The demo is its own Docker Compose project (vrum-demo, or VRUM_DEMO_PROJECT) with its own
@@ -153,9 +154,10 @@ demo down --volumes --remove-orphans
 refuse_ports_in_use
 
 # Only what the demo shows is started: the server, its database, the embedding service (the real
-# one), the scripted mail server, OpenID provider and GitHub, and the real directory. (Dex, the real
+# one), the sandbox that runs the scripts of a key that calls Vrum by running code, the scripted mail
+# server, OpenID provider and GitHub, and the real directory. (Dex, the real
 # OpenID provider the checks use, and the second server that talks to it, are left out.)
-if ! demo up -d --build --wait --wait-timeout 240 app embeddings scripted-mail \
+if ! demo up -d --build --wait --wait-timeout 240 app embeddings sandbox scripted-mail \
   scripted-oidc scripted-github ldap; then
   echo >&2
   echo "The demo did not start. To see why, run: docker compose -p ${project} logs" >&2

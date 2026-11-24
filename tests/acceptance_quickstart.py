@@ -26,6 +26,7 @@ from playwright.async_api import Page, expect
 from tests.acceptance_scenario import Failed, chapter, clip, proof
 from tests.board_helpers import SLOW, browser_page, on_page, sidebar_current
 from tests.board_m14 import events_of, feed_becomes, feed_row, spoken
+from tests.board_search import open_settings
 from tests.helpers import REPO_ROOT, code_of, connect, embeddings_stopped, ok, unique_word
 from tests.second_stack import SecondStack
 from tests.test_board_accounts_integration import (
@@ -36,7 +37,7 @@ from tests.world import Person, server_base
 
 README = REPO_ROOT / "README.md"
 GUIDE = REPO_ROOT / "docs" / "agents.md"
-AGENT = "quickstart-agent"
+AGENT = "my first agent"
 NOTE = "Built the sign-in form. Nothing is left to do, but check the error messages."
 NEWS = 20_000
 # What a plain GET with no key gets at each address the README gives: the board's page and the
@@ -237,7 +238,7 @@ async def first_minutes(base: str) -> None:
             "M18",
             "a newcomer registers in the browser with a name, an email address and a password, "
             "finds no project (no demo project comes with the install), makes one, and its Board "
-            "is empty: no work item, requirement, decision or fact, by the server's own counts",
+            "is empty: no work item, acceptance criterion or note, by the server's own counts",
             no_project_yet
             and listed_before == []
             and [each["name"] for each in listed] == [f"Quick start {word}"]
@@ -254,16 +255,18 @@ async def first_minutes(base: str) -> None:
         on_new_page = page.url.endswith(f"#/item?item={task}&from=board") and await sidebar_current(
             page
         ) == ["board"]
-        await page.locator("#settings-menu").click()
-        await page.locator("#settings-access").click()
-        await page.locator("#key-label").fill("my first agent")
+        await open_settings(page, "users")
+        await page.locator("#key-open").click()
+        await page.locator("#key-name").fill(AGENT)
+        await page.locator("#key-call-tools").check()
+        await page.locator("#key-tools-choice-standard").click()
         await page.locator("#create-key").click()
         await expect(page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
         key = (await page.locator("#key-secret").inner_text()).strip()
         await w.go("#/board")
         await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
-        await w.go("#/access")
-        await expect(page.locator("#key-list")).to_contain_text("my first agent", timeout=SLOW)
+        await w.go("#/users")
+        await expect(page.locator("#keys")).to_contain_text(AGENT, timeout=SLOW)
         gone_from_page = key not in await page.locator("body").inner_text()
         async with connect(f"{base}/mcp", key) as agent:
             seen = {
@@ -274,7 +277,8 @@ async def first_minutes(base: str) -> None:
             "M20",
             "with New item on the Board the newcomer makes an epic, a story in it and a task in "
             "the story, each opening the page of the new item (still in the Board, as its "
-            "breadcrumb and the sidebar say), then makes an agent key from Settings and tools: the "
+            "breadcrumb and the sidebar say), then makes an agent key on the Users page, in a "
+            "dialog that asks how the agent calls Vrum and what it may do: the "
             "secret is shown once (the page shows only its label and start afterwards), and an "
             "MCP client with it sees the same three items with the references (epic:1, story:1, "
             "task:1) and titles the dialog gave",
@@ -293,8 +297,8 @@ async def first_minutes(base: str) -> None:
 
         await w.go("#/board")
         await expect(page.locator(f".card[data-ref='{task}']")).to_be_visible(timeout=SLOW)
-        await the_agent_works(base, key, task, page)
-        await the_board_shows_it(base, key, task, page)
+        await the_agent_works(base, key, epic, task, page)
+        await the_board_shows_it(base, key, task, page, person, mine)
 
 
 async def signed_in_person(page: Page, base: str, email: str, password: str, name: str) -> Person:
@@ -313,7 +317,7 @@ async def signed_in_person(page: Page, base: str, email: str, password: str, nam
     )
 
 
-async def the_agent_works(base: str, key: str, task: str, page: Page) -> None:
+async def the_agent_works(base: str, key: str, epic: str, task: str, page: Page) -> None:
     guide = GUIDE.read_text(encoding="utf-8")
     found = re.search(r"```python\n(.*?)\n```", guide, re.DOTALL)
     assert found, "docs/agents.md has no Python example"
@@ -327,17 +331,20 @@ async def the_agent_works(base: str, key: str, task: str, page: Page) -> None:
         timeout=120,
     )
     async with connect(f"{base}/mcp", key) as agent:
-        taken = await ok(agent, "next_work", actor=AGENT)
-        held = page.locator(f".card[data-ref='{task}'] .card-note.claim")
-        await expect(held).to_contain_text(f"Held by {AGENT}", timeout=NEWS)
-        finished = await ok(agent, "finish_work", actor=AGENT, node=task, outcome="done", note=NOTE)
+        # The agent is named by its key: nobody types a name, and the server records the work under
+        # the key's name.
+        taken = await ok(agent, "next_work")
+        held = page.locator(f".card[data-ref='{task}'] .chip.held")
+        await expect(held).to_have_attribute("data-held-by", AGENT, timeout=NEWS)
+        finished = await ok(agent, "finish_work", node=task, outcome="done", note=NOTE)
     proof(
         "M18",
-        "the Python example from docs/agents.md, run as it is written with the key, reaches the "
-        "server; a real MCP client with the same key takes the task with next_work (the Board "
-        "shows it held by the agent) and ends it with finish_work and a handoff note",
+        "the Python example from docs/agents.md, run as it is written with the key, reads the "
+        "project (it lists the first item); a real MCP client with the same key takes the task "
+        "with next_work, recorded under the key's name (the Board shows it held by the agent), "
+        "and ends it with finish_work and a handoff note",
         ran.returncode == 0
-        and "postgres_version" in ran.stdout
+        and epic in ran.stdout
         and taken["found"]
         and taken["work"]["ref"] == task
         and taken["claim"]["actor"] == AGENT
@@ -346,7 +353,9 @@ async def the_agent_works(base: str, key: str, task: str, page: Page) -> None:
     )
 
 
-async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None:
+async def the_board_shows_it(
+    base: str, key: str, task: str, page: Page, person: Person, mine: str
+) -> None:
     done = page.locator(f".cell[data-status='done'] .card[data-ref='{task}']")
     await expect(done).to_be_visible(timeout=NEWS)
     await page.locator("#activity-open").click()
@@ -358,7 +367,8 @@ async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None
         shown = await feed_becomes(page, [event["id"] for event in reversed(events)])
         handoffs = [event for event in events if event["action"] == "handoff"]
         claims = [event for event in events if event["action"] == "claimed"]
-        status = await ok(agent, "server_status")
+    # server_status is done on the board, by a person: an agent's standard key is not offered it.
+    status = person.call("POST", f"{mine}/tool/server_status", {}).body
     claimed_row = feed_row(page, f"took task {code_of(task)}")
     said: dict[str, Any] = {
         "note": spoken(await finished.locator(".handoff-note").inner_text()),
@@ -386,8 +396,9 @@ async def the_board_shows_it(base: str, key: str, task: str, page: Page) -> None
     proof(
         "M18",
         "none of this needed an embedding or a language-model service: the whole walk ran with the "
-        "embedding service stopped, and server_status through the key still answers, says the "
-        "service is not answering, and counts the one epic, story and task",
+        "embedding service stopped, and the server's status, which the person reads on the board, "
+        "still answers, says the service is not answering, and counts the one epic, story and "
+        "task",
         status["postgres_version"]
         and index["embedding_service"] != "answering"
         and [status["counts"][kind] for kind in ("epics", "stories", "tasks")] == [1, 1, 1],

@@ -43,12 +43,19 @@ def live_tools(owner: Person) -> list[dict[str, Any]]:
 
 
 def the_reads(tools: list[dict[str, Any]]) -> list[str]:
-    return sorted(tool["name"] for tool in tools if not tool["changes_something"])
+    """The tools that only read and that a key can be given one by one (`explore` only reads,
+    but it comes with the way of calling, not with an allowance)."""
+    return sorted(
+        tool["name"] for tool in tools if not tool["changes_something"] and not tool["code_mode"]
+    )
 
 
 def what_a_key_can_have(tools: list[dict[str, Any]]) -> list[str]:
-    """Every tool but the one only a person can use: all an agent key may be given."""
-    return sorted(tool["name"] for tool in tools if not tool["people_only"])
+    """Every tool but the one only a person can use and the two of code mode: all an agent key
+    may be given as an allowance."""
+    return sorted(
+        tool["name"] for tool in tools if not tool["people_only"] and not tool["code_mode"]
+    )
 
 
 async def names_of(client: Client) -> set[str]:
@@ -171,14 +178,32 @@ async def test_keys_made_without_a_choice_get_the_standard_tools_and_say_so() ->
     assert {tool["name"] for tool in tools if tool["people_only"]} == {
         "set_confirmation",
         "set_definition_of_done",
+        "answer_ask",
+        "remove_gate",
+        "approve_plan",
+        "request_plan_changes",
+        "decide_placement",
     }
-    shape = {"id", "name", "hint", "created_at", "last_used_at", "revoked_at", "tools"}
+    shape = {
+        "id",
+        "name",
+        "hint",
+        "created_at",
+        "last_used_at",
+        "revoked_at",
+        "tools",
+        "code_mode",
+        "verifier",
+        "expires_on",
+        "expired",
+    }
 
     left_out = owner.call("POST", keys_path(project), {"name": "plain-agent"})
     said_null = owner.call("POST", keys_path(project), {"name": "null-agent", "tools": None})
     assert left_out.status == said_null.status == 201
     for made in (left_out, said_null):
         assert set(made.body["key"]) == shape and made.body["key"]["tools"] is None
+        assert made.body["key"]["code_mode"] is False
     # The test harness's own key was made with a list of every tool a key can have.
     everyone_else = what_a_key_can_have(tools)
     assert [key["tools"] for key in owner.call("GET", keys_path(project)).body["keys"]] == [
@@ -379,6 +404,10 @@ async def test_a_tool_not_in_a_limited_keys_list_is_refused_and_a_stale_name_is_
                 continue
             result = await frozen.call_tool(tool["name"], {})
             assert result.is_error
+            if tool["code_mode"]:
+                # explore and run come with the way of calling, never with an allowance.
+                assert "is for agent keys that call Vrum by running code" in str(result.content)
+                continue
             assert refusal_for("frozen-agent", tool["name"]) in str(result.content), tool["name"]
         # A name in the list that the server no longer has is no error, now or ever.
         assert (await ok(frozen, "list_nodes"))["items"] == []

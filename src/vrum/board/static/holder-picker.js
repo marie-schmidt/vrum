@@ -2,6 +2,8 @@
 // stories and tasks of the project grouped by their epic, narrowing as words are typed (any word of
 // a code or a title). An epic cannot hold one, so an epic is only a heading. It reads the board's copy
 // of the work and gives back the reference (story:12 or task:40), or null while nothing is chosen.
+// The list is closed when the picker appears (and when the box takes the focus): it opens when the person
+// clicks the box, types in it or presses Down, and closes when a row is chosen, on Escape and when the focus leaves.
 
 import { h, put } from './dom.js';
 import { icon } from './icons.js';
@@ -29,6 +31,7 @@ const wordsOf = (node) => `${codeOf(node.ref)} ${node.kind} ${node.title}`.toLow
 export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
   let picked = chosen;
   let active = null; // the reference lit by the arrow keys
+  let open = false; // whether the list is showing
   const listId = uid('holder-list-');
   const input = h('input', {
     id: uid('holder-'),
@@ -36,11 +39,11 @@ export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
     role: 'combobox',
     autocomplete: 'off',
     'aria-autocomplete': 'list',
-    'aria-expanded': 'true',
+    'aria-expanded': 'false',
     'aria-controls': listId,
-    placeholder: 'A code such as S-12 or T-40, or a word of a title',
+    placeholder: 'A title word, or a code such as S-12',
   });
-  const list = h('div', { id: listId, class: 'holder-list', role: 'listbox', 'aria-label': `${label}: stories and tasks` });
+  const list = h('div', { id: listId, class: 'holder-list', role: 'listbox', 'aria-label': `${label}: stories and tasks`, hidden: true });
   const chosenLine = h('p', { class: 'holder-chosen', role: 'status' });
   let options = []; // the rows drawn, in order
 
@@ -86,8 +89,10 @@ export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
     }
     put(list, shown.length ? shown : h('p', { class: 'holder-none quiet' }, words.length ? 'No story or task matches.' : 'There is no story or task yet.'));
     if (active && !options.some((one) => one.ref === active)) active = null;
-    if (active) input.setAttribute('aria-activedescendant', `${listId}-${refSlug(active)}`);
+    if (open && active) input.setAttribute('aria-activedescendant', `${listId}-${refSlug(active)}`);
     else input.removeAttribute('aria-activedescendant');
+    list.hidden = !open;
+    input.setAttribute('aria-expanded', String(open));
     const node = picked ? store.nodes.get(picked) : null;
     put(chosenLine, node ? [icon('check', { size: 14 }), `On ${codeOf(node.ref)} ${node.title}`] : null);
     chosenLine.hidden = !node;
@@ -107,6 +112,21 @@ export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
   function pick(ref) {
     picked = ref;
     active = ref;
+    open = false;
+    draw();
+  }
+
+  // The list opens only on the person's action, with the chosen row (if any) in sight.
+  function openList() {
+    if (open) return;
+    open = true;
+    draw();
+    if (picked) reveal(picked, 'middle');
+  }
+
+  function closeList() {
+    if (!open) return;
+    open = false;
     draw();
   }
 
@@ -118,18 +138,30 @@ export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
     reveal(active, 'nearest');
   }
 
+  input.addEventListener('click', openList);
   input.addEventListener('input', () => {
     active = null;
+    open = true;
     draw();
   });
+  input.addEventListener('blur', closeList);
+  // The mouse never takes the focus from the box (not even on the list's scroll bar), so the typed words stay.
+  list.addEventListener('mousedown', (event) => event.preventDefault());
   input.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
+      openList();
       move(event.key === 'ArrowDown' ? 1 : -1);
+    } else if (event.key === 'Escape' && open) {
+      // Escape closes the list first, and only then the dialog.
+      event.preventDefault();
+      event.stopPropagation();
+      closeList();
     } else if (event.key === 'Enter') {
       // Enter chooses the lit row, and never sends the form.
       event.preventDefault();
-      if (active) pick(active);
+      if (!open) openList();
+      else if (active) pick(active);
       else if (options.length === 1) pick(options[0].ref);
     }
   });
@@ -140,10 +172,9 @@ export function holderPicker({ chosen = null, label = 'Goes on' } = {}) {
     element,
     input,
     value: () => picked,
-    // Once the dialog is on the page: the box takes the focus and the chosen row is in sight.
+    // Once the dialog is on the page: the box takes the focus, and nothing opens.
     focus() {
       input.focus();
-      if (picked) reveal(picked, 'middle');
     },
   };
 }

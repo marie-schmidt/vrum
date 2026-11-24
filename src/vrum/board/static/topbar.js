@@ -1,21 +1,24 @@
 // The top bar. With a project open it holds the way back (the breadcrumbs), the search box (with a
-// hint of the quick switcher's key), what the server and the index are doing (only when there is
-// something to say) and the appearance control; before one is open it holds the brand, the account
-// and the appearance control. On a narrow window it also holds the button that opens the sidebar.
+// hint of the quick switcher's key) and what the server and the index are doing (only when there is
+// something to say); before one is open it holds the brand, the account and the appearance control (a
+// project's appearance is in the account menu at the foot of the sidebar). On a narrow window it also
+// holds the button that opens the sidebar.
 //
-// The breadcrumbs say where the person is and keep the page they are "in": on a view, Search,
-// Activity or the coverage report, `Projects / Project / Board`; on the page of a record,
-// `Projects / Project / Board / E-3 Title / S-12 Title / T-40 Title`, the view first (a link back to
-// it as it was left), then the epic and story above the record, each a link to its page, and the
-// record last. An acceptance criterion is under the story or task it is on (`... / S-12 Title / AC-3 Title`); a
-// note is directly under the view (`... / Board / N-7`).
+// The breadcrumbs start at the view, as the person is "in" a view: on a view, Search, Activity or the
+// coverage report, just its name; on the page of a record, `Board / E-3 Platform foundations / S-12 Audit
+// log / T-40 Log screen`, the view first (a link back to it as it was left), then the epic and story above
+// the record, each a link to its page, and the record last, every one by its code and its name (the name is
+// cut with an ellipsis, the whole of it is the tooltip). An acceptance criterion is under the story or task it
+// is on (`... / S-12 Audit log / AC-3 A rider can have only one open ride`); a note is directly under the view
+// (`... / Board / N-7 The apps support the last two versions`). The project is in the sidebar's switcher, which
+// also reaches the list of projects.
 
 import { appearanceControl } from './appearance.js';
 import { wordmark } from './brand.js';
-import { backToView, can, itemLink, stepBack, ui, viewLink } from './ctx.js';
+import { backToView, can, itemLink, recordCode, stepBack, ui } from './ctx.js';
 import { h, put } from './dom.js';
 import { icon } from './icons.js';
-import { isNodeKind, itemCode, parseItemRef } from './labels.js';
+import { changeCode, parseItemRef } from './labels.js';
 import { openSidebar } from './sidebar.js';
 import { describeItem, store } from './store.js';
 
@@ -33,13 +36,12 @@ function stepBackOnClick(event) {
   history.back();
 }
 
-export function showTop({ project, indexText, openSearch }) {
+export function showTop({ indexText, openSearch }) {
   const search = h('input', { id: 'global-search', type: 'search', name: 'search', autocomplete: 'off', 'aria-label': 'Search work, acceptance criteria and notes', placeholder: 'Search the project…' });
   const list = h('ol', {});
   const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' }, list);
   const text = indexText();
   bar = {
-    project,
     list,
     crumbs,
     drawn: '', // the path as last drawn, so that it is drawn again only when it changes
@@ -65,7 +67,7 @@ export function showTop({ project, indexText, openSearch }) {
           openSearch(search.value.trim());
         },
       },
-      // The box is the icon, the words and the hint; the Search button is beside it, not in it.
+      // The box is the icon, the words and the hint. Enter asks: there is no button.
       h(
         'div',
         { class: 'global-search-field' },
@@ -74,10 +76,8 @@ export function showTop({ project, indexText, openSearch }) {
         // The quick switcher has no button: its key is said here, and the hint gives way when the box is in use.
         h('span', { class: 'search-hint', id: 'search-hint', 'aria-hidden': 'true' }, 'or ', h('kbd', {}, mac ? '⌘K' : 'Ctrl K')),
       ),
-      h('button', { type: 'submit', id: 'global-search-go' }, 'Search'),
     ),
     h('span', { class: 'top-chips' }, can('write') ? null : h('span', { id: 'view-only', class: 'chip info view-only', title: 'You can look at everything in this project, but not change it.' }, icon('lock', { size: 14 }), 'View only'), bar.connection, bar.index),
-    appearanceControl(),
   );
 }
 
@@ -85,13 +85,8 @@ export function showTop({ project, indexText, openSearch }) {
 // and notes are not read yet): its code.
 function nameOfUnknown(ref) {
   const found = parseItemRef(ref);
-  return found ? crumbCode(found.kind, found.number) : 'Not found';
+  return found ? recordCode(found.kind, found.number) : 'Not found';
 }
-
-// A record in the path is its short code, as work is: E-3, S-12, T-40, AC-3 for an acceptance criterion and N-7
-// for a note.
-const CRUMB_LETTERS = { rule: 'AC', note: 'N' };
-const crumbCode = (kind, number) => (isNodeKind(kind) ? itemCode(kind, number) : `${CRUMB_LETTERS[kind]}-${number}`);
 
 // The records above one on its page, from the top: the epic, then the story (for an acceptance criterion, the
 // story or task it is on, and what is above that).
@@ -102,31 +97,33 @@ function above(found) {
 }
 
 // The steps of the path for the page the address names: [{ kind, text, ref?, href? }], the last of
-// them the page itself.
+// them the page itself. A record's path starts at the view it was reached from, and every record in it
+// is its code and its name (E-3 Platform foundations); the whole of it is the tooltip.
 function pathOf(title) {
-  const steps = [{ kind: 'root', text: 'Projects' }, { kind: 'project', text: bar.project.name }];
-  if (ui.page !== 'item') return [...steps, { kind: 'page', text: title }];
+  // A change's review page: the page of what needs a person it is read from, then the change by its code.
+  if (ui.page === 'review') {
+    const back = backToView();
+    return [{ kind: 'view', text: back.label, href: back.hash }, { kind: 'page', text: changeCode(ui.params.get('change')) ?? title }];
+  }
+  if (ui.page !== 'item') return [{ kind: 'page', text: title }];
   const back = backToView();
-  steps.push({ kind: 'view', text: back.label, href: back.hash });
+  const steps = [{ kind: 'view', text: back.label, href: back.hash }];
   const ref = ui.params.get('item');
   const found = describeItem(ref);
   if (!found) return [...steps, { kind: 'page', text: nameOfUnknown(ref), item: true }];
-  for (const { ref: up, found: parent } of above(found)) {
-    const code = crumbCode(parent.kind, parent.number);
-    steps.push({ kind: 'item', text: code, full: `${code} ${parent.title}`, ref: up });
-  }
-  const code = crumbCode(found.kind, found.number);
-  return [...steps, { kind: 'page', text: code, full: `${code} ${found.title}`, item: true }];
+  const step = (one) => ({ code: one.name, text: one.title, full: `${one.name} ${one.title}` });
+  for (const { ref: up, found: parent } of above(found)) steps.push({ kind: 'item', ref: up, ...step(parent) });
+  return [...steps, { kind: 'page', item: true, ...step(found) }];
 }
 
-// A record in the path is only its code (E-3 / S-12 / T-40), whole; its title is in the tooltip and
-// is the heading of the page.
+// A record in the path: its code, then its name, which is cut with an ellipsis when it does not fit.
+const nameOnly = (step) => [step.code ? h('span', { class: 'crumb-code' }, step.code) : null, h('span', { class: 'crumb-name' }, step.text)];
+
 function stepElement(step) {
-  if (step.kind === 'root') return h('li', { class: 'crumb-root' }, h('a', { href: '/board' }, step.text));
-  if (step.kind === 'project') return h('li', { class: 'crumb-project' }, viewLink('board', {}, { title: step.text }, step.text));
   if (step.kind === 'view') return h('li', { class: 'crumb-view' }, h('a', { href: step.href, title: `Back to the ${step.text}, as you left it` }, step.text));
-  if (step.kind === 'item') return h('li', { class: 'crumb-item' }, itemLink(step.ref, { title: step.full, 'aria-label': step.full }, step.text));
-  return h('li', { id: 'crumb-page', class: step.item ? 'crumb-item' : null, title: step.full || null, 'aria-current': 'page' }, step.text);
+  if (step.kind === 'item') return h('li', { class: 'crumb-item' }, itemLink(step.ref, { title: step.full }, ...nameOnly(step)));
+  if (step.item) return h('li', { id: 'crumb-page', class: 'crumb-item', title: step.full || null, 'aria-current': 'page' }, ...nameOnly(step));
+  return h('li', { id: 'crumb-page', 'aria-current': 'page' }, step.text);
 }
 
 // What the address decides: the path, and the words in the search box (which follow the address on
@@ -143,9 +140,10 @@ export function updateTop(title) {
   bar.crumbs.classList.toggle('has-trail', ui.page === 'item');
   // On the page of a record a back arrow at the left of the bar goes one step back: to the page the
   // person was on just before, as they left it (its filter, its scroll). With no step before it
-  // goes to the view the record was reached from.
-  bar.back.hidden = ui.page !== 'item';
-  if (ui.page === 'item') {
+  // goes to the view the record was reached from. (The review page has its own arrow in its header.)
+  const trail = ui.page === 'item';
+  bar.back.hidden = !trail;
+  if (trail) {
     const back = stepBack();
     bar.back.href = back.hash;
     bar.back.title = back.words;

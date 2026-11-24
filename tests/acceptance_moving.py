@@ -1,7 +1,7 @@
-"""Chapter 14 of the acceptance scenario: moving the whole graph out and back (M7, and M16's proof
-that facts, decisions, their confirmation and their history survive the trip). It is last because
-it destroys the database it started with, twice: once to restore a backup into a fresh container,
-and once to load an export into a fresh, empty server."""
+"""Chapter 14 of the acceptance scenario: moving the whole graph out and back (M7, and M27's proof
+that notes, their confirmation and their history survive the trip). It is last because it
+destroys the database it started with, twice: once to restore a backup into a fresh container, and
+once to load an export into a fresh, empty server."""
 
 import copy
 import os
@@ -15,30 +15,53 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from tests.acceptance_scenario import URL, chapter, clip, proof, tree
+from tests.acceptance_scenario import (
+    ASK_QUESTION,
+    CLIENT_NAME,
+    NEWER_COMMIT,
+    PULL_REQUEST,
+    RUN_LABEL,
+    URL,
+    WORK_BRANCH,
+    WORK_REPOSITORY,
+    chapter,
+    clip,
+    proof,
+    said_about,
+    tree,
+)
 from tests.helpers import (
     REPO_ROOT,
-    confirm,
+    confirm_on_board,
     connect,
     export_everything,
     kind_of,
     make_fact,
     number_of,
     ok,
+    on_board,
     refused,
     rich_world,
     the_token,
+    unique_word,
 )
-from tests.world import make_project, register, server_base
+from tests.test_gates_plans_integration import PLAN, RELEASE, far
+from tests.world import make_project, register, server_base, the_project
 
-SECTIONS = ("nodes", "links", "rules", "decisions", "facts", "events")
-# What an agent is briefed with before it starts work, and what M16 took out of it.
-BRIEFING = ("active_decisions", "project_wide_decisions", "facts", "past_decisions")
+SECTIONS = ("nodes", "links", "rules", "notes", "definition_of_done", "checks", "events")
+# What an agent is briefed with before it starts work about what is known: the notes, in the three
+# sections of M27, and the project's definition of done. What M27 took out of it is below.
+BRIEFING = ("notes", "project_wide_notes", "past_notes", "definition_of_done")
 GONE_FROM_BRIEFINGS = {
     "beliefs",
     "stale_beliefs_left_out",
     "active_principles",
     "superseded_decisions",
+    "active_decisions",
+    "project_wide_decisions",
+    "past_decisions",
+    "facts",
+    "rules",
 }
 
 
@@ -89,11 +112,19 @@ def key_of(ref: str) -> tuple[str, int]:
     return kind_of(ref), number_of(ref)
 
 
+def markdown_files(folder: Path) -> dict[str, str]:
+    """The files of the copy that are one item each (the definition of done is one more file, at
+    the top, and is read apart), by file name."""
+    return {
+        p.stem: p.read_text(encoding="utf-8") for p in folder.rglob("*.md") if p.parent != folder
+    }
+
+
 def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, int]:
     """One file per item, and every connection in the graph a reference at both ends, to a file
     that exists. Returns (files, references, connections)."""
-    files = {p.stem: p.read_text(encoding="utf-8") for p in folder.rglob("*.md")}
-    items = sum(len(document[name]) for name in ("nodes", "rules", "decisions", "facts"))
+    files = markdown_files(folder)
+    items = sum(len(document[name]) for name in ("nodes", "rules", "notes"))
     assert len(files) == items, f"{len(files)} files for {items} items"
     stem_of: dict[tuple[str, int], str] = {}
     for stem in files:
@@ -108,19 +139,13 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     for rule in document["rules"]:
         if rule["node"] is not None:
             pairs.append((("rule", rule["id"]), key_of(rule["node"])))
-    for d in document["decisions"]:
-        here = ("decision", d["id"])
-        pairs += [(here, key_of(x)) for x in d["nodes"]]
-        pairs += [(here, ("rule", x)) for x in d["rule_ids"]]
-        if d["superseded_by_id"] is not None:
-            pairs.append((here, ("decision", d["superseded_by_id"])))
-    for f in document["facts"]:
-        here = ("fact", f["id"])
-        pairs += [(here, key_of(x)) for x in f["nodes"]]
-        pairs += [(here, ("rule", x)) for x in f["rule_ids"]]
-        pairs += [(here, ("decision", x)) for x in f["decision_ids"]]
-        if f["superseded_by_id"] is not None:
-            pairs.append((here, ("fact", f["superseded_by_id"])))
+    for note in document["notes"]:
+        here = ("note", note["id"])
+        pairs += [(here, key_of(x)) for x in note["nodes"]]
+        pairs += [(here, ("rule", x)) for x in note["rule_ids"]]
+        pairs += [(here, ("note", x)) for x in note["note_ids"]]
+        if note["superseded_by_id"] is not None:
+            pairs.append((here, ("note", note["superseded_by_id"])))
     for source, target in pairs:
         assert stem_of[target] in references_in(files[stem_of[source]]), (source, target)
         assert stem_of[source] in references_in(files[stem_of[target]]), (target, source)
@@ -132,11 +157,12 @@ def check_markdown(folder: Path, document: dict[str, Any]) -> tuple[int, int, in
     return len(files), total, len(pairs)
 
 
-def reads_as_two_records(folder: Path, world: dict[str, dict[str, Any]], mention: int) -> bool:
-    """The Markdown copy tells the two records apart in plain words: a fact and a decision (one
-    kind of each, with the project-wide flag and no principle), whether a person confirmed them,
-    and where they stand, and it follows what a text refers to."""
-    files = {p.stem: p.read_text(encoding="utf-8") for p in folder.rglob("*.md")}
+def reads_as_notes(folder: Path, world: dict[str, dict[str, Any]], mention: int) -> bool:
+    """The Markdown copy says in plain words where each note stands: whether a person confirmed it
+    and when, that a replaced one was replaced and by what, that a withdrawn one was withdrawn and
+    why (keeping the confirmation it had), who decided it, and that it applies throughout the
+    project. It follows what a text refers to, and holds the definition of done in one file."""
+    files = markdown_files(folder)
 
     def text_of(kind: str, number: int) -> str:
         return next(t for s, t in files.items() if s.startswith(f"{kind}-{number}-"))
@@ -144,20 +170,23 @@ def reads_as_two_records(folder: Path, world: dict[str, dict[str, Any]], mention
     def stem_of(kind: str, number: int) -> str:
         return next(s for s in files if s.startswith(f"{kind}-{number}-"))
 
+    definition = (folder / "definition-of-done.md").read_text(encoding="utf-8")
     return (
         {p.name for p in folder.iterdir() if p.is_dir()}
-        <= {"epics", "stories", "tasks", "rules", "decisions", "facts"}
-        and "- Confirmation: confirmed by Marie on " in text_of("fact", world["fact1"]["id"])
-        and "- Confirmation: not confirmed by a person" in text_of("fact", world["fact2"]["id"])
-        and f"- Status: superseded by [[{stem_of('fact', world['fact4']['id'])}]]. Why: Measured"
-        in text_of("fact", world["fact3"]["id"])
+        == {"epics", "stories", "tasks", "rules", "notes"}
+        and "- Status: confirmed by Marie on " in text_of("note", world["fact1"]["id"])
+        and "- Status: unconfirmed" in text_of("note", world["fact2"]["id"])
+        and f"- Status: superseded by [[{stem_of('note', world['fact4']['id'])}]]"
+        in text_of("note", world["fact3"]["id"])
         and "- Status: withdrawn. Why: They expire in an hour."
-        in text_of("fact", world["fact6"]["id"])
-        and ", as it was when it ended" in text_of("fact", world["fact6"]["id"])
-        and "- Kind: project-wide decision" in text_of("decision", world["wide"]["id"])
-        and "## Reason" in text_of("decision", world["decision2"]["id"])
-        and f"[[{stem_of('story', number_of(world['story1']['ref']))}]]" in text_of("fact", mention)
-        and f"[[{stem_of('decision', world['wide']['id'])}]]" in text_of("fact", mention)
+        in text_of("note", world["fact6"]["id"])
+        and ", as it was when it ended" in text_of("note", world["fact6"]["id"])
+        and "- Applies: throughout the project" in text_of("note", world["wide"]["id"])
+        and "- Decided: by Marie on " in text_of("note", world["wide"]["id"])
+        and "## Why" in text_of("note", world["decision2"]["id"])
+        and f"[[{stem_of('story', number_of(world['story1']['ref']))}]]" in text_of("note", mention)
+        and f"[[{stem_of('note', world['wide']['id'])}]]" in text_of("note", mention)
+        and "Tests pass, and a person can try it" in definition
         and not re.search(r"belief|principle", "\n".join(files.values()), re.IGNORECASE)
     )
 
@@ -171,11 +200,11 @@ async def knowledge(
         name: (await ok(client, "find_mentions", limit=200, **target))["items"]
         for name, target in (
             ("story", {"node": world["story1"]["ref"]}),
-            ("project-wide decision", {"decision_id": world["wide"]["id"]}),
+            ("project-wide note", {"note_id": world["wide"]["id"]}),
         )
     }
     recall = await ok(client, "recall", node=story["ref"], limit=50)
-    briefing = await ok(client, "next_work", actor="briefing", within_node=epic["ref"], peek=True)
+    briefing = await ok(client, "next_work", within_node=epic["ref"], peek=True)
     return {
         "mentions": mentions,
         "recall": recall,
@@ -185,13 +214,100 @@ async def knowledge(
 
 
 async def histories(client: Any, world: dict[str, dict[str, Any]]) -> dict[str, list[Any]]:
-    """The history of each record that ended or was confirmed, as the tools tell it."""
+    """The history of each note that ended or was confirmed, as the tools tell it."""
     found: dict[str, list[Any]] = {}
-    for name in ("fact1", "fact3", "fact6", "fact5"):
-        found[name] = (await ok(client, "fact_history", fact_id=world[name]["id"]))["items"]
-    for name in ("decision1", "decision2", "decision3", "wide"):
-        found[name] = (await ok(client, "decision_history", decision_id=world[name]["id"]))["items"]
+    for name in ("fact1", "fact3", "fact6", "fact5", "decision1", "decision2", "decision3", "wide"):
+        found[name] = (await ok(client, "note_history", note_id=world[name]["id"]))["items"]
     return found
+
+
+async def asks_of_agents(client: Any) -> list[dict[str, Any]]:
+    """The questions agents put to a person with an ask (not the ones that gates raise, which are
+    asks of their own with the effect gates and are shown with the gates)."""
+    items = (await ok(client, "list_asks", limit=200))["items"]
+    return [found for found in items if found["effect"] != "gates"]
+
+
+async def held_and_proposed(client: Any, refs: list[str]) -> dict[str, Any]:
+    """What gates, drafted plans, plan templates, proposals to move work and the link that says
+    where work was found came to, as the tools say it, without the times (which a restore keeps and
+    an import keeps too, but which are the history's to show)."""
+    gated = {}
+    for ref in refs:
+        node = await ok(client, "get_node", node=ref)
+        gated[ref] = (
+            node["held_by"],
+            [(g["id"], g["kind"], g["state"], g["words"]) for g in node["gates"]],
+        )
+    plans = sorted((await ok(client, "list_plans", limit=200))["items"], key=lambda p: p["id"])
+    # A plan that has a conversation (M51): its revisions and the feedback on them, whole, as the
+    # tools read them, with revision 1 read as it was.
+    talked: dict[int, Any] = {}
+    for one in plans:
+        whole = (await ok(client, "list_plans", plan=one["id"]))["items"][0]
+        if whole["revision"] > 1 or whole["feedback"]:
+            first = (await ok(client, "list_plans", plan=one["id"], revision=1))["items"][0]
+            talked[one["id"]] = {
+                "state": whole["state"],
+                "revision": whole["revision"],
+                "revisions": [
+                    (r["revision"], r["by"], r["note"], r["items"], r["removed"], r["feedback"])
+                    for r in whole["revisions"]
+                ],
+                "feedback": [
+                    (
+                        f["id"],
+                        f["revision"],
+                        f["by"],
+                        f["summary"],
+                        [(c["item"], c["field"], c["text"], c["quoted"]) for c in f["comments"]],
+                    )
+                    for f in whole["feedback"]
+                ],
+                "tree": whole["tree"],
+                "changes": whole["changes"],
+                "first": first["tree"],
+            }
+    templates = (await ok(client, "list_plan_templates"))["items"]
+    moves = sorted((await ok(client, "list_placements", limit=200))["items"], key=lambda m: m["id"])
+    found = [
+        (link["source"], link["target"])
+        for ref in refs
+        for link in (await ok(client, "list_links", node=ref, limit=200))["items"]
+        if link["link_type"] == "discovered_from" and link["source"] == ref
+    ]
+    return {
+        "gated": gated,
+        "plans": [
+            (
+                p["id"],
+                p["title"],
+                p["state"],
+                p["epics"],
+                p["stories"],
+                p["tasks"],
+                p["items"],
+                p["decided_by"],
+                p["reason"],
+            )
+            for p in plans
+        ],  # fmt: skip
+        "templates": [(t["name"], t["version"], t["counts"], t["variables"]) for t in templates],
+        "talked": talked,
+        "moves": [
+            (
+                m["id"],
+                m["state"],
+                [i["ref"] for i in m["items"]],
+                m["parent"],
+                m["reason"],
+                m["decided_by"],
+                m["decision_reason"],
+            )
+            for m in moves
+        ],  # fmt: skip
+        "found": sorted(found),
+    }
 
 
 async def moving() -> None:
@@ -199,14 +315,92 @@ async def moving() -> None:
     work = Path(tempfile.mkdtemp(prefix="vrum-acceptance-"))
     async with connect(URL, the_token()) as client:
         world = await rich_world(client)
-        epic, story, _ = await tree(client, 1)
+        epic, story, quiet = await tree(client, 1)
         mention = await make_fact(
             client,
-            f"Follows [[{world['story1']['ref']}]] and [[decision:{world['wide']['id']}]]",
+            f"Follows [[{world['story1']['ref']}]] and [[note:{world['wide']['id']}]]",
             nodes=[story["ref"]],
             source="The design review",
         )
-        await confirm(client, "fact", mention, "Marie")
+        confirm_on_board("note", mention, "Marie")
+        # An agent said where its work is (M41), and the handoff note it left keeps the words.
+        shipped = (await tree(client, 1))[2]
+        await ok(
+            client, "claim_node", node=shipped["ref"], repository=WORK_REPOSITORY,
+            branch=WORK_BRANCH, commit=NEWER_COMMIT, run_label=RUN_LABEL, client_name=CLIENT_NAME,
+        )  # fmt: skip
+        await ok(
+            client, "finish_work", node=shipped["ref"], outcome="blocked",
+            note="Ready for a verifier.", pull_request=PULL_REQUEST,
+        )  # fmt: skip
+        # Asks (M45): a question that blocked work, answered by a person with a comment, and one
+        # that is still waiting.
+        _, _, answered_task, open_task = await tree(client, 2)
+        for held, ask in (
+            (answered_task, {"question": ASK_QUESTION, "choices": ["Stripe", "Adyen", "Neither"]}),
+            (open_task, {"question": "Is it still open?"}),
+        ):
+            await ok(client, "claim_node", node=held["ref"])
+            await ok(
+                client, "finish_work", node=held["ref"], outcome="blocked",
+                note="I need a decision.", ask=ask,
+            )  # fmt: skip
+        answered_ask = (await ok(client, "get_node", node=answered_task["ref"]))["asks"][0]["id"]
+        open_ask = (await ok(client, "get_node", node=open_task["ref"]))["asks"][0]["id"]
+        on_board("answer_ask", ask=answered_ask, answer="Stripe", comment="Cheapest.")
+        # Gates, plans, a template and proposals (M43, M44, M47): a task held by a timer, one whose
+        # approval nobody has answered, a plan that waits for a person and one a person approved,
+        # a saved template, a link that says where work was found, and two proposals to move a
+        # story, one waiting and one rejected by a person.
+        _, _, timed, approving = await tree(client, 2)
+        word = unique_word()
+        await ok(client, "add_gate", node=timed["ref"], kind="timer", not_before=far())
+        await ok(
+            client, "add_gate", node=approving["ref"], kind="approval", question="May we go on?"
+        )
+        await ok(
+            client, "add_link", source=timed["ref"], target=approving["ref"],
+            link_type="discovered_from",
+        )  # fmt: skip
+        await ok(client, "create_plan", items=PLAN, draft=True, title=f"Waiting {word}")
+        decided_plan = await ok(
+            client, "create_plan", items=PLAN, draft=True, title=f"Approved {word}"
+        )
+        on_board("approve_plan", plan=decided_plan["plan"], approved=True)
+        # A plan that has a conversation (M51): a person asked for changes with a comment on a
+        # line, its agent sent revision 2 that drops one task, and it waits for a person again.
+        talked_plan = await ok(
+            client, "create_plan", items=PLAN, draft=True, title=f"Talked about {word}"
+        )
+        talked_refs = {c["key"]: c["ref"] for c in talked_plan["created"]}
+        on_board(
+            "request_plan_changes", plan=talked_plan["plan"], revision=1,
+            summary="One task too many.",
+            comments=[{"item": talked_refs["t2"], "field": "title", "text": "Is this needed?"}],
+        )  # fmt: skip
+        revised_items = [
+            {**item, "ref": talked_refs[item["key"]]} for item in PLAN if item["key"] != "t2"
+        ]
+        await ok(
+            client, "revise_plan", plan=talked_plan["plan"], items=revised_items,
+            note="Took out the provider call.",
+        )  # fmt: skip
+        await ok(client, "save_plan_template", name=f"moving-{word}", template=RELEASE)
+        one, two = await tree(client, 1), await tree(client, 1)
+        await ok(
+            client, "propose_placement", items=[one[1]["ref"]], parent=two[0]["ref"],
+            reason="Looks like it belongs there.",
+        )  # fmt: skip
+        turned_down = await ok(
+            client, "propose_placement", items=[two[1]["ref"]], parent=one[0]["ref"],
+            reason="And the other way round.",
+        )  # fmt: skip
+        on_board(
+            "decide_placement", placement=turned_down["id"], accepted=False, reason="Leave it."
+        )
+        gate_refs = [timed["ref"], approving["ref"]]
+        held_before = await held_and_proposed(client, gate_refs)
+        asked_before = await asks_of_agents(client)
         original = await export_everything(client)
         told = await knowledge(client, world, story, epic)
         past = await histories(client, world)
@@ -223,21 +417,64 @@ async def moving() -> None:
     )
     proof(
         "M7",
-        "in the Markdown export there is one file per item, and every link, requirement "
-        "placement and decision and fact link appears as a reference, at both ends, to a file "
-        "that exists; made again, the same files",
+        "in the Markdown export there is one file per item, and every link, acceptance criterion "
+        "placement and note link appears as a reference, at both ends, to a file that exists; "
+        "made again, the same files",
         same and files > 0 and connections > 0,
         f"{files} files for {files} items, {references} references, {connections} connections "
         f"checked at both ends. {clip(made.stdout, 40)}",
     )
     proof(
-        "M16",
-        "the Markdown copy reflects the two records: facts and decisions in plain words, each "
-        "saying whether a person confirmed it (an ended one as it was when it ended), a "
-        "project-wide decision and a replacement said so, a reference in a text is a link, and "
-        "no belief or principle appears",
-        reads_as_two_records(notes, world, mention["id"]),
+        "M27",
+        "the Markdown copy reflects the notes: each says whether a person confirmed it (an ended "
+        "one as it was when it ended), a replaced one says what replaced it, a withdrawn one says "
+        "why, a decision says who decided it, a project-wide note says so, a reference in a text "
+        "is a link, the definition of done has its own file, and no belief or principle appears",
+        reads_as_notes(notes, world, mention["id"]),
         "folders: " + ", ".join(sorted(p.name for p in notes.iterdir() if p.is_dir())),
+    )
+    copy_of = markdown_files(notes)
+    page = next(t for s, t in copy_of.items() if s.startswith(f"task-{number_of(shipped['ref'])}-"))
+    bare = next(t for s, t in copy_of.items() if s.startswith(f"task-{number_of(quiet['ref'])}-"))
+    proof(
+        "M41",
+        "the Markdown copy says where the work is, from the handoff note, in a section of the "
+        "item's own file (repository, branch, commit, pull request and the run), and a file of "
+        "an item that was never given any has no such section",
+        "## Where the work is" in page
+        and all(
+            line in page
+            for line in (
+                f"- Repository: {WORK_REPOSITORY}",
+                f"- Branch: {WORK_BRANCH}",
+                f"- Commit: {NEWER_COMMIT}",
+                f"- Pull request: {PULL_REQUEST}",
+                f"- Run: {RUN_LABEL} ({CLIENT_NAME})",
+            )
+        )
+        and "Where the work is" not in bare,
+        f"in {shipped['ref']}'s file",
+    )
+    answered_page = next(
+        t for s, t in copy_of.items() if s.startswith(f"task-{number_of(answered_task['ref'])}-")
+    )
+    open_page = next(
+        t for s, t in copy_of.items() if s.startswith(f"task-{number_of(open_task['ref'])}-")
+    )
+    proof(
+        "M45",
+        "the Markdown copy lists the asks of a story or task under Questions as Q-numbers: what "
+        "was asked and the choices, that the work waited, who asked, and the answer with who gave "
+        "it and their comment, or that it is not answered yet",
+        "## Questions" in answered_page
+        and f"- Q-{answered_ask} (work waited): {ASK_QUESTION} Choices: Stripe, Adyen, Neither."
+        in answered_page
+        and f"Answer: Stripe, by {the_project().owner.name}," in answered_page
+        and "Comment: Cheapest." in answered_page
+        and f"- Q-{open_ask} (work waited): Is it still open?" in open_page
+        and "Not answered yet." in open_page
+        and "## Questions" not in bare,
+        f"Q-{answered_ask} answered, Q-{open_ask} waiting",
     )
 
     # -- backup, destroy the volume, restore into a fresh container
@@ -253,8 +490,10 @@ async def moving() -> None:
     await wait_until_up()
     async with connect(URL, the_token()) as client:
         after = await export_everything(client)
+        asked_restored = await asks_of_agents(client)
+        held_restored = await held_and_proposed(client, gate_refs)
         last = original["events"][-1]["id"]
-        new = await ok(client, "create_node", actor="ann", kind="epic", title="After the restore")
+        new = await ok(client, "create_node", kind="epic", title="After the restore")
         feed = await ok(client, "changes_since", after_event_id=last, limit=10)
     proof(
         "M7",
@@ -291,7 +530,7 @@ async def moving() -> None:
             n for n in bad["nodes"] if (n["kind"], n["number"]) != ("epic", gone["number"])
         ]
         bad["counts"]["nodes"] -= 1
-        message = await refused(client, "import_graph", actor="ann", document=bad)
+        message = await refused(client, "import_graph", document=bad)
         fresh = await export_everything(client)
         still_empty = not any(fresh[n] for n in SECTIONS)
     proof(
@@ -320,7 +559,7 @@ async def moving() -> None:
         now_told = await knowledge(client, world, story, epic)
         now_past = await histories(client, world)
         new_epic, new_story, new_task = await tree(client, 1)
-        second = await refused(client, "import_graph", actor="ann", document=original)
+        second = await refused(client, "import_graph", document=original)
     proof(
         "M7",
         "an export loaded into an empty project comes back identical, with epics, stories and "
@@ -335,23 +574,49 @@ async def moving() -> None:
         f"are {new_epic['ref']}, {new_story['ref']} and {new_task['ref']}, after "
         f"{highest['epic']}, {highest['story']} and {highest['task']}",
     )
-    actions = {e["action"] for e in original["events"]}
-    wide = next(d for d in after["decisions"] if d["id"] == world["wide"]["id"])
-    ended = next(f for f in after["facts"] if f["id"] == world["fact6"]["id"])
-    superseded = next(f for f in after["facts"] if f["id"] == world["fact3"]["id"])
+    wanted = {
+        "repository": WORK_REPOSITORY,
+        "branch": WORK_BRANCH,
+        "commit": NEWER_COMMIT,
+        "pull_request": PULL_REQUEST,
+        "run_label": RUN_LABEL,
+        "client_name": CLIENT_NAME,
+    }
+    handoffs = [
+        e for e in original["events"] if e["action"] == "handoff" and e["node"] == shipped["ref"]
+    ]
+    async with connect(URL, empty_project.key) as client:
+        arrived = await ok(client, "get_node", node=shipped["ref"])
     proof(
-        "M16",
-        "a project's facts, decisions, confirmations, replacements and withdrawals, links and "
-        "references go through export and import into a fresh project and come back as they "
-        "were: the records, their histories, and what the tools say of who mentions what",
+        "M41",
+        "where the work is goes through a backup and restore and through export and import into "
+        "a fresh project: the handoff event of the item carries all six words in the file and in "
+        "the new project, and there get_node says the same in `where` and in its last handoff",
+        [said_about(e["after"]) for e in handoffs] == [wanted]
+        and [
+            said_about(e["after"])
+            for e in after["events"]
+            if e["action"] == "handoff" and e["node"] == shipped["ref"]
+        ]
+        == [wanted]
+        and said_about(arrived["where"]) == said_about(arrived["last_handoff"]) == wanted,
+        f"{shipped['ref']}: {WORK_BRANCH}, {RUN_LABEL} ({CLIENT_NAME})",
+    )
+    actions = {e["action"] for e in original["events"]}
+    wide = next(n for n in after["notes"] if n["id"] == world["wide"]["id"])
+    ended = next(n for n in after["notes"] if n["id"] == world["fact6"]["id"])
+    superseded = next(n for n in after["notes"] if n["id"] == world["fact3"]["id"])
+    proof(
+        "M27",
+        "a project's notes, confirmations, replacements and withdrawals, links and references go "
+        "through export and import into a fresh project and come back as they were: the notes, "
+        "their histories, and what the tools say of who mentions what",
         {
-            "fact_confirmed",
-            "fact_superseded",
-            "fact_withdrawn",
-            "decision_confirmed",
-            "decision_superseded",
-            "decision_withdrawn",
-            "fact_linked",
+            "note_recorded",
+            "note_confirmed",
+            "note_superseded",
+            "note_withdrawn",
+            "note_linked",
         }
         <= actions
         and (wide["project_wide"], wide["confirmed_by"]) == (True, "Marie")
@@ -360,27 +625,177 @@ async def moving() -> None:
         == ("superseded", world["fact4"]["id"])
         and now_past == past
         and now_told["mentions"] == told["mentions"]
-        and any(m["source"]["item_type"] == "fact" for m in told["mentions"]["story"])
+        and any(m["source"]["item_type"] == "note" for m in told["mentions"]["story"])
         and now_told["recall"] == told["recall"],
-        f"{len(after['facts'])} facts and {len(after['decisions'])} decisions, "
+        f"{len(after['notes'])} notes, "
         f"{sum(len(h) for h in past.values())} history entries compared",
     )
+    briefed_wide = {n["id"]: n for n in now_told["briefing"]["project_wide_notes"]}
     proof(
-        "M16",
+        "M27",
         "the agent briefing in the fresh project is the one of the project it came from, made of "
-        "the two records only: active decisions, project-wide decisions, facts and past "
-        "decisions, each saying whether a person confirmed it",
+        "notes in three sections (in force, project-wide, past) and the definition of done, each "
+        "note saying whether a person confirmed it",
         now_told["briefing"] == told["briefing"]
         and set(BRIEFING) <= set(now_told["keys"])
         and not GONE_FROM_BRIEFINGS & set(now_told["keys"])
-        and world["wide"]["id"] in [d["id"] for d in now_told["briefing"]["project_wide_decisions"]]
-        and next(
-            d
-            for d in now_told["briefing"]["project_wide_decisions"]
-            if d["id"] == world["wide"]["id"]
-        )["confirmed_by"]
-        == "Marie"
-        and [f["confirmed_by"] for f in now_told["briefing"]["facts"]] == ["Marie"],
+        and briefed_wide[world["wide"]["id"]]["confirmed_by"] == "Marie"
+        and [n["confirmed_by"] for n in now_told["briefing"]["notes"]] == ["Marie"],
         f"{len(now_told['keys'])} parts, none of the old ones",
+    )
+    async with connect(URL, empty_project.key) as client:
+        imported = await asks_of_agents(client)
+        waiting_there = [
+            (item["kind"], item["node"])
+            for group in (await ok(client, "needs_a_person"))["groups"]
+            for item in group["items"]
+        ]
+        blocked_there = await ok(client, "get_node", node=open_task["ref"])
+    answer_path = f"/board/api/projects/{empty_project.id}/tool/answer_ask"
+    late = empty_project.owner.call("POST", answer_path, {"ask": open_ask, "answer": "Go ahead"})
+    once_only = empty_project.owner.call("POST", answer_path, {"ask": open_ask, "answer": "Again"})
+    async with connect(URL, empty_project.key) as client:
+        freed_there = await ok(client, "get_node", node=open_task["ref"])
+
+    def said_of(items: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+        return [
+            (a["id"], a["node"], a["question"], a["kind"], a["choices"], a["effect"],
+             a["asked_by"], a["answered"], a["answer"], a["comment"], a["answered_by"])
+            for a in items
+        ]  # fmt: skip
+
+    proof(
+        "M45",
+        "asks and their answers go through a backup and restore and through an export and import "
+        "into a fresh project: list_asks says the same (the numbers, the questions, the answers "
+        "and who gave them, to the second after the restore), the ask that was still open is "
+        "still waiting there, as the work it blocked and as a row of what needs a person, and a "
+        "person can still answer it there, once, which frees the work",
+        len(asked_before) == 2
+        and asked_restored == asked_before
+        and said_of(imported) == said_of(asked_before)
+        and [a["answered"] for a in imported] == [True, False]
+        and imported[0]["answered_by"] == the_project().owner.name
+        and blocked_there["status"] == "blocked"
+        and ("ask", open_task["ref"]) in waiting_there
+        and late.status == 200
+        and late.body["answered_by"] == empty_project.owner.name
+        and once_only.status == 400
+        and "already answered" in once_only.body["message"]
+        and freed_there["status"] == "ready",
+        f"Q-{answered_ask} answered and Q-{open_ask} waiting, in every copy",
+    )
+    async with connect(URL, empty_project.key) as client:
+        held_there = await held_and_proposed(client, gate_refs)
+        needs_there = [
+            (item["kind"], item["node"])
+            for group in (await ok(client, "needs_a_person"))["groups"]
+            for item in group["items"]
+        ]
+        waiting_plan = next(p for p in held_there["plans"] if p[2] == "proposed")
+        waiting_move = next(m for m in held_there["moves"] if m[1] == "proposed")
+    plan_path = f"/board/api/projects/{empty_project.id}/tool"
+    approved_there = empty_project.owner.call(
+        "POST", f"{plan_path}/approve_plan", {"plan": waiting_plan[0], "approved": True}
+    )
+    moved_there = empty_project.owner.call(
+        "POST", f"{plan_path}/decide_placement", {"placement": waiting_move[0], "accepted": True}
+    )
+    async with connect(URL, empty_project.key) as client:
+        freed_plan = [
+            (await ok(client, "get_node", node=ref))["held_by"] for ref in waiting_plan[6]
+        ]
+        moved_story = (await ok(client, "get_node", node=waiting_move[2][0]))["parent"]
+    gates_of = {ref: held_before["gated"][ref] for ref in gate_refs}
+    talked_there = next(p for p in held_there["plans"] if p[1].startswith("Talked about"))
+    approved_talked = empty_project.owner.call(
+        "POST",
+        f"{plan_path}/approve_plan",
+        {"plan": talked_there[0], "approved": True, "revision": 2},
+    )
+    async with connect(URL, empty_project.key) as client:
+        at_there = held_there["talked"][talked_there[0]]
+        now_free = [
+            (await ok(client, "get_node", node=item["ref"]))["held_by"] for item in at_there["tree"]
+        ]
+        taken_out = [
+            (await ok(client, "get_node", node=ref))["status"]
+            for ref in at_there["revisions"][1][4]
+        ]
+    proof(
+        "M47",
+        "gates, drafted plans and plan templates go through a backup and restore and through an "
+        "export and import into a fresh project: the task a timer holds and the task an approval "
+        "holds are still held by the same gates, saying the same, the plan that waits is still "
+        "held and still a row of what needs a person, the plan a person approved is still "
+        "approved, the saved template is the same, and a person there can still approve the "
+        "waiting plan, which frees its work",
+        held_restored == held_before
+        and held_there["gated"] == held_before["gated"]
+        and held_there["plans"] == held_before["plans"]
+        and held_there["templates"] == held_before["templates"]
+        and all(by and by[0].startswith("gate:") for by, _ in gates_of.values())
+        and [p[2] for p in held_there["plans"]] == ["proposed", "approved", "proposed"]
+        and ("plan", waiting_plan[6][0]) in needs_there
+        and ("ask", gate_refs[1]) in needs_there
+        and approved_there.status == 200
+        and freed_plan == [[]] * len(waiting_plan[6]),
+        f"{len(held_there['plans'])} plans, {len(held_there['templates'])} template, 2 gates",
+    )
+    (taken_plan,) = held_before["talked"].values()
+    proof(
+        "M51",
+        "a plan with a conversation goes through a backup and restore and through an export and "
+        "import into a fresh project: it is still at revision 2 and waits for a person, with the "
+        "same revisions (who made each, the agent's note, how many items, the one it took out), "
+        "the same feedback with the words each comment was about, revision 1 reading as it was "
+        "and what changed since it; the task that revision took out is still dropped; and a "
+        "person there approves revision 2, which frees what is left and not the dropped task",
+        held_restored["talked"] == held_before["talked"]
+        and held_there["talked"] == held_before["talked"]
+        and taken_plan["revision"] == 2
+        and taken_plan["state"] == "proposed"
+        and [r[0] for r in taken_plan["revisions"]] == [1, 2]
+        and taken_plan["revisions"][1][2] == "Took out the provider call."
+        and len(taken_plan["revisions"][1][4]) == 1
+        and taken_plan["feedback"][0][3] == "One task too many."
+        and taken_plan["feedback"][0][4][0][3] == "Call the provider"
+        and len(taken_plan["first"]) == len(taken_plan["tree"]) + 1
+        and approved_talked.status == 200
+        and approved_talked.body["revision"] == 2
+        and now_free == [[]] * len(at_there["tree"])
+        and taken_out == ["dropped"],
+        f"revision {taken_plan['revision']}, {len(taken_plan['feedback'])} feedback",
+    )
+    proof(
+        "M43",
+        "proposals to move work go through the same copies: the one that waits is still waiting "
+        "(and a row of what needs a person), the one a person rejected is still rejected with "
+        "the reason, and a person in the fresh project can still accept the waiting one, which "
+        "moves the story as that person",
+        held_restored["moves"] == held_before["moves"]
+        and held_there["moves"] == held_before["moves"]
+        and [m[1] for m in held_there["moves"]] == ["proposed", "rejected"]
+        and held_there["moves"][1][6] == "Leave it."
+        and ("placement", waiting_move[2][0]) in needs_there
+        and moved_there.status == 200
+        and moved_story == waiting_move[3],
+        f"{len(held_there['moves'])} proposals in every copy",
+    )
+    timed_page = next(
+        t for s, t in copy_of.items() if s.startswith(f"task-{number_of(timed['ref'])}-")
+    )
+    found_in_page = next(
+        t for s, t in copy_of.items() if s.startswith(f"task-{number_of(approving['ref'])}-")
+    )
+    proof(
+        "M44",
+        "the link that says where work was found goes through them too, in the same direction, "
+        "and the Markdown copy names it in words at both ends (discovered from, led to)",
+        held_restored["found"] == held_before["found"] == held_there["found"]
+        and held_before["found"] == [(gate_refs[0], gate_refs[1])]
+        and "discovered from" in timed_page
+        and "led to" in found_in_page,
+        f"{gate_refs[0]} was found while doing {gate_refs[1]}",
     )
     shutil.rmtree(work, ignore_errors=True)

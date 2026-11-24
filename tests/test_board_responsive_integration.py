@@ -14,6 +14,7 @@ The audits run in the page (tests/board_layout.py), because that is where the si
 are. Every screen of a size and a theme is visited once and the findings are read by the tests of
 each part of the proof, so a failure names the screen, the size and the theme."""
 
+import math
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -39,21 +40,29 @@ from tests.board_helpers import (
 from tests.board_layout import (
     BY_NAME,
     SCREENS,
+    STRUCTURE,
     THEMES,
     Screen,
+    blank_page,
+    distance_to_segment,
     focus_ring,
     focused,
     frames,
+    layout_context,
     layout_page,
     open_address,
+    rested,
     settle,
     start_of_page,
     stops,
+    structure_map,
     tab_to,
     the_world,
     tour,
     visit,
 )
+from tests.board_theme import contrast as contrast_ratio
+from tests.board_theme import palette, parse_colour, pixels
 from tests.helpers import code_of, connect, ok
 from tests.world import make_project, register
 
@@ -83,14 +92,19 @@ TOURED = {
     "search",
     "search-duplicates",
     "activity",
-    "access",
+    "activity-working",
+    "activity-free",
+    "needs",
+    "account",
     "tools",
     "status",
     "projects",
     "sign-in",
     "register",
     "new-item-dialog",
+    "account-menu",
     "navigator-open",
+    "forces-panel",
 }
 
 
@@ -247,6 +261,66 @@ async def test_every_control_has_a_name_icons_are_hidden_and_headings_and_landma
     assert not found, report(found)
 
 
+# -- 5b. an item is never called by its number ------------------------------------------------
+
+
+@screens
+@themes
+async def test_no_screen_calls_an_item_by_its_number_or_its_reference(
+    server_url: str, screen: Screen, theme: str
+) -> None:
+    """An item is its code and its name (E-1 Platform foundations, AC-3 and its title, N-7 and its
+    headline) and, in a sentence, its name in curly quotes. No text on any screen (what a screen
+    reader says too), no tooltip, label or placeholder calls one `#3`, `story 12`, `criterion 3`,
+    `note 7` or `story:12`. The Tools page and the Agent view show what an agent is told, in an
+    agent's own syntax, and are the two places those forms belong."""
+    visited = await tour(server_url, screen, theme)
+    found = {
+        name: audit.structure["forbidden"]
+        for name, audit in visited.audits.items()
+        if audit.structure["forbidden"]
+    }
+    assert not found, report(found)
+
+
+async def test_the_audit_of_forbidden_forms_finds_each_form_where_it_hides_and_lets_names_be(
+    server_url: str,
+) -> None:
+    world = await the_world(server_url)
+    async with layout_context(world.board, BY_NAME["1280"], "light") as (w, context):
+        page = await blank_page(context)
+        await page.set_content(
+            """
+            <main>
+              <p id="a">Moved story 12 to the next epic</p>
+              <p id="b">Criterion #3 is met</p>
+              <p id="c" class="sr-only">Note 7 was withdrawn</p>
+              <button id="d" title="Task 4 is blocked">Open</button>
+              <button id="e" aria-label="Open story:12">Open</button>
+              <input id="f" placeholder="Rule 3 or note:7">
+              <p id="g">S-12 Slot picker, AC-3 A rider can book, N-7 Use short codes</p>
+              <p id="h">“Slot picker” is now blocked. Phase 1 of 3, 12 tasks, Wide tile 01</p>
+              <p id="i" hidden>Story 99 is hidden</p>
+              <a id="j" href="/#section" title="Back to Graph">Graph</a>
+            </main>
+            """
+        )
+        found: list[str] = (await page.evaluate(STRUCTURE))["forbidden"]
+        assert len(found) == 6, found
+        said = " ".join(found)
+        for words in (
+            "story 12",
+            "Criterion #3",
+            "Note 7",
+            "Task 4",
+            "Open story:12",
+            "Rule 3 or note:7",
+        ):
+            assert words in said, (words, found)
+        assert not [line for line in found if "Slot picker" in line or "Story 99" in line]
+        assert w.problems == []
+
+
 # -- 6. contrast -------------------------------------------------------------------------------
 
 
@@ -258,8 +332,10 @@ async def test_every_word_icon_and_field_border_has_the_contrast_it_needs(
     visited = await tour(server_url, screen, theme)
     found: dict[str, list[str]] = {}
     for name, audit in visited.audits.items():
-        # A page that says only that the project is not there has a heading, a line and a link.
-        enough = 5 if name == "no-such-project" else 10
+        # A page that says only that the project is not there has a heading, a line and a link, the
+        # page of what needs a person, empty in this project, says one sentence, and the page of
+        # plan templates, with none made, says one sentence and offers a button.
+        enough = 5 if name in ("no-such-project", "needs", "templates") else 10
         assert audit.contrast.checked >= enough, (
             f"{name}: only {audit.contrast.checked} things looked at"
         )
@@ -318,8 +394,20 @@ async def test_the_menu_is_reachable_through_its_button_on_a_narrow_window(
             assert link_box is not None and link_box["height"] >= 44, (place, link_box)
             assert link_box["x"] >= 0 and link_box["x"] + link_box["width"] <= screen.width
         await expect(page.locator("#sidebar-close")).to_be_visible()
-        for reachable in ("#activity-open", "#settings-menu", "#sign-out", "#project-switcher"):
+        for reachable in ("#activity-open", "#settings-menu", "#account", "#project-switcher"):
             await expect(page.locator(reachable)).to_be_visible()
+        # Signing out and choosing the look of the board are in the account menu, which opens from
+        # its button: its rows are as big as a finger needs and inside the window.
+        await page.locator("#account").click()
+        await expect(page.locator("#account-list")).to_be_visible()
+        for row in ("#account-page", "#account-appearance-light", "#sign-out"):
+            target = page.locator(row)
+            await expect(target).to_be_visible()
+            row_box = await target.bounding_box()
+            assert row_box is not None and row_box["height"] >= 36, (row, row_box)
+            assert row_box["x"] >= 0 and row_box["x"] + row_box["width"] <= screen.width, row
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#account-list")).to_be_hidden()
         # Escape closes it and gives the focus back to the button.
         await page.keyboard.press("Escape")
         await expect(nav).to_be_hidden()
@@ -498,7 +586,7 @@ async def test_every_kind_of_record_opens_on_a_page_of_its_own_that_is_whole(
             # The way back is where the person came from: the breadcrumb ends with the record and
             # fits in the top bar, and the view it names is the one the person was in.
             trail = await crumbs(page)
-            assert trail[-1] and trail[2].lower().startswith(came_from), (where, trail)
+            assert trail[-1] and trail[0].lower().startswith(came_from), (where, trail)
             assert found["crumbs"]["r"] <= screen.width + 0.5, (where, found["crumbs"])
             assert found["last"] is not None and found["last"]["r"] <= screen.width + 0.5, where
             # Its actions are inside the window and big enough; an epic, story or task also has
@@ -510,9 +598,11 @@ async def test_every_kind_of_record_opens_on_a_page_of_its_own_that_is_whole(
             if kind in {"epic", "story", "task"}:
                 moves = await pager(page)
                 assert moves["position"] and moves["previous"] and moves["next"], (where, moves)
-            # Its sections are listed, and the page is read by scrolling the page: no box that
-            # holds it scrolls up and down on its own (a table may scroll sideways, in its region).
-            assert found["jumps"] >= 4 and found["sections"] >= 4, (where, found)
+            # Its sections are laid out one under another and the page is read by scrolling it,
+            # with no list of sections to jump about in: no box that holds it scrolls up and down
+            # on its own (a table may scroll sideways, in its region).
+            assert found["sections"] >= 2, (where, found)
+            await expect(page.locator(".item-nav, .item-jump")).to_have_count(0)
             boxes = await page.evaluate(
                 """() => {
                     const found = [];
@@ -595,17 +685,22 @@ async def test_the_board_the_map_the_timeline_and_a_long_record_scroll_or_pan_in
             "#graph-view svg.graph-rd-svg",
         )
         await goto(w, "#/graph", "#graph-view svg.graph-st-svg")
+        await rested(page)
         view = page.locator("svg.graph-st-svg .graph-st-vp")
         start = view_of(await view.get_attribute("transform") or "")
         assert start[2] == pytest.approx(1, abs=0.01)
+        # The view eases to where a button sends it, and the map says when it has arrived.
         await page.get_by_role("button", name="Zoom in").click()
+        await rested(page)
         zoomed = view_of(await view.get_attribute("transform") or "")
         assert zoomed[2] == pytest.approx(start[2] * 1.4, rel=0.01)
         await page.get_by_role("button", name="Zoom out").click()
+        await rested(page)
         back = view_of(await view.get_attribute("transform") or "")
         assert back[2] == pytest.approx(start[2], rel=0.01)
         await page.get_by_role("button", name="Zoom in").click()
         await page.get_by_role("button", name="Fit the whole project in view").click()
+        await rested(page)
         fitted = view_of(await view.get_attribute("transform") or "")
         assert fitted == pytest.approx(start, abs=0.5)
         # One node has the Tab stop, and the arrow keys go from one to the next.
@@ -700,9 +795,19 @@ async def test_the_tables_of_a_page_scroll_in_regions_of_their_own_and_the_page_
         # of what it needs first and what needs it.
         await goto(w, page_address(world["S5"]), "#item-table tbody tr")
         assert await is_sideways_free(page)
-        await goto(w, page_address(world["D1"]), "#item-part-title")
+        await goto(w, page_address(world["D1"]), "#item-links")
         assert await is_sideways_free(page)
         await expect(page.locator("#item-table")).to_have_count(0)
+        # ... and its Links, one table across the width, which scrolls in a region of its own when
+        # the window is narrow.
+        links = page.locator("#links-region")
+        assert await links.get_attribute("role") == "region"
+        assert await links.get_attribute("tabindex") == "0"
+        assert await links.get_attribute("aria-labelledby") == "item-links-title"
+        room = await links.evaluate("(e) => [e.scrollWidth, e.clientWidth]")
+        if screen.width >= 1100:
+            assert room[0] <= room[1] + 1, room
+        assert await is_sideways_free(page)
         # What concerns a story (its notes, the project-wide ones too) is in tables of their own,
         # each a named region: the window scrolls none of them when there is room for their
         # columns, and a narrow one scrolls each in its region, never the page.
@@ -844,7 +949,7 @@ async def test_search_is_opened_typed_and_a_result_opened_and_gone_back_from_wit
         assert link_text.split(" ", 1)[1][:8] in await page.locator("#item-title").inner_text()
         # The breadcrumb names the page the person was in, and leads back to the results as they
         # were: the same words, the same list.
-        assert (await crumbs(page))[2] == "Search"
+        assert (await crumbs(page))[0] == "Search"
         await start_of_page(page)
         await tab_to(page, "nav.crumbs li.crumb-view a")
         await page.keyboard.press("Enter")
@@ -970,7 +1075,8 @@ async def test_an_items_page_is_sorted_and_walked_from_task_to_story_to_epic_wit
             )
             assert await item_rows(page) == [apple, zebra]
             # A row has nothing to open beside the page: its code is the link to that task's page,
-            # which has the focus on its title and says which story it is part of. The only other
+            # which has the focus on its title and names the epic and story it is in in its
+            # breadcrumb. The only other
             # buttons are the status and priority chips, which open a menu and not a record.
             assert (
                 await page.locator("#item-table button").evaluate_all(
@@ -985,7 +1091,11 @@ async def test_an_items_page_is_sorted_and_walked_from_task_to_story_to_epic_wit
             await expect(page.locator("#item-title")).to_have_text(
                 re.compile(rf"^{code_of(zebra)}\s+Zebra$")
             )
-            await expect(page.locator("#item-part-title")).to_contain_text(code_of(story))
+            assert (await crumbs(page))[1:] == [
+                f"{code_of(epic)} Keys",
+                f"{code_of(story)} Keyed story",
+                f"{code_of(zebra)} Zebra",
+            ]
             # Previous and next: the keys ] and [ walk the tasks of the story, and the buttons are
             # stops of Tab that say where the page stands among them.
             moves = await pager(page)
@@ -1003,17 +1113,21 @@ async def test_an_items_page_is_sorted_and_walked_from_task_to_story_to_epic_wit
             assert (await pager(page))["next"]["disabled"], "no next task after the last one"
             # Up: the link to the story, then to its epic; and across the epics with the same keys.
             await start_of_page(page)
-            await tab_to(page, "#item-part-title a")
+            # The step to the story is a link whose words are its code and its name (and the
+            # whole of it is its tooltip).
+            up = page.locator(f"nav.crumbs li.crumb-item a[href$='item={story}&from=board']")
+            await expect(up).to_have_attribute("title", f"{code_of(story)} Keyed story")
+            await tab_to(page, f"nav.crumbs li.crumb-item a[href$='item={story}&from=board']")
             await page.keyboard.press("Enter")
             await arrived(page, story)
             await start_of_page(page)
             await tab_to(page, "nav.crumbs li.crumb-item a")
             await page.keyboard.press("Enter")
             await arrived(page, epic)
-            assert (await crumbs(page))[3:] == [code_of(epic)]
+            assert (await crumbs(page))[1:] == [f"{code_of(epic)} Keys"]
             await page.keyboard.press("]")
             await arrived(page, other_epic)
-            assert (await crumbs(page))[3:] == [code_of(other_epic)]
+            assert (await crumbs(page))[1:] == [f"{code_of(other_epic)} More keys"]
             await page.keyboard.press("[")
             await arrived(page, epic)
 
@@ -1227,16 +1341,16 @@ async def test_on_a_touch_screen_the_controls_that_ask_for_it_are_44_pixels(
                 if box is None or min(box["width"], box["height"]) < 43.5:
                     shown = box and f"{box['width']:.0f}x{box['height']:.0f}"
                     small.append(f"{selector} is {shown}, and a touch target is 44x44")
-        # The page of an item: the way to its neighbours and the list of its sections are as big
-        # as a finger, and so is the way to open the page of a chosen record on the Graph.
+        # The page of an item: the way to its neighbours and its actions are as big as a finger,
+        # and so is the way to open the page of a chosen record on the Graph.
         for address, selectors in (
             # An epic in the middle has both neighbours (the end of a row has a control that is
             # off and holds only an arrow), and Edit is as big as they are.
             (
                 page_address(world["E3"]),
-                ("#item-prev", "#item-next", ".item-jump", "button.edit-details"),
+                ("#item-prev", "#item-next", "#item-agent-view", "button.edit-details"),
             ),
-            (page_address(world["X1"]), (".item-jump",)),
+            (page_address(world["X1"]), ("#item-agent-view",)),
             (
                 f"#/graph?tab=around&focus={world['D1']}",
                 ("#graph-hub-open",),
@@ -1255,11 +1369,26 @@ async def test_on_a_touch_screen_the_controls_that_ask_for_it_are_44_pixels(
         await goto(w, "#/board", ".card[data-ref]")
         await page.locator("#sidebar-toggle").click()
         await frames(page)
-        for selector in ("#sidebar-close", "#main-nav a", "#activity-open", "#settings-menu"):
+        for selector in (
+            "#sidebar-close",
+            "#main-nav a",
+            "#activity-open",
+            "#settings-menu",
+            "#account",
+        ):
             places = page.locator(selector)
             for at in range(await places.count()):
                 box = await places.nth(at).bounding_box()
                 assert box is not None and box["height"] >= 43.5, (selector, box)
+        # The account menu's rows (the page, the three looks, sign out) are as big as a finger too.
+        await page.locator("#account").click()
+        await expect(page.locator("#account-list")).to_be_visible()
+        rows = page.locator("#account-list [role=menuitem], #account-list [role=menuitemradio]")
+        assert await rows.count() == 5
+        for at in range(await rows.count()):
+            box = await rows.nth(at).bounding_box()
+            assert box is not None and box["height"] >= 43.5, (at, box)
+        await page.keyboard.press("Escape")
         # The tree of epics: a row, and the chevron that opens it, are big enough to be hit.
         for ref in (world["E1"], world["S2"]):
             await tree_expand(page, ref)
@@ -1283,6 +1412,7 @@ async def test_the_nodes_of_the_structure_map_can_be_zoomed_to_24_pixels_or_more
         page = w.page
         await open_address(w, "#/board")
         await goto(w, "#/graph", "#graph-view svg.graph-st-svg")
+        await rested(page)
         smallest = """() => {
             const nodes = document.querySelectorAll('svg.graph-st-svg .graph-st-node');
             const sizes = [...nodes].map((n) => {
@@ -1298,12 +1428,309 @@ async def test_the_nodes_of_the_structure_map_can_be_zoomed_to_24_pixels_or_more
             >= 20
         )
         # The map starts fitted, with everything in view; its zoom buttons make every node a
-        # target of 24 pixels or more before they stop.
+        # target of 24 pixels or more before they stop (each click eases the view to its goal).
         for _ in range(24):
             if await page.evaluate(smallest) >= 23.5:
                 break
             await page.get_by_role("button", name="Zoom in").click()
+            await rested(page)
         assert await page.evaluate(smallest) >= 23.5, world.board
+
+
+# -- 11b. the live map's controls, Around's fit, the Roadmap's box and the map's marks -----------
+
+
+async def reachable(locator: Any) -> bool:
+    """Whether the first thing at the middle of an element is the element (or part of it), once it
+    has been scrolled into view: it is not clipped by a box or covered by another."""
+    await locator.scroll_into_view_if_needed()
+    found: bool = await locator.evaluate(
+        """(e) => {
+            const r = e.getBoundingClientRect();
+            const at = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+            return r.left >= 0 && r.right <= innerWidth && !!at && (at === e || e.contains(at));
+        }"""
+    )
+    return found
+
+
+@screens
+async def test_the_forces_panel_and_the_tidy_button_can_be_reached_and_are_not_clipped(
+    server_url: str, screen: Screen
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, "light") as w:
+        page = w.page
+        await open_address(w, "#/board")
+        await goto(w, "#/graph", "#graph-view svg.graph-st-svg")
+        await rested(page)
+        forces, tidy, panel = (
+            page.locator(f"#graph-st-{name}") for name in ("forces", "tidy", "forces-panel")
+        )
+        # The two buttons are in the toolbar, inside the window and big enough; the panel is closed.
+        await expect(panel).to_be_hidden()
+        await expect(forces).to_have_attribute("aria-expanded", "false")
+        for button in (forces, tidy):
+            assert await reachable(button), button
+            box = await button.bounding_box()
+            assert box is not None and min(box["width"], box["height"]) >= 24, box
+        await forces.click()
+        await expect(panel).to_be_visible()
+        await expect(forces).to_have_attribute("aria-expanded", "true")
+        assert await reachable(panel)
+        # Each slider and Reset can be reached and used: the keyboard moves a slider one step and
+        # the map comes to rest again; Reset puts the four back where they start.
+        sliders = {
+            name: page.locator(f"#graph-st-force-{name}")
+            for name in ("centre", "repel", "link", "distance")
+        }
+        for name, slider in sliders.items():
+            assert await reachable(slider), name
+            await slider.focus()
+            await page.keyboard.press("ArrowRight")
+            await page.keyboard.press("ArrowRight")
+            await expect(slider).to_have_value("1.2")
+            await expect(page.locator(f"output[for=graph-st-force-{name}]")).to_have_text("1.2")
+            await rested(page)
+        reset = page.locator("#graph-st-forces-reset")
+        assert await reachable(reset)
+        await reset.click()
+        for slider in sliders.values():
+            await expect(slider).to_have_value("1")
+        await rested(page)
+        # Escape closes the panel and gives the focus back to its button.
+        await page.keyboard.press("Escape")
+        await expect(panel).to_be_hidden()
+        await expect(forces).to_be_focused()
+        # Tidy works from where it is and ends with the map at rest and every dot still there.
+        count = await page.locator("svg.graph-st-svg .graph-st-node").count()
+        await tidy.click()
+        await rested(page)
+        assert await page.locator("svg.graph-st-svg .graph-st-node").count() == count
+        assert await is_sideways_free(page)
+
+
+FIGURE = """() => {
+  const ego = document.querySelector('.graph-ego');
+  const transform = getComputedStyle(ego).transform;
+  const k = transform === 'none' ? 1 : new DOMMatrix(transform).a;
+  let smallest = Infinity;
+  for (const e of ego.querySelectorAll('*')) {
+    if (![...e.childNodes].some((n) => n.nodeType === 3 && n.nodeValue.trim())) continue;
+    if (!e.checkVisibility() || e.closest('.sr-only')) continue;
+    smallest = Math.min(smallest, parseFloat(getComputedStyle(e).fontSize) * k);
+  }
+  const visible = (id) => {
+    const e = document.getElementById(id);
+    return !!e && e.checkVisibility();
+  };
+  const stage = document.querySelector('.graph-ego-stage').getBoundingClientRect();
+  return {
+    scroll: [document.documentElement.scrollHeight, innerHeight],
+    sideways: [document.documentElement.scrollWidth, innerWidth],
+    stage: [stage.left, stage.top, stage.right, stage.bottom].map((n) => Math.round(n)),
+    smallest, k,
+    controls: ['graph-ego-fit', 'graph-ego-zoom-in', 'graph-ego-zoom-out'].map(visible),
+  };
+}"""
+
+
+async def figure(page: Page) -> dict[str, Any]:
+    """Around's figure once it has stopped changing: it is fitted in a frame or two after it is
+    drawn, so it is measured when two looks a few frames apart agree."""
+    before = None
+    for _ in range(25):
+        await frames(page, 2)
+        found: dict[str, Any] = await page.evaluate(FIGURE)
+        if found["stage"] == before:
+            return found
+        before = found["stage"]
+    raise AssertionError(f"the figure never stopped changing: {before}")
+
+
+@screens
+async def test_around_is_fitted_to_its_tab_where_it_has_the_room_and_stacks_where_it_has_not(
+    server_url: str, screen: Screen
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, "light") as w:
+        page = w.page
+        await open_address(w, "#/board")
+        for name in ("E1", "S2", "S1"):
+            await goto(w, f"#/graph?tab=around&focus={world[name]}", "#graph-hub[data-ref]")
+            found = await figure(page)
+            assert found["sideways"][0] <= found["sideways"][1], (name, found)
+            if screen.width >= 768:
+                # The whole figure is in the window: no scroll, and the words are still 11 pixels
+                # or more after it has been scaled. It can be fitted, zoomed in and out.
+                assert found["scroll"][0] <= found["scroll"][1], (name, found)
+                assert found["stage"][3] <= screen.height, (name, found)
+                assert found["smallest"] >= 11 - 0.01, (name, found)
+                assert found["controls"] == [True, True, True], (name, found)
+                # A group that has more than it shows grows where it is (nothing is drawn over
+                # anything), the figure is fitted again, the page does not scroll, and closing it
+                # puts the figure back as it was.
+                more = page.locator(".graph-more").first
+                if await more.count():
+                    await more.click()
+                    await expect(page.locator(".graph-gbox.is-open").first).to_be_visible()
+                    after = await figure(page)
+                    assert after["stage"][3] <= screen.height, (name, found, after)
+                    assert after["scroll"][0] <= after["scroll"][1], (name, after)
+                    assert after["sideways"][0] <= after["sideways"][1], (name, after)
+                    await page.keyboard.press("Escape")
+                    await expect(page.locator(".graph-gbox.is-open")).to_have_count(0)
+                    assert (await figure(page))["stage"] == found["stage"], (name, found)
+            else:
+                # A window this narrow gets one column that the page scrolls, with no controls
+                # for a figure that is not there.
+                assert found["controls"] == [False, False, False], (name, found)
+                assert found["smallest"] >= 11 - 0.01, (name, found)
+
+
+ROADMAP_BOX = """() => {
+  const box = document.getElementById('rm-scroll');
+  const rows = box.querySelector('.rm-rows').getBoundingClientRect();
+  const at = box.getBoundingClientRect();
+  return {
+    window: innerHeight, bottom: at.bottom, height: at.height,
+    page: document.documentElement.scrollHeight,
+    sideways: document.documentElement.scrollWidth <= innerWidth,
+    inside: [box.scrollHeight, box.clientHeight], rows: rows.bottom,
+  };
+}"""
+
+
+@screens
+@themes
+async def test_the_roadmap_box_fills_the_window_down_to_its_bottom_with_its_grid(
+    server_url: str, screen: Screen, theme: str
+) -> None:
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, theme) as w:
+        page = w.page
+        await open_address(w, "#/board")
+        await goto(w, "#/roadmap", ".rm-bar")
+        found = await page.evaluate(ROADMAP_BOX)
+        assert found["sideways"], found
+        # A window too short for the least the box keeps (14rem) scrolls the page instead of
+        # squeezing the box; every other window ends with the box, a margin under it, and no scroll.
+        if found["height"] > 240:
+            assert 0 <= found["window"] - found["bottom"] <= 20, found
+            assert found["page"] <= found["window"], found
+        else:
+            assert found["page"] >= found["bottom"], found
+        # With little in it (this project has a few dozen rows at most) the grid still goes down
+        # to the bottom of the box.
+        if found["inside"][0] <= found["inside"][1]:
+            assert found["rows"] >= found["bottom"] - 3, found
+
+
+def mixed(
+    over: tuple[float, float, float, float], under: tuple[int, int, int]
+) -> tuple[float, ...]:
+    """A colour with an alpha over an opaque one."""
+    return tuple(over[at] * over[3] + under[at] * (1 - over[3]) for at in range(3))
+
+
+@screens
+@themes
+async def test_the_dots_and_lines_of_the_structure_map_keep_their_contrast_at_every_size(
+    server_url: str, screen: Screen, theme: str
+) -> None:
+    """Measured from the pixels of the screen (the names are measured with every other word of the
+    page by the tour's contrast audit): a dot is painted in its status colour and stands out from
+    the map's background by 3:1, and so does a line of the tree."""
+    world = await the_world(server_url)
+    async with layout_page(world.board, screen, theme) as w:
+        page = w.page
+        await open_address(w, "#/board")
+        await goto(w, "#/graph", "#graph-view svg.graph-st-svg")
+        await rested(page)
+        await frames(page)
+        await page.evaluate("() => window.scrollTo(0, 0)")
+        drawn = await structure_map(page)
+        shot = await page.screenshot(
+            type="png", scale="css", animations="disabled", caret="hide", full_page=True
+        )
+        dots, canvas = drawn["nodes"], drawn["furniture"]["canvas"]
+        assert canvas is not None and len(dots) >= 40, canvas
+        zoom = drawn["furniture"]["zoom"]
+
+        def clear(x: float, y: float, margin: float) -> bool:
+            """Whether nothing of the map (a dot, a name or the zoom buttons) is within `margin`."""
+            if (
+                zoom
+                and zoom["l"] - margin < x < zoom["r"] + margin
+                and zoom["t"] - margin < y < zoom["b"] + margin
+            ):
+                return False
+            if any(
+                n["l"] - margin < x < n["r"] + margin and n["t"] - margin < y < n["b"] + margin
+                for n in drawn["names"]
+            ):
+                return False
+            return all(math.hypot(x - d["x"], y - d["y"]) > d["r"] + margin for d in dots)
+
+        background = next(
+            (
+                (x, y)
+                for y in range(int(canvas["t"]) + 6, int(canvas["b"]) - 6, 9)
+                for x in range(int(canvas["l"]) + 6, int(canvas["r"]) - 6, 9)
+                if clear(x, y, 12)
+            ),
+            None,
+        )
+        assert background is not None, canvas
+        # The dots that are big enough to be read from their pixels: four points half a radius from
+        # the middle (a hub's code is written across the middle, which they keep clear of).
+        measured = [d for d in dots if d["r"] >= 2.5 and not d["dropped"] and d["opacity"] == 1]
+        assert sum(d["kind"] != "task" for d in measured) == sum(d["kind"] != "task" for d in dots)
+        assert len(measured) >= 20, len(measured)
+        offsets = ((-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5))
+        points = [background]
+        for d in measured:
+            points.extend(
+                (round(d["x"] + dx * d["r"]), round(d["y"] + dy * d["r"])) for dx, dy in offsets
+            )
+        # The lines: the middle of each one that no dot, name or other line is near, and its eight
+        # neighbours (a line of one pixel is not always drawn on the pixel it is computed on).
+        segments = [(tuple(line["from"]), tuple(line["to"])) for line in drawn["lines"]]
+        middles = []
+        for line, (a, b) in zip(drawn["lines"], segments, strict=True):
+            x, y = round((a[0] + b[0]) / 2), round((a[1] + b[1]) / 2)
+            if not clear(x, y, 3):
+                continue
+            if any(distance_to_segment((x, y), other) < 4 for other in segments if other != (a, b)):
+                continue
+            middles.append((line, x, y))
+        assert len(middles) >= 3, len(middles)
+        for _, x, y in middles:
+            points.extend((x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+        found = await pixels(page, shot, points)
+        ground = found[0]
+        assert ground in palette(theme), ground
+        problems = []
+        for at, d in enumerate(measured):
+            own = parse_colour(d["fill"])
+            assert own is not None, d
+            seen = found[1 + at * 4 : 5 + at * 4]
+            painted = [p for p in seen if all(abs(p[i] - own[i]) <= 3 for i in range(3))]
+            if not painted:
+                problems.append(f"{d['ref']} is not painted in {d['fill']}: {seen}")
+            elif contrast_ratio(painted[0], ground) < 3:
+                problems.append(f"{d['ref']} {contrast_ratio(painted[0], ground):.2f}:1")
+        start = 1 + len(measured) * 4
+        for at, (line, _, _) in enumerate(middles):
+            stroke = parse_colour(line["stroke"])
+            assert stroke is not None and stroke[3] > 0, line
+            effective = mixed((*stroke[:3], stroke[3] * line["opacity"]), ground)
+            if contrast_ratio(effective, ground) < 3:
+                problems.append(f"a line is {contrast_ratio(effective, ground):.2f}:1")
+            nine = found[start + at * 9 : start + at * 9 + 9]
+            if max(contrast_ratio(p, ground) for p in nine) < 1.15:
+                problems.append(f"a line is not on its pixels: {nine}")
+        assert not problems, "\n".join(problems)
 
 
 # -- 12. reduced motion ---------------------------------------------------------------------------

@@ -50,8 +50,12 @@ AREAS = (
     "Acceptance criteria",
     "Definition of done",
     "Notes",
+    "Asks and what needs a person",
+    "Gates, plans and templates",
+    "Placing work",
     "Search and the index",
     "Moving data",
+    "Running code",
 )
 
 TOOL_PLACES: dict[str, ToolPlace] = {
@@ -113,10 +117,83 @@ TOOL_PLACES: dict[str, ToolPlace] = {
         "step. A person changes the status on the item's page, and releases a claim with a "
         "note on the Activity page.",
     ),
-    "create_plan": _agents(
-        "Work",
-        "It creates a whole plan (items, links and acceptance criteria) as one all-or-nothing "
-        "step from data an agent writes. A person makes items one at a time with New item.",
+    "create_plan": _board(
+        "Gates, plans and templates",
+        "templates",
+        "Make a plan from a saved template, on the Plan templates page: it fills in the "
+        "template's variables and creates the whole plan in one step, as a draft if you ask for "
+        "one. An agent writes a plan's items itself. A person makes single items with New item.",
+    ),
+    "add_gate": _board(
+        "Gates, plans and templates",
+        "board",
+        "Add a gate, in the Gates section of a story's or task's page: wait until a time, or "
+        "until a person approves.",
+    ),
+    "remove_gate": _board(
+        "Gates, plans and templates",
+        "board",
+        "Lift a gate, in the Gates section of a story's or task's page. Only a person can, so an "
+        "agent's call is refused.",
+    ),
+    "list_plans": _board(
+        "Gates, plans and templates",
+        "needs",
+        "The plans waiting for approval, on the Needs a person page (one row each).",
+    ),
+    "approve_plan": _board(
+        "Gates, plans and templates",
+        "needs",
+        "Approve or reject a proposed plan, from its row on the Needs a person page. Only a "
+        "person can, so an agent's call is refused.",
+    ),
+    "request_plan_changes": _board(
+        "Gates, plans and templates",
+        "needs",
+        "Ask for changes to a plan, with a summary and comments on its lines, from its row on "
+        "the Needs a person page. Only a person can, so an agent's call is refused.",
+    ),
+    "revise_plan": _agents(
+        "Gates, plans and templates",
+        "An agent revises a plan a person asked changes to, and a person reads the revision. A "
+        "person does not edit a drafted plan: they ask for the change.",
+    ),
+    "save_plan_template": _board(
+        "Gates, plans and templates",
+        "templates",
+        "Save a template, on the Plan templates page (Settings and tools).",
+    ),
+    "list_plan_templates": _board(
+        "Gates, plans and templates",
+        "templates",
+        "The Plan templates page lists them with their variables.",
+    ),
+    "delete_plan_template": _board(
+        "Gates, plans and templates",
+        "templates",
+        "Delete a template, on the Plan templates page.",
+    ),
+    "suggest_parent": _board(
+        "Placing work",
+        "board",
+        "Where could it go?, on a story's or task's page: the nearest epics or stories by "
+        "meaning, with the reason, each with Move here.",
+    ),
+    "propose_placement": _agents(
+        "Placing work",
+        "A person moves work directly, on the Board or from Move on an item's page. An agent "
+        "proposes a move or a new epic for several stories, and a person decides.",
+    ),
+    "list_placements": _board(
+        "Placing work",
+        "needs",
+        "The proposals to move work, on the Needs a person page (one row each).",
+    ),
+    "decide_placement": _board(
+        "Placing work",
+        "needs",
+        "Accept or reject a proposal to move work, from its row on the Needs a person page. Only "
+        "a person can, so an agent's call is refused.",
     ),
     "changes_since": _board(
         "Status and changes", "activity", "The Activity page is the feed; the board also polls it."
@@ -192,6 +269,25 @@ TOOL_PLACES: dict[str, ToolPlace] = {
         "Confirm a note, or take the confirmation away, from its status, on its page or in the "
         "Notes list. Only a person can confirm, so an agent's call is refused.",
     ),
+    "list_asks": _board(
+        "Asks and what needs a person",
+        "needs",
+        "The asks an agent put to a person, on the Needs a person page and on the page of the "
+        "story or task they are about.",
+    ),
+    "answer_ask": _board(
+        "Asks and what needs a person",
+        "needs",
+        "Answer an ask, from its row on the Needs a person page or from the page of the story or "
+        "task. Only a person can answer, so an agent's call is refused.",
+    ),
+    "needs_a_person": _board(
+        "Asks and what needs a person",
+        "needs",
+        "The Needs a person page is this list: open asks, checks only a person can tick, notes "
+        "waiting for confirmation and work whose claim ran out twice, by story. The sidebar "
+        "counts its rows.",
+    ),
     "search": _board("Search and the index", "search", "The search box, at the top of every page."),
     "similar_items": _board(
         "Search and the index",
@@ -219,5 +315,16 @@ TOOL_PLACES: dict[str, ToolPlace] = {
         "Moving data",
         "It loads a whole export into an empty project, which is done once to set one up, so it "
         "stays with the command line (scripts/import_graph.py) and docs/backup-and-export.md.",
+    ),
+    "explore": _board(
+        "Running code",
+        "tools",
+        "Try it, on this page: it lists the functions a key that runs code has, and gives their "
+        "types. Make such a key on the Users page.",
+    ),
+    "run": _agents(
+        "Running code",
+        "It runs a script for an agent key that calls Vrum by running code: one script does what "
+        "many calls would. A person works on the pages of the board one step at a time.",
     ),
 }

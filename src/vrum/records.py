@@ -22,7 +22,17 @@ NOTE_STATUSES = IN_FORCE + ENDED
 
 # The tools only a person can use: `require_person` refuses an agent that calls one. No agent key
 # can be given them, and the Tools page says so. The one place that names them.
-PEOPLE_ONLY_TOOLS = frozenset({"set_confirmation", "set_definition_of_done"})
+PEOPLE_ONLY_TOOLS = frozenset(
+    {
+        "set_confirmation",
+        "set_definition_of_done",
+        "answer_ask",
+        "approve_plan",
+        "request_plan_changes",
+        "remove_gate",
+        "decide_placement",
+    }
+)
 
 HEADLINE_CHARS = 120
 

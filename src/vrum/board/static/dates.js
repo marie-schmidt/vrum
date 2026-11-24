@@ -13,6 +13,10 @@ export const fromDay = (day) => new Date(day * DAY_MS).toISOString().slice(0, 10
 
 export const todayDay = () => Math.floor(Date.now() / DAY_MS);
 
+// How many whole days late an item is: the days since its target day, at least 1 while the server calls it overdue,
+// and 0 for work that is not late (the server never calls done or dropped work overdue).
+export const lateDaysOf = (node) => (node.overdue && node.target_on ? Math.max(1, todayDay() - toDay(node.target_on)) : 0);
+
 // 0 = Sunday ... 6 = Saturday.
 export const weekday = (day) => (((day + 4) % 7) + 7) % 7;
 
@@ -32,6 +36,12 @@ export const monthName = (day) =>
 export const yearOf = (day) => new Date(day * DAY_MS).getUTCFullYear();
 export const monthOf = (day) => new Date(day * DAY_MS).getUTCMonth();
 export const dayOfMonth = (day) => new Date(day * DAY_MS).getUTCDate();
+
+// A day written YYYY-MM-DD as it reads in a chip: 31 Dec 2026.
+export const dayWords = (text) => {
+  const day = toDay(text);
+  return `${dayOfMonth(day)} ${monthName(day)} ${yearOf(day)}`;
+};
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];

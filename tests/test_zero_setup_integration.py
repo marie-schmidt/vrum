@@ -115,3 +115,22 @@ async def test_a_database_that_lost_its_password_file_says_so_in_plain_words(
     told = stack.compose("logs", "--no-color", "db").stdout
     assert "already exists, but the file that holds its password is gone" in told
     assert "docker compose down --volumes" in told
+
+
+async def test_a_drafted_plan_is_read_whole_before_anything_has_ever_been_indexed(
+    stack: SecondStack,
+) -> None:
+    """A fresh install has no search index at all until the first one is built, and a plan's
+    checks (which look for work it may repeat) must say they could not look, not fail."""
+    stack.up()
+    async with stack.client() as client:
+        made = await ok(
+            client,
+            "create_plan",
+            draft=True,
+            items=[{"key": "e", "kind": "epic", "title": "First plan"}],
+        )
+        (plan,) = (await ok(client, "list_plans", plan=made["plan"]))["items"]
+        checks = {check["kind"]: check for check in plan["checks"]}
+        assert checks["duplicate"]["state"] == "unavailable"
+        assert checks["circle"]["state"] == "ok"

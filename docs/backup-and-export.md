@@ -51,7 +51,11 @@ uv run python scripts/export_graph.py http://127.0.0.1:8000/mcp graph.json
   project's definition of done itself, with its version and who
   last changed it. The file is readable only by you and holds everything in the project, so keep it
   private. Accounts, sessions, keys, people and invitations are never in it. The board's **Status
-  and export** page has the same download.
+  and export** page has the same download. Gates, drafted plans and their decisions (with every
+  revision of a plan and the feedback people gave on it), saved plan
+  templates, questions and their answers, and proposals to move work are all in it as part of the
+  history, so they come back as they were (a timer gate still holds its task, a drafted plan is
+  still held and a person can still decide it).
 - **Import:** `scripts/import_graph.py` loads such a file into an **empty project** (make one on the
   board, and a key for it), keeping every number, id, date, status and the history, so
   `story:12` is still `story:12`, and the next new epic, story or task continues after the highest
@@ -109,3 +113,87 @@ target folder, `definition-of-done.md`. Epics, stories and tasks are numbered ea
 graph each time, and the same graph gives the same files. It replaces the folders and the file it
 made inside the target folder and refuses a target folder that holds something else, so nothing of
 yours is overwritten.
+
+A link made with `discovered_from` (the new work was found while doing the other) is named in the
+copy as "discovered from" at the new item and "led to" at the one it was found in. Gates, drafted
+plans and plan templates are not in the copy: it is for reading the work, and they are about how
+the work is run. They are in the export.
+
+## Bringing work in from other tools
+
+Three scripts bring work that lives somewhere else into a project, as epics, stories and tasks with
+their links and acceptance criteria. They are one way in: nothing is kept in step afterwards, and
+Vrum never talks to Beads or GitHub (a script reads a file, or you run `gh` on your own machine and
+give the script what it wrote). Each takes the server's address and a file, and each can say what
+it would do first.
+
+```
+export VRUM_AGENT_KEY=<the key of the project>
+bd export > beads-export.jsonl
+uv run python scripts/import_beads.py http://127.0.0.1:8000/mcp beads-export.jsonl --dry-run
+uv run python scripts/import_beads.py http://127.0.0.1:8000/mcp beads-export.jsonl
+```
+
+- **Beads** (`scripts/import_beads.py`) reads what `bd export` writes, one issue on each line. A
+  `blocks`, `waits-for` or `conditional-blocks` dependency becomes `needs_first`, `related`
+  becomes `relates_to`, `discovered-from` becomes `discovered_from`, and `duplicates` and
+  `supersedes` keep their names. Any other kind of dependency is a problem, so that nothing is
+  dropped without a word. Beads also keeps messages, events, molecules and gates, which are not
+  work: the file is refused while it holds them, naming each one, and **`--skip-not-work`** leaves
+  them out.
+- **GitHub issues** (`scripts/import_github.py`) reads a JSON list of issues. Write it with the
+  GitHub command line on your own machine, for example
+  `gh issue list --repo OWNER/REPO --state all --limit 1000 --json number,title,body,state,stateReason,labels,milestone,url > issues.json`.
+  A milestone is an epic and an issue is a story under it. An issue whose body has a task list of
+  `- [ ] #12` makes those issues its tasks. A closed issue is done, or dropped when it was closed
+  as not planned; a label that says urgent, high or low sets the priority. Pull requests in the
+  list are left out and counted.
+- **Spec Kit** (`scripts/import_speckit.py`) reads a `tasks.md`. The feature is the epic, each phase
+  is a story, and each task line (`- [ ] T012 [P] [US1] Create the album model`) is a task, done
+  when it is marked `[x]`. A `[US1]` label puts a task under the phase for that user story, and
+  `(depends on T010, T011)` makes it wait for those tasks. A task inside a comment is not a task.
+
+**The hierarchy is by position.** Vrum has three levels: an epic is an epic, what is directly under
+an epic is a story, and what is under a story is a task. Work that has no epic goes under an epic
+called **Inbox**, as stories: the convention for work that is not sorted yet, which Vrum's
+suggestions for where work belongs start from (see [Sorting unsorted work](agents.md#sorting-unsorted-work)).
+Nesting deeper than three levels, an epic inside something else, or a parent that is not in the file
+is a listed problem, never guessed at. Statuses and priorities carry over, an acceptance criterion
+in the source is placed on its story, and the old identifier (and, for GitHub, the issue's address
+and labels) is kept in the item's details so the old system can still be found from the new one.
+Nothing is invented: a size, a date or a link the source does not state is left out.
+
+**A file that does not fit changes nothing.** Every problem is found first and listed, one sentence
+each, and then nothing is made: "Nothing was created: the file has 3 problems." A plan the server
+itself refuses, such as two items that wait for each other, is refused whole too. With `--dry-run`
+a file that fits says what it would create ("It would create 2 epics, 2 stories and 2 tasks")
+and creates nothing.
+
+**The key needs two tools.** The scripts send the plan with `create_plan` and then set the status
+each item had with `update_nodes`. The standard agent set has the first but not the second, so on
+the project's **Users** page allow the key both. Without `update_nodes` the work is still made, but
+every item starts as not started and the script says so. A project with a definition of done that
+has checks refuses `done` from an agent, so a closed issue is made as not started and the script
+says so too: tick the checks, or set it on the board.
+
+## Setting up a coding agent
+
+`scripts/setup_agent.py` writes what a coding agent needs to use a project, in the project's own
+folder: its MCP configuration and Vrum's short agent guide.
+
+```
+uv run python scripts/setup_agent.py claude http://127.0.0.1:8000/mcp --dir ~/work/my-project --check
+```
+
+The clients are `claude` (Claude Code), `codex` (Codex), `cursor` (Cursor) and `copilot` (GitHub
+Copilot, in the CLI and in VS Code). **It never writes the agent key.** Each configuration says to
+read the key from the `VRUM_AGENT_KEY` environment variable, so the files are safe to commit and
+the key stays where only you can read it: make the key on the project's **Users** page, then run
+`export VRUM_AGENT_KEY=<the key>` before you start the client. The guide is the server's own
+agent guide, written between two markers (`<!-- vrum-guide:start -->` and
+`<!-- vrum-guide:end -->`) in the file the client reads (CLAUDE.md, AGENTS.md or
+`.github/copilot-instructions.md`), so running it again replaces that block and leaves the rest of
+the file alone, and it never makes a second copy. An existing configuration file is kept: the
+`vrum` entry is added to it. A file that is not valid JSON, or a Codex configuration that already
+has a Vrum table, is left alone and refused in words. With **`--check`** and the key set it also
+connects and says which tools the key is offered.

@@ -6,22 +6,22 @@
 // A record is named the way the address names it: epic:3, story:12 or task:40 (the ref the server
 // sends), rule:3 (shown as an acceptance criterion) or note:7. That name is the key of its dot and of its
 // row. Every dot has a `key`, a `kind` (which is also its `type`), a `number` (its number within
-// its kind; an acceptance criterion's or a note's own `id`) and a `code` for a person to read (S-12 for
-// work, #3 for the rest). A piece of work also has its `ref`; the others keep their `id`.
+// its kind; an acceptance criterion's or a note's own `id`), the `title` a person reads (a note's is its
+// headline) and a `code` to read before it (S-12 for work, AC-3 for an acceptance criterion, N-7 for a
+// note). A piece of work also has its `ref`; the others keep their `id`.
 
 import { parseSel as readSel } from './ctx.js';
-import { KIND_ORDER, inForce, nodeCode, nodeRef, parseNodeRef } from './labels.js';
+import { KIND_ORDER, inForce, noteCode, nodeCode, nodeRef, parseNodeRef, ruleCode } from './labels.js';
 import { epicOf, headlineOf, store } from './store.js';
 
-// The kinds of list: the work as an outline, the two kinds of context, and everything.
-export const LIST_KINDS = ['work', 'requirements', 'notes', 'everything'];
-export const LIST_WORDS = { work: 'Work', requirements: 'Acceptance criteria', notes: 'Notes', everything: 'Everything' };
+// The kinds of list: the work as an outline, and the two kinds of context.
+export const LIST_KINDS = ['work', 'requirements', 'notes'];
+export const LIST_WORDS = { work: 'Work', requirements: 'Acceptance criteria', notes: 'Notes' };
 // Which kinds of context record each kind of list holds.
 const CONTEXT_OF = {
   work: [],
   requirements: ['rule'],
   notes: ['note'],
-  everything: ['rule', 'note'],
 };
 // The old "Context" list held every kind of context; the one place that still links to it
 // (the Board's acceptance criteria placed nowhere) means the acceptance criteria.
@@ -38,6 +38,7 @@ export const EDGE = {
   supersedes: { label: 'supersedes', back: 'is superseded by' },
   duplicates: { label: 'duplicates', back: 'duplicates' },
   relates_to: { label: 'relates to', back: 'relates to' },
+  discovered_from: { label: 'discovered from', back: 'led to' },
   placed: { label: 'is an acceptance criterion of', back: 'has the acceptance criterion' },
   concerns: { label: 'concerns', back: 'is concerned by' },
   replaces: { label: 'replaces', back: 'is replaced by' },
@@ -56,8 +57,9 @@ function parseSel(text) {
 }
 
 // The choices the address holds. With an epic in it the scope is that epic (`epic` is its ref; the
-// address carries its number), and otherwise it is the whole project. `hideKind` is the kinds of
-// context the list does not hold.
+// address carries its number), and otherwise it is the whole project. `work` and `context` say which
+// kinds of record the list draws, and `hideKind` is the kinds of context it does not hold. A `view` that
+// is not one of the lists (the old Everything, say) is the work list.
 export function settings(params) {
   const number = Number(params.get('epic')) || null;
   const epic = number ? nodeRef('epic', number) : null;
@@ -66,6 +68,8 @@ export function settings(params) {
   const view = LIST_KINDS.includes(asked) ? asked : 'work';
   return {
     view,
+    work: view === 'work',
+    context: view !== 'work',
     scope: known ? 'epic' : 'all',
     epic: known,
     q: (params.get('q') || '').trim(),
@@ -75,13 +79,13 @@ export function settings(params) {
   };
 }
 
-export const showsWork = (cfg) => cfg.view === 'work' || cfg.view === 'everything';
-export const showsContext = (cfg) => cfg.view !== 'work';
+export const showsWork = (cfg) => cfg.work;
+export const showsContext = (cfg) => cfg.context;
 
-// What has to be loaded for these settings, besides the work itself.
+// What has to be loaded for these settings, besides the work itself. The acceptance criteria and the notes are
+// always read, so that the kind switch can say how many of each the scope holds.
 export function needs(cfg) {
-  const wanted = [];
-  if (showsContext(cfg)) wanted.push('rules', 'notes');
+  const wanted = ['rules', 'notes'];
   if (cfg.mentions) wanted.push('references');
   return wanted;
 }
@@ -106,12 +110,12 @@ export function universe(cfg) {
     if (!cfg.hideKind.has('rule')) {
       for (const rule of store.rules || []) {
         const holder = rule.node === null ? null : store.nodes.get(rule.node);
-        add({ key: keyOf('rule', rule.id), kind: 'rule', type: 'rule', id: rule.id, number: rule.id, code: `#${rule.id}`, title: rule.title, status: rule.status, epic: holder ? epicOf(holder)?.ref ?? null : null, ended: rule.status === 'dropped', text: rule.body_preview || rule.body || '', record: rule });
+        add({ key: keyOf('rule', rule.id), kind: 'rule', type: 'rule', id: rule.id, number: rule.id, code: ruleCode(rule.id), title: rule.title, status: rule.status, epic: holder ? epicOf(holder)?.ref ?? null : null, ended: rule.status === 'dropped', text: rule.body_preview || rule.body || '', record: rule });
       }
     }
     if (!cfg.hideKind.has('note')) {
       for (const note of store.notes || []) {
-        add({ key: keyOf('note', note.id), kind: 'note', type: 'note', id: note.id, number: note.id, code: `#${note.id}`, title: clip(headlineOf(note), 60), status: note.status, epic: null, ended: !inForce(note), projectWide: Boolean(note.project_wide), text: `${note.text} Why: ${note.why}`, record: note });
+        add({ key: keyOf('note', note.id), kind: 'note', type: 'note', id: note.id, number: note.id, code: noteCode(note.id), title: clip(headlineOf(note), 60), status: note.status, epic: null, ended: !inForce(note), projectWide: Boolean(note.project_wide), text: `${note.text} Why: ${note.why}`, record: note });
       }
     }
   }
@@ -262,4 +266,18 @@ export function view(cfg, all, matched = null) {
     shown.notice = matched ? 'Nothing matches the filter.' : all.dots.size ? 'There is nothing in this scope.' : 'There is nothing to show yet.';
   }
   return shown;
+}
+
+// How many of each kind of record the scope holds (the epic and the filter, but not the status or the words a
+// list has of its own), whichever list is showing, so that the kind switch can say it. The work the filter does
+// not match but that is drawn only to show a match in its place is not counted.
+export function scopeCounts(cfg, matched = null) {
+  const wide = { ...cfg, work: true, context: true, hideKind: new Set(), mentions: false };
+  const shown = view(wide, universe(wide), matched);
+  const count = { work: 0, requirements: 0, notes: 0 };
+  for (const dot of shown.dots.values()) {
+    if (dot.isNode) count.work += dot.outside ? 0 : 1;
+    else count[dot.type === 'rule' ? 'requirements' : 'notes'] += 1;
+  }
+  return count;
 }

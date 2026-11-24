@@ -61,7 +61,7 @@ export const mapStatusChips = (counts, finest = 'tasks') =>
     ),
   );
 
-// A dot that is amber where work is overdue (or a ring, as the whole map draws it); a pair of dots,
+// A red dot where work is overdue (or a dashed ring, as the whole map draws it); a pair of dots,
 // the second bigger.
 export const lateChip = (words = 'Overdue', shape = 'dot') => keyChip(h('span', { class: `graph-x-late${shape === 'ring' ? ' is-ring' : ''}` }), words);
 export const biggerChip = (words) => keyChip(h('span', { class: 'graph-x-bigger' }), words);
@@ -89,12 +89,13 @@ export function lineChip(type, words, title = null) {
   return keyChip(svg, words, { title });
 }
 
-// The five kinds of link of the Structure picture.
+// The kinds of link of the Structure picture.
 export const LINK_KEY = [
   ['needs_first', 'Needs first (the arrow shows the order)'],
   ['relates_to', 'Related'],
   ['duplicates', 'Duplicate'],
   ['supersedes', 'Supersedes'],
+  ['discovered_from', 'Discovered from (where work was found; nothing waits for it)'],
   ['mention', 'Named in a text'],
 ];
 export const linkChips = () => LINK_KEY.map(([type, words]) => lineChip(type, words));

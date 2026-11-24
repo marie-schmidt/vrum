@@ -4,8 +4,17 @@
 // anything. A project's data is always asked for by the project's number in the address, so an
 // answer can only ever be for the project it was asked for.
 
-// A request the server turned down, with its words (they are the same as an agent is told).
-export class Refusal extends Error {}
+import { askCode } from './labels.js';
+
+// A request the server turned down, with its words (they are the same as an agent is told, except that
+// an item the words name by its reference is named by what it is called: see namesIn). `raw` is what the
+// server said, unchanged.
+export class Refusal extends Error {
+  constructor(message, options) {
+    super(namesIn(message), options);
+    this.raw = message;
+  }
+}
 // Nobody is signed in, or the session ended.
 export class NotSignedIn extends Refusal {}
 // The person is not in the project (any more): the owner took them out while the board was open.
@@ -20,6 +29,40 @@ let project = null; // the number of the project the board is on, or null
 let mail = false; // whether the server can send email (it says so to everyone, signed in or not)
 let providers = []; // the other ways to sign in that the server offers: { id, name, kind } (none unless it is set up)
 let createAccounts = true; // whether a first sign-in with a provider may make a new account
+
+// -- naming items for a person -------------------------------------------------------------------
+
+// The server speaks to agents, who name an item by its reference (story:12, rule:3, note:7). A person
+// is never told a reference: a sentence from the server is shown with each one replaced by the item's
+// name. The store, which knows the names, hands its lookup over once (useNames); an item it does not
+// know is "an item".
+let describe = () => null;
+
+export function useNames(lookup) {
+  describe = lookup;
+}
+
+const KIND_OF_LETTER = { E: 'epic', S: 'story', T: 'task', AC: 'rule', N: 'note' };
+const NUMBER = '[1-9][0-9]{0,17}';
+// A reference as an agent writes it (story:12), the letter form of a code (S-12, AC-3, N-7) and the words (note 7).
+// A quote around it goes with it, so the name is not quoted twice.
+const REFERENCE = new RegExp(`(["'])?\\b(?:(epic|story|task|rule|note):(${NUMBER})|(AC|[ESTN])-(${NUMBER})|([Nn]ote|(?:[Aa]cceptance )?[Cc]riterion) (${NUMBER}))\\b\\1?`, 'g');
+const NAME_ROOM = 90;
+// An ask is not a record with a name: the server says "Ask 12", and a person reads Q-12.
+const ASK = new RegExp(`\\b[Aa]sk (${NUMBER})\\b`, 'g');
+
+export function namesIn(text) {
+  if (typeof text !== 'string') return text;
+  return text
+    .replace(REFERENCE, (_all, _quote, word, number, letters, lettered, said, spoken) => {
+      const kind = word || KIND_OF_LETTER[letters] || (/^[Nn]ote$/.test(said) ? 'note' : 'rule');
+      const found = describe(`${kind}:${number || lettered || spoken}`);
+      if (!found) return 'an item';
+      const title = String(found.title).replace(/\s+/g, ' ').trim();
+      return `“${title.length > NAME_ROOM ? `${title.slice(0, NAME_ROOM - 1)}…` : title}”`;
+    })
+    .replace(ASK, (_all, number) => askCode(number));
+}
 
 export function setProject(id) {
   project = id;
@@ -153,10 +196,15 @@ export const projects = async () => (await send('/board/api/projects', { method:
 export const createProject = (name) => post('/board/api/projects', { name });
 export const projectInfo = (id) => send(`/board/api/projects/${id}`, { method: 'GET' });
 export const keys = async () => (await send(scoped('/keys'), { method: 'GET' })).keys;
-// `tools` is the list of tool names the key may use, or null for the standard tools (the ones Vrum offers agents). Answers { key, secret }.
-export const createKey = (name, tools = null) => post(scoped('/keys'), tools ? { name, tools } : { name });
-// Change what a key may use, from the agent's next request on. Answers the key.
-export const changeKeyTools = async (id, tools) => (await send(scoped(`/keys/${id}`), { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ tools }) })).key;
+// `tools` is the list of tool names the key may use, or null for the standard tools (the ones Vrum offers agents). `codeMode` is
+// true for a key that calls Vrum by running code and false for one that calls the tools one at a time. `verifier` is true for a
+// key whose agent checks other agents' work. `expiresOn` is the last day the key works (YYYY-MM-DD), or null for a key that never
+// expires. Answers { key, secret }.
+export const createKey = (name, tools = null, codeMode = false, verifier = false, expiresOn = null) => post(scoped('/keys'), { name, ...(tools ? { tools } : {}), code_mode: codeMode, verifier, ...(expiresOn ? { expires_on: expiresOn } : {}) });
+// Change what a key may use, how it calls Vrum, whether it is a verifier's and the last day it works, from the agent's next request
+// on. `changes` has `tools` (a list of names, or null for the standard tools), `code_mode`, `verifier` and/or `expires_on` (a day,
+// or null for a key that never expires). Answers the key.
+export const changeKey = async (id, changes) => (await send(scoped(`/keys/${id}`), { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(changes) })).key;
 export const revokeKey = async (id) => (await send(scoped(`/keys/${id}`), { method: 'DELETE' })).key;
 
 // -- the signed-in person's own account ---------------------------------------------------------------
@@ -186,6 +234,28 @@ export const revokeInvite = async (id) => (await send(scoped(`/invites/${id}`), 
 export const previewInvite = async (token) => (await send(`/board/api/invites/${encodeURIComponent(token)}`, { method: 'GET' })).invite;
 // Join the project the invitation is for. Answers the project, with the role the person has in it.
 export const acceptInvite = async (token) => (await post(`/board/api/invites/${encodeURIComponent(token)}/accept`, {})).project;
+
+// -- webhooks (the owner's) and email nudges (every member's) ------------------------------------------
+
+// The project's webhooks, the kinds of news there are with the server's sentence for each, in the order to show them, and how many a
+// project may have: { webhooks, kinds, most }. Only the owner may ask; the server refuses anyone else in words.
+export const webhooks = () => send(scoped('/webhooks'), { method: 'GET' });
+// Add a webhook for the chosen kinds of news. Answers { webhook, secret }: the secret is in this answer and nowhere else, ever.
+export const addWebhook = (url, events) => post(scoped('/webhooks'), { url, events });
+// Change the kinds a webhook is sent for (`events`) or turn it off or on (`enabled`). Answers the webhook.
+export const changeWebhook = async (id, changes) => (await send(scoped(`/webhooks/${id}`), { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(changes) })).webhook;
+export const deleteWebhook = (id) => send(scoped(`/webhooks/${id}`), { method: 'DELETE' });
+// A new secret; the old one keeps signing for a day. Answers { webhook, secret }, the secret shown this once.
+export const replaceWebhookSecret = (id) => post(scoped(`/webhooks/${id}/secret`), {});
+// Send one message now, once, and say how it went: { delivered, status, words }. It can take up to ten seconds.
+export const testWebhook = (id) => post(scoped(`/webhooks/${id}/test`), {});
+// What was sent to a webhook, newest first.
+export const webhookDeliveries = async (id, limit = 20) => (await send(scoped(`/webhooks/${id}/deliveries?limit=${limit}`), { method: 'GET' })).deliveries;
+// The signed-in person's own email nudges in every project they are in, and what they may ask for: { nudges, kinds, mail,
+// email_confirmed }.
+export const nudges = () => send('/board/api/nudges', { method: 'GET' });
+// Ask to be mailed about these kinds of news in one project (an empty list stops them). Answers { project, events }.
+export const setNudges = async (projectNumber, events) => (await send(`/board/api/projects/${projectNumber}/nudges`, { method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({ events }) })).nudge;
 
 // -- a project's graph ---------------------------------------------------------------------------
 

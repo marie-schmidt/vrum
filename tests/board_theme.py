@@ -25,7 +25,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from tests.board_helpers import SLOW, VIEWPORT, Watched
+from tests.board_helpers import SLOW, VIEWPORT, Watched, open_account_menu
 from tests.world import SESSION_COOKIE, Project, project_at
 from vrum.board import STATIC
 
@@ -281,9 +281,12 @@ _LOOK = """() => {
     scheme: getComputedStyle(html).colorScheme,
     background: getComputedStyle(document.body).backgroundColor,
     os: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
-    checked: [...document.querySelectorAll('[data-appearance]:checked')]
+    checked: [...document.querySelectorAll(
+      '[data-appearance]:checked, [data-appearance][aria-checked=true]')]
       .map((i) => i.dataset.appearance),
-    controls: document.querySelectorAll('[role=radiogroup][aria-label=Appearance]').length,
+    controls: document.querySelectorAll(
+      '[role=radiogroup][aria-label=Appearance], '
+      + '[role=group][aria-labelledby=appearance-heading]').length,
   };
 }"""
 
@@ -291,7 +294,9 @@ _LOOK = """() => {
 async def look(page: Page) -> dict[str, Any]:
     """What the page says its appearance is: the resolved theme, the choice, what is stored, the
     colour scheme and background that are painted, the operating system's preference and which
-    choices the appearance controls show as checked."""
+    choices the appearance controls show as checked (the three radios at the top of the pages
+    before a project is open, the three radio items of the account menu in a project; `controls`
+    counts the groups of choices there are, which is one on any page)."""
     found: dict[str, Any] = await page.evaluate(_LOOK)
     return found
 
@@ -323,10 +328,15 @@ async def settled(page: Page, theme: str, choice: str, *, stored: str | None | b
 
 
 async def choose(page: Page, choice: str, *, within: str = "#top") -> None:
-    """Pick Light, Dark or System with the appearance control a person sees (at the top, before a
-    project is open and in it), the way a click on its label does."""
-    group = page.locator(within).locator("[role=radiogroup][aria-label=Appearance]").first
-    await group.locator(f"label:has(input[data-appearance={choice}])").click()
+    """Pick Light, Dark or System with the appearance control a person sees: the three radios at
+    the top before a project is open (the sign-in and the project list), and, in a project, the
+    Appearance items of the account menu at the foot of the sidebar (the menu closes itself)."""
+    if await page.locator("#app[data-shell=project]").count():
+        await open_account_menu(page)
+        await page.locator(f"#account-appearance-{choice}").click()
+    else:
+        group = page.locator(within).locator("[role=radiogroup][aria-label=Appearance]").first
+        await group.locator(f"label:has(input[data-appearance={choice}])").click()
     await page.wait_for_function(
         "choice => document.documentElement.getAttribute('data-theme-choice') === choice",
         arg=choice,

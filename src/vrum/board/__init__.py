@@ -37,6 +37,10 @@ from vrum.accounts import (
     SessionInfo,
     SignInMethods,
     SsoRefusal,
+    clean_allowance,
+    clean_code_mode,
+    clean_expiry,
+    clean_verifier,
 )
 from vrum.board.session import (
     CROSS_SITE,
@@ -54,11 +58,13 @@ from vrum.config import Settings
 from vrum.db import NoProject, working_for
 from vrum.guard import GuardedServer
 from vrum.identity import NoIdentity, person, working_as
+from vrum.notify_events import EVENT_TYPES, MOST_WEBHOOKS, NUDGE_TYPES
 from vrum.records import PEOPLE_ONLY_TOOLS
 from vrum.search import Searcher
 from vrum.sso import COOKIE_NAME as SSO_COOKIE
 from vrum.sso import REDIRECT_PROVIDERS, Sso
-from vrum.surface import AGENT_SURFACE, MOST_AGENT_TOOLS
+from vrum.surface import AGENT_SURFACE, CODE_TOOLS, MOST_AGENT_TOOLS
+from vrum.webhooks import WebhookBook
 
 STATIC = Path(__file__).parent / "static"
 
@@ -86,6 +92,12 @@ READ_TOOLS = (
     "changes_since",
     "ready_work",
     "who_is_working",
+    "list_asks",
+    "needs_a_person",
+    "list_plans",
+    "list_plan_templates",
+    "suggest_parent",
+    "list_placements",
     "server_status",
 )
 WRITE_TOOLS = (
@@ -109,6 +121,15 @@ WRITE_TOOLS = (
     "unlink_note",
     "set_confirmation",
     "set_check",
+    "answer_ask",
+    "add_gate",
+    "remove_gate",
+    "approve_plan",
+    "request_plan_changes",
+    "decide_placement",
+    "save_plan_template",
+    "delete_plan_template",
+    "create_plan",
 )
 BOARD_TOOLS = frozenset(READ_TOOLS + WRITE_TOOLS)
 
@@ -249,6 +270,7 @@ def add_board(
     searcher: Searcher,
     accounts: Accounts,
     sso: Sso,
+    webhook_book: WebhookBook,
 ) -> None:
     """Add the board's routes to the server."""
 
@@ -598,6 +620,9 @@ def add_board(
                 name if isinstance(name, str) else "",
                 body.get("tools") if isinstance(body, dict) else None,
                 known_tools=await tool_names(),
+                code_mode=body.get("code_mode", False) if isinstance(body, dict) else False,
+                verifier=body.get("verifier", False) if isinstance(body, dict) else False,
+                expires_on=body.get("expires_on") if isinstance(body, dict) else None,
             )
         except AccessRefusal as error:
             return _refused(error)
@@ -605,28 +630,60 @@ def add_board(
         return _json({"key": key.model_dump(mode="json"), "secret": secret}, 201)
 
     async def change_key(request: Request) -> Response:
-        """Change what a key may do: `{"tools": [names]}` for those tools, `{"tools": null}` for
-        every tool. It applies from the agent's next request."""
+        """Change what a key may do, how it calls Vrum and whether it verifies other agents' work:
+        `{"tools": [names]}` for those tools, `{"tools": null}` for the tools Vrum offers agents,
+        `{"code_mode": true}` to run code and `{"code_mode": false}` for one tool at a time,
+        `{"verifier": true}` to mark it a verifier's and `{"verifier": false}` to clear that,
+        `{"expires_on": "2026-12-31"}` for the last day it works and `{"expires_on": null}` for a
+        key that never expires; any of them together. It applies from the agent's next request."""
         try:
             session, project = await in_project(request, changing=True)
             try:
                 body = await request.json()
             except ValueError:
                 body = None
-            if not isinstance(body, dict) or "tools" not in body:
+            changes = {"tools", "code_mode", "verifier", "expires_on"}
+            if not isinstance(body, dict) or not changes & body.keys():
                 raise AccessRefusal(
-                    "Say what the key may do: tools is a list of tool names, or null for every "
-                    "tool. Nothing was changed."
+                    "Say what to change: tools is a list of tool names, or null for the standard "
+                    "tools, code_mode is true to run code or false for one tool at a time, "
+                    "verifier is true or false, and expires_on is the last day the key works, or "
+                    "null for a key that never expires. Nothing was changed."
                 )
-            key = await accounts.set_key_tools(
-                session.account.id,
-                project.id,
-                _number(request.path_params["key_id"]),
-                body["tools"],
-                known_tools=await tool_names(),
+            await accounts.owned_project(
+                session.account.id, project.id, to="change what an agent key may do"
             )
+            known = await tool_names()
+            # Every part is checked before any is changed, so a bad one changes nothing.
+            if "tools" in body:
+                clean_allowance(body["tools"], known)
+            if "code_mode" in body:
+                clean_code_mode(body["code_mode"])
+            if "verifier" in body:
+                clean_verifier(body["verifier"])
+            if "expires_on" in body:
+                clean_expiry(body["expires_on"])
+            key_id = _number(request.path_params["key_id"])
+            key = None
+            if "tools" in body:
+                key = await accounts.set_key_tools(
+                    session.account.id, project.id, key_id, body["tools"], known_tools=known
+                )
+            if "code_mode" in body:
+                key = await accounts.set_key_mode(
+                    session.account.id, project.id, key_id, body["code_mode"]
+                )
+            if "verifier" in body:
+                key = await accounts.set_key_verifier(
+                    session.account.id, project.id, key_id, body["verifier"]
+                )
+            if "expires_on" in body:
+                key = await accounts.set_key_expiry(
+                    session.account.id, project.id, key_id, body["expires_on"]
+                )
         except AccessRefusal as error:
             return _refused(error)
+        assert key is not None
         return _json({"key": key.model_dump(mode="json")})
 
     async def revoke_key(request: Request) -> Response:
@@ -638,6 +695,128 @@ def add_board(
         except AccessRefusal as error:
             return _refused(error)
         return _json({"key": key.model_dump(mode="json")})
+
+    # -- webhooks and email nudges (M48) ---------------------------------------------------------
+    # A project's owner has its webhooks (the book refuses anyone else in words); any member has
+    # their own nudges. A webhook's secret is sent once, when it is made or replaced, and never
+    # again.
+
+    async def json_object(request: Request) -> dict[str, Any]:
+        refuse_unless_same_site_json(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise AccessRefusal("The request has to be a JSON object.")
+        return body
+
+    async def list_webhooks(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=False)
+            found = await webhook_book.list_webhooks(session.account.id, project.id)
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json(
+            {
+                "webhooks": [one.model_dump(mode="json") for one in found],
+                "kinds": EVENT_TYPES,
+                "most": MOST_WEBHOOKS,
+            }
+        )
+
+    async def create_webhook(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            body = await json_object(request)
+            made = await webhook_book.create_webhook(
+                session.account.id, project.id, body.get("url"), body.get("events")
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json(made.model_dump(mode="json"), 201)
+
+    async def change_webhook(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            body = await json_object(request)
+            changed = await webhook_book.change_webhook(
+                session.account.id,
+                project.id,
+                _number(request.path_params["webhook_id"]),
+                events=body.get("events"),
+                enabled=body.get("enabled"),
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json({"webhook": changed.model_dump(mode="json")})
+
+    async def replace_webhook_secret(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            made = await webhook_book.rotate_secret(
+                session.account.id, project.id, _number(request.path_params["webhook_id"])
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json(made.model_dump(mode="json"))
+
+    async def delete_webhook(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            await webhook_book.delete_webhook(
+                session.account.id, project.id, _number(request.path_params["webhook_id"])
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json({"deleted": True})
+
+    async def webhook_deliveries(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=False)
+            found = await webhook_book.deliveries(
+                session.account.id,
+                project.id,
+                _number(request.path_params["webhook_id"]),
+                _number(request.query_params.get("limit", "50")) or 50,
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json({"deliveries": [one.model_dump(mode="json") for one in found]})
+
+    async def test_webhook(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            result = await webhook_book.send_test(
+                session.account.id, project.id, _number(request.path_params["webhook_id"])
+            )
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json(result.model_dump(mode="json"))
+
+    async def my_nudges(request: Request) -> Response:
+        try:
+            session = await signed_in(accounts, request, changing=False)
+            found = await webhook_book.my_nudges(session.account.id)
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json(
+            {
+                "nudges": [one.model_dump(mode="json") for one in found],
+                "kinds": {kind: EVENT_TYPES[kind] for kind in NUDGE_TYPES},
+                "mail": settings.mail is not None,
+                "email_confirmed": session.account.email_verified,
+            }
+        )
+
+    async def set_nudges(request: Request) -> Response:
+        try:
+            session, project = await in_project(request, changing=True)
+            body = await json_object(request)
+            made = await webhook_book.set_nudges(session.account.id, project.id, body.get("events"))
+        except AccessRefusal as error:
+            return _refused(error)
+        return _json({"nudge": made.model_dump(mode="json")})
 
     # -- the people of a project and their invitations -------------------------------------------
     # Anyone in a project sees who else is in it (the owner also sees their email addresses) and
@@ -871,6 +1050,8 @@ def add_board(
                     "board_calls": tool.name in BOARD_TOOLS,
                     "people_only": tool.name in PEOPLE_ONLY_TOOLS,
                     "offered_to_agents": tool.name in AGENT_SURFACE,
+                    # explore and run are what a key that runs code is shown instead of the tools.
+                    "code_mode": tool.name in CODE_TOOLS,
                 }
             )
         return _json(
@@ -936,6 +1117,25 @@ def add_board(
     mcp.custom_route(f"{api}/projects/{{project_id}}/keys/{{key_id}}", methods=["PATCH"])(
         change_key
     )
+    mcp.custom_route(f"{api}/projects/{{project_id}}/webhooks", methods=["GET"])(list_webhooks)
+    mcp.custom_route(f"{api}/projects/{{project_id}}/webhooks", methods=["POST"])(create_webhook)
+    mcp.custom_route(f"{api}/projects/{{project_id}}/webhooks/{{webhook_id}}", methods=["PATCH"])(
+        change_webhook
+    )
+    mcp.custom_route(f"{api}/projects/{{project_id}}/webhooks/{{webhook_id}}", methods=["DELETE"])(
+        delete_webhook
+    )
+    mcp.custom_route(
+        f"{api}/projects/{{project_id}}/webhooks/{{webhook_id}}/secret", methods=["POST"]
+    )(replace_webhook_secret)
+    mcp.custom_route(
+        f"{api}/projects/{{project_id}}/webhooks/{{webhook_id}}/deliveries", methods=["GET"]
+    )(webhook_deliveries)
+    mcp.custom_route(
+        f"{api}/projects/{{project_id}}/webhooks/{{webhook_id}}/test", methods=["POST"]
+    )(test_webhook)
+    mcp.custom_route(f"{api}/nudges", methods=["GET"])(my_nudges)
+    mcp.custom_route(f"{api}/projects/{{project_id}}/nudges", methods=["PUT"])(set_nudges)
     mcp.custom_route(f"{api}/projects/{{project_id}}/members", methods=["GET"])(list_members)
     mcp.custom_route(f"{api}/projects/{{project_id}}/members/{{person}}", methods=["PATCH"])(
         change_member

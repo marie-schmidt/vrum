@@ -5,9 +5,10 @@ name is who the scripts are in the project's history. A key reaches that project
 export and import scripts also need the key to be allowed `export_graph` and `import_graph`, which
 are not among the tools agents are offered by default (see docs/backup-and-export.md)."""
 
+import asyncio
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from mcp.types import TextContent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from vrum.exchange import FORMAT, FORMAT_VERSION, SECTIONS  # noqa: E402
+from vrum.importers import ImportProblems  # noqa: E402
 
 
 @asynccontextmanager
@@ -72,3 +74,71 @@ async def fetch_export(client: Client) -> dict[str, Any]:
                 "Run it again when nothing is writing."
             )
     return document
+
+
+async def send_plan(url: str, imported: Any) -> int:
+    """Create what an importer read (vrum.importers.Imported) in a running Vrum as one plan, then
+    give each item the status it had. The plan is all or nothing: when the server refuses it, it
+    says why and nothing was created. A status the server refuses (an agent may not set `done`
+    while the definition of done has an unticked check) is reported, and the item stays as it was
+    created. Returns the exit status: 0, or 1 when the plan was refused."""
+    async with connect(url) as client:
+        made = await client.call_tool(
+            "create_plan",
+            {"items": imported.items, "links": imported.links, "rules": imported.rules},
+        )
+        if made.is_error or made.structured_content is None:
+            print(said(made), file=sys.stderr)
+            return 1
+        refs = {c["key"]: c["ref"] for c in made.structured_content["created"]}
+        changes = [
+            {"node": refs[key], "expected_version": 1, "status": status}
+            for key, status in imported.statuses.items()
+        ]
+        refused: list[str] = []
+        for start in range(0, len(changes), 100):
+            result = await client.call_tool(
+                "update_nodes", {"changes": changes[start : start + 100]}
+            )
+            if result.is_error or result.structured_content is None:
+                refused.append(said(result))
+                continue
+            refused.extend(
+                f"{one['node']}: {one['refusal']}"
+                for one in result.structured_content["results"]
+                if not one["applied"]
+            )
+    counts = ", ".join(f"{count} {name}" for name, count in imported.counts().items() if count)
+    print(f"Created {counts} from {imported.source}.")
+    for note in imported.left_out:
+        print(note)
+    if refused:
+        many = "1 status" if len(refused) == 1 else f"{len(refused)} statuses"
+        print(f"{many} could not be set, so those items start as not started:")
+        for line in refused[:10]:
+            print(f"  {line}")
+    return 0
+
+
+def run_import(
+    reader: Callable[[str], Any], url: str, source: Path, *, dry_run: bool = False
+) -> int:
+    """What an importer script does: read the file with `reader`, say every problem when it does
+    not fit (and change nothing), and otherwise create it in the project with `send_plan` (or, with
+    `dry_run`, only say what would be created). Returns the exit status."""
+    try:
+        imported = reader(source.read_text(encoding="utf-8"))
+    except ImportProblems as refused:
+        print(
+            f"Nothing was created: the file has {len(refused.problems)} problems.", file=sys.stderr
+        )
+        for number, problem in enumerate(refused.problems, start=1):
+            print(f"{number}. {problem}", file=sys.stderr)
+        return 1
+    if dry_run:
+        counts = ", ".join(f"{count} {name}" for name, count in imported.counts().items() if count)
+        print(f"The file fits. It would create {counts}. Nothing was created.")
+        for note in imported.left_out:
+            print(note)
+        return 0
+    return asyncio.run(send_plan(url, imported))

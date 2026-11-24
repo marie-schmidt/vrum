@@ -1,0 +1,26 @@
+/* The Plan templates page (templates.js): the project's templates one under the other, each with what it makes, its variables as small
+   chips and its buttons; and the dialogs that make a plan from one, read one whole and save one. Nothing is wider than the window at any
+   width. Colours are only ever a token (tokens.css). */
+
+.templates { display: grid; gap: var(--space-4); margin: 0; padding: 0; }
+.template { display: grid; gap: var(--space-2); min-width: 0; padding: var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.template > p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.template-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); min-width: 0; }
+.template-name { margin: 0; font-family: var(--font-mono); font-size: var(--text-md); font-weight: 650; overflow-wrap: anywhere; }
+.template-variables { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; }
+.chip.variable { font-family: var(--font-mono); }
+.template-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-1); }
+.templates-empty { min-width: 0; padding: var(--space-5); border: var(--border-w) dashed var(--border-strong); border-radius: var(--radius-md); color: var(--text-2); }
+.templates-empty p { margin: 0; }
+
+dialog.template-dialog .template-about { margin: 0 0 var(--space-3); overflow-wrap: anywhere; }
+dialog.template-dialog .problem-text { white-space: pre-line; overflow-wrap: anywhere; }
+dialog.template-dialog textarea { width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); }
+.template-made { display: grid; gap: var(--space-2); min-width: 0; }
+.template-made > p { margin: 0; overflow-wrap: anywhere; }
+.template-made-items { display: grid; gap: var(--space-1); margin: 0; padding: 0; }
+.template-made-items .item-link .icon { margin-right: var(--space-1); color: var(--text-2); }
+.template-json { margin: 0; max-height: 60vh; overflow: auto; font-family: var(--font-mono); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (pointer: coarse) {
+  .template-actions button { min-height: 2.75rem; }
+}

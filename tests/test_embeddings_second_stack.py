@@ -30,6 +30,9 @@ MODEL = "all-MiniLM-L6-v2"
 STORY = "Customers receive a receipt PDF by email once their payment has gone through"
 # Nothing in common with STORY in words: no word of one is a word of the other, even after stemming.
 PARAPHRASE = "an invoice mailed to a client after charging them"
+# A task is short, and is found by meaning like a story (M39).
+TASK = "Email the customer a receipt PDF when the payment succeeds"
+TASK_PARAPHRASE = "send a client an invoice by mail after they are charged"
 
 ASK = """
 import json, sys, urllib.request, urllib.error
@@ -149,10 +152,12 @@ async def test_with_nothing_set_a_note_is_found_by_a_word_it_does_not_contain(
         epic = await made(client, "epic", "Payments")
         story = await made(client, "story", STORY, epic)
         await made(client, "story", "Dark mode for the interface", epic)
+        task = await made(client, "task", TASK, story)
+        await made(client, "task", "Switch the interface to a dark theme at night", story)
         index = await until(client, "caught_up")
         # What the status page and the board's top bar say.
         assert index["embedding_model"] == MODEL and index["vector_size"] == 384
-        assert index["indexed"] >= 3
+        assert index["indexed"] >= 5
         assert board_index(stack)["meaning"] == "used"
         assert board_index(stack)["waiting_to_index"] == 0
 
@@ -162,6 +167,10 @@ async def test_with_nothing_set_a_note_is_found_by_a_word_it_does_not_contain(
         assert found["index"]["meaning"] == "used"
         assert found["items"][0]["ref"] == story, found["items"]
         assert found["items"][0]["matched"] == "meaning"
+        # A task reworded with no word in common is found by meaning too, ahead of the other task.
+        tasks = await ok(client, "search", query=TASK_PARAPHRASE, mode="meaning", types=["task"])
+        assert tasks["items"][0]["ref"] == task, tasks["items"]
+        assert tasks["items"][0]["matched"] == "meaning"
 
 
 async def test_the_app_starts_and_answers_without_the_service_and_everything_catches_up(

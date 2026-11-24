@@ -318,7 +318,12 @@ def test_a_key_is_named_for_its_agent_and_two_keys_in_force_never_share_a_name()
         "last_used_at",
         "revoked_at",
         "tools",
+        "code_mode",
+        "verifier",
+        "expires_on",
+        "expired",
     }
+    assert made.body["key"]["code_mode"] is False
 
     # Upper or lower case is the same name, and the refusal names the key that has it.
     for clash, existing in (("API-Agent", "api-agent"), ("Tests", "tests")):

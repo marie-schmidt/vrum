@@ -17,6 +17,7 @@ with no entry there has no details on purpose, so that the board's empty field s
 import re
 import textwrap
 from dataclasses import dataclass
+from typing import Any
 
 from tests import demo_details
 
@@ -213,17 +214,72 @@ class Withdrawal:
 
 
 @dataclass(frozen=True)
+class Where:
+    """What an agent says about where its work is (M41): a branch of the made-up repository, a
+    commit made up from the branch's name and, when there is one, a pull request of that
+    repository. `merged` names the pull request that the verifier's [github] tick of the same work
+    names (its number is worked out from the item's title, so the two are always the same one);
+    `pull_request` is the number of one that is open, or that no verifier has looked at yet. `run`
+    is the letter of the run (`run-<the day it is made>-<letter>`), said with the client the actor
+    works in (CLIENTS); left out, no run label or client is said."""
+
+    branch: str
+    pull_request: int | None = None
+    merged: bool = False
+    run: str | None = None
+
+
+@dataclass(frozen=True)
+class Ask:
+    """What an agent asks a person when it needs one (M45): a question, with choices to pick one
+    of or none, or a yes or no approval. When a person has answered it, `answer` is what they said
+    (one of the choices, or yes or no), `by` is who gave it (a person who has an account here: the
+    owner or the planner), and `comment` is what they added, if anything. Left without an answer,
+    it is still waiting for a person. With `kept` the person also kept the answer as a decision
+    (M52: Keep as a decision on the board): a note by them on the work, with the question and the
+    answer as its text and their comment as why."""
+
+    question: str
+    choices: tuple[str, ...] = ()
+    approval: bool = False
+    answer: str | None = None
+    by: str | None = None
+    comment: str | None = None
+    kept: bool = False
+
+
+@dataclass(frozen=True)
 class Handoff:
+    """An agent's claim of a piece of work and the end of it with finish_work. An ask is put with
+    the outcome blocked (the work waits for the answer) or released (it stays free to take)."""
+
     key: str
     actor: str
     outcome: str
     note: str
+    where: Where | None = None
+    ask: Ask | None = None
+
+
+@dataclass(frozen=True)
+class Asked:
+    """Work that its agent marks blocked with an ask, as it moves the work along (update_node), by
+    whoever works on its epic. An ask that is answered frees the work, which then goes on to the
+    status it is described with; one that is not answered leaves the work blocked."""
+
+    key: str
+    ask: Ask
 
 
 @dataclass(frozen=True)
 class Held:
+    """A claim. `after` is the agent whose claim on the same work ran out before this one took it
+    over, so that the work has lapsed twice."""
+
     key: str
     actor: str
+    where: Where | None = None
+    after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +339,18 @@ AGENT_SUFFIX = "-agent"
 # something in these areas of the Tools page, but nothing in the others (no moving data, no index).
 # Nobody holds their secrets: they are there to be looked at.
 KEPT_KEYS = ("api-agent", "review-agent", "docs-agent")
+# The one key with a last day (M41), so that the Users page shows what a key that runs out looks
+# like: this many days after the day the demo is loaded. The others never run out.
+EXPIRING_KEY = "docs-agent"
+KEY_EXPIRES_AFTER_DAYS = 90
+# The program each agent works in, said with its run label when it says where its work is. (A label
+# and a client name are only that: who did the work is the key's name.)
+CLIENTS = {
+    "api-agent": "claude-code",
+    "mobile-agent": "copilot-cli",
+    "ops-agent": "cursor",
+    "docs-agent": "claude-code",
+}
 DOCS_AGENT_AREAS = (
     "Work",
     "Links",
@@ -393,7 +461,7 @@ PLATFORM = epic(
         ),
         task(
             "Trim ride routes to start and end 30 days after a ride",
-            "in_progress",
+            "blocked",
             "high",
             -2,
             key="trim-routes",
@@ -493,7 +561,7 @@ PLATFORM = epic(
             Every screen has to meet the accessibility rule in [[d-wcag]].
         """),
         task("Colour and type tokens for light and dark", "done", "normal", -22),
-        task("Button, input and list components", "in_progress", "normal", 4),
+        task("Button, input and list components", "blocked", "normal", 4, key="components"),
         task("Icon set for bikes, stations and warnings", due=18),
         status="in_progress",
         due=18,
@@ -839,7 +907,7 @@ PAYMENTS = epic(
             The rules that turn minutes into money. The pilot used a flat unlock fee
             ([[d-fee-old]]); the launch prices are in [[d-fee-new]].
         """),
-        task("Price table by ride length", "in_progress", "high", -14, key="price-table"),
+        task("Price table by ride length", "blocked", "high", -14, key="price-table"),
         task("Five free minutes on every single ride", "done", "normal", -20),
         task("Daily cap on what a rider pays", due=3),
         task("Different prices in different city zones", "blocked", "normal", -5, key="city-zones"),
@@ -884,7 +952,7 @@ STATIONS = epic(
         """),
         task("Map screen with clustering", "done", "high", -50),
         task("Station marker with bikes and free docks", "done", "normal", -44),
-        task("Refresh the counts every 30 seconds", "in_progress", "normal", 3, key="refresh-30s"),
+        task("Refresh the counts every 30 seconds", "blocked", "normal", 3, key="refresh-30s"),
         task("Show reserved and broken bikes differently", due=14),
         task("Dark map style", priority="low", due=30),
         task("Keep the map smooth with 200 stations", due=20),
@@ -910,7 +978,13 @@ STATIONS = epic(
             to the shared configuration service and the old service is deleted.
         """),
         task("Inventory every setting the old service reads", "done", "normal", -20),
-        task("Move the settings to the new configuration service", "in_progress", "normal", -20),
+        task(
+            "Move the settings to the new configuration service",
+            "in_progress",
+            "normal",
+            -20,
+            key="move-settings",
+        ),
         task("Delete the old configuration after one clean week", due=10),
         status="in_progress",
         due=-20,
@@ -990,7 +1064,7 @@ FLEET = epic(
             on the map.
         """),
         task("Rider can report damage in two taps", "done", "normal", -8),
-        task("Lock out a bike after two reports", "in_progress", "high", 3, key="bike-lockout"),
+        task("Lock out a bike after two reports", "blocked", "high", 3, key="bike-lockout"),
         task("Damage report endpoint for operators", "in_progress", "high", 4, key="ops-api"),
         task("Tell the nearest technician", due=5),
         task("Tag a locked-out bike with its fault", due=8),
@@ -1169,7 +1243,13 @@ SUPPORT = epic(
         "who is answering a message, because the inbox says so. A message that has waited too "
         "long turns up in the weekly report of missed promises.",
         task("Shared inbox for support", "done", "normal", -20),
-        task("Tags for unlock, charge, bike and other", "in_progress", "normal", 4),
+        task(
+            "Tags for unlock, charge, bike and other",
+            "in_progress",
+            "normal",
+            4,
+            key="support-tags",
+        ),
         task("Reply templates", due=8),
         task("Weekly report of missed promises", due=12),
         status="in_progress",
@@ -1376,6 +1456,7 @@ EPICS: tuple[Item, ...] = (
 
 NEEDS = "needs_first"
 RELATES = "relates_to"
+DISCOVERED = "discovered_from"
 
 LINKS: tuple[Link, ...] = (
     Link("unlock-endpoint", "token", NEEDS),
@@ -1416,6 +1497,11 @@ LINKS: tuple[Link, ...] = (
     Link("privacy", "route-trace", RELATES),
     Link("receipt-email", "receipt-msg", "duplicates"),
     Link("gateway-limits", "rate-limit", "supersedes"),
+    # Found while doing the work it points at (never makes anything wait).
+    Link("refund-api", "charge-end", DISCOVERED),
+    Link("old-phones", "ble-proto", DISCOVERED),
+    Link("outside-fee", "full-station", DISCOVERED),
+    Link("page-oncall", "two-seconds", DISCOVERED),
 )
 
 # -- acceptance criteria -----------------------------------------------------------------------
@@ -1654,13 +1740,53 @@ DEFINITION_OF_DONE = md("""
     - The help articles, the operator notes and the changelog are up to date.
     - Nothing is left half done: no switch that is still off, no screen that leads nowhere.
     - Anything we learned or decided on the way is written down as a note.
+    - [verifier] Reviewed by an agent that did not write it.
+    - [github] The pull request is merged and its checks passed.
     - [person] Looks right on a real phone or a real bike.
 """)
+
+# The agent whose key is marked a verifier (Users page, "Verifies other agents' work"): it ticks the
+# lines tagged [verifier] and [github] on work it did not do, and never claims or hands off work
+# itself. It may use the tools that read and the two a verifier needs, to tick a check and to set
+# the work done once every check is ticked.
+VERIFIER = "review-agent"
+VERIFIER_TOOLS = ("set_check", "update_node")
+
+# Blocked work that its agent has finished and handed over saying that it is ready for a verifier:
+# nobody holds it, its own checks are ticked and the two tagged for a verifier and the one for a
+# person are not, so is:unverified finds it. (The demo's other blocked work waits for something
+# else, and is found by the same filter because it has the same checks open.)
+WAITING_FOR_VERIFIER = ("trim-routes", "price-table", "refresh-30s", "bike-lockout")
+
+# Blocked work that its agent has finished, with every check ticked that a person is not needed for
+# (the verifier's two too), handed over saying what a person should look at: nobody holds it, and
+# only the check marked [person] is open, so the page of what needs a person lists it.
+WAITING_FOR_A_PERSON = ("components",)
+
+# How the verifier ticked the line tagged [verifier] on finished work, in three wordings.
+VERIFIED_EVIDENCE: tuple[str, ...] = (
+    "Read the whole change and ran it on the staging build: nothing to send back.",
+    "Read the diff of '{title}', tried the new paths and found nothing wrong.",
+    "Went through the change line by line and ran its tests myself; all is as described.",
+)
+
+# How the verifier ticked the line tagged [github], in the one fixed form that scripts/verify_pr.py
+# writes after it has asked `gh` on its own machine, so that anyone can look again. The address is
+# a made-up one: there is no such organisation or repository to ask. {merged} is a time like
+# 2026-11-18T14:20:00Z, {commit} ten characters of a commit's name and {passed} how many checks
+# passed (all of them).
+PULL_REQUEST_ADDRESS = "https://github.com/example-org/bike-share/pull/{number}"
+# The repository agents say their work is in. Like the pull requests, it is made up.
+REPOSITORY_ADDRESS = "https://github.com/example-org/bike-share"
+PULL_REQUEST_SEEN = (
+    "{address} merged {merged}, merge commit {commit}, checks passed {passed} of {passed}"
+)
 
 # How the first six checks above were ticked on finished work, in the words of whoever did it. Each
 # check has three wordings, so that a page does not show one sentence over and over. {title} is
 # the title of the item, {tests} and {added} are numbers worked out from it, and {reviewer} is a
-# person of the team. The last check is marked [person]: only a person ticks it.
+# person of the team. The three checks after them are marked [verifier], [github] and [person]:
+# the first two are ticked by the verifier (see VERIFIED_EVIDENCE) and the last only by a person.
 CHECK_EVIDENCE: tuple[tuple[str, ...], ...] = (
     (
         "Every acceptance criterion was tried on the staging build and is met.",
@@ -2243,6 +2369,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "seconds, as decided. A replayed token is refused with the reason `already_used`, and "
         "the attempt is logged. The token's lifetime is a setting, not a constant, because the "
         "field test may want to change it.",
+        where=Where("feature/signed-unlock-tokens", merged=True, run="a"),
     ),
     Handoff(
         "unlock-endpoint",
@@ -2255,6 +2382,7 @@ HANDOFFS: tuple[Handoff, ...] = (
             `bike_locked_out`, `rider_has_open_ride`, `token_expired`). The mobile app can show
             the plain message that comes with each code, so it does not need its own list.
         """),
+        where=Where("feature/unlock-endpoint", merged=True, run="b"),
     ),
     Handoff(
         "print-qr",
@@ -2281,6 +2409,12 @@ HANDOFFS: tuple[Handoff, ...] = (
             needs someone with the lock vendor's contact, and the phone side may help by showing
             progress at once. I am handing it on.
         """),
+        where=Where("wip/unlock-in-two-seconds", run="a"),
+        ask=Ask(
+            "May we ask the lock vendor for a firmware change that opens the lock faster in the "
+            "cold? They say it would delay the field test by about two weeks.",
+            approval=True,
+        ),
     ),
     Handoff(
         "dock-detect",
@@ -2288,6 +2422,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "done",
         "A dock now reports within a second of the lock closing. Three stations report late "
         "because of a weak mobile signal at the cabinet; those are on the list for a repeater.",
+        where=Where("feature/detect-docked-bike", merged=True, run="a"),
     ),
     Handoff(
         "nearby-check",
@@ -2296,6 +2431,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "Typing a number now looks only at bikes within 150 metres of the phone, which removed "
         "all the mistaken unlocks of the pilot. If the phone has no location the number is "
         "accepted as before, and the ride is marked for a look by support.",
+        where=Where("feature/check-nearby-bikes", merged=True, run="c"),
     ),
     Handoff(
         "checklist-screen",
@@ -2304,6 +2440,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "The checklist screen is in the technicians' app. It works with gloves on: the buttons "
         "are 56 points high. Technicians asked for a way to skip the lights check in daylight; "
         "I left it out because every check has to be done every time.",
+        where=Where("feature/checklist-screen", merged=True, run="a"),
     ),
     Handoff(
         "sign-off",
@@ -2311,6 +2448,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "done",
         "Sign-off stores the technician's name, the time and the checklist version. A "
         "technician who is not signed in cannot finish an inspection.",
+        where=Where("feature/technician-sign-off", merged=True, run="b"),
     ),
     Handoff(
         "rate-limit",
@@ -2341,6 +2479,11 @@ HANDOFFS: tuple[Handoff, ...] = (
 
             Ines is chasing it through the city liaison.
         """),
+        ask=Ask(
+            "The city has not sent its template for the assessment. Should we start on our own "
+            "template and adapt it later, or keep waiting?",
+            choices=("Start on our own template", "Keep waiting for the city's template"),
+        ),
     ),
     Handoff(
         "report-lock",
@@ -2349,6 +2492,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "Blocked on the operator dashboard's damage endpoint, which is not finished yet. The "
         "app can already collect the report. I stopped here so that no report is lost while "
         "the endpoint is missing.",
+        where=Where("feature/report-a-broken-lock", run="a"),
     ),
     Handoff(
         "three-ds",
@@ -2357,6 +2501,7 @@ HANDOFFS: tuple[Handoff, ...] = (
         "Blocked until the payment provider sends us test cards that trigger the extra "
         "authentication step. They promised them for the end of the week. The code is ready "
         "and waits on a branch.",
+        where=Where("feature/three-ds-challenge", run="b"),
     ),
     Handoff(
         "refund-single",
@@ -2365,21 +2510,154 @@ HANDOFFS: tuple[Handoff, ...] = (
         "I started this but it belongs with the operator dashboard, and I do not work there. "
         "Nothing is written yet. The first thing to decide is who is allowed to refund and up "
         "to what amount.",
+        ask=Ask(
+            "Who is allowed to refund a single ride from the operator dashboard?",
+            choices=("Any operator", "Only a shift lead", "Only the finance team"),
+            answer="Only a shift lead",
+            by=PLANNER,
+            comment="A shift lead can decide on the spot. Larger amounts go to the finance team.",
+            kept=True,
+        ),
+    ),
+    Handoff(
+        "components",
+        "mobile-agent",
+        "blocked",
+        md("""
+            The button, input and list components are built, merged and already used by two
+            screens. Everything that does not need a person is checked.
+
+            What is left is a look on a real phone: I only tried the touch targets and the dark
+            theme in the simulator, and the focus rings on a real keyboard. Someone with a phone
+            in hand should look and tick the last line of the definition of done.
+        """),
+        where=Where("feature/shared-components", run="a"),
+    ),
+    Handoff(
+        "trim-routes",
+        "api-agent",
+        "blocked",
+        "The nightly job now cuts every ride route down to its start and end station 30 days "
+        "after the ride, and its test on a copy of last month's rides passes. The pull request "
+        "is https://github.com/example-org/bike-share/pull/1022 and it is merged. Ready for a "
+        "verifier: I wrote it, so I cannot tick the checks that need someone else.",
+        where=Where("feature/trim-routes-after-30-days", pull_request=1022, run="a"),
+    ),
+    Handoff(
+        "price-table",
+        "api-agent",
+        "blocked",
+        md("""
+            The price table is in, and every row of [[d-fee-new]] has a test.
+
+            - Pull request: https://github.com/example-org/bike-share/pull/1027, merged.
+            - The tests I ran pass.
+
+            Ready for a verifier. I wrote it, so I cannot tick the checks that need someone else.
+        """),
+        where=Where("feature/price-table-by-ride-length", pull_request=1027, run="c"),
+    ),
+    Handoff(
+        "refresh-30s",
+        "mobile-agent",
+        "blocked",
+        "The map asks for new station counts every 30 seconds, and only while the map is on "
+        "screen, so a phone in a pocket does not use the battery. The pull request is "
+        "https://github.com/example-org/bike-share/pull/1031 and it is merged. Ready for a "
+        "verifier to read it and look at its checks.",
+        where=Where("feature/refresh-every-30-seconds", pull_request=1031, run="a"),
+    ),
+    Handoff(
+        "bike-lockout",
+        "ops-agent",
+        "blocked",
+        md("""
+            Two damage reports from two different riders now lock the bike out at once, and it
+            drops off the map.
+
+            - Pull request: https://github.com/example-org/bike-share/pull/1036, merged.
+            - The checks on it passed on my side.
+
+            Ready for a verifier: someone other than me has to read it and check the pull
+            request.
+        """),
+        where=Where("feature/bike-lockout", pull_request=1036, run="b"),
     ),
 )
 
 # Claims that are held now, for the longest time a claim may be held (24 hours), so that they
-# are still held when someone looks.
+# are still held when someone looks. Most say where the work is (M41); the pull request of one that
+# has one is said when the claim is renewed, as an agent does once it has opened it. The two that
+# api-agent holds are two instances of one key, which are told apart only by their run labels. One
+# says nothing at all, which is what a claim that says nothing looks like.
 HELD: tuple[Held, ...] = (
-    Held("zero-downtime", "api-agent"),
-    Held("two-seconds", "mobile-agent"),
-    Held("lockout", "Lena Okafor"),
-    Held("charge-end", "api-agent"),
+    Held(
+        "zero-downtime",
+        "api-agent",
+        Where("feature/zero-downtime-deploys", pull_request=1041, run="a"),
+    ),
+    Held("two-seconds", "mobile-agent", Where("perf/unlock-in-two-seconds", run="a")),
+    Held("lockout", "Lena Okafor", Where("fix/lockout-after-two-reports")),
+    Held("charge-end", "api-agent", Where("fix/charge-at-ride-end", pull_request=1048, run="b")),
     Held("damage", "ops-agent"),
 )
 
-# A claim that has run out without a handoff note.
-LAPSED: tuple[Held, ...] = (Held("drop-points", "review-agent"),)
+# A claim that has run out without a handoff note. (Not the verifier's: a verifier never works on
+# what it may be asked to check.) It still shows where the work was. One ran out twice (M45): an
+# agent took it, its claim ran out, another took it over and that claim ran out too, with nothing
+# said either time, so the page of what needs a person lists it.
+LAPSED: tuple[Held, ...] = (
+    Held("drop-points", "mobile-agent", Where("feature/drop-points-accuracy", run="c")),
+    Held(
+        "support-tags",
+        "ops-agent",
+        Where("feature/support-tags", run="a"),
+        after="docs-agent",
+    ),
+)
+
+# Work that its agent marks blocked with an ask while it moves the work along (update_node), as it
+# would do instead of writing the question in a note: the one that has no answer is still blocked,
+# waiting for a person; the two with an answer are free again and went on. Asks put when work is
+# handed over are on the HANDOFFS above. Altogether there are six: three that wait for a person
+# (two questions with choices that block work, and an approval that parks it) and three answered
+# (a question, an approval and a question with a comment), by the two people who have an account.
+ASKED: tuple[Asked, ...] = (
+    Asked(
+        "city-zones",
+        Ask(
+            "How many price zones should the first release have?",
+            choices=(
+                "One zone for the whole city",
+                "Two zones: the centre and the outer districts",
+                "One zone for each district",
+            ),
+        ),
+    ),
+    Asked(
+        "full-station",
+        Ask(
+            "When the station is full, what should the app tell the rider?",
+            choices=(
+                "Offer the nearest station with free docks",
+                "Let the rider lock the bike beside the station for a fee",
+                "Ask the rider to wait",
+            ),
+            answer="Offer the nearest station with free docks",
+            by=OWNER,
+        ),
+    ),
+    Asked(
+        "move-settings",
+        Ask(
+            "The old service stops answering for about ten minutes while its settings move. Is it "
+            "all right to do the move at night, in the quiet hours?",
+            approval=True,
+            answer="yes",
+            by=PLANNER,
+        ),
+    ),
+)
 
 # Changes made after the work was planned: a date that slipped, a priority that rose, a title
 # or text that was sharpened. The keys name the node; each is a change to a field the node
@@ -2422,3 +2700,474 @@ EDITS: tuple[Edit, ...] = (
     Edit("hold-bike", "Priya Nair", due=60),
     Edit("insurance", "Priya Nair", due=15),
 )
+
+# -- sorting work, gates, drafted plans and templates (M42 to M47) ------------------------------
+# Everything below is made after the plan above, through the same tools a team would use, by
+# tests/demo_flow.py. Nothing here names where a loose story belongs: the steward asks the server
+# (suggest_parent, which runs on the real embedding service) and proposes only where the model is
+# sure, so these texts are written loosely, the way they were said on a call.
+
+# The agent that files what comes in from calls and notes, and the steward that proposes where it
+# belongs. The steward's key may use four tools and none that changes work, so whatever it
+# proposes waits for a person; its key stays in force so that the Users page shows it.
+INTAKE = "intake-agent"
+STEWARD = "steward"
+STEWARD_TOOLS = ("list_nodes", "suggest_parent", "list_placements", "propose_placement")
+INBOX = "Inbox"
+INBOX_BODY = "Work that has come in from calls and notes and has not been sorted into an epic yet."
+
+
+@dataclass(frozen=True)
+class Loose:
+    """A story filed in the Inbox from a call or a note, written the way it was said."""
+
+    title: str
+    body: str
+
+
+# Three of these are about one epic each, clearly enough for the model to be sure (so the steward
+# proposes where they go), two belong together in an epic that does not exist yet, one is about
+# something the model cannot place (it is about money, but only just more than it is about help),
+# and one is clearly about money. The steward's script leaves the one it is not sure about, and
+# the steward proposes it by hand together with the one that is clearly about money (CHECKED
+# below), which is what makes a proposal a person should look at twice.
+LOOSE: tuple[Loose, ...] = (
+    Loose(
+        "Help page does not say what happens to the deposit",
+        "A rider emailed twice asking whether the five euro deposit comes back, and the help "
+        "page says nothing.",
+    ),
+    Loose(
+        "Employers want to pay for monthly passes for their staff",
+        "A company on the Riverside business park asked if one invoice could cover the monthly "
+        "passes of twelve employees, instead of each person paying by card.",
+    ),
+    Loose(
+        "Show broken docks on the map before people walk there",
+        "A rider walked six minutes to a station where three docks were out of order. The map "
+        "showed the docks as free.",
+    ),
+    Loose(
+        "Riders with a dead phone cannot open a bike",
+        "Three riders this week reached a station with a phone that had no battery left and "
+        "could not unlock a bike. Could they open one another way?",
+    ),
+    Loose(
+        "Tourists keep asking for a weekend rental",
+        "The hotel on Mill Street says guests ask every Friday whether they can rent a bike for "
+        "the weekend.",
+    ),
+    Loose(
+        "Hotels want to give guests a bike for their stay",
+        "Two hotels asked if they could buy a block of bike days and hand them to guests at "
+        "check in.",
+    ),
+    Loose(
+        "Let support give a rider a credit for the next ride",
+        "When a ride goes wrong, support wants to add free minutes to the rider's account "
+        "instead of paying money back.",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class GroupedUnder:
+    """Stories of the Inbox that the steward proposes grouping under a new epic. A group of
+    stories that fits no epic is a person's or an agent's to name, since Vrum has no language
+    model: the epic is made only if a person accepts."""
+
+    epic_title: str
+    epic_body: str
+    reason: str
+    stories: tuple[str, ...]
+
+
+GROUPED = GroupedUnder(
+    "Visitors and tourists",
+    "People who ride for a day or a weekend and do not want an account or a monthly pass: how "
+    "they find a bike, how they pay, and where they get help.",
+    "Two different people asked for something for visitors in the same week, and it fits none "
+    "of our epics. They look like the start of one.",
+    (
+        "Tourists keep asking for a weekend rental",
+        "Hotels want to give guests a bike for their stay",
+    ),
+)
+# What the steward proposes by hand, before its script runs: two stories under the epic that is
+# nearest by meaning to the first (the loader asks the server which, and never names one). The
+# first is the story the script would leave, because the model is not sure, and the second is
+# clearly about the same epic, so the proposal is not routine: the first scores well below the
+# second and is hardly ahead of the next epic. It is the kind of proposal to look at twice.
+CHECKED_STORIES = (
+    "Help page does not say what happens to the deposit",
+    "Let support give a rider a credit for the next ride",
+)
+CHECKED_REASON = (
+    "Both are about money riders pay or get back. The credit story belongs here, and the deposit "
+    "story is the nearest of all but only just, so please check it."
+)
+# What the people who decide the steward's proposals say. The first proposal the script makes is
+# accepted by the planner (the story moves, as she moves it), the second is rejected by the owner
+# with this reason, and the rest wait.
+SUGGESTION_REJECTED = (
+    "Broken docks need the sensor work in Fleet first. Leave it in the Inbox until that lands."
+)
+
+
+@dataclass(frozen=True)
+class Gate:
+    """A gate on a task that has no claim and is free to take until it is gated. A timer opens
+    `days` days after the day the demo is made. An approval raises a question for a person
+    (`question`); with `answer` it has been answered by `by` (an account of the project) and,
+    for a no, the work stays held."""
+
+    key: str
+    actor: str
+    kind: str
+    days: int | None = None
+    question: str | None = None
+    answer: str | None = None
+    by: str | None = None
+    comment: str | None = None
+
+
+GATES: tuple[Gate, ...] = (
+    Gate("social-signin", "api-agent", "timer", days=14),
+    Gate(
+        "delete-account",
+        "api-agent",
+        "approval",
+        question="May we start deleting accounts from the live database before the data "
+        "protection review is finished?",
+    ),
+    Gate(
+        "insurance-text",
+        "ops-agent",
+        "approval",
+        question="The insurer sent a draft of the terms. May we show it to riders before the "
+        "insurer has signed it off?",
+        answer="no",
+        by=OWNER,
+        comment="Wait for the insurer's signed copy. Riders must not see a draft.",
+    ),
+    Gate(
+        "reserve-api",
+        "mobile-agent",
+        "approval",
+        question="May the reserve endpoint use the new timer service, which has only two weeks "
+        "of production history?",
+        answer="yes",
+        by=PLANNER,
+        comment="The load test passed on Tuesday.",
+    ),
+)
+
+# A plan the planning agent drafted, which waits for a person to approve it as one decision:
+# nothing in it can be taken until then. It hangs under an epic that already exists (so the
+# review of it has a context line to show) and reaches one story that exists with a relates_to
+# link. A name that is not one of the plan's own keys is the description's key for an existing
+# item: tests/demo_flow.py `winter_plan` writes it as the reference the server gave it. The
+# details are written as a person would write them in a few lines. It is worth a second look in
+# two ways: one task has no size on purpose, and one story (`winter-battery`) repeats work that
+# exists, the "Battery swap schedule" story, which the check for look-alikes names. The wording of
+# the three stories was measured offline with the real embedding model (the same all-MiniLM-L6-v2
+# the demo runs): the repeat reads about 0.70 like the existing story and nothing else comes near
+# the overlap threshold (0.55), and the other two stories stay below 0.50 of everything that exists.
+WINTER_TITLE = "Winter fleet expansion"
+WINTER_UNDER = "fleet"
+# The story of the plan that repeats work that exists (the story called Battery swap schedule).
+WINTER_REPEATS = "Battery swaps for the cold months"
+WINTER_ITEMS: tuple[dict[str, str], ...] = (
+    {
+        "key": "studded",
+        "kind": "story",
+        "title": "Studded tyres for the busiest routes",
+        "parent": WINTER_UNDER,
+        "size": "l",
+        "priority": "high",
+        "body": "Riders on the river path asked for tyres that grip on frost.\n"
+        "Forty bikes cover the river path, both bridges and the hill route.\n"
+        "They must be fitted before the first frost, so the target day is firm.",
+    },
+    {
+        "key": "covers",
+        "kind": "story",
+        "title": "Weather covers for the busiest docks",
+        "parent": WINTER_UNDER,
+        "size": "m",
+        "body": "A rider who docks a bike in snow should not have to brush the dock first.\n"
+        "The covers keep rain and snow off the docks.\n"
+        "The city has to approve the frames before anything is ordered.",
+    },
+    {
+        "key": "winter-battery",
+        "kind": "story",
+        "title": "Battery swaps for the cold months",
+        "parent": WINTER_UNDER,
+        "size": "m",
+        "body": "Electric bikes lose range in the cold, so they need a fresh battery before they "
+        "run flat.\nSwap earlier in winter and send the van to the stations that empty first.\n"
+        "Use the swap time measured in the workshop trial.",
+    },
+    {
+        "key": "supplier",
+        "kind": "task",
+        "title": "Choose a studded tyre supplier",
+        "parent": "studded",
+        "size": "s",
+    },
+    {
+        "key": "fit-tyres",
+        "kind": "task",
+        "title": "Fit studded tyres on forty bikes",
+        "parent": "studded",
+        "size": "m",
+        "body": "Fit them at the depot, ten bikes a day.\n"
+        "A bike is out of service for one morning and goes back on the street the same day.",
+    },
+    {
+        "key": "survey",
+        "kind": "task",
+        "title": "Survey the four stations for cover frames",
+        "parent": "covers",
+        "size": "s",
+    },
+    {
+        "key": "fit-covers",
+        "kind": "task",
+        "title": "Order and fit the covers",
+        "parent": "covers",
+        "body": "Not sized yet: the survey decides what the frames cost and how long they take "
+        "to fit.",
+    },
+)
+# Links of the plan: (source, target, link type). The first two are between its own tasks; the
+# last reaches the story of an existing epic that a fit of studded tyres is workshop work for.
+WINTER_LINKS: tuple[tuple[str, str, str], ...] = (
+    ("fit-tyres", "supplier", "needs_first"),
+    ("fit-covers", "survey", "needs_first"),
+    ("studded", "workshop", "relates_to"),
+)
+# The days from the day the demo is made, for the story that has dates: (start, target).
+WINTER_DAYS: dict[str, tuple[int, int]] = {"studded": (10, 45)}
+# The acceptance criteria of the plan, each on one of its stories or tasks: (item, title).
+WINTER_CRITERIA: tuple[tuple[str, str], ...] = (
+    ("studded", "Every bike with studded tyres passes the grip test on the wet ramp"),
+    ("covers", "A covered dock stays free of snow and ice after a night of snow"),
+    ("winter-battery", "No electric bike runs flat on a frosty morning"),
+    ("fit-tyres", "The torque of every fitted tyre is written on the bike's job card"),
+)
+
+# The conversation about the winter plan (M51). The demo owner read the drafted plan, asked for two
+# changes with a comment on one line each (the title of a story, the details of a task) and said so
+# in a summary, and the planning agent sent revision 2 of the SAME plan, which changes those two
+# parts and nothing else (so its checks, its totals and its row on Needs a person stay as they were)
+# and says what it changed. WINTER_FEEDBACK is (item key, part, what the person said);
+# WINTER_REVISED is the new words of the two parts, by item key; WINTER_NOW is the plan as it reads
+# now, at revision 2.
+WINTER_FEEDBACK_SUMMARY = (
+    "Two things before I can approve this: the studded tyres story needs a title that names the "
+    "routes, and the fitting task has to say how long a bike is off the street."
+)
+WINTER_FEEDBACK: tuple[tuple[str, str, str], ...] = (
+    (
+        "studded",
+        "title",
+        "Too vague for a title. Name the routes, so nobody has to open the story to know which "
+        "bikes it is about.",
+    ),
+    (
+        "fit-tyres",
+        "body",
+        "'One morning' is not enough for the rota. How many hours is a bike off the street?",
+    ),
+)
+WINTER_REVISED: dict[str, dict[str, str]] = {
+    "studded": {"title": "Studded tyres on the river path, both bridges and the hill route"},
+    "fit-tyres": {
+        "body": "Fit them at the depot, ten bikes a day.\n"
+        "A bike is out of service for four hours, from 8 until noon, and goes back on the street "
+        "the same afternoon."
+    },
+}
+WINTER_REVISION_NOTE = (
+    "Named the routes in the title of the studded tyres story and said how long a bike is off the "
+    "street for the fitting. Nothing else changed."
+)
+WINTER_NOW: tuple[dict[str, str], ...] = tuple(
+    {**item, **WINTER_REVISED.get(item["key"], {})} for item in WINTER_ITEMS
+)
+
+# A second, small plan that waits for its agent (M51): the operations agent drafted it under the
+# same epic, the owner asked for changes (a summary and a comment on the story's details and on one
+# size), and nobody has revised it yet. It is held, so none of it can be taken, and it is not a row
+# on Needs a person (it is the agent's turn, not a person's); the page says one line about it. The
+# wording was measured with the real embedding model: nothing in it reads above 0.46 like anything
+# that exists, so it adds no look-alike to the winter plan's check.
+SPRING_TITLE = "Spring tyre check"
+SPRING_BY = "ops-agent"
+SPRING_ITEMS: tuple[dict[str, str], ...] = (
+    {
+        "key": "spring-check",
+        "kind": "story",
+        "title": "Tyre wear check before the spring season",
+        "parent": WINTER_UNDER,
+        "size": "m",
+        "body": "Count the bikes whose tyres are below the wear mark.\n"
+        "The depot has a quiet week in March for the work.",
+    },
+    {
+        "key": "spring-measure",
+        "kind": "task",
+        "title": "Measure the tread of every bike's tyres",
+        "parent": "spring-check",
+        "size": "s",
+    },
+    {
+        "key": "spring-replace",
+        "kind": "task",
+        "title": "Replace the tyres below the wear mark",
+        "parent": "spring-check",
+        "size": "m",
+    },
+)
+SPRING_FEEDBACK_SUMMARY = (
+    "How many bikes is this about, and in which week? Please say so before I agree to it."
+)
+SPRING_FEEDBACK: tuple[tuple[str, str, str], ...] = (
+    (
+        "spring-check",
+        "body",
+        "Give the number of bikes and the week, not just 'a quiet week in March'.",
+    ),
+    ("spring-replace", "size", "Is m enough if a third of the fleet needs new tyres?"),
+)
+
+# Two plan templates (data, with {{placeholders}}). The planning agent saves both, and the
+# operations agent makes a plan from the first, as a draft, which the planner approves: a plan
+# that was made from a template and approved earlier.
+STATION_LAUNCH = "station-launch-checklist"
+RELEASE_CHECKLIST = "release-checklist"
+NEIGHBOURHOODS = ("Old Mill", "Harbour Row", "Northgate", "University Quarter")
+TEMPLATES: dict[str, dict[str, Any]] = {
+    STATION_LAUNCH: {
+        "description": "Everything a new station needs before riders can use it.",
+        "variables": {
+            "station": {"description": "The station's name, such as Millbank Quay"},
+            "neighbourhood": {
+                "description": "The neighbourhood the station serves",
+                "choices": list(NEIGHBOURHOODS),
+            },
+            "epic": {
+                "description": "The epic the launch belongs under",
+                "type": "ref",
+                "kind": "epic",
+            },
+        },
+        "items": [
+            {
+                "key": "launch",
+                "kind": "story",
+                "title": "Launch {{station}} station in {{neighbourhood}}",
+                "parent": "{{epic}}",
+                "body": "Everything to do before riders can use {{station}}: the site, the "
+                "docks, the sensors and the news for {{neighbourhood}}.",
+            },
+            {
+                "key": "site",
+                "kind": "task",
+                "title": "Survey the {{station}} site with the city",
+                "parent": "launch",
+                "size": "s",
+            },
+            {
+                "key": "docks",
+                "kind": "task",
+                "title": "Order docks for {{station}}",
+                "parent": "launch",
+                "size": "xs",
+            },
+            {
+                "key": "sensors",
+                "kind": "task",
+                "title": "Test the dock sensors at {{station}}",
+                "parent": "launch",
+                "size": "s",
+            },
+            {
+                "key": "news",
+                "kind": "task",
+                "title": "Tell riders in {{neighbourhood}} about {{station}}",
+                "parent": "launch",
+                "size": "xs",
+            },
+        ],
+        "links": [
+            {"source": "docks", "target": "site", "link_type": "needs_first"},
+            {"source": "sensors", "target": "docks", "link_type": "needs_first"},
+            {"source": "news", "target": "sensors", "link_type": "needs_first"},
+        ],
+        "rules": [
+            {
+                "title": "Every dock at {{station}} shows its state on the map within a minute",
+                "node": "launch",
+            }
+        ],
+    },
+    RELEASE_CHECKLIST: {
+        "description": "What a release of the app needs, from the notes to the stores.",
+        "variables": {
+            "version": {
+                "description": "The version, such as 2.4",
+                "pattern": "^[0-9.]+$",
+                "max_length": 12,
+            },
+            "channel": {
+                "description": "Where it goes first",
+                "choices": ["beta", "stable"],
+                "default": "beta",
+            },
+        },
+        "items": [
+            {"key": "release", "kind": "epic", "title": "Release {{version}}"},
+            {
+                "key": "prepare",
+                "kind": "story",
+                "title": "Prepare {{version}}",
+                "parent": "release",
+            },
+            {
+                "key": "notes",
+                "kind": "task",
+                "title": "Write the release notes for {{version}}",
+                "parent": "prepare",
+                "size": "xs",
+            },
+            {
+                "key": "phone",
+                "kind": "task",
+                "title": "Run the release checks on a real phone",
+                "parent": "prepare",
+                "size": "s",
+            },
+            {
+                "key": "ship",
+                "kind": "story",
+                "title": "Ship {{version}} to {{channel}}",
+                "parent": "release",
+            },
+            {
+                "key": "tag",
+                "kind": "task",
+                "title": "Tag {{version}}",
+                "parent": "ship",
+                "size": "xs",
+            },
+        ],
+        "links": [{"source": "ship", "target": "prepare", "link_type": "needs_first"}],
+    },
+}
+LAUNCH_EPIC = "stations"
+LAUNCH_VALUES = {"station": "Millbank Quay", "neighbourhood": "Old Mill"}
+LAUNCH_TITLE = "Launch the Millbank Quay station"
+LAUNCH_BY = "ops-agent"

@@ -9,7 +9,36 @@ HTTP API, makes a project, and fills it through real operations: a team plans th
 on most of it), people and agents move it along, take claims and leave handoff notes, record notes
 (some with the person who decided them) and confirm some of them, and the owner sets the
 definition of done, whose checks are then ticked on the finished work, by the agents with how they
-checked and by a person for the one only a person can judge. Two more fictional people join the
+checked and by a person for the one only a person can judge. Two of its lines are tagged for a
+verifier ([verifier] and [github]): the key of review-agent is marked a verifier, it ticks them on
+finished work (the [github] one with the made-up pull request in the form scripts/verify_pr.py
+writes), and four tasks are blocked, held by nobody and handed over saying they are ready for a
+verifier, which is:unverified finds. Agents also say where their work is (M41): the claims that
+are held now and the one that ran out carry a branch, a commit, sometimes a pull request and a run
+label with the client's name of the made-up repository example-org/bike-share (two instances of
+one key hold work under two run labels, and one claim says nothing at all), and the handoff notes
+of code work say a branch and a pull request, the very one the verifier's [github] tick names on
+work that is done. The key of docs-agent has a last day, 90 days after the day the demo is made.
+Agents also put asks to a person (M45): six of them, through finish_work and update_node (two
+questions with choices that block work, an approval that parks a task, and three that the owner and
+the planner answered through the board, so that the questions and answers of an item and its
+history have something to show), and the page of what needs a person lists the other things only
+a person can settle: a task finished but for the check marked [person], unconfirmed notes on work in
+progress, and a task whose claim ran out twice, about eleven rows under six stories.
+Then the later part of the demo (M42 to M47, tests/demo_flow.py) is made through the same tools
+and the real embedding service: an agent files six loose stories in an epic called Inbox from calls
+and notes, a steward (scripts/steward.py, with a key allowed four tools) proposes where the ones the
+model is sure about belong and groups two under a new epic, the planner accepts one proposal (the
+story moves, as she moves it) and the owner rejects another with a reason, four gates hold work (a
+timer, two approvals that wait or were refused, and one that was approved), the planning agent
+saves two plan templates and drafts a winter plan that waits for approval while a plan made from a
+template was approved by the planner earlier, and four tasks say where they were found with the
+link discovered_from. Two drafted plans have a conversation (M51): the owner asked for changes to
+the winter plan with a summary and a comment on a story's title and on a task's details, and its
+agent sent revision 2, which a person reads next; and the owner asked for changes to a small spring
+plan, which waits for its agent to revise it and is not a row on the page of what needs a person.
+The page of what needs a person then lists about seventeen rows.
+Two more fictional people join the
 project the way people do, through invitations
 the owner makes (priya@example.com, an editor, and tom@example.com, a viewer), and have the
 same password. When the server can send email Priya's invitation is emailed to her, which the
@@ -22,7 +51,8 @@ people of the team do as the owner, and every confirmation is a person's, since 
 confirm. The viewer is shown to be able to look and not to change. Nothing but real operations is
 used, no SQL and no code in the server. When the project is filled the agents' keys are revoked,
 except three that stay in force with different allowances (api-agent may use every tool,
-review-agent only the tools that read, docs-agent also the tools that change work, links, claims,
+review-agent the tools that read and the two a verifier needs, to tick a check and to set work
+done, docs-agent also the tools that change work, links, claims,
 acceptance criteria and notes), so that the Users page shows what a key may do. Nobody holds
 their secrets, and a check shows that a limited key is refused what it may not do.
 
@@ -34,6 +64,7 @@ is written anywhere.
 
 import asyncio
 import datetime
+import hashlib
 import re
 import secrets
 import sys
@@ -50,12 +81,16 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import TextContent
 
 from tests import demo_data as data
+from tests.demo_flow import Flow, Stopped, later_counts
 from tests.world import Person, api
 
 # The longest a claim may be held (24 hours), so that the claims of the demo are still held when
 # someone looks at it. One that must have run out is taken for one second.
 LONG_LEASE = 86_400
 HANDOFF_LEASE = 3_600
+# What a claim says about where the work is and which run it is (the pull request comes with a
+# renewal or the end of the work).
+CLAIM_FIELDS = ("repository", "branch", "commit", "run_label", "client_name")
 
 # The stored statuses an item goes through on its way to the status it is described with.
 STATUS_PATH = {
@@ -66,10 +101,6 @@ STATUS_PATH = {
 }
 
 _REFERENCE = re.compile(r"\[\[([a-z0-9][a-z0-9-]*)\]\]")
-
-
-class Stopped(SystemExit):
-    """Something is wrong with where this was pointed, or with the data, said in plain words."""
 
 
 @dataclass(frozen=True)
@@ -208,7 +239,8 @@ def plan_arguments(names: Names, today: datetime.date) -> dict[str, Any]:
 
 
 def expected_counts() -> dict[str, int]:
-    """How much of each kind the description holds, as server_status counts them."""
+    """How much of each kind the plan holds, as server_status counts them once it is made (the
+    later part of the demo, tests/demo_flow.py, adds to it: see expected_totals)."""
     placed = place(data.EPICS)
     return {
         "epics": sum(p.item.kind == "epic" for p in placed),
@@ -218,6 +250,16 @@ def expected_counts() -> dict[str, int]:
         "rules": len(data.RULES) + len(derived_criteria(placed)),
         "notes": len(data.NOTES),
     }
+
+
+def expected_totals() -> dict[str, int]:
+    """How much of each kind the whole demo holds when it is loaded: the plan and everything the
+    later part adds (an Inbox with its loose stories, a drafted plan and the plan made from a
+    template)."""
+    added = later_counts()
+    totals = {kind: count + added.get(kind, 0) for kind, count in expected_counts().items()}
+    totals["notes"] += len(kept_of_description())
+    return totals
 
 
 def expected_note_counts() -> dict[str, int]:
@@ -243,12 +285,115 @@ def expected_note_counts() -> dict[str, int]:
     }
 
 
+def unconfirmed_note_keys() -> set[str]:
+    """The notes that end in force and not confirmed, as expected_note_counts counts them."""
+    confirmed: dict[str, bool] = {}
+    for step in data.CONFIRMATIONS:
+        confirmed[step.key] = step.confirmed
+    ended = {key for note in data.NOTES for key in note.replaces}
+    ended |= {step.key for step in data.WITHDRAWALS}
+    return {
+        note.key for note in data.NOTES if note.key not in ended and not confirmed.get(note.key)
+    }
+
+
+def asks_of_description() -> list[tuple[str, data.Ask]]:
+    """Every ask the description puts, with the key of the story or task it is about, in the order
+    they are made (the ones put as work is moved along, then the ones put as it is handed over)."""
+    return [
+        *((asked.key, asked.ask) for asked in data.ASKED),
+        *((step.key, step.ask) for step in data.HANDOFFS if step.ask is not None),
+    ]
+
+
+def kept_of_description() -> list[tuple[str, data.Ask]]:
+    """The asks whose answer a person kept as a decision (M52), with the key of their work. They
+    are put when work is handed over, so that the notes of the description keep their numbers."""
+    handed = {step.key for step in data.HANDOFFS if step.ask is not None}
+    return [(key, ask) for key, ask in asks_of_description() if ask.kept and key in handed]
+
+
+def ask_arguments(ask: data.Ask) -> dict[str, Any]:
+    """An ask as finish_work and update_node take it."""
+    arguments: dict[str, Any] = {"question": ask.question}
+    if ask.choices:
+        arguments["choices"] = list(ask.choices)
+    if ask.approval:
+        arguments["approval"] = True
+    return arguments
+
+
+def expected_needs() -> list[tuple[str, str, str]]:
+    """What the page of what needs a person should list for the description, as the server works it
+    out: (kind, the story or task, the story it is grouped under). An open ask on work that is
+    not finished; blocked work with only a person's check open; an unconfirmed note on a story or
+    task that is in progress or held; and a claim that ran out twice."""
+    names = Names.of_description()
+    placed = place(data.EPICS)
+    by_key = {entry.key: entry for entry in placed}
+
+    def story_of(key: str) -> str:
+        entry = names.node(key)
+        return entry.ref if entry.item.kind == "story" else by_key[entry.parent or ""].ref
+
+    held = {step.key for step in data.HELD}
+    rows: list[tuple[str, str, str]] = []
+    for key, ask in asks_of_description():
+        if ask.answer is None and names.node(key).item.status not in ("done", "dropped"):
+            rows.append(("ask", names.node(key).ref, story_of(key)))
+    for key in data.WAITING_FOR_A_PERSON:
+        rows.append(("check", names.node(key).ref, story_of(key)))
+    waiting_notes = unconfirmed_note_keys()
+    by_note = {note.key: note for note in data.NOTES}
+
+    def linked(note: data.Note) -> set[str]:
+        """What a note concerns: its own links and, as the loader replaces with keep_links, those
+        of every note it replaced."""
+        return set(note.nodes).union(*(linked(by_note[key]) for key in note.replaces))
+
+    noted: set[str] = set()
+    for note in data.NOTES:
+        if note.key not in waiting_notes:
+            continue
+        for key in linked(note):
+            entry = names.node(key)
+            if entry.item.kind in ("story", "task") and (
+                entry.item.status == "in_progress" or key in held
+            ):
+                noted.add(key)
+    rows.extend(("note", names.node(key).ref, story_of(key)) for key in sorted(noted))
+    for step in data.LAPSED:
+        if step.after:
+            rows.append(("lapse", names.node(step.key).ref, story_of(step.key)))
+    return rows
+
+
+def expected_gate_rows() -> list[tuple[str, str, str]]:
+    """The rows of what needs a person that the gates add, as the server works them out: (kind, the
+    task, the story it is grouped under). An approval nobody has answered is an ask of its own; one
+    a person refused is a row of its own (kind gate) until a person lifts it; a timer and an
+    approval that was given add none. The rows for a drafted plan and for proposals to move work
+    are not here: which item comes first in them depends on what the server says (see
+    tests/demo_flow.py), and they are in a group with no story."""
+    names = Names.of_description()
+    by_key = {entry.key: entry for entry in place(data.EPICS)}
+    rows: list[tuple[str, str, str]] = []
+    for gate in data.GATES:
+        if gate.kind != "approval" or gate.answer == "yes":
+            continue
+        entry = names.node(gate.key)
+        story = by_key[entry.parent or ""].ref
+        rows.append(("ask" if gate.answer is None else "gate", entry.ref, story))
+    return rows
+
+
 def agents_of_description() -> list[str]:
     """Every agent the description names (a name that ends with "-agent"), each of which gets a key
     of its own. Sorted, so the keys are made in the same order every time."""
-    named = {data.RECORDER, *data.WORKERS.values()}
+    named = {data.RECORDER, data.VERIFIER, data.INTAKE, *data.WORKERS.values()}
     named |= {step.actor for step in data.HANDOFFS}
     named |= {held.actor for held in (*data.HELD, *data.LAPSED)}
+    named |= {held.after for held in data.LAPSED if held.after}
     named |= {edit.actor for edit in data.EDITS}
     named |= {actor for _, _, actor in (*data.RULE_PLACES, *data.RULE_MOVES)}
     named |= {edit.actor for edit in data.RULE_EDITS}
@@ -287,12 +432,68 @@ def check_words(index: int, placed: Placed) -> str:
     )
 
 
+def pull_request_number(title: str) -> int:
+    """The number of the made-up pull request of a piece of work, worked out from its title, so that
+    the address the verifier ticks the [github] line with and the one the agent that did the work
+    said its work is in are the same one."""
+    return 100 + zlib.crc32(title.encode()) % 900
+
+
+def commit_of(seed: str) -> str:
+    """A made-up commit hash (40 hex digits) that is always the same for the same words."""
+    return hashlib.sha256(seed.encode()).hexdigest()[:40]
+
+
+def whereabouts(
+    where: data.Where | None, actor: str, title: str, today: datetime.date
+) -> dict[str, str | None]:
+    """What an agent says about where its work is, as the arguments of the tools that take it
+    (None for what it does not say): the fictional repository, the branch, a commit made up from
+    the branch, the pull request when there is one and, when the run has a letter, the run label
+    (the day the demo is made and the letter) and the client the actor works in."""
+    if where is None:
+        return {}
+    number = pull_request_number(title) if where.merged else where.pull_request
+    return {
+        "repository": data.REPOSITORY_ADDRESS,
+        "branch": where.branch,
+        "commit": commit_of(where.branch),
+        "pull_request": None if number is None else data.PULL_REQUEST_ADDRESS.format(number=number),
+        "run_label": None if where.run is None else f"run-{today:%Y-%m-%d}-{where.run}",
+        "client_name": data.CLIENTS.get(actor) if where.run is not None else None,
+    }
+
+
+def verified_words(github: bool, placed: Placed, today: datetime.date) -> str:
+    """How the verifier ticked one of the lines tagged for it on one item: its own words for a line
+    tagged [verifier], and for one tagged [github] the one fixed form that scripts/verify_pr.py
+    writes, with a made-up pull request. Everything is worked out from the item's title, so that a
+    run always says the same."""
+    spread = zlib.crc32(placed.item.title.encode())
+    if not github:
+        return data.VERIFIED_EVIDENCE[spread % len(data.VERIFIED_EVIDENCE)].format(
+            title=placed.item.title
+        )
+    merged = datetime.datetime.combine(
+        today - datetime.timedelta(days=1 + spread % 45),
+        datetime.time(9 + spread % 9, (spread >> 5) % 60),
+        tzinfo=datetime.UTC,
+    )
+    return data.PULL_REQUEST_SEEN.format(
+        address=data.PULL_REQUEST_ADDRESS.format(number=pull_request_number(placed.item.title)),
+        merged=merged.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        commit=hashlib.sha256(placed.item.title.encode()).hexdigest()[:10],
+        passed=2 + (spread >> 3) % 4,
+    )
+
+
 def allowances(tools: list[dict[str, Any]]) -> dict[str, list[str] | None]:
     """What each key that stays in force may do, worked out from the server's own tool list (the
     entries of GET /board/api/tools): None for the tools Vrum offers agents, or the tools it may
     use (only ones that are offered)."""
     offered = [tool for tool in tools if tool["offered_to_agents"]]
     reads = [tool["name"] for tool in offered if not tool["changes_something"]]
+    verifying = [tool["name"] for tool in offered if tool["name"] in data.VERIFIER_TOOLS]
     recording = [
         tool["name"]
         for tool in offered
@@ -302,7 +503,7 @@ def allowances(tools: list[dict[str, Any]]) -> dict[str, list[str] | None]:
     ]
     chosen: dict[str, list[str] | None] = {
         "api-agent": None,
-        "review-agent": sorted(reads),
+        "review-agent": sorted({*reads, *verifying}),
         "docs-agent": sorted(reads + recording),
     }
     assert set(chosen) == set(data.KEPT_KEYS)
@@ -323,6 +524,8 @@ async def limit_the_kept_keys(
         changed = owner.call("PATCH", f"{path}/{ids[name]}", {"tools": tools})
         if changed.status != 200 or changed.body["key"]["tools"] != tools:
             raise Stopped(f"What the key of {name} may do was not set: {changed.body}")
+        if changed.body["key"]["verifier"] != (name == data.VERIFIER):
+            raise Stopped(f"The key of {name} is not what it should be about verifying.")
     wanted = {name: offered if tools is None else set(tools) for name, tools in allowed.items()}
     # A tool a key may not use is refused in words, whatever the arguments are: one the key's own
     # list leaves out, and, for a standard key, one that is done on the board.
@@ -359,6 +562,22 @@ async def limit_the_kept_keys(
         raise problem from None
 
 
+async def give_a_key_a_last_day(owner: Person, path: str, ids: dict[str, int]) -> str:
+    """The owner gives one of the keys that stay in force a last day, a fixed number of days after
+    today (UTC, as the server counts), as they do on the Users page, so that the page shows what a
+    key that runs out looks like. Returns the day."""
+    today = datetime.datetime.now(datetime.UTC).date()
+    last_day = (today + datetime.timedelta(days=data.KEY_EXPIRES_AFTER_DAYS)).isoformat()
+    changed = owner.call("PATCH", f"{path}/{ids[data.EXPIRING_KEY]}", {"expires_on": last_day})
+    if (
+        changed.status != 200
+        or changed.body["key"]["expires_on"] != last_day
+        or changed.body["key"]["expired"]
+    ):
+        raise Stopped(f"The last day of the key of {data.EXPIRING_KEY} was not set: {changed.body}")
+    return last_day
+
+
 class Demo:
     """One run: a client for each agent, the people who have an account (each signed in on the
     board, by name), and the numbers everything has."""
@@ -369,11 +588,15 @@ class Demo:
         people: dict[str, Person],
         project_id: int,
         today: datetime.date,
+        url: str = "",
+        keys: dict[str, str] | None = None,
     ) -> None:
         self.clients = clients
         self.people = people
         self.project_id = project_id
         self.today = today
+        self.url = url
+        self.keys = keys or {}
         self.names = Names.of_description()
 
     async def call(self, tool: str, actor: str | None = None, **arguments: Any) -> dict[str, Any]:
@@ -446,16 +669,42 @@ class Demo:
     async def move_statuses(self) -> None:
         """Every item that is not new gets to where it stands, one step at a time, by whoever holds
         it or else by whoever works on its epic. The ones that end with a handoff note get there
-        through the note."""
+        through the note. Work that is marked blocked with an ask is blocked with it: an answered
+        ask frees the work, which then goes on to the status it is described with."""
         noted = {handoff.key for handoff in data.HANDOFFS}
         holders = {held.key: held.actor for held in (*data.HELD, *data.LAPSED)}
+        asked = {entry.key: entry.ask for entry in data.ASKED}
         for placed in place(data.EPICS):
             item = placed.item
-            if item.status == "new" or (item.key in noted):
+            key = item.key or ""
+            if item.status == "new" or key in noted:
                 continue
-            actor = holders.get(item.key or "") or data.WORKERS[placed.epic]
+            ask = asked.get(key)
+            actor = holders.get(key) or data.WORKERS[placed.epic]
+            if ask is not None and ask.answer is not None:
+                await self.change(actor, placed.ref, status="blocked", ask=ask_arguments(ask))
+                await self.answer(placed.ref, ask)
             for status in STATUS_PATH[item.status]:
-                await self.change(actor, placed.ref, status=status)
+                fields: dict[str, Any] = {"status": status}
+                if status == "blocked" and ask is not None and ask.answer is None:
+                    fields["ask"] = ask_arguments(ask)
+                await self.change(actor, placed.ref, **fields)
+
+    async def answer(self, ref: str, ask: data.Ask) -> None:
+        """A person answers the ask that waits on this story or task, through the board as
+        themselves: the one who has an account here that the description names."""
+        waiting = await self.call("list_asks", node=ref, status="open")
+        number = next(
+            (found["id"] for found in waiting["items"] if found["question"] == ask.question), None
+        )
+        if number is None or ask.by is None or ask.answer is None:
+            raise Stopped(f"{ref} has no open ask that can be answered as described.")
+        words: dict[str, Any] = {"ask": number, "answer": ask.answer}
+        if ask.comment:
+            words["comment"] = ask.comment
+        given = await self.as_person("answer_ask", words, ask.by)
+        if (given["answered_by"], given["answer"]) != (ask.by, ask.answer):
+            raise Stopped(f"The answer to Q-{number} was not recorded as {ask.by} gave it.")
 
     # -- acceptance criteria and the definition of done ------------------------------------------
 
@@ -500,20 +749,25 @@ class Demo:
         stored = await self.call("get_definition_of_done")
         if stored["body"] != data.DEFINITION_OF_DONE or stored["updated_by_kind"] != "person":
             raise Stopped("The definition of done is not what was written.")
-        if (
-            len(stored["items"]) != len(data.CHECK_EVIDENCE) + 1
-            or not stored["items"][-1]["person_only"]
-        ):
+        flags = [(i["verifier_only"], i["github"], i["person_only"]) for i in stored["items"]]
+        ordinary = [(False, False, False)] * len(data.CHECK_EVIDENCE)
+        tagged = [(True, False, False), (True, True, False), (False, False, True)]
+        if flags != ordinary + tagged:
             raise Stopped("The definition of done does not have the checks that are described.")
 
     async def ticks(self) -> None:
         """Whoever finished work ticks the checks of the definition of done and says how they were
         done: all of them on what is done, the first few on what is under way, the first on what is
-        blocked and none on the rest. The check marked [person], the last, is ticked on every
-        finished piece of work by a person, once with no words, and never by an agent. One tick of
-        an agent is taken back by a person and put right by the agent, so that the history shows
-        it."""
+        blocked and none on the rest, except the blocked work that waits for a verifier, whose own
+        checks are all ticked, and the one that waits for a person, whose checks are all ticked but
+        the one that is the person's. The checks tagged [verifier] and [github] are ticked by the
+        verifier
+        on finished work (never by the agent that did it), and the check marked [person], the last,
+        on every finished piece of work by a person, once with no words, and never by an agent.
+        One tick of an agent is taken back by a person and put right by the agent, so that the
+        history shows it."""
         items = (await self.call("get_definition_of_done"))["items"]
+        ordinary = sum(not entry["verifier_only"] and not entry["person_only"] for entry in items)
         holders = {held.key: held.actor for held in (*data.HELD, *data.LAPSED)}
         finishers = {step.key: step.actor for step in data.HANDOFFS}
         finished = 0
@@ -523,6 +777,10 @@ class Demo:
             how_many = {"done": len(items), "in_progress": 1 + spread % 4, "blocked": 1}.get(
                 item.status, 0
             )
+            if item.key in data.WAITING_FOR_VERIFIER:
+                how_many = ordinary
+            if item.key in data.WAITING_FOR_A_PERSON:
+                how_many = len(items) - 1  # every line but the last, which only a person ticks
             if item.kind != "task" and item.status != "done":
                 how_many = 0
             if item.kind == "epic" or not how_many:
@@ -540,6 +798,9 @@ class Demo:
                         else data.PERSON_TRIED[spread % len(data.PERSON_TRIED)]
                     )
                     await self.call("set_check", data.OWNER, evidence=words, **tick)
+                elif items[index]["verifier_only"]:
+                    words = verified_words(items[index]["github"], placed, self.today)
+                    await self.call("set_check", data.VERIFIER, evidence=words, **tick)
                 elif item.title == data.UNTICK.task and index == data.UNTICK.check:
                     await self.call("set_check", actor, evidence=data.UNTICK.first, **tick)
                     await self.call(
@@ -550,6 +811,152 @@ class Demo:
                     await self.call("set_check", actor, evidence=check_words(index, placed), **tick)
         if finished == 0:
             raise Stopped("The description has no finished work to tick the checks of.")
+
+    async def check_the_verifier(self) -> None:
+        """What the verifier is for, as the server says it: the work that waits for a verifier is
+        found by is:unverified (blocked, held by nobody), the ticks of the verifier are its own,
+        and an agent whose key is not a verifier's is refused the line that is tagged for one."""
+        waiting = {self.ref(key) for key in data.WAITING_FOR_VERIFIER}
+        found = await self.call("list_nodes", data.VERIFIER, query="is:unverified", limit=200)
+        refs = {entry["ref"] for entry in found["items"]}
+        if not waiting <= refs:
+            raise Stopped("The work that waits for a verifier is not what is:unverified finds.")
+        for ref in refs:
+            node = await self.call("get_node", node=ref)
+            if node["status"] != "blocked" or node["claimed_by"] is not None:
+                raise Stopped(f"is:unverified found {ref}, which is not blocked work nobody holds.")
+        for ref in sorted(waiting):
+            node = await self.call("get_node", node=ref)
+            open_checks = [c["text"] for c in node["checks"] if not c["checked"]]
+            if len(open_checks) != 3 or node["handoff_count"] < 1:
+                raise Stopped(f"{ref} does not wait for a verifier as described.")
+        items = (await self.call("get_definition_of_done"))["items"]
+        tagged = next(entry for entry in items if entry["verifier_only"] and not entry["github"])
+        refused = await self.clients["api-agent"].call_tool(
+            "set_check", {"node": min(waiting), "item": tagged["item"], "evidence": "Looked."}
+        )
+        told = " ".join(getattr(block, "text", "") for block in refused.content)
+        if not refused.is_error or "only a verifier can judge" not in told:
+            raise Stopped("An agent that is not a verifier was not refused a verifier's check.")
+        done = next(
+            placed.ref
+            for placed in place(data.EPICS)
+            if placed.item.kind == "task" and placed.item.status == "done"
+        )
+        node = await self.call("get_node", node=done)
+        ticked = [check for check in node["checks"] if check["verifier_only"]]
+        if len(ticked) != 2 or any(
+            (check["checked_by"], check["checked_by_kind"]) != (data.VERIFIER, "agent")
+            for check in ticked
+        ):
+            raise Stopped("The verifier's ticks are not the verifier's own.")
+        said(f"    {len(refs)} blocked items are found by is:unverified, {len(waiting)} of them")
+        said("    handed over for a verifier; the rest are blocked on something else")
+
+    async def check_the_asks(self) -> None:
+        """What asks and what needs a person came to, as the server says it: every ask of the
+        description is there, put about the right work, with the answer, the person who gave it and
+        the comment as described (or none); an ask that blocks work and is open leaves it blocked,
+        one that parks it leaves it free, and an answered one leaves nothing blocked by it; the
+        list of what needs a person holds exactly the rows the description expects, by story; and
+        the viewer, who can look, is refused when answering, and changes nothing."""
+        wanted = asks_of_description()
+        listed = await self.call("list_asks", limit=200)
+        found_by_question = {found["question"]: found for found in listed["items"]}
+        if listed["total"] != len(wanted) or len(found_by_question) != len(wanted):
+            raise Stopped(
+                f"The demo holds {listed['total']} asks, not the {len(wanted)} described."
+            )
+        for key, ask in wanted:
+            found = found_by_question.get(ask.question)
+            node = await self.call("get_node", node=self.ref(key))
+            given = (ask.answer is not None, ask.by, ask.answer, ask.comment)
+            if (
+                found is None
+                or found["node"] != self.ref(key)
+                or (found["answered"], found["answered_by"], found["answer"], found["comment"])
+                != given
+                or (found["kind"] == "approval") != ask.approval
+            ):
+                raise Stopped(f"The ask about {key} is not as described.")
+            held_up = found["effect"] == "blocks" and not found["answered"]
+            if held_up != (node["status"] == "blocked" and node["claimed_by"] is None):
+                raise Stopped(f"The work of the ask about {key} is not blocked or free as asked.")
+        needs = await self.call("needs_a_person")
+        rows = sorted(
+            (item["kind"], item["node"], group["story"])
+            for group in needs["groups"]
+            for item in group["items"]
+        )
+        expected = expected_needs()
+        if rows != sorted(expected) or needs["total"] != len(expected) or needs["left_out"]:
+            raise Stopped(
+                f"What needs a person is not what the description expects: {rows} and not "
+                f"{sorted(expected)}."
+            )
+        waiting = [found for found in listed["items"] if not found["answered"]]
+        path = f"/board/api/projects/{self.project_id}/tool"
+        tried = await asyncio.to_thread(
+            self.people[data.VIEWER].call,
+            "POST",
+            f"{path}/answer_ask",
+            {"ask": waiting[0]["id"], "answer": (waiting[0]["choices"] or ["Go ahead"])[0]},
+        )
+        still = await self.call("list_asks", status="open", limit=200)
+        if tried.status not in (400, 403) or still["total"] != len(waiting):
+            raise Stopped(f"The viewer should be refused when answering ({tried.status}).")
+        said(
+            f"    {len(wanted)} asks ({len(waiting)} waiting for a person), and "
+            f"{len(expected)} things that need a person under {len(needs['groups'])} stories"
+        )
+
+    async def keep_answers(self) -> None:
+        """A person kept some answers as decisions, as the board's Keep as a decision does after an
+        answer stood: a note by that person on the work, the question and the answer as its text and
+        their comment as why, naming them, linked to the work. It is a note like any other (never
+        edited, unconfirmed until a person confirms it), so the notes of the description are
+        counted again with it, and it adds no row to what needs a person."""
+        before = expected_note_counts()
+        wanted = kept_of_description()
+        for key, ask in wanted:
+            ref = self.ref(key)
+            answered = await self.call("list_asks", node=ref, status="answered")
+            number = next(
+                (found["id"] for found in answered["items"] if found["question"] == ask.question),
+                None,
+            )
+            if number is None or ask.by is None or ask.answer is None:
+                raise Stopped(f"{key} has no answered ask to keep as a decision.")
+            made = await self.as_person(
+                "add_note",
+                {
+                    "text": f"Q: {ask.question}\nA: {ask.answer}",
+                    "why": ask.comment or f"Answered Q-{number}.",
+                    "decided_by": ask.by,
+                    "nodes": [ref],
+                },
+                ask.by,
+            )
+            if (
+                made["decided_by"] != ask.by
+                or made["recorded_by"] != ask.by
+                or made["status"] != "unconfirmed"
+                or made["nodes"] != [ref]
+            ):
+                raise Stopped(f"The decision kept for {key} is not recorded as {ask.by}'s.")
+        asked: dict[str, dict[str, Any]] = {
+            "all": {},
+            "decided": {"decided": True},
+            "unconfirmed": {"status": "unconfirmed"},
+            "in_force": {"status": "in_force"},
+        }
+        for name, how in asked.items():
+            found = (await self.call("list_notes", limit=1, **how))["total"]
+            if found != before[name] + len(wanted):
+                raise Stopped(
+                    f"The demo holds {found} notes counted as {name}, not "
+                    f"{before[name] + len(wanted)}."
+                )
 
     # -- notes -----------------------------------------------------------------------------------
 
@@ -624,25 +1031,65 @@ class Demo:
     async def hand_off(self) -> None:
         for step in data.HANDOFFS:
             ref = self.ref(step.key)
-            await self.call("claim_node", actor=step.actor, node=ref, lease_seconds=HANDOFF_LEASE)
+            said_where = whereabouts(
+                step.where, step.actor, self.names.node(step.key).item.title, self.today
+            )
+            await self.call(
+                "claim_node",
+                actor=step.actor,
+                node=ref,
+                lease_seconds=HANDOFF_LEASE,
+                **{field: said_where.get(field) for field in CLAIM_FIELDS},
+            )
             await self.call(
                 "finish_work",
                 actor=step.actor,
                 node=ref,
                 outcome=step.outcome,
                 note=self.names.text(step.note),
+                pull_request=said_where.get("pull_request"),
+                ask=None if step.ask is None else ask_arguments(step.ask),
             )
+            if step.ask is not None and step.ask.answer is not None:
+                await self.answer(ref, step.ask)
 
     async def claim(self, held: data.Held, lease_seconds: int) -> None:
         ref = self.ref(held.key)
+        said_where = whereabouts(
+            held.where, held.actor, self.names.node(held.key).item.title, self.today
+        )
         current = await self.call("get_node", node=ref)
         if current["status"] != "in_progress":
             await self.change(held.actor, ref, status="in_progress")
-        await self.call("claim_node", actor=held.actor, node=ref, lease_seconds=lease_seconds)
+        await self.call(
+            "claim_node",
+            actor=held.actor,
+            node=ref,
+            lease_seconds=lease_seconds,
+            **{field: said_where.get(field) for field in CLAIM_FIELDS},
+        )
+        pull_request = said_where.get("pull_request")
+        if pull_request is not None:
+            # The agent opened a pull request after it began, and says so as it renews its claim.
+            await self.call(
+                "renew_claim",
+                actor=held.actor,
+                node=ref,
+                lease_seconds=lease_seconds,
+                commit=commit_of(f"{said_where['branch']} again"),
+                pull_request=pull_request,
+            )
 
     async def claims(self) -> None:
         for held in data.HELD:
             await self.claim(held, LONG_LEASE)
+        # The work that ran out twice is first taken by one agent, whose claim runs out, and then
+        # by another, whose claim runs out too.
+        first = [data.Held(held.key, held.after) for held in data.LAPSED if held.after]
+        for held in first:
+            await self.claim(held, 1)
+        if first:
+            await asyncio.sleep(2)
         for held in data.LAPSED:
             await self.claim(held, 1)
         if data.LAPSED:
@@ -700,6 +1147,7 @@ class Demo:
         said("The search index has not caught up yet. It will, in a minute or so.")
 
     async def build(self) -> dict[str, int]:
+        flow = Flow(self)
         steps = (
             ("planning the work", self.make_plan),
             ("moving the work along", self.move_statuses),
@@ -715,7 +1163,21 @@ class Demo:
             # are not asked for ticks that do not exist yet; they tick afterwards.
             ("setting the definition of done", self.definition_of_done),
             ("ticking its checks on finished work", self.ticks),
+            ("checking the verifier", self.check_the_verifier),
+            ("checking the asks and what needs a person", self.check_the_asks),
+            ("keeping an answer as a decision", self.keep_answers),
             ("checking what each person may do", self.check_roles),
+            # The later part (M42 to M47) comes after the checks above, which count the asks and
+            # the rows of what needs a person as the description has them. Where loose work
+            # belongs is asked of the real embedding service, so the index is caught up first.
+            ("filing loose work in an Inbox", flow.file_the_inbox),
+            ("indexing for search", self.wait_for_index),
+            ("proposing where loose work belongs, as the steward", flow.steward_proposes),
+            ("accepting one proposal and rejecting another", flow.people_decide),
+            ("holding work behind gates", flow.gate_work),
+            ("saving plan templates and drafting plans", flow.plans_and_templates),
+            ("asking for changes to two plans and revising one", flow.a_conversation_about_plans),
+            ("checking gates, proposals, plans and templates", flow.check),
             ("indexing for search", self.wait_for_index),
         )
         for what, step in steps:
@@ -723,7 +1185,7 @@ class Demo:
             await step()
         status = await self.call("server_status")
         counts: dict[str, int] = status["counts"]
-        for kind, wanted in expected_counts().items():
+        for kind, wanted in expected_totals().items():
             if counts[kind] != wanted:
                 raise Stopped(f"The demo holds {counts[kind]} {kind}, not the {wanted} described.")
         return counts
@@ -746,7 +1208,7 @@ async def fill(
                 clients[name] = await stack.enter_async_context(
                     Client(streamable_http_client(url, http_client=http))
                 )
-            return await Demo(clients, people, project_id, today).build()
+            return await Demo(clients, people, project_id, today, url, keys).build()
     except BaseExceptionGroup as group:
         # Each connection is inside the one before it, so a problem arrives wrapped once for each:
         # say the problem itself.
@@ -871,20 +1333,39 @@ async def main(url: str) -> str:
     listing = person.call("GET", "/board/api/tools")
     if listing.status != 200:
         raise Stopped(f"The server's tool list was refused: {listing.body}")
-    loader_tools = sorted(tool["name"] for tool in listing.body["tools"] if not tool["people_only"])
+    loader_tools = sorted(
+        tool["name"]
+        for tool in listing.body["tools"]
+        if not tool["people_only"] and not tool["code_mode"]
+    )
     try:
         for name in agents_of_description():
-            key = person.call("POST", path, {"name": name, "tools": loader_tools})
-            if key.status != 201:
+            key = person.call(
+                "POST",
+                path,
+                {"name": name, "tools": loader_tools, "verifier": name == data.VERIFIER},
+            )
+            if key.status != 201 or key.body["key"]["verifier"] != (name == data.VERIFIER):
                 raise Stopped(f"The key for {name} was refused: {key.body}")
             keys[name] = key.body["secret"]
             ids[name] = key.body["key"]["id"]
+        # The steward's key may use four tools and none that changes work, from the first.
+        steward = person.call(
+            "POST", path, {"name": data.STEWARD, "tools": list(data.STEWARD_TOOLS)}
+        )
+        if steward.status != 201 or sorted(steward.body["key"]["tools"]) != sorted(
+            data.STEWARD_TOOLS
+        ):
+            raise Stopped(f"The key for {data.STEWARD} was refused: {steward.body}")
+        keys[data.STEWARD] = steward.body["secret"]
+        ids[data.STEWARD] = steward.body["key"]["id"]
         counts = await fill(url, keys, people, project_id)
         await limit_the_kept_keys(url, person, path, keys, ids)
-        kept = set(data.KEPT_KEYS)
+        last_day = await give_a_key_a_last_day(person, path, ids)
+        kept = {*data.KEPT_KEYS, data.STEWARD}
     finally:
-        # A run that stopped leaves no key in force; one that finished keeps the three that show
-        # what a key may do.
+        # A run that stopped leaves no key in force; one that finished keeps the ones that show
+        # what a key may do (the steward's is one of them).
         for name, key_id in ids.items():
             if name not in kept:
                 person.call("DELETE", f"{path}/{key_id}")
@@ -892,10 +1373,13 @@ async def main(url: str) -> str:
         "  filled: "
         + ", ".join(f"{counts[name]} {name}" for name in ("epics", "stories", "tasks", "links"))
         + f", {counts['rules']} acceptance criteria, {counts['notes']} notes "
-        + f"({expected_note_counts()['decided']} with a person who decided them), "
+        + f"({expected_note_counts()['decided'] + len(kept_of_description())} with a person who "
+        + "decided them), "
+        + f"{len(asks_of_description())} asks put to a person, "
         + f"{counts['events']} changes in the history "
         + f"(made by {len(keys)} agents and 2 people; {data.VIEWER} can only look; "
-        + f"{len(kept)} keys stay in force, with different allowances)"
+        + f"{len(kept)} keys stay in force, with different allowances, {data.VERIFIER}'s "
+        + f"key is a verifier's and {data.EXPIRING_KEY}'s key runs out on {last_day})"
     )
     if sign_in_arranged:
         said(sign_in_arranged)

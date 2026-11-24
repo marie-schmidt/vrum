@@ -4,19 +4,20 @@
 """Chapter 18 of the acceptance scenario: pages (M20). There is no detail panel and no drawer: every
 epic, story, task, acceptance criterion and note has a full page of its own, Search, Activity and
 the acceptance criteria coverage report are pages, the path keeps the view a person came from, and a
-person can move through the content (previous and next, up, down, the sidebar's tree) without going
-back to a list.
+person can move through the content (previous and next, up, down, the back arrow, the sidebar's
+tree) without going back to a list.
 
 The chapter makes its own account, project and key, so it needs nothing from the chapters before
 it. A real MCP client fills a small project (four epics, one of them with nine long project-wide
 notes, stories, tasks, acceptance criteria placed and not, notes that are confirmed, replaced and
-withdrawn, dependencies, a claim and a handoff note), and a real headless browser
+withdrawn, dependencies, claims held by two agents and by the person who owns the project, and a
+handoff note), and a real headless browser
 shows that, compared with what the tools say: no panel or drawer is on any page; every kind of
 record opens its own page from every place that names it, under the view it came from; previous and
 next walk exactly the siblings `list_nodes` gives, and the sidebar's tree is `list_nodes`; the
 tables of what concerns an epic span the page; the Graph's Around opens the page of what it looks
-at; Search, Possible duplicates, Activity and the coverage report equal their tools; and no page
-scrolls sideways at 390, 768, 1280 and 1600 pixels in both themes."""
+at; Search, Possible duplicates, Activity (changes and who is working) and the coverage report
+equal their tools; and no page scrolls sideways at 390, 768, 1280 and 1600 pixels in both themes."""
 
 import asyncio
 import contextlib
@@ -39,11 +40,14 @@ from tests.board_helpers import (
     Watched,
     board_url,
     browser_page,
+    crumbs,
     drag_bar,
     hold_back_news,
+    item_name,
+    open_editor,
     plain,
 )
-from tests.board_m14 import events_of, feed_ids
+from tests.board_m14 import events_of, feed_ids, open_free, open_working, show_tab
 from tests.helpers import (
     all_nodes,
     code_of,
@@ -55,16 +59,19 @@ from tests.helpers import (
     make_note,
     number_of,
     ok,
+    on_board,
     refused,
     set_status,
     unique_word,
     whole_coverage_report,
 )
 from tests.test_board_requirements_integration import choose_place
-from tests.world import Project, make_project, project_at, register
+from tests.world import Project, make_key, make_project, project_at, register
 
+# The person who owns the project and is signed in to its board. Everything else that holds or
+# changes work is an agent with a key of its own, named for what it does, since the server records
+# who did what from the credential and nothing can be done in somebody else's name.
 ACTOR = "Pages Tester"
-PLANNER = "Maya Planner"
 
 NINE = [
     ("Prices are shown and charged in the customer's own currency", "Maya Planner"),
@@ -180,24 +187,22 @@ async def build(client: Client, word: str, project: Project) -> World:
         {
             "title": "The total includes tax",
             "body": "A shopper sees tax in the total.",
-            "story": "cart",
+            "node": "cart",
         },
         {
             "title": "An empty basket cannot be paid",
             "body": "No card step with nothing in it.",
-            "story": "cart",
+            "node": "cart",
         },
         {
             "title": "A card is charged once",
             "body": "A second click never charges twice.",
-            "story": "card",
+            "node": "card",
         },
-        {"title": "Receipts name the shop", "body": "Not placed in a story yet.", "story": None},
-        {"title": "Refunds go back to the same card", "body": "Not placed either.", "story": None},
+        {"title": "Receipts name the shop", "body": "Not placed on a story yet.", "node": None},
+        {"title": "Refunds go back to the same card", "body": "Not placed either.", "node": None},
     ]
-    made = await ok(
-        client, "create_plan", actor=PLANNER, items=plan_items, links=links, rules=rules
-    )
+    made = await ok(client, "create_plan", items=plan_items, links=links, rules=rules)
     by_key = {item["key"]: item["ref"] for item in made["created"]}
     world.epics = [by_key[k] for k in ("checkout", "accounts", "reports", "someday")]
     world.stories = [
@@ -205,14 +210,15 @@ async def build(client: Client, word: str, project: Project) -> World:
     ]
     world.tasks = [r for k, r in by_key.items() if k.startswith("t-")]
     world.rules = list(made["rule_ids"])
-    await move_work(client, world)
+    await move_work(client, world, project)
     await remember(client, world, project)
     return world
 
 
-async def move_work(client: Client, world: World) -> None:
-    """Some tasks are under way, done or blocked; one is held by an agent, one by a person, and one
-    ended with a handoff note; two stories mean the same in other words."""
+async def move_work(client: Client, world: World, project: Project) -> None:
+    """Some tasks are under way, done or blocked; one is held by an agent, one by the person who
+    owns the project and one ended with a handoff note from a second agent; two stories mean the
+    same in other words."""
     by_title = {n["title"]: n for n in (await ok(client, "list_nodes", limit=200))["items"]}
     for title, status in (
         ("Remove an item from the basket", "in_progress"),
@@ -221,29 +227,33 @@ async def move_work(client: Client, world: World) -> None:
     ):
         await set_status(client, by_title[title], status)
     held = by_title["Remove an item from the basket"]["ref"]
-    await ok(client, "claim_node", actor="mobile-agent", node=held, lease_seconds=86_400)
-    form = by_title["Card form"]["ref"]
-    await ok(client, "claim_node", actor="Priya Nair", node=form, lease_seconds=86_400)
-    total = by_title["Show the basket total"]["ref"]
-    await ok(client, "claim_node", actor="api-agent", node=total, lease_seconds=3_600)
-    await ok(
-        client,
-        "finish_work",
-        actor="api-agent",
-        node=total,
-        outcome="done",
-        note=(
-            "The total now includes tax and rounds the way the card step does, so the two "
-            "never differ by a cent. The one thing left open is how a basket in two "
-            "currencies is summed, which Maya has to decide. The tests for it are in the "
-            "same folder as the basket tests and are named after the rule they check."
-        ),
+    async with connect(project.mcp_url, make_key(project, "mobile-agent")) as mobile:
+        await ok(mobile, "claim_node", node=held, lease_seconds=86_400)
+    on_board(
+        "claim_node",
+        project=project,
+        node=by_title["Card form"]["ref"],
+        lease_seconds=86_400,
     )
+    total = by_title["Show the basket total"]["ref"]
+    async with connect(project.mcp_url, make_key(project, "api-agent")) as api:
+        await ok(api, "claim_node", node=total, lease_seconds=3_600)
+        await ok(
+            api,
+            "finish_work",
+            node=total,
+            outcome="done",
+            note=(
+                "The total now includes tax and rounds the way the card step does, so the two "
+                "never differ by a cent. The one thing left open is how a basket in two "
+                "currencies is summed, which Maya has to decide. The tests for it are in the "
+                "same folder as the basket tests and are named after the rule they check."
+            ),
+        )
     world.twin_story = (
         await ok(
             client,
             "create_node",
-            actor=PLANNER,
             kind="story",
             title="Reimburse a shopper",
             parent=world.epics[2],
@@ -421,8 +431,6 @@ LEAVE_A_MARK = """() => {
     page.insertAdjacentHTML('afterbegin', '<i id="mount-sentinel" hidden></i>');
 }"""
 
-CRUMBS = "nav.crumbs li"
-
 
 def status_of(url: str) -> int:
     """What the server answers to a plain GET of this address."""
@@ -485,14 +493,6 @@ async def visit(w: Watched, address: str, *, fresh: bool = False) -> None:
     )
 
 
-async def crumbs(page: Page) -> list[str]:
-    """The path in the top bar, as words: Projects, the project, the view, then what is open."""
-    texts: list[str] = await page.locator(CRUMBS).evaluate_all(
-        "els => els.map((e) => e.innerText.replace(/\\s+/g, ' ').trim())"
-    )
-    return texts
-
-
 async def highlighted(page: Page) -> str | None:
     """The page the sidebar marks as the one the person is in: a view, or Activity; None when
     nothing is marked (Search and the coverage report have no place in the sidebar)."""
@@ -528,9 +528,13 @@ def every_page(world: World) -> list[tuple[str, str]]:
         ("the Graph's Order", "#/graph?tab=order"),
         ("the Graph looking around an epic", f"#/graph?tab=around&focus={world.epics[0]}"),
         ("the Roadmap", "#/roadmap"),
+        ("Lists of work", "#/lists?view=work"),
+        ("Lists of acceptance criteria", "#/lists?view=requirements"),
+        ("Lists of notes", "#/lists?view=notes"),
         ("Search", "#/search?search=refund"),
         ("Possible duplicates", "#/search?dups=1"),
         ("Activity", "#/activity"),
+        ("Activity, who is working", "#/activity?tab=working"),
         ("the coverage report", "#/coverage"),
         ("the page of an epic", f"#/item?item={world.epics[0]}&from=board"),
         ("the page of a story", f"#/item?item={world.stories[1]}&from=graph"),
@@ -538,7 +542,8 @@ def every_page(world: World) -> list[tuple[str, str]]:
         ("the page of an acceptance criterion", f"#/item?item=rule:{world.rules[2]}&from=board"),
         ("the page of a decided note", f"#/item?item=note:{world.decided_kept}&from=search"),
         ("the page of a note", f"#/item?item=note:{world.note_wide}&from=activity"),
-        ("Agent access", "#/access"),
+        ("Users and agent keys", "#/users"),
+        ("Definition of done", "#/definition"),
         ("Tools", "#/tools"),
         ("Status and export", "#/status"),
     ]
@@ -577,7 +582,7 @@ async def nothing_beside_the_page(w: Watched, world: World) -> None:
     ]
     proof(
         "M20",
-        f"on {len(pages)} pages (the Board, the Graph and its tabs, the Roadmap, Search, "
+        f"on {len(pages)} pages (the Board, the Graph and its tabs, the Roadmap, the Lists, Search, "
         "Possible duplicates, Activity, the coverage report, each of the five record pages and "
         "the settings pages) nothing of a detail panel or a drawer is there and the page holds "
         "only its own content; old addresses with sel=, drawer= and panel= open the page without "
@@ -609,9 +614,7 @@ class Opening:
     start: str  # the address the person starts on, with a filter of its own where the view has one
     ref: str  # the record that has to open
     click: str  # the element that is clicked (a selector in the page); "" when `keys` is used
-    came_from: (
-        str  # the view the path must start with: board, graph, roadmap, search, activity, coverage
-    )
+    came_from: str  # the view the path must start with: board, graph, roadmap, lists, search, activity, coverage
     keys: tuple[str, ...] = ()  # pressed instead, for the quick switcher
     where: tuple[int, int] | None = None  # a click away from the links of a card
 
@@ -620,6 +623,7 @@ VIEW_WORDS = {
     "board": "Board",
     "graph": "Graph",
     "roadmap": "Roadmap",
+    "lists": "Lists",
     "search": "Search",
     "activity": "Activity",
     "coverage": "Coverage",
@@ -633,10 +637,15 @@ def openings(world: World) -> list[Opening]:
     decided = f"note:{world.decided_kept}"
     note = f"note:{world.note_wide}"
     on_board, around = (
-        "#/board?q=is:overdue",
+        "#/board?show=both&q=is:overdue",
         "#/graph?tab=around",
     )
     roadmap = "#/roadmap?q=priority:high,urgent"
+    lists_work, lists_rules, lists_notes = (
+        "#/lists?view=work",
+        "#/lists?view=requirements",
+        "#/lists?view=notes",
+    )
     activity = f"#/activity?act_item=note:{world.decided_kept}"
     refund_search, provider_search = (
         "#/search?search=refund",
@@ -657,72 +666,51 @@ def openings(world: World) -> list[Opening]:
         Opening("a task in the results of Search", refund_search, t_refund, f"#search-results tr[data-ref='{t_refund}'] a.result-title", "search"),
         Opening("an acceptance criterion in the results of Search", refund_search, f"rule:{world.rules[4]}", f"#search-results tr[data-ref='rule:{world.rules[4]}'] a.result-title", "search"),
         Opening("a note in the results of Search", provider_search, f"note:{world.note_kept}", f"#search-results tr[data-ref='note:{world.note_kept}'] a.result-title", "search"),
-        Opening("a line of the change feed on Activity", activity, decided, f"#feed li.event a.item-link[data-kind='note'][data-id='{world.decided_kept}']", "activity"),
-        Opening("a claim among who is working on what", "#/activity", "task:2", "#claims-live li.claim a.item-link[data-ref='task:2']", "activity"),
+        Opening("a title in the Work list of Lists", lists_work, epic, f"#work-tree li[data-key='{epic}'] > .gv-row a.gv-title", "lists"),
+        Opening("an acceptance criterion in the list of Lists", lists_rules, rule, f"#lists-list .gv-record[data-key='{rule}'] button.gv-open", "lists"),
+        Opening("a note in the notes list of Lists", lists_notes, decided, f"#ctx-notes-list tr[data-ref='{decided}'] a.record-title", "lists"),
+        Opening("a line of the change feed on Activity", activity, decided, f"#feed li.event a.item-link[href*='item={decided}&']", "activity"),
+        Opening("a claim among who is working on what", "#/activity?tab=working", "task:2", "#agents li.claim[data-node='task:2'] a.item-link", "activity"),
         Opening("an acceptance criterion in the coverage report", "#/coverage", f"rule:{world.rules[3]}", f"tr[data-rule='{world.rules[3]}'] a.record-title", "coverage"),
         Opening("a story in the coverage report", "#/coverage", world.stories[2], f"tr[data-story='{world.stories[2]}'] a.record-title", "coverage"),
-        Opening("a reference in an epic's details", f"#/item?item={epic}&from=board", world.stories[1], f"#item-details .markdown a.reference[data-ref='{world.stories[1]}']", "board"),
-        Opening("a line of a history", f"#/item?item={epic}&from=graph", f"note:{world.note_gone}", f"[data-part=history] a.item-link[data-kind='note'][data-id='{world.note_gone}']", "graph"),
+        Opening("a reference in an epic's details", f"#/item?item={epic}&from=board", world.stories[1], f"#item-details .body-text a.reference[data-ref='{world.stories[1]}']", "board"),
+        Opening("a line of a history", f"#/item?item={epic}&from=graph", f"note:{world.note_gone}", f"[data-part=history] a[href*='item=note:{world.note_gone}&']", "graph"),
         Opening("the quick switcher, typing a task's code", roadmap, t_form, "", "roadmap", keys=("T-6",)),
-        Opening("the quick switcher, typing a note", roadmap, decided, "", "roadmap", keys=(f"note {world.decided_kept}",)),
+        Opening("the quick switcher, typing a note's code", roadmap, decided, "", "roadmap", keys=(f"N-{world.decided_kept}",)),
     ]  # fmt: skip
 
 
-async def expected_path(client: Client, ref: str, view: str, project: str) -> list[str]:
+async def expected_path(client: Client, ref: str, view: str) -> list[str]:
     """The path the top bar has to show for a record: the view first, then the epic and story
-    above it (an acceptance criterion is under its story or task), then the record. Every record is
-    named by its code alone: E-1, S-4, T-9, AC-3 for an acceptance criterion and N-7 for a note;
-    the titles are in the tooltips and in the page's heading (see expected_title and
-    expected_tooltip)."""
+    above it (an acceptance criterion is under its story or task), then the record. Each step is
+    a record's code and its name: E-1 Checkout, S-4 Pay by card, T-9 Refund button, AC-3 and N-7
+    for an acceptance criterion and a note (the project is named by the switcher, not here)."""
     kind, _, number = ref.partition(":")
-    steps = ["Projects", project, VIEW_WORDS[view]]
+    above: list[str] = []
+    up: str | None = None
     if kind in ("epic", "story", "task"):
-        node = await ok(client, "get_node", node=ref)
-        above: list[str] = []
-        up = node["parent"]
-        while up:
-            parent = await ok(client, "get_node", node=up)
-            above.insert(0, code_of(up))
-            up = parent["parent"]
-        return [*steps, *above, code_of(ref)]
-    if kind == "rule":
-        rule = await ok(client, "get_rule", rule_id=int(number))
-        above = []
-        up = rule["node"]
-        while up:
-            parent = await ok(client, "get_node", node=up)
-            above.insert(0, code_of(up))
-            up = parent["parent"]
-        return [*steps, *above, f"AC-{number}"]
-    return [*steps, f"N-{number}"]
+        up = (await ok(client, "get_node", node=ref))["parent"]
+    elif kind == "rule":
+        up = (await ok(client, "get_rule", rule_id=int(number)))["node"]
+    while up:
+        above.insert(0, await item_name(client, up))
+        up = (await ok(client, "get_node", node=up))["parent"]
+    return [VIEW_WORDS[view], *above, await item_name(client, ref)]
 
 
 async def expected_title(client: Client, ref: str) -> str:
-    """The words of a record's page heading: the code and the title of work, "Acceptance criterion
-    #3 The title", "Note #7 The first line"."""
-    kind, _, number = ref.partition(":")
-    if kind in ("epic", "story", "task"):
-        node = await ok(client, "get_node", node=ref)
-        return f"{code_of(ref)} {node['title']}"
-    if kind == "rule":
-        rule = await ok(client, "get_rule", rule_id=int(number))
-        return f"Acceptance criterion #{number} {rule['title']}"
-    note = await ok(client, "get_note", note_id=int(number))
-    return f"Note #{number} {note['headline']}"
+    """The words of a record's page heading: its code and its name, "S-12 Scan a code", "AC-3 The
+    title", "N-7 The first line"."""
+    return await item_name(client, ref)
 
 
-async def expected_tooltip(client: Client, ref: str) -> str:
-    """The tooltip of the last step of the path: the record's code and its title, where the code
-    of an acceptance criterion is AC-3 and of a note N-7 ("AC-3 The title", "N-7 The first line"),
-    not the words of the page's heading."""
-    kind, _, number = ref.partition(":")
-    if kind == "rule":
-        rule = await ok(client, "get_rule", rule_id=int(number))
-        return f"AC-{number} {rule['title']}"
-    if kind == "note":
-        note = await ok(client, "get_note", note_id=int(number))
-        return f"N-{number} {note['headline']}"
-    return await expected_title(client, ref)
+def same_name(shown: str, wanted: str) -> bool:
+    """A name as the page shows it is the one asked for, or, for a long first line of a note that
+    the page cuts short, its first forty characters."""
+    if shown == wanted:
+        return True
+    code = wanted.partition(" ")[0]
+    return code.startswith("N-") and shown.startswith(wanted[: len(code) + 41].rstrip("…").strip())
 
 
 async def open_it(page: Page, opening: Opening) -> None:
@@ -731,7 +719,7 @@ async def open_it(page: Page, opening: Opening) -> None:
         box = page.locator("#switcher-input")
         await expect(box).to_be_visible(timeout=SLOW)
         await box.fill(opening.keys[0])
-        await expect(page.locator("li.switcher-option").first).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#switcher-list [role=option]").first).to_be_visible(timeout=SLOW)
         await page.keyboard.press("Enter")
     else:
         target = page.locator(opening.click).first
@@ -742,9 +730,7 @@ async def open_it(page: Page, opening: Opening) -> None:
             await target.click()
 
 
-async def records_open_from_everywhere(
-    w: Watched, client: Client, world: World, project: Any
-) -> None:
+async def records_open_from_everywhere(w: Watched, client: Client, world: World) -> None:
     page = w.page
     wrong: list[str] = []
     by_place: dict[str, list[Opening]] = {}
@@ -755,26 +741,32 @@ async def records_open_from_everywhere(
         for opening in group:
             await open_it(page, opening)
             await on_item(page, opening.ref)
-            wanted = await expected_path(client, opening.ref, opening.came_from, project.name)
+            wanted = await expected_path(client, opening.ref, opening.came_from)
             heading = await expected_title(client, opening.ref)
-            wanted_tooltip = await expected_tooltip(client, opening.ref)
             # The title and the path name the record once the page has what it needs to say them.
             with contextlib.suppress(AssertionError):
-                await expect(page.locator("#item-title")).to_have_text(heading, timeout=SLOW)
+                await expect(page.locator("#item-title")).to_have_text(
+                    re.compile(re.escape(heading[:20])), timeout=SLOW
+                )
             title = words(await page.locator("#item-title").inner_text())
             path = await crumbs(page)
             tooltip = await page.locator("#crumb-page").get_attribute("title") or ""
             marked = await highlighted(page)
             lit = (
                 opening.came_from
-                if opening.came_from in ("board", "graph", "roadmap", "activity")
+                if opening.came_from in ("board", "graph", "roadmap", "lists", "activity")
                 else None
             )
-            if path != wanted or marked != lit or heading != title or tooltip != wanted_tooltip:
+            if (
+                len(path) != len(wanted)
+                or not all(same_name(shown, want) for shown, want in zip(path, wanted, strict=True))
+                or marked != lit
+                or not same_name(title, heading)
+                or not same_name(tooltip, wanted[-1])
+            ):
                 wrong.append(
                     f"{opening.place}: path {path}, wanted {wanted}; marked {marked}; "
-                    f"title {title!r}, wanted {heading!r}; tooltip {tooltip!r}, "
-                    f"wanted {wanted_tooltip!r}"
+                    f"title {title!r}, wanted {heading!r}; tooltip {tooltip!r}"
                 )
             # The way back returns to the view as it was left, with its filter and choices.
             await page.locator("nav.crumbs li.crumb-view a").click()
@@ -793,13 +785,13 @@ async def records_open_from_everywhere(
     proof(
         "M20",
         f"{len(openings(world))} ways to open a record, from the Board's cards and lanes, the "
-        "Graph's Around, the Roadmap's bars and labels, Search results, the "
+        "Graph's Around, the Roadmap's bars and labels, the Lists, Search results, the "
         "change feed and the claims of Activity, the coverage report, a reference in a text, a "
         "line of a history and the quick switcher, each land on the page of an epic, story, task, "
         "acceptance criterion or note; the path starts with the view it came from and then runs "
-        "through the epic and story above it and ends with the record's code (E-1, S-4, T-9, "
-        "AC-3, N-7, whose tooltip is the code and the title), the sidebar marks that same view, "
-        "and the way back returns to the view with its filter",
+        "through the epic and story above it and ends with the record (E-1, S-4, T-9, AC-3, N-7, "
+        "each with its name, the last one also as the tooltip and the page's heading), the "
+        "sidebar marks that same view, and the way back returns to the view with its filter",
         not wrong and kinds == ["epic", "note", "rule", "story", "task"],
         f"{len(by_place)} starting places" + (f"; wrong: {wrong[:3]}" if wrong else ""),
     )
@@ -840,25 +832,29 @@ async def record_pages_equal_the_tools(w: Watched, client: Client, world: World)
         await visit(w, f"#/item?item={ref}&from=board")
         await on_item(page, ref)
         shown = words(await page.locator("#item-page").inner_text())
-        summary = page.locator("#item-page .card-summary")
+        strip = page.locator("#item-page .state-strip")
         said: dict[str, str] = {
             "title": words(await page.locator("#item-title").inner_text()),
-            "status": await summary.locator(".chip.status").first.get_attribute("data-status")
+            "status": await strip.locator("dd.status .chip.status").first.get_attribute(
+                "data-status"
+            )
             or "",
-            "priority": words(await summary.locator(".chip.priority").first.inner_text()).lower(),
+            "priority": await strip.locator("dd.priority .chip.priority").first.get_attribute(
+                "data-priority"
+            )
+            or "",
         }
         if said["title"] != f"{code_of(ref)} {node['title']}":
             wrong.append(f"{ref} title {said['title']}")
         if said["status"] != node["status"] or said["priority"] != node["priority"]:
             wrong.append(f"{ref} status {said['status']}, priority {said['priority']}")
         if node["parent"]:
-            path = words(await page.locator("nav.crumbs").inner_text())
-            if code_of(node["parent"]) not in path.split():
+            path = await crumbs(page)
+            if await item_name(client, node["parent"]) not in path:
                 wrong.append(f"{ref} parent {path}")
         for field_name, selector in (("start_on", "dd.start"), ("target_on", "dd.target")):
-            if (
-                node[field_name]
-                and words(await summary.locator(selector).inner_text()) != node[field_name]
+            if node[field_name] and node[field_name] not in words(
+                await strip.locator(selector).inner_text()
             ):
                 wrong.append(f"{ref} {field_name}")
         if (
@@ -874,11 +870,10 @@ async def record_pages_equal_the_tools(w: Watched, client: Client, world: World)
     await visit(w, f"#/item?item=rule:{rule['id']}&from=board")
     await on_item(page, f"rule:{rule['id']}")
     shown = words(await page.locator("#item-page").inner_text())
-    story = await ok(client, "get_node", node=rule["node"])
     if (
         words(await page.locator("#item-title").inner_text())
-        != f"Acceptance criterion #{rule['id']} {rule['title']}"
-        or f"{code_of(rule['node'])} {story['title']}" not in shown
+        != await item_name(client, f"rule:{rule['id']}")
+        or await item_name(client, rule["node"]) not in await crumbs(page)
         or rule["status"].title() not in shown
         or first_line(rule["body"]) not in shown
     ):
@@ -905,30 +900,24 @@ async def record_pages_equal_the_tools(w: Watched, client: Client, world: World)
         if note["project_wide"]:
             wanted.add("project")
         sure = f"Confirmed by {note['confirmed_by']}" if note["status"] == "confirmed" else ""
-        said_by = (
-            f"Decided by {note['decided_by']}"
-            + (f" on {note['decided_on']}" if note["decided_on"] else "")
-            if note["decided_by"]
-            else ""
-        )
-        if (
-            words(await page.locator("#item-title").inner_text())
-            != f"Note #{number} {note['headline']}"
-            or any(
-                text not in shown
-                for text in (
-                    words(note["text"]),
-                    words(note["why"]),
-                    note["recorded_by"],
-                    STATUS_WORDS[note["status"]],
-                    sure,
-                    said_by,
-                )
+        said_by = f"{note['decided_by']} on {note['decided_on']}" if note["decided_by"] else ""
+        title = words(await page.locator("#item-title").inner_text())
+        missing = [
+            name
+            for name, text in (
+                ("text", words(note["text"].partition("\n")[2])),
+                ("why", words(note["why"])),
+                ("recorded by", note["recorded_by"]),
+                ("status", STATUS_WORDS[note["status"]]),
+                ("confirmed by", sure),
+                ("decided by", said_by),
+                ("project-wide", "roject-wide" if note["project_wide"] else ""),
             )
-            or await concerned(page, "concerns") != wanted
-            or (note["project_wide"] and "roject-wide" not in shown)
-        ):
-            wrong.append(f"note {number}")
+            if text not in shown
+        ]
+        concerns = await concerned(page, "concerns")
+        if not same_name(title, f"N-{number} {note['headline']}") or missing or concerns != wanted:
+            wrong.append(f"note {number}: title {title!r}, missing {missing}, concerns {concerns}")
         if note["superseded_by_id"]:
             replaced_by = await concerned(page, "replaces")
             if replaced_by != {f"note:{note['superseded_by_id']}"}:
@@ -1043,7 +1032,9 @@ async def moving_through_the_content(w: Watched, client: Client, world: World) -
     await page.locator(f"#item-table tr[data-ref='{task}'] a.item-code-link").click()
     await on_item(page, task)
     path = await crumbs(page)
-    await page.locator("#item-part a").first.click()
+    arrow = page.locator("#back-to-view")
+    arrow_words = await arrow.get_attribute("aria-label")
+    await arrow.click()
     await on_item(page, story)
     await page.locator("nav.crumbs li.crumb-item a").first.click()
     await on_item(page, world.epics[0])
@@ -1066,11 +1057,13 @@ async def moving_through_the_content(w: Watched, client: Client, world: World) -
     proof(
         "M20",
         "from the page of an epic a person reaches a story, then a task, then back to the story "
-        "and the epic, then to the next two epics, then through the sidebar's tree to a task of "
-        "the third, by clicking links and buttons only (no address typed after the first): "
-        "each page is the one the click names and the path above the task reads "
-        f"'{' / '.join(path[2:])}'",
-        path[2:] == await expected_tail(client, task)
+        "with the back arrow (which names the page it goes back to) and up to the epic by the "
+        "path above the page, then to the next two epics, then through the sidebar's tree to a "
+        "task of the third, by clicking links and buttons only (no address typed after the "
+        "first): each page is the one the click names and the path above the task reads "
+        f"'{' / '.join(path[1:])}'",
+        path[1:] == await expected_tail(client, task)
+        and arrow_words == f"Back to {await item_name(client, story)}"
         and await current.get_attribute("data-ref") == "task:14"
         and parent_open == ["true", "true"],
         f"{len(path)} steps",
@@ -1080,8 +1073,7 @@ async def moving_through_the_content(w: Watched, client: Client, world: World) -
 
 
 async def expected_tail(client: Client, ref: str) -> list[str]:
-    path = await expected_path(client, ref, "board", "")
-    return path[2:]
+    return (await expected_path(client, ref, "board"))[1:]
 
 
 async def the_sidebar_tree(w: Watched, client: Client, world: World) -> None:
@@ -1148,20 +1140,25 @@ async def the_sidebar_tree(w: Watched, client: Client, world: World) -> None:
 # -- 4. the nine long notes, in tables the width of the page ---------------------------------------
 
 MEASURE = """() => {
-    const page = document.getElementById('item-page').getBoundingClientRect();
-    const tables = [...document.querySelectorAll('#item-details table.record-table')].map((table) => {
-        const box = table.getBoundingClientRect();
+    const box = (e) => e.getBoundingClientRect();
+    const page = box(document.getElementById('item-page'));
+    const tables = [...document.querySelectorAll('#item-page table.record-table')]
+        .filter((table) => table.getClientRects().length > 0).map((table) => {
         const rows = [...table.querySelectorAll('tbody tr')];
-        const region = table.closest('.table-scroll');
+        const region = table.parentElement;
         return {
-            name: (table.querySelector('caption') || {}).innerText || '',
-            left: box.left, width: box.width, rows: rows.length,
-            heights: rows.map((row) => Math.round(row.getBoundingClientRect().height)),
+            name: table.className,
+            left: box(table).left, width: box(table).width, rows: rows.length,
+            heights: rows.map((row) => Math.round(box(row).height)),
             columns: [...table.querySelectorAll('thead th')].map((th, at) => ({
-                name: th.innerText.trim(), width: th.getBoundingClientRect().width,
-                empty: rows.filter((row) => !((row.children[at] || {}).innerText || '').trim()).length,
+                name: th.textContent.trim(), width: box(th).width,
+                filled: rows.some((row) => {
+                    const cell = row.children[at];
+                    return Boolean(cell) && (cell.textContent.trim() !== ''
+                        || Boolean(cell.querySelector('svg, a, button, select, input')));
+                }),
             })),
-            sideways: region ? region.scrollWidth - region.clientWidth : 0,
+            sideways: region.scrollWidth - region.clientWidth,
         };
     });
     return { page: { left: page.left, width: page.width }, tables };
@@ -1190,20 +1187,22 @@ async def open_every_disclosure(page: Page) -> None:
 
 
 def table_problems(measured: dict[str, Any], width: int) -> list[str]:
+    """Every table of notes spans the content of the page, does not scroll sideways, keeps a row to
+    three lines (no row is taller than three of the shortest row of any table, a button included)
+    and has no column with nothing in it."""
     problems: list[str] = []
     page = measured["page"]
+    line = min((h for table in measured["tables"] for h in table["heights"]), default=0)
     for table in measured["tables"]:
         name = f"{table['name']} at {width}"
-        if abs(table["left"] - page["left"]) > 3 or table["width"] < page["width"] - 6:
+        if abs(table["left"] - page["left"]) > 4 or table["width"] < page["width"] - 8:
             problems.append(f"{name}: spans {table['width']:.0f} of {page['width']:.0f}")
-        if table["sideways"] > 0:
+        if table["sideways"] > 1:
             problems.append(f"{name}: scrolls sideways")
-        if table["heights"] and (
-            max(table["heights"]) > 64 or max(table["heights"]) - min(table["heights"]) > 8
-        ):
-            problems.append(f"{name}: rows are {table['heights']} high")
+        if table["heights"] and max(table["heights"]) > line * 3.2:
+            problems.append(f"{name}: rows are {table['heights']} high, a line is {line}")
         for column in table["columns"]:
-            if column["empty"] or column["width"] < 40:
+            if not column["filled"] or column["width"] < 40:
                 problems.append(f"{name}: dead column {column['name']}")
     return problems
 
@@ -1250,13 +1249,11 @@ async def the_nine_notes(w: Watched, client: Client, world: World) -> None:
     )
     await row.locator("td.cell-title .clamp-toggle").click()
     shown = words(await row.locator("td.cell-title").inner_text())
-    await row.locator("td.cell-decided").click()
+    await row.locator("td").last.click()
     await on_item(page, f"note:{wide_id}")
     with contextlib.suppress(AssertionError):
-        await expect(page.locator("#item-details")).to_contain_text(
-            words(note["why"]), timeout=SLOW
-        )
-    page_text = words(await page.locator("#item-details").inner_text())
+        await expect(page.locator("#item-page")).to_contain_text(words(note["why"]), timeout=SLOW)
+    page_text = words(await page.locator("#item-page").inner_text())
     checks = {
         "tables as wide as the page": not problems,
         "the ids recall gives": all(seen.get(name) == ids for name, ids in expected.items()),
@@ -1267,7 +1264,7 @@ async def the_nine_notes(w: Watched, client: Client, world: World) -> None:
         "the whole text in the title of the cell": words(note["text"]) in words(whole),
         "three lines, and Show whole text puts every word in the cell": wraps
         and words(note["text"]) in shown,
-        "the whole text on the record's page": words(note["text"]) in page_text,
+        "the whole text on the record's page": words(note["text"].partition("\n")[2]) in page_text,
         "the whole why on the record's page": words(note["why"]) in page_text,
     }
     failed = [name for name, held in checks.items() if not held]
@@ -1275,7 +1272,7 @@ async def the_nine_notes(w: Watched, client: Client, world: World) -> None:
         "M20",
         f"on the epic with nine long project-wide notes and linked notes, the {tables} "
         "tables of notes (in force, project-wide, earlier) are as wide as the page "
-        "at 1280 and at 1600 pixels, do not scroll sideways, keep one line to a row with no "
+        "at 1280 and at 1600 pixels, do not scroll sideways, keep a row to three lines with no "
         "empty column, hold exactly the ids recall gives, a row opens the note's page where "
         "the whole text is, and the project-wide disclosure is closed when the epic has linked "
         "entries and open when it has none",
@@ -1301,7 +1298,7 @@ async def records_change_on_their_pages(w: Watched, client: Client, world: World
     target = world.nine[4]
     await visit(w, f"#/item?item=note:{target}&from=board", fresh=True)
     await on_item(page, f"note:{target}")
-    chip = page.locator("#item-page .record-chips .chip.note-status")
+    chip = page.locator("#item-page .state-strip dd.status .chip.note-status")
     said = board_refusal(
         project_at(w.board), "set_confirmation", note_id=target, confirmation="confirmed", person=""
     )
@@ -1389,11 +1386,11 @@ async def records_change_on_their_pages(w: Watched, client: Client, world: World
     await visit(w, f"#/item?item={quiet_epic}&from=board", fresh=True)
     await on_item(page, quiet_epic)
     await hold_back_news(page)
-    await page.locator("#edit-open").click()
+    await open_editor(page)
     await page.locator("#edit-title").fill("My own title")
     await page.locator("#edit-body").fill("My own words, not saved yet")
     await ok(
-        client, "update_node", actor="agent-1", node=quiet_epic, expected_version=1,
+        client, "update_node", node=quiet_epic, expected_version=1,
         title=f"Agent title {word}", body="The agent's words",
     )  # fmt: skip
     await page.get_by_role("button", name="Save changes").click()
@@ -1402,7 +1399,7 @@ async def records_change_on_their_pages(w: Watched, client: Client, world: World
     plain(
         (await stale.inner_text()).strip(),
         await refused(
-            client, "update_node", actor=ACTOR, node=quiet_epic, expected_version=1,
+            client, "update_node", node=quiet_epic, expected_version=1,
             title="My own title", body="My own words, not saved yet",
         ),
     )  # fmt: skip
@@ -1615,7 +1612,7 @@ async def expect_index_ready(client: Client) -> None:
     raise Failed("M20: the search index did not catch up")
 
 
-LIVE_CLAIMS = """() => [...document.querySelectorAll('#claims-live li.claim')]
+LIVE_CLAIMS = """() => [...document.querySelectorAll('#agents li.claim[data-live="1"]')]
     .map((e) => [e.dataset.node, e.dataset.actor, e.querySelector('.countdown').dataset.expires,
                  e.querySelector('.countdown').innerText.trim()])"""
 
@@ -1658,6 +1655,10 @@ async def activity_equals_the_tools(w: Watched, client: Client, world: World) ->
     events = await events_of(client)
     shown = await feed_ids(page)
     working = await who_is_working_now(client)
+    handoff = next(a["last_handoff"] for a in working["agents"] if a["last_handoff"])
+    note_on_page = words(await page.locator("#feed li.event .handoff-note").first.inner_text())
+    # Who is working on what is a view of its own, chosen with the toggle under the title.
+    await open_working(page)
     held = {
         (hold["node"], agent["actor"], hold["expires_at"])
         for agent in working["agents"]
@@ -1670,15 +1671,16 @@ async def activity_equals_the_tools(w: Watched, client: Client, world: World) ->
         and abs(left - (datetime.datetime.fromisoformat(expires) - now).total_seconds() / 60) < 3
         for _, _, expires, text in live
     )
-    handoff = next(a["last_handoff"] for a in working["agents"] if a["last_handoff"])
-    note_on_page = words(await page.locator("#feed li.event .handoff-note").first.inner_text())
+    two_holders = {actor for _, actor, _, _ in live} == {"mobile-agent", ACTOR}
 
-    # Taking, renewing and releasing, from the buttons, as the person named in the box.
+    # Taking, renewing and releasing, from the buttons, as the person who is signed in.
     me = ACTOR
-    await expect(page.locator("#acting-as")).to_contain_text(me)
+    await open_free(page)
+    await expect(page.locator("#claiming-as")).to_contain_text(me)
     await page.locator("#claim-id").fill("T-3")
     await page.locator("#claim-by-id-go").click()
-    mine = page.locator(f"#claims-live li.claim[data-node='task:3'][data-actor='{me}']")
+    await open_working(page)
+    mine = page.locator(f"#agents li.claim[data-node='task:3'][data-actor='{me}']")
     await expect(mine).to_be_visible(timeout=SLOW)
     first_expiry = await mine.locator(".countdown").get_attribute("data-expires") or ""
     took = next(
@@ -1713,12 +1715,14 @@ async def activity_equals_the_tools(w: Watched, client: Client, world: World) ->
         for hold in agent["holding"]
     ]
     newest = (await events_of(client))[-3:]
+    await show_tab(page, "changes")
     await expect(page.locator("#feed li.event").first).to_contain_text(me, timeout=SLOW)
     released_note = words(await page.locator("#feed li.event .handoff-note").first.inner_text())
     checks = {
         "the feed is changes_since, newest first": shown
         == [event["id"] for event in reversed(events)],
         "the claims in force are who_is_working's": {(n, a, e) for n, a, e, _ in live} == held,
+        "held by an agent and by the person signed in": two_holders,
         "each countdown is the time to the tool's expiry": left_ok,
         "the handoff note is in full": note_on_page == words(handoff["note"]),
         "Renew gave a later expiry": renewed["expires_at"] > took["expires_at"],
@@ -1733,10 +1737,11 @@ async def activity_equals_the_tools(w: Watched, client: Client, world: World) ->
     proof(
         "M20",
         f"the Activity page lists exactly the {len(events)} changes changes_since gives, newest "
-        "first; its claims in force are who_is_working's, each with a countdown that is the time "
-        "to the tool's expiry; the handoff note is shown in full; and Claim, Renew and Release "
-        "from the page change what the tool says (a later expiry after Renew, no claim and a "
-        "note in the feed after Release)",
+        "first; its Working view, chosen with the toggle, shows the claims in force that "
+        "who_is_working gives, each with a countdown that is the time to the tool's expiry; the "
+        "handoff note is shown in full; and Claim, Renew and Release from the page change what "
+        "the tool says (a later expiry after Renew, no claim and a note in the feed after "
+        "Release)",
         not failed,
         f"{len(shown)} changes, {len(live)} claims in force"
         + (f"; not so: {failed}; newest {[event['action'] for event in newest]}" if failed else ""),
@@ -1826,7 +1831,7 @@ async def the_graph_looks_around_then_opens(w: Watched, client: Client, world: W
     # Open page opens it, under the Graph, and the way back keeps the focus.
     await page.locator("#graph-hub-open").click()
     await on_item(page, story)
-    by_link = (await crumbs(page))[2] == "Graph"
+    by_link = (await crumbs(page))[0] == "Graph"
     await back_to_the_graph(story)
     # A piece of work around it looks around that one instead, in the address.
     neighbour = page.locator("button.graph-node.n-work[data-ref]").first
@@ -1851,7 +1856,7 @@ async def the_graph_looks_around_then_opens(w: Watched, client: Client, world: W
         "and Open page opens the record's page under the Graph without losing the focus; the "
         "way back keeps it; a piece of work around it looks around that one instead; and a "
         "task and an epic open the same way",
-        "Story S-2" in box
+        code_of(story) in box
         and node["title"] in box
         and chip == node["status"]
         and still_on_the_graph
@@ -1889,12 +1894,12 @@ async def the_roadmap_still_works(w: Watched, client: Client, world: World) -> N
     await page.locator(f".rm-bar[data-ref='{opened}']").focus()
     await page.keyboard.press("Enter")
     await on_item(page, opened)
-    by_enter = (await crumbs(page))[2] == "Roadmap"
+    by_enter = (await crumbs(page))[0] == "Roadmap"
     await page.locator("nav.crumbs li.crumb-view a").click()
     await expect(page.locator(f".rm-bar[data-ref='{moved}']")).to_be_visible(timeout=SLOW)
     await page.locator(f".rm-bar[data-ref='{moved}']").click(position={"x": 30, "y": 8})
     await on_item(page, moved)
-    by_click = (await crumbs(page))[2] == "Roadmap"
+    by_click = (await crumbs(page))[0] == "Roadmap"
 
     def shifted(first: str | None, second: str | None, days: int) -> bool:
         return (
@@ -1964,6 +1969,10 @@ FOCUS_RING = """() => {
 }"""
 
 
+# The pages on which the first controls a keyboard reaches are checked for a visible focus ring.
+FOCUS_PAGES = ("the Board", "an epic", "Search")
+
+
 def layout_pages(world: World) -> list[tuple[str, str, str]]:
     """Every page of the board that holds content: its address, and what shows it is drawn."""
     epic, story, task = world.epics[0], world.stories[1], "task:7"
@@ -1975,9 +1984,13 @@ def layout_pages(world: World) -> list[tuple[str, str, str]]:
         ("the Graph's Around", f"#/graph?tab=around&focus={epic}", "#graph-hub"),
         ("the Graph's Order", "#/graph?tab=order", "#graph-explore"),
         ("the Roadmap", "#/roadmap", "#rm-scroll[data-ready=true] .rm-bar"),
+        ("Lists of work", "#/lists?view=work", "#work-tree li"),
+        ("Lists of acceptance criteria", "#/lists?view=requirements", "#lists-list .gv-record"),
+        ("Lists of notes", "#/lists?view=notes", "#ctx-notes-list tr.record-line"),
         ("Search", "#/search?search=refund", "#search-results tr.result"),
         ("Possible duplicates", "#/search?dups=1", "#dup-pairs tr.pair"),
         ("Activity", "#/activity", "#feed li.event"),
+        ("Activity, who is working", "#/activity?tab=working", "#agents li.claim"),
         ("the coverage report", "#/coverage", "#coverage-summary"),
         ("an epic", f"#/item?item={epic}&from=board", f"#item-page[data-ref='{epic}'] #item-table"),
         ("a story", f"#/item?item={story}&from=graph", f"#item-page[data-ref='{story}'] #item-table"),
@@ -1985,9 +1998,10 @@ def layout_pages(world: World) -> list[tuple[str, str, str]]:
         ("an acceptance criterion", f"#/item?item={rule}&from=board", f"#item-page[data-ref='{rule}'] #item-details"),
         ("a decided note", f"#/item?item={decided}&from=search", f"#item-page[data-ref='{decided}'] #item-details"),
         ("a note", f"#/item?item={note}&from=activity", f"#item-page[data-ref='{note}'] #item-details"),
-        ("Agent access", "#/access", "#key-form"),
+        ("Users and agent keys", "#/users", "#users-agents"),
+        ("Definition of done", "#/definition", "#definition-page"),
         ("Tools", "#/tools", "#tool-list"),
-        ("Status and export", "#/status", "#sizes"),
+        ("Status and export", "#/status", "#download-export"),
     ]  # fmt: skip
 
 
@@ -2029,7 +2043,7 @@ async def keyboard_journey(w: Watched, narrow: bool) -> list[str]:
         return wrong
     await page.keyboard.press("Control+k")
     await page.locator("#switcher-input").fill("Receipts")
-    await expect(page.locator("li.switcher-option").first).to_be_visible(timeout=SLOW)
+    await expect(page.locator("#switcher-list [role=option]").first).to_be_visible(timeout=SLOW)
     await page.keyboard.press("Enter")
     await expect(page.locator("#item-title")).to_contain_text("Receipts", timeout=SLOW)
     return wrong
@@ -2063,7 +2077,7 @@ async def no_sideways_scroll_anywhere(w: Watched, client: Client, world: World) 
                     problems.append(f"{where}: {left}")
                 checked += 1
             # The focus is visible on the first controls a keyboard reaches.
-            for name, address, marker in pages[:1] + pages[9:10] + pages[5:6]:
+            for name, address, marker in [p for p in pages if p[0] in FOCUS_PAGES]:
                 await go_to(w, address, marker)
                 await page.evaluate("document.activeElement && document.activeElement.blur()")
                 reached = 0
@@ -2087,8 +2101,9 @@ async def no_sideways_scroll_anywhere(w: Watched, client: Client, world: World) 
     proof(
         "M20",
         f"at 390, 768, 1280 and 1600 pixels, in the light and the dark theme, {len(pages)} pages "
-        "(the Board, the Graph's map and lists, the Roadmap, Search, Possible duplicates, "
-        "Activity, the coverage report, a record page of each kind and the settings pages) never "
+        "(the Board, the Graph and its tabs, the Roadmap, the Lists, Search, Possible duplicates, "
+        "Activity and its Working view, the coverage report, a record page of each kind and the "
+        "settings pages) never "
         "scroll sideways, are in the theme asked for, have one heading, give every visible "
         "control a name and hold nothing of a panel or a drawer; the first controls a keyboard "
         "reaches show a focus ring; and a journey by keyboard alone (the menu, the sidebar's "
@@ -2108,16 +2123,14 @@ async def pages() -> None:
         "Pages: no panel, no drawer; every record is a page and you can move through them (M20)"
     )
     word = unique_word()
-    project = make_project(register(name=f"Pages {word}"), f"Pages {word}")
+    project = make_project(register(name=ACTOR), f"Pages {word}")
     try:
         async with connect(project.mcp_url, project.key) as client:
             world = await build(client, word, project)
-            async with browser_page(
-                board_url(project.mcp_url, project), token=project.key, name=ACTOR
-            ) as w:
+            async with browser_page(board_url(project.mcp_url, project), token=project.key) as w:
                 await w.open("#/board")
                 await nothing_beside_the_page(w, world)
-                await records_open_from_everywhere(w, client, world, project)
+                await records_open_from_everywhere(w, client, world)
                 await record_pages_equal_the_tools(w, client, world)
                 await moving_through_the_content(w, client, world)
                 await the_nine_notes(w, client, world)

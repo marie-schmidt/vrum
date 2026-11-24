@@ -1,4 +1,4 @@
-"""The semantic index: embeddings of epics, stories, acceptance criteria and notes. It is
+"""The semantic index: embeddings of epics, stories, tasks, acceptance criteria and notes. It is
 derived from the graph, can be dropped at any time, and never decides anything.
 
 This module is the only one that writes to the index tables (it also creates and drops them): the
@@ -38,8 +38,8 @@ from vrum.items import NamedItem, named
 
 log = logging.getLogger("vrum.indexing")
 
-# The types of thing that are embedded. A task is found by exact words only.
-INDEXED_TYPES = ("epic", "story", "rule", "note")
+# The types of thing that are embedded.
+INDEXED_TYPES = ("epic", "story", "task", "rule", "note")
 # The biggest vector PostgreSQL's vector type can hold.
 _MOST_DIMENSIONS = 16000
 

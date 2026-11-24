@@ -1,8 +1,9 @@
 """Who may talk to the server, and how much they may send.
 
 The MCP endpoint needs an agent key for a project, as `Authorization: Bearer <key>`. A request with
-no key, a key that is wrong or revoked, or the wrong sort of header is refused before its body is
-read. The health check and the board's page files hold no data and are open. The board's own calls
+no key, a key that is wrong, revoked or past its last day, or the wrong sort of header is refused
+before its body is read. The health check and the board's page files hold no data and are open.
+The board's own calls
 (under /board/api) are checked by the board against the person's session, because they carry a
 cookie and not a key. Every request with more bytes than the limit is refused before it is
 handled. Each refusal says in plain words what to do. Nothing a caller sent in a header is ever
@@ -17,7 +18,7 @@ from typing import Any, Protocol
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY, KeyAccess
+from vrum.accounts import BAD_AGENT_KEY, NO_AGENT_KEY, KeyAccess, KeyExpired
 from vrum.logs import event
 
 log = logging.getLogger("vrum.access")
@@ -108,8 +109,11 @@ class AccessGuard:
         key, reason = bearer_key(header)
         if key is None:
             return (reason or "no_key"), NO_AGENT_KEY if reason == "no_key" else NOT_A_BEARER
-        if await self._keys.project_for_key(key) is None:
-            return "wrong_key", BAD_AGENT_KEY
+        try:
+            if await self._keys.project_for_key(key) is None:
+                return "wrong_key", BAD_AGENT_KEY
+        except KeyExpired as expired:
+            return "key_expired", str(expired)
         return None
 
     async def _read_unannounced_body(self, receive: Receive) -> Receive | None:

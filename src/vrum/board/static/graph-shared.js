@@ -4,7 +4,7 @@
 // anything: every call reads the store as it is now.
 
 import { h, s as element } from './dom.js';
-import { todayDay, toDay } from './dates.js';
+import { lateDaysOf } from './dates.js';
 import { icon } from './icons.js';
 import { KIND_ORDER, nodeCode } from './labels.js';
 import { store } from './store.js';
@@ -59,7 +59,6 @@ export function workModel() {
     if (!kids.has(node.parent)) kids.set(node.parent, []);
     kids.get(node.parent).push(node);
   }
-  const today = todayDay();
   const model = {
     list,
     epics: list.filter((node) => node.kind === 'epic'),
@@ -84,10 +83,7 @@ export function workModel() {
       return { done: node.progress_done || 0, total: node.progress_total || 0 };
     },
     // Days past the day it was due, 0 when it is not late.
-    late(ref) {
-      const node = store.nodes.get(ref);
-      return node && node.overdue && node.target_on ? Math.max(1, today - toDay(node.target_on)) : 0;
-    },
+    late: (ref) => (store.nodes.has(ref) ? lateDaysOf(store.nodes.get(ref)) : 0),
     waitingOn: (ref) => (store.nodes.get(ref)?.waiting_on || []).filter((one) => store.nodes.has(one)),
     // The refs of everything under a node, the node included.
     subtree(ref) {
@@ -127,15 +123,6 @@ export function linksOf(ref) {
 // -- small pieces of page ------------------------------------------------------------------------
 
 export const code = (text) => h('span', { class: 'graph-x-code mono' }, text);
-
-export function dueChip(model, ref) {
-  const node = model.node(ref);
-  if (!node || !node.target_on) return null;
-  const late = model.late(ref);
-  return late > 0
-    ? h('span', { class: 'chip warn' }, icon('clock', { size: 14 }), `Overdue ${late} ${late === 1 ? 'day' : 'days'}`)
-    : h('span', { class: 'chip' }, icon('calendar', { size: 14 }), `Due ${node.target_on}`);
-}
 
 export function toggle(label, iconName, pressed, onclick, props = {}) {
   return h(

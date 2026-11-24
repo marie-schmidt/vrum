@@ -33,7 +33,7 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
-from tests.world import api, make_project, register, the_project
+from tests.world import api, make_key, make_project, register, the_project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -281,6 +281,24 @@ async def test_the_health_check_and_the_page_files_are_the_only_open_doors_and_h
         assert "not signed in" in body.decode() and the_token() not in body.decode()
     # The tool route of the old, install-wide board is gone.
     assert request(root + "/board/api/tool/list_nodes", key=the_token())[0] in (404, 405)
+
+
+async def test_a_connection_that_waits_a_few_seconds_between_requests_is_still_there(
+    server_url: str,
+) -> None:
+    """An agent that thinks for a while between two calls reuses its connection. The server used to
+    close an idle one after five seconds, and a request sent as it closed failed with "Server
+    disconnected without sending a response"; an idle connection is now kept much longer."""
+    connection = open_connection(server_url)
+    try:
+        for attempt in range(2):
+            connection.request("GET", "/health")
+            answer = connection.getresponse()
+            assert (answer.status, answer.read()) == (200, b'{"status":"ok"}'), attempt
+            if attempt == 0:
+                await anyio.sleep(8)
+    finally:
+        connection.close()
 
 
 # -- the size of a request -------------------------------------------------------------------------
@@ -567,6 +585,9 @@ PAGED = (
     "list_rules",
     "rule_history",
     "coverage_report",
+    "list_asks",
+    "list_plans",
+    "list_placements",
     "list_notes",
     "note_history",
     "recall",
@@ -580,6 +601,14 @@ PAGED = (
 # one item's own links. A new tool with a list that is in none of these groups fails the test
 # below, so that it is decided on purpose.
 BOUNDED = {
+    "needs_a_person",
+    "suggest_parent",
+    "propose_placement",
+    "decide_placement",
+    "approve_plan",
+    "request_plan_changes",
+    "revise_plan",
+    "list_plan_templates",
     "create_node",
     "get_node",
     "update_node",
@@ -600,6 +629,11 @@ BOUNDED = {
     "set_check",
     # One entry for each person or agent who has taken work: as many as there are names.
     "who_is_working",
+    # The two tools of a key that runs code: a line for each of the functions it has, or of the
+    # names it asked for (at most 50), and the calls (at most 200) and log lines (at most 16 KB)
+    # of one script.
+    "explore",
+    "run",
 }
 
 
@@ -608,7 +642,11 @@ async def test_every_tool_that_returns_a_list_pages_it_or_is_known_to_be_bounded
 ) -> None:
     pages: set[str] = set()
     lists: set[str] = set()
-    for tool in (await client.list_tools()).tools:
+    # The tools of a key that runs code are not in the list the test harness's key sees.
+    own = make_project(register())
+    async with connect(own.mcp_url, make_key(own, "code-agent", code_mode=True)) as coder:
+        everything = [*(await client.list_tools()).tools, *(await coder.list_tools()).tools]
+    for tool in everything:
         schema = json.dumps(tool.output_schema or {})
         properties = (tool.output_schema or {}).get("properties", {})
         if '"next_' in schema:

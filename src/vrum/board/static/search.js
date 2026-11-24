@@ -10,13 +10,14 @@
 // own choices). A search always uses exact words and meaning together.
 
 import { Refusal, callPaged } from './api.js';
-import { itemLink, ui } from './ctx.js';
+import { itemLink, recordCode, ui } from './ctx.js';
 import { clear, h, plural, put } from './dom.js';
 import * as duplicates from './duplicates.js';
 import { icon } from './icons.js';
 import { KIND, anyStatusIcon, codeOf, kindIcon, nodeCode, nodeRef, parseNodeRef, plainNoteStatus, plainRequirementStatus, statusChip, statusLabel } from './labels.js';
 import { pageHeader } from './page.js';
-import { epicOf, store } from './store.js';
+import { REFERENCE_PATTERN } from './references.js';
+import { describeItem, ensureContext, epicOf, store } from './store.js';
 
 const FIRST = 50;
 const MATCHED = { words: 'Exact words', meaning: 'Meaning (a suggestion)', both: 'Words and meaning' };
@@ -156,6 +157,7 @@ function buildResults() {
       {
         class: 'search-form',
         role: 'search',
+        'aria-label': 'Search by words and meaning',
         onsubmit: (event) => {
           event.preventDefault();
           const asked = box.value.trim();
@@ -165,7 +167,6 @@ function buildResults() {
         },
       },
       h('div', { class: 'search-field' }, icon('search', { size: 16 }), box),
-      h('button', { type: 'submit', class: 'primary', id: 'search-go' }, 'Search'),
     ),
     h('div', { class: 'search-notices' }, parts.waiting, parts.note, parts.problem),
     parts.skip,
@@ -216,6 +217,8 @@ async function load(quiet = false) {
   let found;
   try {
     found = await callPaged('search', { query });
+    // A text that names an acceptance criterion or a note needs them read, to say what they are called.
+    if (found.items.some((item) => String(item.snippet).includes('[[') || String(item.title).includes('[['))) await ensureContext();
   } catch (error) {
     if (mine !== generation || !root) return;
     if (!(error instanceof Refusal)) throw error;
@@ -327,8 +330,17 @@ function facet(name, label, counts, words, order, current, note = null) {
 
 // -- one result ---------------------------------------------------------------------------------------
 
+// A reference written in a text (`[[story:12]]`) is read as the code and name of the item it names, never as the reference.
+const MENTION = new RegExp(REFERENCE_PATTERN, 'g');
+const named = (text) =>
+  String(text).replace(MENTION, (_all, kind, number) => {
+    const found = describeItem(`${kind}:${number}`);
+    return found ? `${found.name} ${found.title}` : 'an item';
+  });
+
 // The snippet with the matched words (between « and ») marked, as text only.
-function snippet(text) {
+function snippet(source) {
+  const text = named(source);
   const out = [];
   const pattern = /«([^»]*)»/g;
   let at = 0;
@@ -340,12 +352,6 @@ function snippet(text) {
   if (at < text.length) out.push(text.slice(at));
   return out;
 }
-
-// The code a person reads for a result: S-12 for work, #3 for an acceptance criterion or a note.
-const codeOfResult = (item) => {
-  const at = parseNodeRef(item.ref);
-  return at ? nodeCode(at.kind, at.number) : `#${item.id}`;
-};
 
 // The results as a table: the kind, the item, how it matched, its status, and why with a snippet.
 // On a narrow page each row stacks into a card (pages.css), so the same elements serve both.
@@ -364,10 +370,25 @@ function resultTable(items) {
   );
 }
 
+// The code a person reads for a result, which is followed by its name: S-12 for work, AC-3 for an acceptance
+// criterion, N-7 for a note.
+const codeOfResult = (item) => {
+  const at = parseNodeRef(item.ref);
+  return at ? nodeCode(at.kind, at.number) : recordCode(item.item_type, item.id);
+};
+
+// What an item sits under, by its kind, code and title (the board's own title when it knows the item, else the
+// server's, which is the title as it was when the search ran).
+function parentLine(item) {
+  const kind = parseNodeRef(item.parent)?.kind;
+  const title = store.nodes.get(item.parent)?.title ?? item.parent_title ?? '';
+  if (!kind) return null;
+  return h('p', { class: 'result-parent' }, 'in ', itemLink(item.parent, {}, `${KIND[kind]?.label || kind} ${codeOf(item.parent)} ${title}`.trim()));
+}
+
 function resultRow(item) {
-  const parentKind = item.parent ? parseNodeRef(item.parent)?.kind : null;
   const work = WORK.includes(item.item_type);
-  const title = itemLink(item.ref, { class: 'result-title' }, h('span', { class: 'result-code' }, codeOfResult(item)), ' ', item.title);
+  const title = itemLink(item.ref, { class: 'result-title' }, h('span', { class: 'result-code' }, codeOfResult(item)), ' ', named(item.title));
   return h(
     'tr',
     {
@@ -385,7 +406,7 @@ function resultRow(item) {
       'td',
       { class: 'cell-item' },
       title,
-      item.parent ? h('p', { class: 'result-parent' }, 'in ', itemLink(item.parent, {}, `${KIND[parentKind]?.label || parentKind} ${codeOf(item.parent)} ${store.nodes.get(item.parent)?.title ?? ''}`.trim())) : null,
+      item.parent ? parentLine(item) : null,
     ),
     h('td', { class: 'cell-matched' }, h('span', { class: `chip matched matched-${item.matched}` }, MATCHED[item.matched] || item.matched)),
     h('td', { class: 'cell-status' }, work ? statusChip(item.status) : item.item_type === 'note' ? plainNoteStatus(item.status) : plainRequirementStatus(item.status)),

@@ -235,11 +235,18 @@ def test_the_board_is_four_views_and_the_settings_pages_and_the_old_pages_have_n
     settings = re.search(r"export const SETTINGS = \[(.*?)\]", ctx)
     assert views and settings
     assert re.findall(r"'(\w+)'", views.group(1)) == ["board", "graph", "roadmap", "lists"]
-    assert re.findall(r"'(\w+)'", settings.group(1)) == ["users", "definition", "tools", "status"]
+    assert re.findall(r"'(\w+)'", settings.group(1)) == [
+        "users",
+        "definition",
+        "templates",
+        "tools",
+        "status",
+    ]
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     pages = re.search(r"const PAGES = \{(.*?)\n\};", app, re.S)
     assert pages
-    # Search, Activity, the coverage report and the page of one record (item) are reached from
+    # Search, Activity, Needs a person, the coverage report and the page of one record (item) are
+    # reached from
     # links and the top bar, so they are pages that are in neither VIEWS nor SETTINGS.
     assert re.findall(r"^\s{2}(\w+): \{ title", pages.group(1), re.M) == [
         "board",
@@ -248,12 +255,16 @@ def test_the_board_is_four_views_and_the_settings_pages_and_the_old_pages_have_n
         "lists",
         "search",
         "activity",
+        "needs",
         "coverage",
         "users",
         "definition",
+        "templates",
         "tools",
         "status",
+        "account",
         "item",
+        "review",
     ]
     # Home, Table, Outline, Rules, Memory, Overlaps and Ask are gone, scripts and all: Search and
     # Activity are pages, and acceptance criteria and notes have pages of their own.

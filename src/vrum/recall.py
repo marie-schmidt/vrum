@@ -35,6 +35,11 @@ from vrum.rules import Rule, require_rule, rule_list_columns
 from vrum.search import IndexNote, Searcher, SearchResult
 
 RECALL_LISTS = ("all", "notes", "project_wide_notes", "past_notes", "acceptance_criteria")
+# The most characters of notes and criteria one recall gives back, unless it is asked for more. The
+# entries that do not fit are left out and the section says how to read on (its next_after_id).
+DEFAULT_RECALL_CHARS = 40_000
+LEAST_RECALL_CHARS = 1_000
+MOST_RECALL_CHARS = 1_000_000
 
 
 class RecalledNote(BaseModel):
@@ -111,6 +116,74 @@ class Recall(BaseModel):
         description="Only when you ask for it with with_similar: what is alike in meaning but "
         "not linked. Everything else here is exact links only."
     )
+    max_characters: int = Field(
+        default=DEFAULT_RECALL_CHARS,
+        description="The most characters of entries this answer was allowed to hold (max_chars). "
+        "A section always gives at least its first entry, so paging on makes progress.",
+    )
+    left_out: dict[str, int] = Field(
+        default_factory=dict,
+        description="For each section that was cut to fit, how many entries were left out of this "
+        "page. Empty when nothing was cut.",
+    )
+    cut_note: str | None = Field(
+        default=None, description="In words, what was cut and how to read the rest."
+    )
+
+
+_SHOWN_NAMES = {
+    "notes": "notes",
+    "project_wide_notes": "project-wide notes",
+    "acceptance_criteria": "acceptance criteria",
+    "past_notes": "past notes",
+}
+
+
+def _fit(
+    sections: dict[str, NoteSection],
+    criteria: CriteriaSection,
+    similar: SimilarSection | None,
+    budget: int,
+) -> dict[str, int]:
+    """Keep whole entries, turn by turn from each section, while they fit in `budget` characters;
+    the rest are left out of this page and the section's next_after_id says where to read on. A
+    section always keeps its first entry (so reading on always moves forward, and one very long
+    note is still given, whole). Gives back how many each section lost."""
+    lists: dict[str, NoteSection | CriteriaSection] = {
+        "notes": sections["notes"],
+        "project_wide_notes": sections["project_wide_notes"],
+        "acceptance_criteria": criteria,
+        "past_notes": sections["past_notes"],
+    }
+    sizes = {
+        name: [len(entry.model_dump_json()) for entry in section.items]
+        for name, section in lists.items()
+    }
+    used = len(similar.model_dump_json()) if similar is not None else 0
+    kept = {name: 0 for name in lists}
+    open_sections = [name for name in lists if sizes[name]]
+    while open_sections:
+        for name in list(open_sections):
+            size = sizes[name][kept[name]]
+            if kept[name] > 0 and used + size > budget:
+                open_sections.remove(name)
+                continue
+            used += size
+            kept[name] += 1
+            if kept[name] == len(sizes[name]):
+                open_sections.remove(name)
+    left: dict[str, int] = {}
+    for name, section in lists.items():
+        dropped = len(sizes[name]) - kept[name]
+        if not dropped:
+            continue
+        left[name] = dropped
+        section.items = section.items[: kept[name]]
+        last = section.items[-1]
+        section.next_after_id = (
+            last.criterion.id if isinstance(last, RecalledCriterion) else last.note.id
+        )
+    return left
 
 
 def _comes_down_words(via: str, thing: str | int, chain: list[str]) -> str:
@@ -169,9 +242,15 @@ class Recaller:
         limit: int,
         after_id: int | None,
         with_similar: bool,
+        max_chars: int = DEFAULT_RECALL_CHARS,
     ) -> Recall:
         """What is known about one node or rule, by exact links, and, if asked, what is alike."""
         limit = page_size(limit)
+        if not LEAST_RECALL_CHARS <= max_chars <= MOST_RECALL_CHARS:
+            raise Refusal(
+                f"max_chars must be a whole number from {LEAST_RECALL_CHARS} to "
+                f"{MOST_RECALL_CHARS}, but it is {max_chars}."
+            )
         check_choice("show", show, RECALL_LISTS)
         if (node is None) == (rule_id is None):
             raise Refusal(
@@ -307,10 +386,22 @@ class Recaller:
                 limit=limit,
             )
             similar = SimilarSection(items=similar_items, count=count, index=note)
+        left_out = _fit(sections, criteria, similar, max_chars)
+        cut_note = None
+        if left_out:
+            cut_note = (
+                f"To stay within {max_chars:,} characters this left out "
+                + ", ".join(f"{count} {_SHOWN_NAMES[name]}" for name, count in left_out.items())
+                + ". Read on with show set to a section and after_id set to its next_after_id, or "
+                "ask again with a larger max_chars."
+            )
         return Recall(
             notes=sections["notes"],
             project_wide_notes=sections["project_wide_notes"],
             past_notes=sections["past_notes"],
             acceptance_criteria=criteria,
             similar=similar,
+            max_characters=max_chars,
+            left_out=left_out,
+            cut_note=cut_note,
         )

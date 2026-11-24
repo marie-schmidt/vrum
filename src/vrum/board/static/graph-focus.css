@@ -19,7 +19,7 @@ form.graph-find #graph-find-input[aria-expanded="true"] { border-color: var(--fo
 form.graph-find #graph-find-input::placeholder { text-overflow: ellipsis; }
 .graph-find-lead { position: absolute; left: var(--space-3); top: 0; bottom: 0; display: inline-flex; align-items: center; color: var(--text-3); pointer-events: none; }
 .graph-find-kind { display: none; }
-/* What is chosen is shown over the box until something is typed: its sign, code and title. */
+/* What is chosen is shown over the box until something is typed: its sign and title. */
 .graph-find:is(.has-item, .is-missing):not(.is-typing) .graph-find-lead > .icon { display: none; }
 .graph-find:is(.has-item, .is-missing):not(.is-typing) .graph-find-kind { display: inline-flex; }
 .graph-find.has-item:not(.is-typing) .graph-find-lead { color: var(--accent-text); }
@@ -50,8 +50,9 @@ button.graph-find-clear:hover, button.graph-find-clear:focus-visible, button.gra
 .graph-trail { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
 .graph-trail ol { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .graph-trail li + li::before { content: "\203A"; margin-right: var(--space-2); color: var(--text-3); }
-.graph-trail .link { font-family: var(--font-mono); font-size: var(--text-sm); }
-.graph-trail-here { font-family: var(--font-mono); font-weight: 700; }
+.graph-trail .link, .graph-trail-here { display: inline-flex; align-items: baseline; gap: var(--space-1); max-width: 18rem; font-size: var(--text-sm); }
+.graph-trail-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-trail-here { font-weight: 700; }
 
 /* -- the list ------------------------------------------------------------------------------------------------ */
 
@@ -72,6 +73,7 @@ button.graph-find-clear:hover, button.graph-find-clear:focus-visible, button.gra
 .graph-find-option[data-chosen="true"] { font-weight: 650; }
 .graph-find-code { flex: none; }
 .graph-find-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-find-context { flex: 0 1 38%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: var(--text-xs); }
 .graph-find-option.is-ended .graph-find-title { color: var(--text-2); }
 .graph-find-ended { flex: none; color: var(--text-2); font-size: var(--text-xs); }
 .graph-find-check { display: inline-flex; flex: none; color: var(--accent-text); }

@@ -1,0 +1,35 @@
+/* Where a piece of work is and which run is doing it (whereabouts.js): one quiet block of two short lines, the run and then the
+   place (repository, branch, commit, pull request), drawn the same on the item's page, a handoff note, Activity, the card of a
+   holder and the Agent view. Nothing is drawn when nothing was said. Colours come from tokens.css. */
+
+.where { display: grid; gap: 2px; min-width: 0; color: var(--text-2); font-size: var(--text-sm); font-weight: 400; font-variant-numeric: normal; }
+.where-row { min-width: 0; }
+.where-run, .where-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-2); max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.where-part { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.where-run { gap: var(--space-1); }
+.where .icon { flex: none; color: var(--text-3); }
+.where-dot { color: var(--text-3); }
+.where a { color: var(--text-2); text-decoration-color: var(--border-strong); text-underline-offset: 0.18em; }
+.where a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+
+/* On the item's page: one entry of the property strip; in a handoff note: between who left it and its words. */
+.state-item > dd.where-item { display: block; }
+.handoff-item > .where { margin: var(--space-1) 0 0; }
+
+/* Activity: under the countdown of a claim, spanning the row, and under an agent's last handoff. */
+li.claim > .where { grid-column: 1 / -1; }
+.agent-handoff-block { display: grid; gap: 2px; }
+
+/* In the card of a holder: under the piece of work, on a line of its own. */
+.actor-card .hovercard-list li { flex-wrap: wrap; }
+.actor-card .hovercard-list .where { flex: 1 0 100%; }
+.actor-card-part > .where { margin-top: var(--space-1); }
+
+/* In the Agent view, whose lines are monospace text: the words keep to the page's own type. */
+.ag-line .where { display: inline-grid; vertical-align: top; text-indent: 0; font-family: var(--font-sans); font-size: var(--text-sm); white-space: normal; }
+
+/* The last day of a key (key-tools.js, labels.js expiryChip): one quiet chip, and the danger chip once it is out. */
+.key-expiry-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.key-expiry-row .date-field { flex: 0 1 14rem; min-width: 0; }
+.key-expired-note { margin: var(--space-2) 0 0; }
+.chip.key-expiry:not(.danger) { background: transparent; border: var(--border-w) solid var(--border); color: var(--text-2); font-weight: 500; }

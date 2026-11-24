@@ -12,15 +12,17 @@
 // through its target day, cell for cell. Work that is late has a hatched tail from the end of its bar
 // through today, a cell for each day it is late, and the number of days beside it.
 
-import { Refusal, call } from './api.js';
+import { Refusal, call, namesIn } from './api.js';
 import { can, itemLink, notify, openItem, ui, viewLink } from './ctx.js';
-import { dayOfMonth, fromDay, monthName, monthOf, monthStart, nextMonth, toDay, todayDay, weekday, yearOf } from './dates.js';
+import { dayOfMonth, fromDay, lateDaysOf, monthName, monthOf, monthStart, nextMonth, toDay, todayDay, weekday, yearOf } from './dates.js';
 import { h, plural, put, s } from './dom.js';
 import { filterBar, loadRows } from './filterbar.js';
+import { hoverCard } from './hovercard.js';
 import { icon } from './icons.js';
 import { keyButton } from './key-button.js';
 import { KIND, PRIORITIES, PRIORITY, STATUS, STATUSES, addsUp, byRef, codeOf, kindIcon, nodeCode, parseNodeRef, sizeWords, statusIcon } from './labels.js';
-import { epicOf, store, sync } from './store.js';
+import { beforeDue } from './list-parts.js';
+import { epicOf, store, sync, titleOf } from './store.js';
 
 const ROW = 38;
 const BAR_INSET = 5; // a bar is this far from the top and the bottom of its row
@@ -45,6 +47,7 @@ let drag = null; // a bar being dragged
 let keys = null; // arrow keys pressed, not yet sent
 let generation = 0;
 let wantToday = true;
+let sizeWatch = null; // sees the timeline's box change size, to know whether it can still be panned
 
 // -- the page -------------------------------------------------------------------------------------
 
@@ -68,12 +71,15 @@ export function mount(element, initial) {
     scroll: h('div', { class: 'rm-scroll', id: 'rm-scroll', role: 'region', tabindex: 0, 'aria-label': 'Timeline, scrolls sideways and down' }, h('p', { class: 'loading', role: 'status' }, 'Reading the timeline…')),
   };
   const pan = (way) => parts.scroll.scrollBy({ left: way * Math.max(parts.scroll.clientWidth * 0.6, 160), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  sizeWatch = new ResizeObserver(markPannable);
+  sizeWatch.observe(parts.scroll);
   put(
     root,
     h(
       'div',
       { class: 'roadmap-page' },
-      h('header', { class: 'page-header' }, h('div', { class: 'page-title' }, h('h1', {}, 'Roadmap'))),
+      // The top bar names the page, so the h1 is only for assistive technology; the Roadmap has no action, so no header row.
+      h('h1', { class: 'sr-only' }, 'Roadmap'),
       h(
         'div',
         { class: 'rm-toolbar' },
@@ -122,15 +128,15 @@ function keyContent() {
   const item = (picture, ...words) => h('li', {}, picture, h('span', {}, ...words));
   const group = (title, className, ...items) => h('div', { class: `rm-key-group ${className}` }, h('h3', {}, title), h('ul', { class: 'plain' }, items));
   const kind = (name) => mark(h('span', { class: 'rm-kind' }, kindIcon(name, 14)));
-  // The small mark a row's label carries for the same two things.
+  // The small mark a row's label carries for a schedule conflict (lateness is the bar's own tail and note).
   const rowMark = (classes) => mark(h('span', { class: `chip ${classes}` }, icon('alert', { size: 12 })));
   return h(
     'div',
     { class: 'rm-key-card' },
+    group('Status', 'is-status', STATUSES.map((status) => item(swatch(`status-${status}`, statusIcon(status, 12)), h('strong', {}, STATUS[status].label), ' ', h('span', { class: 'quiet' }, STATUS[status].hint)))),
     h(
       'div',
       { class: 'rm-key-column' },
-      group('Status', 'is-status', STATUSES.map((status) => item(swatch(`status-${status}`, statusIcon(status, 12)), STATUS[status].label))),
       group(
         'Lines',
         '',
@@ -144,7 +150,7 @@ function keyContent() {
         item(kind('epic'), 'Epic, in bold'),
         item(kind('story'), 'Story'),
         item(kind('task'), 'Task'),
-        item([rowMark('danger overdue'), rowMark('warn conflict')], 'Marks at the end of a row: overdue, schedule conflict'),
+        item(rowMark('warn conflict'), 'Mark at the end of a row: schedule conflict'),
       ),
     ),
     h(
@@ -177,6 +183,8 @@ export function unmount() {
   generation += 1;
   if (keys) clearTimeout(keys.timer);
   keys = null;
+  sizeWatch?.disconnect();
+  sizeWatch = null;
   root = null;
 }
 
@@ -226,12 +234,6 @@ function spanOf(node) {
   return { s: start, e: end, editable: !node.span_worked_out };
 }
 
-// How many days late a node is: a cell for each day from the one after its target date through today. Work that is
-// done or dropped is never late, and a node with no target date of its own has nothing to be late for.
-function lateDays(node, today) {
-  return node.overdue && node.target_on ? Math.max(1, today - toDay(node.target_on)) : 0;
-}
-
 const dayText = (day, withYear) => `${dayOfMonth(day)} ${monthName(day)}${withYear ? ` ${yearOf(day)}` : ''}`;
 
 // "5 days: 3 Dec to 7 Dec": what a bar covers, counting its first and its last day. The year is said when it is not this one.
@@ -271,7 +273,9 @@ function layoutRows(dated, mode) {
   }
   const list = [];
   for (const group of [...groups.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))) {
-    list.push({ type: 'group', label: group.label, count: group.items.length });
+    // Grouped by epic, the epic's own row (the first of its group) is the heading, so no row says it twice. A group
+    // whose epic is not drawn (a filter left it out) keeps its heading.
+    if (!(mode === 'epic' && group.items.some((item) => item.node.kind === 'epic'))) list.push({ type: 'group', label: group.label, count: group.items.length });
     for (const item of inOrder(group.items, mode)) list.push({ type: 'item', ...item });
   }
   return list;
@@ -311,6 +315,7 @@ function draw() {
       ),
     );
     sayCount(0, 0);
+    markPannable();
     parts.scroll.dataset.ready = 'true';
     return;
   }
@@ -325,18 +330,20 @@ function draw() {
   const list = layoutRows(dated, mode);
   const items = new Map();
   list.forEach((entry, at) => {
-    if (entry.type === 'item') items.set(entry.node.ref, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR), late: lateDays(entry.node, today) });
+    if (entry.type === 'item') items.set(entry.node.ref, { ...entry, y: at * ROW, left: (entry.s - origin) * ppd, width: Math.max((entry.e - entry.s + 1) * ppd, MIN_BAR), late: lateDaysOf(entry.node) });
   });
   geometry = { origin, end, ppd, items, today };
 
   const rowsHigh = Math.max(list.length, MIN_ROWS) * ROW;
   const labels = h('div', { class: 'rm-labels' }, h('div', { class: 'rm-corner', css: { height: `${SCALE}px` } }, 'Item'));
-  const area = h('div', { class: 'rm-rows', css: { height: `${rowsHigh}px` } });
+  const area = h('div', { class: 'rm-rows', css: { minHeight: `${rowsHigh}px` } });
   const scale = h('div', { class: 'rm-scale', css: { height: `${SCALE}px`, width: `${width}px` } });
   const track = h('div', { class: 'rm-track', css: { width: `${width}px` }, dataset: { origin: fromDay(origin), ppd: String(ppd), today: fromDay(today), zoom } }, scale, area);
   // What the style sheet draws the grid and the ruler's cells from: a day, a week, a weekend and a row, and where the
-  // first Saturday and the first Monday fall from the left edge.
-  track.style.setProperty('--rm-row', `${ROW}px`);
+  // first Saturday and the first Monday fall from the left edge. The rows and the grid go on below the last row, to the
+  // bottom of the box.
+  const inner = h('div', { class: 'rm-inner' }, labels, track);
+  inner.style.setProperty('--rm-row', `${ROW}px`);
   track.style.setProperty('--rm-day', `${ppd}px`);
   track.style.setProperty('--rm-week', `${7 * ppd}px`);
   track.style.setProperty('--rm-weekend', `${2 * ppd}px`);
@@ -360,24 +367,33 @@ function draw() {
       return;
     }
     labels.append(labelFor(entry, mode));
+    // Grouped by epic, the epic's own row heads its group, with the band a group heading has.
+    if (mode === 'epic' && entry.node.kind === 'epic') area.append(h('div', { class: 'rm-band', css: { top: `${at * ROW}px`, height: `${ROW}px` } }));
     area.append(...barFor(entry, items.get(entry.node.ref)));
   });
-  if (list.length < MIN_ROWS) labels.append(h('div', { class: 'rm-spacer', css: { height: `${(MIN_ROWS - list.length) * ROW}px` } }));
+  labels.append(h('div', { class: 'rm-fill', 'aria-hidden': 'true' }));
   if (!dated.length) area.append(h('p', { class: 'rm-hint' }, 'Nothing here has dates yet. Give work a start or due date on its page and it appears here.'));
   area.append(arrows(items, width, rowsHigh));
   area.addEventListener('pointerdown', pointerDown);
   scale.addEventListener('pointerdown', startPan);
 
-  parts.scroll.replaceChildren(h('div', { class: 'rm-inner' }, labels, track));
+  parts.scroll.replaceChildren(inner);
   parts.scroll.scrollLeft = scrolled.left;
   parts.scroll.scrollTop = scrolled.top;
   if (wantToday) {
     wantToday = false;
     scrollToStart();
   }
+  markPannable();
   sayCount(dated.length, rows.length - dated.length);
   if (focusedBar) parts.scroll.querySelector(`.rm-bar[data-ref="${focusedBar}"]`)?.focus();
   parts.scroll.dataset.ready = 'true';
+}
+
+// The empty grid shows the hand of a drag only while dragging it can move the timeline.
+function markPannable() {
+  const view = parts.scroll;
+  view.classList.toggle('pannable', view.scrollWidth > view.clientWidth + 1 || view.scrollHeight > view.clientHeight + 1);
 }
 
 // The line under the controls: how many items are drawn, and how many are not because they have no
@@ -434,6 +450,9 @@ function drawScale(scale, origin, end, zoom, ppd, today) {
   scale.append(days);
 }
 
+// The hover card of a status symbol: the status and what it means, in the words of the Board's key (labels.js).
+const statusCard = (symbol, status) => hoverCard(symbol, [h('p', { class: 'hovercard-title' }, STATUS[status].label), h('p', {}, STATUS[status].hint)]);
+
 function marks(node, editable, late) {
   const found = [];
   if (late) found.push(`${plural(late, 'day')} late`);
@@ -448,12 +467,11 @@ function labelFor(entry, mode) {
   const depth = mode === 'epic' ? (node.kind === 'epic' ? 0 : node.kind === 'story' ? 1 : 2) : 0;
   return h(
     'div',
-    { class: `rm-label kind-${node.kind}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { ref: node.ref, kind: node.kind } },
+    { class: `rm-label kind-${node.kind}${mode === 'epic' && node.kind === 'epic' ? ' heads' : ''}`, css: { height: `${ROW}px`, paddingLeft: `${8 + depth * 14}px` }, dataset: { ref: node.ref, kind: node.kind } },
     h('span', { class: 'rm-kind', 'aria-hidden': 'true' }, kindIcon(node.kind, 14)),
     itemLink(node.ref, { class: 'rm-open', title: `${KIND[node.kind].label} ${code} ${node.title}` }, h('span', { class: 'id mono' }, code), ` ${node.title}`),
-    node.overdue ? h('span', { class: 'chip danger overdue', title: 'Overdue' }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Overdue')) : null,
     node.schedule_conflicts.length
-      ? h('span', { class: 'chip warn conflict', title: `It starts before ${node.schedule_conflicts.map(codeOf).join(', ')} is due` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
+      ? h('span', { class: 'chip warn conflict', title: `It starts ${beforeDue(node.schedule_conflicts)}` }, icon('alert', { size: 12 }), h('span', { class: 'sr-only' }, 'Schedule conflict'))
       : null,
   );
 }
@@ -464,17 +482,20 @@ function barFor(entry, spot) {
   const found = marks(node, editable, late);
   const code = nodeCode(node.kind, node.number);
   const sized = sizeWords(node, { rollup: addsUp(node) });
-  const words = `${KIND[node.kind].label} ${node.number}: ${node.title}. ${spanWords(first, last, geometry.today)}. ${STATUS[node.status].label}.${sized ? ` Size: ${sized}.` : ''}${found.length ? ` ${found.join('. ')}.` : ''}`;
+  const words = `${KIND[node.kind].label} ${code}: ${node.title}. ${spanWords(first, last, geometry.today)}. ${STATUS[node.status].label}.${sized ? ` Size: ${sized}.` : ''}${found.length ? ` ${found.join('. ')}.` : ''}`;
   const chosen = picked.has(node.ref);
   // A bar with no room for its icon and words shows neither: the row's label says what it is, and
   // its status icon stands beside it, so nothing is drawn over the bar.
   const short = spot.width < SHORT_BAR;
+  const free = movable(spot);
   const top = `${spot.y + BAR_INSET}px`;
   const height = `${ROW - 2 * BAR_INSET}px`;
+  // The status symbol inside a bar has the hover card. Its empty title keeps the bar's own tooltip from showing over it too.
+  const symbol = short ? null : h('span', { class: 'rm-icon', title: '', 'aria-hidden': 'true', dataset: { status: node.status } }, statusIcon(node.status, 13));
   const el = h(
     'div',
     {
-      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', short ? 'short' : '', spot.width < TINY_BAR ? 'tiny' : '', late ? 'late' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
+      class: ['rm-bar', `kind-${node.kind}`, `status-${node.status}`, editable ? '' : 'worked-out', free ? 'movable' : '', short ? 'short' : '', spot.width < TINY_BAR ? 'tiny' : '', late ? 'late' : '', node.schedule_conflicts.length ? 'conflict' : '', chosen ? 'picked' : ''].filter(Boolean).join(' '),
       role: 'button',
       tabindex: 0,
       'aria-pressed': String(chosen),
@@ -484,29 +505,33 @@ function barFor(entry, spot) {
       dataset: { ref: node.ref, kind: node.kind, start: fromDay(first), end: fromDay(last), workedOut: String(!editable), late: String(late) },
       onkeydown: barKey,
     },
-    editable && can('write') ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
-    short ? null : h('span', { class: 'rm-icon', 'aria-hidden': 'true' }, statusIcon(node.status, 13)),
+    free ? h('span', { class: 'rm-handle start', dataset: { handle: 'start' } }) : null,
+    symbol,
+    symbol ? statusCard(symbol, node.status) : null,
     short ? null : h('span', { class: 'rm-text' }, `${code} ${node.title}`),
-    editable && can('write') ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
+    free ? h('span', { class: 'rm-handle end', dataset: { handle: 'end' } }) : null,
   );
   // Late work: a hatched tail from the end of the bar through today, a cell for each day, and the days said at its end.
   const barEnd = spot.left + spot.width;
   const todayEnd = (geometry.today + 1 - geometry.origin) * geometry.ppd;
   const tail = late && todayEnd > barEnd ? [h('span', { class: 'rm-late', 'aria-hidden': 'true', dataset: { ref: node.ref, late: String(late) }, css: { left: `${barEnd}px`, width: `${todayEnd - barEnd}px`, top, height } })] : [];
   const said = found.filter((text) => text !== 'Worked out from what is under it');
+  const beside = `${Math.max(barEnd, late ? todayEnd : 0) + 4}px`;
   const note =
     short || said.length
       ? [
           h(
             'span',
-            { class: `rm-note status-${node.status}${late ? ' overdue' : ''}`, 'aria-hidden': 'true', dataset: { ref: node.ref }, css: { left: `${Math.max(barEnd, late ? todayEnd : 0) + 4}px`, top, height } },
+            { class: `rm-note status-${node.status}${late ? ' overdue' : ''}`, 'aria-hidden': 'true', dataset: { ref: node.ref }, css: { left: beside, top, height } },
             short ? statusIcon(node.status, 13) : null,
             node.schedule_conflicts.length ? icon('alert', { size: 12 }) : null,
             said.join(' · '),
           ),
         ]
       : [];
-  return [el, ...tail, ...note];
+  // The hover card of the symbol beside a short bar hangs from a transparent box over the symbol, so the note keeps only its own words.
+  const over = short ? h('span', { class: 'rm-note-status', 'aria-hidden': 'true', dataset: { ref: node.ref, status: node.status }, css: { left: beside, top, height } }) : null;
+  return [el, ...tail, ...note, ...(over ? [over, statusCard(over, node.status)] : [])];
 }
 
 // An arrow from what is needed first to the item that waits for it, between bars that are drawn.
@@ -616,7 +641,7 @@ function preview(refs, mode, days) {
     el.classList.toggle('backwards', first > last);
     el.dataset.preview = `${fromDay(first)} to ${fromDay(last)}`;
     // What stands beside the bar (its late tail and its marks) would be left behind, so it is put away until the change is made.
-    for (const beside of parts.scroll.querySelectorAll(`.rm-late[data-ref="${ref}"], .rm-note[data-ref="${ref}"]`)) beside.hidden = true;
+    for (const beside of parts.scroll.querySelectorAll(`.rm-late[data-ref="${ref}"], .rm-note[data-ref="${ref}"], .rm-note-status[data-ref="${ref}"]`)) beside.hidden = true;
   }
   parts.scroll.classList.add('moving');
 }
@@ -640,7 +665,7 @@ async function commit(refs, mode, days) {
       const change = changeFor(items[0], mode, days);
       try {
         await call('update_node', { node: node.ref, expected_version: node.version, ...change });
-        notify(`Moved ${nodeCode(node.kind, node.number)}: ${describe(change)}.`);
+        notify(`Moved “${node.title}”: ${describe(change)}.`);
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
         notify(error.message, { refusal: true });
@@ -649,7 +674,7 @@ async function commit(refs, mode, days) {
       const changes = items.map((item) => ({ node: item.node.ref, expected_version: item.node.version, ...changeFor(item, mode, days) }));
       try {
         const outcome = await call('update_nodes', { changes });
-        for (const result of outcome.results.filter((one) => !one.applied)) notify(`${codeOf(result.node)} was not moved. ${result.refusal}`, { refusal: true });
+        for (const result of outcome.results.filter((one) => !one.applied)) notify(`“${titleOf(result.node)}” was not moved. ${namesIn(result.refusal)}`, { refusal: true });
         if (outcome.applied) notify(`Moved ${plural(outcome.applied, 'item')}${outcome.refused ? `; ${outcome.refused} refused` : ''}.`);
       } catch (error) {
         if (!(error instanceof Refusal)) throw error;
@@ -694,7 +719,8 @@ function startPan(event) {
 function pointerDown(event) {
   const el = event.target.closest('.rm-bar');
   if (!el) {
-    startPan(event);
+    // Marks beside a bar (its note and its late tail) are not the empty timeline: a drag that starts on one does nothing.
+    if (!event.target.closest('.rm-note, .rm-note-status, .rm-late')) startPan(event);
     return;
   }
   if (event.button !== 0 || !geometry) return;

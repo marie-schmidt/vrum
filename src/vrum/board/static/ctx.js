@@ -3,7 +3,8 @@
 
 import { h } from './dom.js';
 import { icon } from './icons.js';
-import { itemCode, parseItemRef } from './labels.js';
+import { changeCode, itemCode, kindLabel, parseItemRef } from './labels.js';
+import { describeItem } from './store.js';
 
 export const ui = {
   page: 'board',
@@ -28,12 +29,21 @@ export const ui = {
   signOut: () => {},
 };
 
-// The four views the work is seen in, and the pages of settings.
+// The four views the work is seen in, and the pages of settings. The person's own Account page is neither: it is
+// reached only from the account menu at the foot of the sidebar.
 export const VIEWS = ['board', 'graph', 'roadmap', 'lists'];
-export const SETTINGS = ['users', 'definition', 'tools', 'status'];
+export const SETTINGS = ['users', 'definition', 'templates', 'tools', 'status'];
 // The pages a record page can say it was reached from, and what each is called.
-export const FROM_PAGES = [...VIEWS, 'search', 'activity', 'coverage'];
-export const FROM_TITLES = { board: 'Board', graph: 'Graph', roadmap: 'Roadmap', lists: 'Lists', search: 'Search', activity: 'Activity', coverage: 'Coverage' };
+export const FROM_PAGES = [...VIEWS, 'search', 'activity', 'needs', 'coverage'];
+export const FROM_TITLES = { board: 'Board', graph: 'Graph', roadmap: 'Roadmap', lists: 'Lists', search: 'Search', activity: 'Activity', needs: 'Needs a person', coverage: 'Coverage' };
+// The pages about the work itself, where the navigator of epics, stories and tasks is shown: the views, Search,
+// Activity, the page of what needs a person, the coverage report, the page of a record and the review page of a change (which is read from
+// the page of what needs a person and goes back to it). The settings pages and the Account page have none.
+export const WORK_PAGES = [...FROM_PAGES, 'item', 'review'];
+
+// The code a person reads before the name of any of the five kinds: E-3, S-12 or T-40 for work, AC-3 for an
+// acceptance criterion and N-7 for a note.
+export const recordCode = (kind, number) => itemCode(kind, number);
 
 // What an address keeps when the person goes to another page: between the four views, the work
 // filter and the epic. Nothing else goes along: a page's own choices (the search, the activity
@@ -137,26 +147,30 @@ export function backToView() {
   return { label, hash: kept || `#/${FROM_PAGES.includes(ui.from) ? ui.from : 'board'}` };
 }
 
-const STEP_NAMES = { ...FROM_TITLES, users: 'Users', definition: 'Definition of done', tools: 'Tools', status: 'Status' };
+const STEP_NAMES = { ...FROM_TITLES, users: 'Users', definition: 'Definition of done', templates: 'Plan templates', tools: 'Tools', status: 'Status', account: 'Account' };
 
 // The page one step back, which the back arrow goes to: where the person was just before, as they
-// left it, named by its page (Graph, Search, Users) or, for a record, by its code (S-12). With no
-// step before (the address was loaded fresh) it is the view the record was reached from.
+// left it, named by its page (Graph, Search, Users) or, for a record, by its code and name (S-12 and the title of
+// the story). With no step before (the address was loaded fresh) it is the view the record was reached from.
 export function stepBack() {
   const step = ui.previous;
   if (!step) {
+    // A change's review page is read from the page of what needs a person, and goes back to it.
+    if (ui.page === 'review') return { hash: '#/needs', words: `Back to ${FROM_TITLES.needs}`, onTrail: false };
     const view = backToView();
     return { hash: view.hash, words: `Back to ${view.label}`, onTrail: false };
   }
   const [page, query = ''] = step.replace(/^#\/?/, '').split('?');
   const found = page === 'item' ? parseItemRef(new URLSearchParams(query).get('item')) : null;
-  const name = found ? itemCode(found.kind, found.number) : STEP_NAMES[page] || FROM_TITLES.board;
+  const change = page === 'review' ? changeCode(new URLSearchParams(query).get('change')) : null;
+  const named = found ? describeItem(found.ref) : null;
+  const name = change ?? (named ? [named.name, named.title].filter(Boolean).join(' ') : found ? `the ${kindLabel(found.kind).toLowerCase()}` : STEP_NAMES[page] || FROM_TITLES.board);
   return { hash: step, words: `Back to ${name}`, onTrail: true };
 }
 
 // Who is signed in: { id, email, name } and, from the server, whether the address is verified
 // (`email_verified`) and whether the account has a password (`has_password`: an account made by a
-// provider has none). app.js fills it in when the board starts, and the Users page changes the name in
+// provider has none). app.js fills it in when the board starts, and the Account page changes the name in
 // place, so that every page that says it reads the same one. The server decides who a change is
 // recorded as; this is only what the board shows.
 export const account = { id: null, email: '', name: '' };

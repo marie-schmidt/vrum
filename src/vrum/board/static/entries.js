@@ -12,9 +12,9 @@ import { itemLink, openItem } from './ctx.js';
 import { day, h, moment } from './dom.js';
 import { clip, plainText } from './forms.js';
 import { icon } from './icons.js';
-import { actorLabel, codeOf, decidedWords, inForce, itemCode, kindIcon, noteStatusWords, parseNodeRef, plainRequirementStatus } from './labels.js';
+import { actorLabel, codeOf, decidedWords, inForce, kindIcon, noteCode, noteStatusWords, parseNodeRef, plainRequirementStatus, ruleCode } from './labels.js';
 import { inline } from './markdown.js';
-import { kindWords, nodeLink, openLink } from './references.js';
+import { kindWords, codeFor, namesInText, nodeLink, openLink } from './references.js';
 import { noteStatusChip as noteStatusMenu, requirementStatusChip, statusChip } from './status-menu.js';
 import { headlineOf, restOf, store, titleOf } from './store.js';
 
@@ -24,8 +24,6 @@ export const recordTitle = (record) => clip(plainText(headlineOf(record)), 140);
 const tableOf = (kind) => (kind === 'note' ? store.notes : store.rules) || [];
 const byId = (kind, id) => tableOf(kind).find((entry) => entry.id === id) || null;
 
-export const kindChip = (record) => h('span', { class: 'chip kind kind-note' }, kindIcon('note', 14), `Note #${record.id}`);
-
 // The chip that says where a note stands. It is a button that opens a menu (status-menu.js) for a person who
 // can change the project, and the plain chip for one who cannot or for a note that has ended. `onChanged`
 // runs after a change was made.
@@ -33,11 +31,6 @@ export const noteStatusChip = (record, options = {}) => noteStatusMenu(record, o
 
 export const projectWideChip = (record) =>
   record.project_wide ? h('span', { class: 'chip project-wide', title: 'It applies throughout the project' }, icon('graph', { size: 14 }), 'Project-wide') : null;
-
-// The chips every note carries, in one place so that none is left out. A note's own page says
-// what it is in its title, so it asks for the others only.
-export const recordChips = (record, { kind = true, onChanged = null } = {}) =>
-  h('div', { class: 'record-chips' }, kind ? kindChip(record) : null, projectWideChip(record), noteStatusChip(record, { onChanged }));
 
 // What a note says about who stood behind it, in words. A note that ended keeps the confirmation it had.
 // `last` is the newest event that confirmed or un-confirmed it, when the page has the history: a
@@ -54,16 +47,24 @@ export function confirmationWords(record, last = null) {
 // How an acceptance criterion stands, as a chip: open, met or dropped, each with its own sign.
 export const ruleStatusChip = (rule, options = {}) => requirementStatusChip(rule, options);
 
-export const requirementKindChip = (rule) => h('span', { class: 'chip kind kind-rule' }, kindIcon('rule', 14), `Criterion #${rule.id}`);
-
 const joined = (nodes) => nodes.flatMap((node, at) => (at ? [', ', node] : [node]));
+
+// Another note, as a link to its page: its code and its first line in quotes (N-5 “The apps support…”). One that is not known
+// (the notes are not read yet) is its code alone.
+function noteLink(id) {
+  const note = byId('note', id);
+  const words = note ? plainText(headlineOf(note)) : '';
+  const link = openLink('note', id, words ? `${noteCode(id)} “${clip(words, 80)}”` : noteCode(id));
+  if (words) link.title = `${noteCode(id)} ${words}`;
+  return link;
+}
 
 // How it ended, and what replaced what: the chain ends in what is in force now. `replaces` is
 // false where a table already lists what the note replaced.
 export function lifecycleLines(record, { replaces = true } = {}) {
   const lines = [];
   if (replaces && (record.supersedes_ids || []).length) {
-    lines.push(h('p', { class: 'quiet replaces' }, `Replaces note${record.supersedes_ids.length === 1 ? '' : 's'} `, joined(record.supersedes_ids.map((id) => openLink('note', id, `#${id}`))), '.'));
+    lines.push(h('p', { class: 'quiet replaces' }, `Replaces note${record.supersedes_ids.length === 1 ? '' : 's'} `, joined(record.supersedes_ids.map((id) => noteLink(id))), '.'));
   }
   if (record.status === 'superseded') {
     const steps = [];
@@ -71,7 +72,7 @@ export function lifecycleLines(record, { replaces = true } = {}) {
     let current = record;
     while (current && current.superseded_by_id && !seen.has(current.superseded_by_id)) {
       seen.add(current.superseded_by_id);
-      steps.push(openLink('note', current.superseded_by_id, `#${current.superseded_by_id}`));
+      steps.push(noteLink(current.superseded_by_id));
       current = byId('note', current.superseded_by_id);
     }
     const last = current && current !== record ? current : null;
@@ -123,9 +124,9 @@ export function dataTable({ caption, className = '', columns, rows, row }) {
   return { element, add };
 }
 
-// The first cell of a row: the kind's icon and the record's number or code, a link to its page.
+// The first cell of a row: the kind's icon and the record's code, a link to its page.
 const idCell = (kind, number, ref) =>
-  h('th', { scope: 'row', class: 'cell-id' }, itemLink(ref, { class: 'item-code-link', 'data-focus-key': `open:${ref}` }, kindIcon(kind, 14), h('span', { class: 'item-code' }, itemCode(kind, number))));
+  h('th', { scope: 'row', class: 'cell-id' }, itemLink(ref, { class: 'item-code-link', 'data-focus-key': `open:${ref}` }, kindIcon(kind, 14), h('span', { class: 'item-code' }, codeFor(kind, number))));
 
 // A cell whose words wrap to at most three lines. When they do not all fit, a quiet "Show whole text"
 // puts all of them in the cell (as they were written, lines and all), so that nothing is left to
@@ -159,12 +160,13 @@ const clipping = new ResizeObserver((entries) => {
     } else if (!clipped && toggle) toggle.remove();
   }
 });
-function clampCell(cls, full, ...content) {
+function clampCell(cls, words, ...content) {
+  const full = namesInText(words);
   const short = h('div', { class: 'clamp clamp-wrap', title: full }, ...content);
   fulls.set(short, full);
   const cell = h('td', { class: `cell-clamp cell-wrap ${cls}` }, short);
   // Only the column of words has the button: it takes whatever width the others leave, so a button
-  // appearing in it moves nothing sideways. In a narrow column of codes it would widen the column, which
+  // appearing in it moves nothing sideways. In a narrow column it would widen the column, which
   // would unclip the words, which would take the button away again, and so on.
   if (cls.split(' ').includes('cell-title')) clipping.observe(short);
   return cell;
@@ -179,24 +181,32 @@ const plainCell = (cls, ...content) => h('td', { class: cls }, ...content);
 const dateCell = (value) => plainCell('cell-on', value ? h('span', { class: 'item-date' }, day(value)) : null);
 const quiet = (text) => h('span', { class: 'quiet' }, text);
 
-// What a note concerns, one item to a name: { type, ref, short, full }.
+// What a note concerns, one item to a name: { type, ref, words } (its code, then its name; `record` is the other note,
+// when it is one).
 function concernedItems(record) {
   return [
-    ...(record.nodes || []).map((ref) => ({ type: parseNodeRef(ref)?.kind || 'story', ref, short: codeOf(ref), full: `${codeOf(ref)} ${titleOf(ref)}` })),
-    ...(record.rule_ids || []).map((id) => ({ type: 'rule', ref: `rule:${id}`, short: `Criterion #${id}`, full: `Criterion #${id} ${byId('rule', id)?.title || ''}`.trim() })),
+    ...(record.nodes || []).map((ref) => ({ type: parseNodeRef(ref)?.kind || 'story', ref, words: `${codeOf(ref)} ${titleOf(ref)}` })),
+    ...(record.rule_ids || []).map((id) => ({ type: 'rule', ref: `rule:${id}`, words: `${ruleCode(id)} ${byId('rule', id)?.title || ''}`.trim() })),
     ...(record.note_ids || []).map((id) => {
       const other = byId('note', id);
-      return { type: 'note', ref: `note:${id}`, short: `Note #${id}`, full: `Note #${id} ${other ? headlineOf(other) : ''}`.trim(), record: other };
+      return { type: 'note', ref: `note:${id}`, words: `${noteCode(id)} ${other ? recordTitle(other) : ''}`.trim(), record: other };
     }),
   ];
 }
 
-// "Applies to" in a list: the whole project, and the codes of what it is linked to.
+const SHOWN_APPLIES = 3; // the items "Applies to" says in a list before "and 2 more"
+
+// "Applies to" in a list: the whole project and what it is linked to, each by its code and name, one to a line, cut with an
+// ellipsis when long; the whole list is in the cell's tooltip.
 function appliesCell(record) {
-  const found = concernedItems(record);
-  const names = [record.project_wide ? 'Whole project' : null, ...found.map((one) => one.short)].filter(Boolean);
-  const full = [record.project_wide ? 'The whole project' : null, ...found.map((one) => one.full)].filter(Boolean);
-  return clampCell('cell-applies', full.join('\n'), names.length ? names.join(', ') : quiet('Nothing yet'));
+  const lines = [...(record.project_wide ? ['The whole project'] : []), ...concernedItems(record).map((one) => one.words)];
+  if (!lines.length) return plainCell('cell-clamp cell-applies', quiet('Nothing yet'));
+  const rest = lines.length - SHOWN_APPLIES;
+  return h(
+    'td',
+    { class: 'cell-clamp cell-applies' },
+    h('div', { class: 'applies-list', title: lines.join('\n') }, lines.slice(0, SHOWN_APPLIES).map((words) => h('span', { class: 'applies-name' }, words)), rest > 0 ? h('span', { class: 'applies-more' }, `and ${rest} more`) : null),
+  );
 }
 
 // What is under the first line of a note's text, or, when there is no more, its why: the grey words
@@ -209,6 +219,10 @@ function detailOf(record) {
 // Who decided a note and when, as a quiet detail of its row: the words are whole in the cell's title.
 const decidedCell = (record) =>
   clampCell('cell-decided', decidedWords(record) || '', record.decided_by ? `${record.decided_by}${record.decided_on ? `, ${day(record.decided_on)}` : ''}` : null);
+
+// Who recorded a note, with their sign, and the day, in one cell.
+const recordedCell = (record) =>
+  plainCell('cell-recorded', actorLabel(record.recorded_by, record.recorded_by_kind), record.recorded_at ? h('span', { class: 'recorded-on item-date' }, day(record.recorded_at)) : null);
 
 // The properties of the row of a note: its hooks, and what opens it. `why` is the reason recall
 // gives for its being there.
@@ -239,8 +253,7 @@ const noteColumns = [
   { key: 'status', label: 'Status', cell: (record) => plainCell('cell-status', noteStatusChip(record)) },
   { key: 'applies', label: 'Applies to', cell: appliesCell },
   { key: 'decided', label: 'Decided by', cell: decidedCell },
-  { key: 'by', label: 'Recorded by', cell: (record) => plainCell('cell-by', actorLabel(record.recorded_by, record.recorded_by_kind)) },
-  { key: 'on', label: 'Recorded', cell: (record) => dateCell(record.recorded_at) },
+  { key: 'recorded', label: 'Recorded', cell: recordedCell },
 ];
 
 // Notes as a table. A note may carry `why_here`, the reason recall gives for it, which is kept on its
@@ -308,7 +321,7 @@ function statusOf(type, ref) {
 // of what it names.
 export function concernsTable(record, { caption }) {
   const rows = [
-    ...(record.project_wide ? [{ type: 'project', ref: null, short: 'The whole project', full: 'The whole project' }] : []),
+    ...(record.project_wide ? [{ type: 'project', ref: null, words: 'The whole project' }] : []),
     ...concernedItems(record),
   ];
   const kindName = (row) => (row.type === 'project' ? 'Project' : kindWords(row.type).label);
@@ -321,7 +334,7 @@ export function concernsTable(record, { caption }) {
         key: 'item',
         label: 'Item',
         cell: (row) =>
-          clampCell('cell-title', row.full, row.ref ? itemLink(row.ref, { class: 'record-title', 'data-focus-key': `open:${row.ref}` }, row.full) : h('span', { class: 'record-title' }, 'Every epic, story and task in the project')),
+          clampCell('cell-title', row.words, row.ref ? itemLink(row.ref, { class: 'record-title', 'data-focus-key': `open:${row.ref}` }, row.words) : h('span', { class: 'record-title' }, 'Every epic, story and task in the project')),
       },
       { key: 'status', label: 'Status', cell: (row) => plainCell('cell-status', row.ref ? statusOf(row.type, row.ref) : null) },
     ],

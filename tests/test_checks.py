@@ -151,11 +151,11 @@ def test_a_person_is_never_held_back_and_neither_is_an_epic() -> None:
     # A person decides, and an epic has no checks: nothing is read to find that out.
     run_as(
         person("Marie"),
-        lambda: refuse_while_unticked(None, "task:1", instead="x", person_instead="y"),  # type: ignore[arg-type]
+        lambda: refuse_while_unticked(None, "task:1", instead="x", block="y"),  # type: ignore[arg-type]
     )
     run_as(
         agent("ann"),
-        lambda: refuse_while_unticked(None, "epic:1", instead="x", person_instead="y"),  # type: ignore[arg-type]
+        lambda: refuse_while_unticked(None, "epic:1", instead="x", block="y"),  # type: ignore[arg-type]
     )
 
 
@@ -235,3 +235,83 @@ def test_the_markdown_copy_keeps_the_tag_of_a_check_only_a_person_can_judge() ->
     assert "- [ ] Tests pass\n" in text
     assert text.endswith("- [x] [person] Looks right on a phone (by Marie, 2026-11-19)")
     assert "- [ ] [person] Looks right on a phone" in _checklist("task:2", items, {})
+
+
+# -- verifiers and GitHub evidence (M40) ---------------------------------------------------------
+
+
+def test_the_verifier_and_github_tags_say_who_may_tick_a_line_and_are_not_part_of_its_words() -> (
+    None
+):
+    body = (
+        "- Plain\n"
+        "- [verifier] Reviewed by someone else\n"
+        "- [ ] [GitHub] The pull request is merged\n"
+        "* [x] [github] [VERIFIER] Both tags, either order\n"
+        "- [verifier] [person] A person outranks it\n"
+        "- [person][verifier] Glued on\n"
+    )
+    flags = [(i.text, i.person_only, i.verifier_only, i.github) for i in definition_items(body)]
+    assert flags == [
+        ("Plain", False, False, False),
+        ("Reviewed by someone else", False, True, False),
+        # [github] means [verifier] too.
+        ("The pull request is merged", False, True, True),
+        ("Both tags, either order", False, True, True),
+        ("A person outranks it", True, True, False),
+        ("[person][verifier] Glued on", False, False, False),
+    ]
+    plain, tagged = (
+        definition_items("- Reviewed")[0],
+        definition_items("- [verifier] Reviewed")[0],
+    )
+    assert plain.item == tagged.item == item_key("Reviewed")
+    assert item_words("[ ] [verifier] [github]   Reviewed   twice") == "Reviewed twice"
+
+
+def test_two_lines_with_the_same_words_carry_every_tag_any_of_them_has() -> None:
+    for body in (
+        "- Reviewed\n- [verifier] Reviewed\n",
+        "- [github] Reviewed\n- Reviewed\n",
+        "- [verifier] Reviewed\n  - [x] [PERSON] Reviewed\n",
+    ):
+        (item,) = definition_items(body)
+        assert item.verifier_only is True
+    (item,) = definition_items("- Reviewed\n- [github] Reviewed\n")
+    assert (item.verifier_only, item.github) == (True, True)
+
+
+def test_a_github_evidence_must_start_with_a_pull_request_of_a_repository() -> None:
+    from vrum.checks import pull_request_address
+
+    good = "https://github.com/acme/widgets/pull/12"
+    assert pull_request_address(good) == good
+    assert pull_request_address(f"  {good} merged 2026-11-22, checks passed 3 of 3") == good
+    assert pull_request_address(f"{good}/files merged") == good
+    assert pull_request_address(f"{good}#issuecomment-1 merged") == good
+    assert pull_request_address("https://git.example.com/acme/widgets.git/pull/7") == (
+        "https://git.example.com/acme/widgets.git/pull/7"
+    )
+    for bad in (
+        None,
+        "",
+        "merged https://github.com/acme/widgets/pull/12",
+        "http://github.com/acme/widgets/pull/12",
+        "https://github.com/acme/widgets/pull/0",
+        "https://github.com/acme/widgets/pull/twelve",
+        "https://github.com/acme/widgets/issues/12",
+        "https://github.com/acme/widgets/pull/12x",
+        "https://github.com/acme/pull/12",
+        "github.com/acme/widgets/pull/12",
+    ):
+        assert pull_request_address(bad) is None, bad
+
+
+def test_the_markdown_copy_keeps_every_tag_of_a_check() -> None:
+    items = definition_items(
+        "- [verifier] Reviewed\n- [github] Merged\n- [person] [verifier] Looks right"
+    )
+    text = _checklist("task:1", items, {})
+    assert "- [ ] [verifier] Reviewed\n" in text
+    assert "- [ ] [github] Merged\n" in text
+    assert text.endswith("- [ ] [person] [verifier] Looks right")

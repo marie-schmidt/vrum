@@ -18,12 +18,14 @@ from playwright.async_api import Page, expect
 from tests.board_helpers import (
     FROM_PAGES,
     GONE,
+    HEADINGS,
     PAGES,
     SETTINGS,
     SLOW,
     VIEWS,
     board_url,
     browser_page,
+    crumb_codes,
     crumb_links,
     crumbs,
     item_address,
@@ -63,6 +65,7 @@ TITLES = {
     "lists": "Lists",
     "search": "Search",
     "activity": "Activity",
+    "needs": "Needs a person",
     "coverage": "Coverage",
 }
 
@@ -102,19 +105,25 @@ async def test_there_are_four_views_and_the_board_is_the_landing_view(
             "Roadmap",
             "Lists",
         ]
+        # A view's link is its name and nothing else: no row of numbers beside the four views.
+        assert await links.all_inner_texts() == ["Board", "Graph", "Roadmap", "Lists"]
+        await expect(page.locator("#main-nav .nav-count")).to_have_count(0)
         assert await links.evaluate_all("els => els.map(e => e.dataset.page)") == VIEWS
         assert await page.locator("#main-nav").get_attribute("aria-label") == "Views"
         # Nothing else in the shell leads to a page of the work: the rest are the project switcher,
         # the tree of epics (each title a link to a record's page), the search box, the link to the
-        # Activity page and the Settings menu.
+        # Activity page, the Settings menu and the account menu (whose one link is Account).
         top_links = await page.locator("#sidebar a[href^='#/'], #top a[href^='#/']").evaluate_all(
             "els => els.map(e => e.getAttribute('href').split('?')[0].replace('#/', ''))"
         )
-        assert set(top_links) <= {*VIEWS, *SETTINGS, "activity", "item"}
+        assert set(top_links) <= {*VIEWS, *SETTINGS, "activity", "needs", "item", "account"}
         assert not set(top_links) & set(GONE)
         await expect(page.locator("#project-switcher")).to_be_visible()
         await expect(page.locator("#global-search")).to_be_visible()
+        # The box has no button beside it: Enter asks.
+        await expect(page.locator("#global-search-go")).to_have_count(0)
         await expect(page.locator("#settings-menu")).to_be_visible()
+        await expect(page.locator("#account")).to_be_visible()
         activity = page.locator("a#activity-open")
         await expect(activity).to_be_visible()
         assert await activity.get_attribute("href") == "#/activity"
@@ -158,6 +167,11 @@ async def test_the_quick_switcher_offers_the_views_and_pages_and_every_jump_is_a
 
         await page.keyboard.press("Control+k")
         await expect(page.locator("#switcher")).to_be_visible()
+        # It opens empty: only the box, and the list of places comes with the first Down.
+        await expect(page.locator("#switcher-list")).to_be_hidden()
+        assert await page.locator("#switcher-input").get_attribute("aria-expanded") == "false"
+        await page.keyboard.press("ArrowDown")
+        await expect(page.locator("#switcher-list")).to_be_visible()
         titles = await page.locator("#switcher-list li[data-page]").all_inner_texts()
         assert [re.sub(r"^View ", "", text).strip() for text in titles] == [
             "Board",
@@ -166,9 +180,11 @@ async def test_the_quick_switcher_offers_the_views_and_pages_and_every_jump_is_a
             "Lists",
             "Search",
             "Activity",
+            "Needs a person",
             "Coverage",
             "Users",
             "Definition of done",
+            "Plan templates",
             "Tools",
             "Status and export",
         ]
@@ -177,21 +193,32 @@ async def test_the_quick_switcher_offers_the_views_and_pages_and_every_jump_is_a
 
         # It only navigates, and every place it goes to is a page: a record opens its own page, in
         # the page the person is in, whatever the kind of record. A note someone decided is a
-        # decision, and either word finds it.
+        # decision, and either word finds it; a criterion and a note are found by their codes.
         for words, ref in (
             (f"Jump target {word}", epic),
             (code_of(story), story),
             (f"decision {decision['id']}", f"note:{decision['id']}"),
             (f"note {decision['id']}", f"note:{decision['id']}"),
             (f"note {note['id']}", f"note:{note['id']}"),
+            (f"N-{note['id']}", f"note:{note['id']}"),
             (f"criterion {rule['id']}", f"rule:{rule['id']}"),
+            (f"AC-{rule['id']}", f"rule:{rule['id']}"),
         ):
             await jump(words)
             await item_loaded(page, ref)
             assert page.url.endswith(f"#/item?item={ref}&from=roadmap"), (words, page.url)
-            assert (await crumbs(page))[2] == "Roadmap"
+            # The path starts at the view the jump was made from: no project, no Projects.
+            assert (await crumbs(page))[0] == "Roadmap"
             assert await sidebar_current(page) == ["roadmap"]  # the view it was reached from
             await no_panel_or_drawer(page)
+        # A criterion and a note are listed by their codes, with no kind word before the title.
+        await page.keyboard.press("Control+k")
+        await page.locator("#switcher-input").fill(f"AC-{rule['id']}")
+        option = page.locator("#switcher-list li[data-ref]")
+        await expect(option).to_have_count(1)
+        assert await option.inner_text() == f"AC-{rule['id']} {rule['title']}"
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#switcher")).to_have_count(0)
         # The views, Search, Activity and the coverage report are jumps too.
         for words, name in (
             ("activity", "activity"),
@@ -206,10 +233,61 @@ async def test_the_quick_switcher_offers_the_views_and_pages_and_every_jump_is_a
         assert w.problems == [], w.problems
 
 
+async def test_the_quick_switcher_opens_with_only_its_box_and_lists_places_when_asked(
+    board: str,
+) -> None:
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/board")
+        await on_page(page, "board")
+        box, listing = page.locator("#switcher-input"), page.locator("#switcher-list")
+        rows = page.locator("#switcher-list li.switcher-option")
+
+        async def opened() -> None:
+            await page.keyboard.press("Control+k")
+            await expect(page.locator("#switcher")).to_be_visible()
+            await expect(box).to_be_focused()
+            # Only the box: no list, no row, and nothing says a list is open.
+            await expect(listing).to_be_hidden()
+            assert await page.locator("#switcher-list li").count() == 0
+            assert await box.get_attribute("aria-expanded") == "false"
+
+        # Typing opens the list, with what the words find.
+        await opened()
+        await box.fill("gra")
+        await expect(listing).to_be_visible()
+        assert await box.get_attribute("aria-expanded") == "true"
+        assert await page.locator("#switcher-list li[data-page=graph]").count() == 1
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#switcher")).to_have_count(0)
+
+        # The first Down only opens the list (the first place stays the active one); the next
+        # moves down it.
+        await opened()
+        await page.keyboard.press("ArrowDown")
+        await expect(listing).to_be_visible()
+        await expect(rows.first).to_have_attribute("aria-selected", "true")
+        await page.keyboard.press("ArrowDown")
+        await expect(rows.nth(1)).to_have_attribute("aria-selected", "true")
+        await expect(rows.first).to_have_attribute("aria-selected", "false")
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#switcher")).to_have_count(0)
+
+        # A click on the field opens it too; and opened again it is empty again.
+        await opened()
+        await box.click()
+        await expect(listing).to_be_visible()
+        await page.keyboard.press("Escape")
+        await expect(page.locator("#switcher")).to_have_count(0)
+        await opened()
+        assert await box.input_value() == ""
+        assert w.problems == [], w.problems
+
+
 # -- the Settings menu --------------------------------------------------------------------------
 
 
-async def test_the_settings_menu_works_from_the_keyboard_and_reaches_its_four_pages(
+async def test_the_settings_menu_works_from_the_keyboard_and_reaches_its_five_pages(
     board: str,
 ) -> None:
     async with browser_page(board, token=the_token()) as w:
@@ -231,12 +309,14 @@ async def test_the_settings_menu_works_from_the_keyboard_and_reaches_its_four_pa
         assert await items.all_inner_texts() == [
             "Users",
             "Definition of done",
+            "Plan templates",
             "Tools",
             "Status and export",
         ]
         await expect(page.locator("#settings-users")).to_be_focused()
         for key, focused in (
             ("ArrowDown", "definition"),
+            ("ArrowDown", "templates"),
             ("ArrowDown", "tools"),
             ("ArrowDown", "status"),
             ("ArrowDown", "users"),
@@ -255,12 +335,12 @@ async def test_the_settings_menu_works_from_the_keyboard_and_reaches_its_four_pa
         # An arrow up from the button opens it on the last choice, and a click elsewhere closes it.
         await page.keyboard.press("ArrowUp")
         await expect(page.locator("#settings-status")).to_be_focused()
-        await page.locator("main#page h1").click()
+        await page.locator("main#page").click(position={"x": 4, "y": 4})
         await expect(menu).to_be_hidden()
 
         # Each page is reached with the keyboard alone, and the menu's own button is marked while
         # a settings page is open.
-        for steps, name in ((0, "users"), (1, "definition"), (2, "tools"), (3, "status")):
+        for steps, name in enumerate(SETTINGS):
             await w.go("#/board")
             await on_page(page, "board")
             await button.focus()
@@ -292,8 +372,10 @@ async def test_every_view_is_one_click_from_every_page_and_each_page_marks_where
         "coverage": [],
         "users": [],
         "definition": [],
+        "templates": [],
         "tools": [],
         "status": [],
+        "account": [],
         f"item?item={story}&from=roadmap": ["roadmap"],
         f"item?item={story}&from=activity": ["activity"],
     }
@@ -312,6 +394,104 @@ async def test_every_view_is_one_click_from_every_page_and_each_page_marks_where
                 assert await sidebar_current(page) == [name], (start, name)
                 await w.go(f"#/{start}")
                 await on_page(page, start.split("?")[0])
+        assert w.problems == [], w.problems
+
+
+async def test_the_path_is_the_page_you_are_in_and_the_epic_tree_is_for_work_pages_only(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Tree and path {word}")
+    story = await made(client, "story", f"Path of a story {word}", epic)
+    # What the path says on each page: only the page, there is no Projects and no project in it.
+    titles = {name: HEADINGS[name] for name in (*PAGES, "account")}
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        project = project_at(board)
+        await w.open("#/board")
+        await on_page(page, "board")
+        for name in (*PAGES, "account"):
+            await w.go(f"#/{name}")
+            await on_page(page, name)
+            assert await crumbs(page) == [titles[name]], name
+            await expect(page.locator("#crumb-page")).to_have_text(titles[name])
+            assert await page.locator("nav.crumbs").count() == 1
+            assert project.name not in await page.locator("nav.crumbs").inner_text()
+            assert "Projects" not in await page.locator("nav.crumbs").inner_text()
+            # The tree of epics is beside the work, and out of the way of the settings pages and
+            # the account page (where it would have nothing to do with the page).
+            tree = page.locator("#epic-list")
+            if name in (*SETTINGS, "account"):
+                await expect(tree).to_be_hidden()
+                await expect(page.locator("#epics-heading")).to_be_hidden()
+            else:
+                await expect(tree).to_be_visible()
+                await expect(tree_item(page, epic)).to_be_visible(timeout=SLOW)
+        # The page of a record is a work page: its path ends with the record's code and its name.
+        await w.go(item_address(story))
+        await item_loaded(page, story)
+        await expect(page.locator("#epic-list")).to_be_visible()
+        assert await crumbs(page) == [
+            "Board",
+            f"{code_of(epic)} Tree and path {word}",
+            f"{code_of(story)} Path of a story {word}",
+        ]
+        assert await crumb_codes(page) == ["Board", code_of(epic), code_of(story)]
+        # Back on a work page, the tree is there again, with what it showed before.
+        await w.go("#/roadmap")
+        await on_page(page, "roadmap")
+        await expect(tree_item(page, epic)).to_be_visible(timeout=SLOW)
+        assert w.problems == [], w.problems
+
+
+async def test_no_page_repeats_the_title_the_top_bar_gives_it_in_a_heading_of_its_own(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"One title {word}")
+    story = await made(client, "story", f"One title story {word}", epic)
+    # A heading is on show when it has a box bigger than the 1 px by 1 px a screen-reader-only
+    # heading is clipped to.
+    seen = """() => {
+        const shown = (e) => {
+            const box = e.getBoundingClientRect();
+            return box.width > 2 && box.height > 2 && getComputedStyle(e).visibility !== 'hidden';
+        };
+        return {
+            h1: [...document.querySelectorAll('#page h1')].map((e) => ({
+                text: e.textContent.trim(), srOnly: e.classList.contains('sr-only'),
+                shown: shown(e),
+            })),
+            headings: [...document.querySelectorAll('#page h1, #page h2, #page .page-title')]
+                .filter(shown).map((e) => e.textContent.trim()),
+            old: document.querySelectorAll('#page .page-title').length,
+            inHeader: [...document.querySelectorAll(
+                '#page header.page-header h1, #page header.page-header h2'
+            )].filter(shown).length,
+        };
+    }"""
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/board")
+        for name in (*PAGES, "account"):
+            await w.go(f"#/{name}")
+            await on_page(page, name)
+            title = HEADINGS[name]
+            # The top bar names the page; the page has one h1 with the same words, for a screen
+            # reader only, and no heading on show says them again.
+            await expect(page.locator("#crumb-page")).to_have_text(title)
+            found = await page.evaluate(seen)
+            assert found["h1"] == [{"text": title, "srOnly": True, "shown": False}], (name, found)
+            assert title not in found["headings"], (name, found)
+            assert found["old"] == 0, name
+            # Where a page has actions of its own they sit in a header row that holds no title.
+            assert found["inHeader"] == 0, (name, found)
+        # The page of a record keeps its own title, on show: it is the record, not a page's name.
+        await w.go(item_address(story))
+        await item_loaded(page, story)
+        found = await page.evaluate(seen)
+        assert [(one["srOnly"], one["shown"]) for one in found["h1"]] == [(False, True)]
+        assert f"One title story {word}" in found["h1"][0]["text"]
         assert w.problems == [], w.problems
 
 
@@ -435,7 +615,7 @@ async def test_the_search_box_is_on_every_view_and_goes_to_the_search_page_with_
                 "data-ref", story, timeout=SLOW
             )
             assert page.url.endswith(f"#/item?item={story}&from=search")
-            assert (await crumbs(page))[2] == "Search"
+            assert (await crumbs(page))[0] == "Search"
             await no_panel_or_drawer(page)
             # The way back is the search as it was left, with its words and its result.
             await view_crumb(page).click()
@@ -479,9 +659,14 @@ async def test_the_activity_link_leads_to_the_activity_page_from_every_view_and_
             await on_page(page, "activity")
             assert await hash_of(page) == "#/activity"
             assert await sidebar_current(page) == ["activity"]
-            # The feed and who is working are on the page, which is no longer a view.
+            # The page opens on Changes, the first of its three views, and who is working is one
+            # click away on the same page, which is no longer a view.
             await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
-            await expect(page.locator("#working")).to_be_visible()
+            await expect(page.locator("#activity-tab-changes")).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            await page.locator("#activity-tab-working").click()
+            await expect(page.locator("#working")).to_be_visible(timeout=SLOW)
             await no_panel_or_drawer(page)
             # A view is a click away again, and the Activity link is no longer marked.
             await page.locator(f"#main-nav a[data-page={name}]").click()
@@ -517,13 +702,12 @@ async def test_a_record_page_keeps_the_page_it_was_reached_from_in_its_path_side
     after = await made(client, "story", f"Path next story {word}", epic, actor=actor)
     task = await made(client, "task", f"Path task {word}", story, actor=actor)
     project = project_at(board)
+    # Each record in the path is its code and its name, the code never alone.
     path = [
-        "Projects",
-        project.name,
         "",
-        code_of(epic),
-        code_of(story),
-        code_of(task),
+        f"{code_of(epic)} Path epic {word}",
+        f"{code_of(story)} Path story {word}",
+        f"{code_of(task)} Path task {word}",
     ]
     async with browser_page(board, token=the_token()) as w:
         page = w.page
@@ -531,16 +715,18 @@ async def test_a_record_page_keeps_the_page_it_was_reached_from_in_its_path_side
             await w.open(item_address(task, from_page))
             await page.reload()
             await item_loaded(page, task)
-            # The path starts with the page the person is in, then the epic and story above.
-            path[2] = TITLES[from_page]
+            # The path starts with the page the person is in (there is no Projects and no project
+            # in it: the project is in the sidebar), then the epic and story above.
+            path[0] = TITLES[from_page]
             assert await crumbs(page) == path, from_page
+            assert project.name not in " ".join(await crumbs(page))
             links = await crumb_links(page)
-            assert [href is None for _, href in links] == [False, False, False, False, False, True]
+            assert [href is None for _, href in links] == [False, False, False, True]
             # After a load nothing says which choices the page had, so the way back is the page.
-            assert links[2][1] == f"#/{from_page}"
+            assert links[0][1] == f"#/{from_page}"
             # The sidebar keeps the view highlighted (and Activity, when that is where it is from).
             assert await sidebar_current(page) == (
-                [from_page] if from_page in (*VIEWS, "activity") else []
+                [from_page] if from_page in (*VIEWS, "activity", "needs") else []
             ), from_page
             # Every link to a record, in the page, the path and the tree, keeps the same page.
             hrefs = await page.locator(
@@ -549,11 +735,20 @@ async def test_a_record_page_keeps_the_page_it_was_reached_from_in_its_path_side
             ).evaluate_all("els => els.map(e => e.getAttribute('href'))")
             assert hrefs and all(href.endswith(f"&from={from_page}") for href in hrefs), hrefs
             await no_panel_or_drawer(page)
+            # The tab and the tooltip of a step name the record by its code and its name.
+            assert (await page.title()).startswith(f"{path[3]} · "), await page.title()
+            first_step = page.locator("nav.crumbs li.crumb-item a").first
+            assert await first_step.get_attribute("title") == path[1]
+            assert await first_step.get_attribute("aria-label") is None
 
             # From the story above, the next story, the epic and the way back all stay in it.
             await page.locator("nav.crumbs li.crumb-item a").nth(1).click()
             await item_loaded(page, story)
             assert page.url.endswith(f"#/item?item={story}&from={from_page}")
+            # The arrow at the left of the bar goes one step back, and says where in words.
+            arrow = page.locator("#back-to-view")
+            await expect(arrow).to_have_attribute("aria-label", f"Back to {path[3]}")
+            assert await arrow.get_attribute("title") == f"Back to {path[3]}"
             await page.locator("#item-next").click()
             await item_loaded(page, after)
             assert page.url.endswith(f"#/item?item={after}&from={from_page}")

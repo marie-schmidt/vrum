@@ -19,14 +19,14 @@ const FORMS = [
   ['A leading -', 'leaves the matches out.', ['-status:done']],
   ['no:', 'finds items where a field is empty: start, target, claimed, parent, body (no details), criteria (no acceptance criteria), size or waiting.', ['no:target', 'no:size', 'no:criteria']],
   ['Dates', 'take a day or a range. Leave one end open.', ['target:2026-11-01..2026-12-31']],
-  ['is:', 'takes overdue, conflict, waiting, claimed or lapsed.', ['is:overdue']],
+  ['is:', 'takes overdue, conflict, waiting, claimed, lapsed, held or unverified (blocked, held by nobody and waiting for a verifier). held is work kept back by a gate or a plan that waits for approval.', ['is:overdue', 'is:held', 'is:unverified']],
   ['claimed and waiting', 'alone mean held by someone, and waiting on something.', ['-claimed', 'waiting']],
-  ['epic: and story:', 'take everything under it. parent: is only what is directly under it, and number: goes with kind:.', ['epic:3', 'kind:story number:12']],
+  ['epic: and story:', 'take everything under it, by the number in its code (E-3 is epic:3). parent: is only what is directly under it, and number: goes with kind:.', ['epic:3', 'kind:story number:12']],
 ];
 
 const TRY = [
   ['kind:task status:ready -claimed priority:high', 'Ready, high priority, nobody holds it'],
-  ['epic:3 status:blocked,in_progress', 'Running or stuck in epic 3'],
+  ['epic:3 status:blocked,in_progress', 'Running or stuck under E-3'],
   ['target:2026-12-01..2026-12-31 -claimed', 'Due in December, nobody holds it'],
 ];
 
@@ -111,7 +111,8 @@ export async function loadRows(text, bar) {
     return rows;
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    bar.setProblem(error.message);
+    // The server's own words: its examples of the filter language (epic:3) are not references to items.
+    bar.setProblem(error.raw);
     return null;
   }
 }

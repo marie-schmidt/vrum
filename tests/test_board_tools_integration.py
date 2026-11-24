@@ -1,7 +1,8 @@
 """M16's Tools page, one of the settings pages, against the running containers, driven in a real
 headless browser and checked against a real MCP client (see ./check.sh): it is reached from the
-Settings menu with the keyboard, it lists every tool the server has (44, one of which only a
-person can use), and none that generate or that belong to beliefs or principles, each with its
+Settings menu with the keyboard, it lists every tool the server has (the ones that only a person
+can use, two that only a key that runs code is given, and the rest), and none that generate or that
+belong to beliefs or principles, each with its
 description, fields and place on the board (or why it is for agents only), and says which tools
 agents are offered (25) and which are done on the board; "Try it" returns what MCP returns and
 exists only for the tools that read, and the server turns away a try of anything that changes
@@ -19,6 +20,7 @@ from tests.board_helpers import SLOW, api_path, board_url, browser_page, made, p
 from tests.board_m14 import spoken
 from tests.board_search import open_settings
 from tests.helpers import (
+    connect,
     make_note,
     number_of,
     ok,
@@ -26,8 +28,9 @@ from tests.helpers import (
     the_token,
     unique_word,
 )
-from tests.world import SESSION_COOKIE, api, project_at, register
+from tests.world import SESSION_COOKIE, api, make_key, make_project, project_at, register
 from vrum.board.tools import TOOL_PLACES, AgentsOnly, OnTheBoard
+from vrum.records import PEOPLE_ONLY_TOOLS
 from vrum.surface import AGENT_TOOLS, MOST_AGENT_TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -45,14 +48,19 @@ PAGES = {
     "lists",
     "search",
     "activity",
+    "needs",
     "coverage",
     "users",
     "definition",
+    "templates",
     "tools",
     "status",
 }
-# The tools no agent key can have: only a person confirms a note or sets the definition of done.
-PEOPLE_ONLY = {"set_confirmation", "set_definition_of_done"}
+# The tools no agent key can have: only a person confirms a note, sets the definition of done or
+# answers an ask.
+PEOPLE_ONLY = set(PEOPLE_ONLY_TOOLS)
+# The two tools a key that runs code is given instead of the others (it is never ticked one by one).
+CODE_TOOLS = {"explore", "run"}
 
 
 @pytest.fixture
@@ -70,14 +78,21 @@ async def listed(page: Page) -> None:
 async def test_the_page_lists_every_tool_the_server_has_with_a_place_and_who_is_offered_it(
     client: Client, board: str
 ) -> None:
-    # The test key may use every tool a key can have; the board lists those and the one that only a
-    # person can use.
+    # The test key may use every tool a key can have; the board lists those, the one that only a
+    # person can use, and the two a key that runs code is given (which no key is given one by one).
     tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert PEOPLE_ONLY.isdisjoint(tools)
-    assert set(tools) | PEOPLE_ONLY == set(TOOL_PLACES) and len(TOOL_PLACES) == 47
+    assert PEOPLE_ONLY.isdisjoint(tools) and CODE_TOOLS.isdisjoint(tools)
+    assert set(tools) | PEOPLE_ONLY | CODE_TOOLS == set(TOOL_PLACES)
     assert len(AGENT_TOOLS) == MOST_AGENT_TOOLS == 25 and set(AGENT_TOOLS) <= set(tools)
     assert GONE.isdisjoint(TOOL_PLACES)
     assert not [name for name in TOOL_PLACES if OLD_WORDS.search(name)]
+    # What a key that runs code lists, which the page's entries for the two must agree with.
+    owner = register(name=f"Lister {unique_word()}")
+    own = make_project(owner)
+    async with connect(own.mcp_url, make_key(own, "coder", code_mode=True)) as coder:
+        code_listing = {tool.name: tool for tool in (await coder.list_tools()).tools}
+    assert set(code_listing) == CODE_TOOLS
+    board_listing = {t["name"]: t for t in owner.call("GET", "/board/api/tools").body["tools"]}
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/board")
@@ -87,32 +102,48 @@ async def test_the_page_lists_every_tool_the_server_has_with_a_place_and_who_is_
         names: list[str] = await page.locator("#tool-list article.tool").evaluate_all(
             "els => els.map(e => e.dataset.name)"
         )
-        assert sorted(names) == sorted(TOOL_PLACES) and len(names) == len(set(names)) == 47
+        assert sorted(names) == sorted(TOOL_PLACES) and len(names) == len(set(names)) == len(
+            TOOL_PLACES
+        )
         # The switch says how many tools there are, and how many of them agents are offered.
-        await expect(page.locator("#tools-show-all")).to_contain_text("47")
+        await expect(page.locator("#tools-show-all")).to_contain_text(str(len(TOOL_PLACES)))
         await expect(page.locator("#tools-show-offered")).to_contain_text("25")
 
         reads = {
             name
-            for name, tool in tools.items()
+            for name, tool in {**tools, **code_listing}.items()
             if tool.annotations and tool.annotations.read_only_hint
         }
         assert {"search", "recall", "list_notes", "get_note", "find_overlaps"} <= reads
+        assert "explore" in reads and "run" not in reads
         assert {"add_note", "supersede_note", "withdraw_note", "link_note"}.isdisjoint(reads)
         for name in names:
             entry = page.locator(f"#tool-entry-{name}")
-            # Whether agents are offered it, as a word and a sign, from the server's own list.
+            # Whether agents are offered it, as a word and a sign, from the server's own list. The
+            # two tools of a key that runs code say who they are for instead.
             offered = name in AGENT_TOOLS
             await expect(entry).to_have_attribute("data-offered", "1" if offered else "0")
+            await expect(entry).to_have_attribute("data-code", "1" if name in CODE_TOOLS else "0")
             await expect(entry.locator(".tool-offer")).to_have_text(
-                "Offered to agents" if offered else "Board and administration only"
+                "For keys that run code"
+                if name in CODE_TOOLS
+                else "Offered to agents"
+                if offered
+                else "Board and administration only"
             )
             if name in PEOPLE_ONLY:
                 await expect(entry.locator(".offer-note")).to_contain_text("Only a person")
                 continue
-            tool = tools[name]
-            # The description, whole: its first paragraph and then the rest.
-            paragraphs = [p for p in (tool.description or "").split("\n\n") if p.strip()]
+            if name in CODE_TOOLS:
+                await expect(entry.locator(".offer-note")).to_contain_text(
+                    "Only a key that runs code is given this tool."
+                )
+            tool = tools.get(name) or code_listing[name]
+            # The description, whole: its first paragraph and then the rest. (What a key that runs
+            # code is told `run` is has its own functions in it, so the page shows the server's
+            # general words for it.)
+            wording = board_listing[name]["description"] if name == "run" else tool.description
+            paragraphs = [p for p in (wording or "").split("\n\n") if p.strip()]
             assert spoken(await entry.locator("p.first").inner_text()) == spoken(paragraphs[0])
             for extra in paragraphs[1:]:
                 assert spoken(extra) in spoken(
@@ -124,6 +155,8 @@ async def test_the_page_lists_every_tool_the_server_has_with_a_place_and_who_is_
                 "els => els.map(e => e.dataset.field)"
             )
             assert fields == list(properties), name
+            # A tool that takes no fields has no list of them to open ("Fields (0)").
+            assert (await entry.locator("details.fields-list").count() == 1) == bool(properties)
             for field_name, spec in properties.items():
                 if spec.get("description"):
                     cell = entry.locator(f"tr[data-field='{field_name}'] td").last
@@ -188,10 +221,14 @@ async def test_the_tools_agents_are_offered_can_be_told_from_the_rest_on_the_pag
         await w.open("#/tools")
         await listed(page)
         everything = await page.locator("#tool-list article.tool").count()
-        assert everything == 47
+        assert everything == len(TOOL_PLACES)
         # Each choice of the switch lists only its tools, says how many they are, and is in the
-        # address, which opens the same list again.
-        for choice, offered, count in (("offered", "1", 25), ("board", "0", 22)):
+        # address, which opens the same list again. The two tools of a key that runs code are in
+        # neither of these two (the new test file has their own switch).
+        for choice, offered, count in (
+            ("offered", "1", 25),
+            ("board", "0", len(TOOL_PLACES) - 25 - len(CODE_TOOLS)),
+        ):
             await page.locator(f"#tools-show-{choice}").click()
             await expect(page.locator(f"#tools-show-{choice}")).to_have_attribute(
                 "aria-pressed", "true"
@@ -210,7 +247,9 @@ async def test_the_tools_agents_are_offered_can_be_told_from_the_rest_on_the_pag
         await expect(page.locator("#tools-show-offered")).to_have_attribute("aria-pressed", "true")
         # All tools again.
         await page.locator("#tools-show-all").click()
-        await expect(page.locator("#tool-list article.tool")).to_have_count(47, timeout=SLOW)
+        await expect(page.locator("#tool-list article.tool")).to_have_count(
+            len(TOOL_PLACES), timeout=SLOW
+        )
         assert w.problems == []
 
 
@@ -225,6 +264,7 @@ async def test_the_settings_menu_is_a_menu_for_the_keyboard(client: Client, boar
         assert await items.evaluate_all("els => els.map(e => e.id)") == [
             "settings-users",
             "settings-definition",
+            "settings-templates",
             "settings-tools",
             "settings-status",
         ]
@@ -243,13 +283,14 @@ async def test_the_settings_menu_is_a_menu_for_the_keyboard(client: Client, boar
         await page.keyboard.press("ArrowDown")
         await page.keyboard.press("ArrowDown")
         await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("ArrowDown")
         await page.keyboard.press("Space")
         await expect(page).to_have_url(re.compile(r"#/tools$"), timeout=SLOW)
         await expect(menu).to_have_attribute("aria-current", "page")
         assert w.problems == []
 
 
-async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_session(
+async def test_tools_has_no_connect_block_and_the_users_page_says_how_an_agent_connects_once(
     client: Client, board: str, server_url: str
 ) -> None:
     project = project_at(board)
@@ -257,12 +298,23 @@ async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_se
         page = w.page
         await w.open("#/tools")
         await listed(page)
-        assert await page.locator("#endpoint").inner_text() == server_url
-        # It describes the agent key: sent as a bearer header, read from the environment, made on
-        # the Users page, and never one that is shown here.
-        connecting = await page.locator("#connecting").inner_text()
+        # The Tools page is the reference of the tools: how to connect is said once, on the Users
+        # page, and this page only has a link to the agent keys, in its header.
+        for left in ("#connecting", "#connect", "#endpoint", "#example", "#mcp-address"):
+            assert await page.locator(left).count() == 0, left
+        assert "Connect an agent" not in await page.locator("#page").inner_text()
+        keys = page.locator("a#tools-agent-keys")
+        assert await keys.get_attribute("href") == "#/users"
+        await keys.click()
+        await expect(page).to_have_url(re.compile(r"#/users$"), timeout=SLOW)
+        await expect(page.locator("#connect")).to_be_visible(timeout=SLOW)
+        assert await page.locator("#connect").count() == 1
+        assert await page.locator("#page").get_by_text("Connect an agent").count() == 1
+        assert await page.locator("#mcp-address").inner_text() == server_url
+        # It describes the agent key: sent as a bearer header, read from the environment, and never
+        # one that is shown here.
+        connecting = await page.locator("#connect").inner_text()
         assert "agent key" in connecting and "Authorization: Bearer" in connecting
-        assert await page.locator("#connecting a[href='#/users']").count() >= 1
         await page.locator("#example summary").click()
         example = await page.locator("#example").text_content() or ""
         assert server_url in example and "Authorization" in example
@@ -281,9 +333,16 @@ async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_se
         )
         for secret in (project.key, cookies[0]["value"]):
             assert secret not in everything
-        # The search narrows the list by what is in the names, areas, descriptions and places.
+        # Back on Tools, the search narrows the list by what is in the names, areas, descriptions
+        # and places. Enter asks (there is no Search button), and Clear is there only once there
+        # is something to clear.
+        await w.go("#/tools")
+        await listed(page)
+        await expect(page.locator("#tool-search")).to_be_visible()
+        await expect(page.locator("#page form.filter button[type=submit]")).to_have_count(0)
+        await expect(page.locator("#clear-tool-search")).to_be_hidden()
         await page.locator("#tool-search").fill("overlaps")
-        await page.locator("#page form.filter button[type=submit]").click()
+        await page.locator("#tool-search").press("Enter")
         await expect(page.locator("#count")).to_contain_text("1 tool shown", timeout=SLOW)
         shown: list[str] = await page.locator("#tool-list article.tool").evaluate_all(
             "els => els.map(e => e.dataset.name)"
@@ -291,8 +350,38 @@ async def test_the_page_says_how_an_agent_connects_and_never_shows_a_key_or_a_se
         assert "find_overlaps" in shown and "create_node" not in shown
         assert 1 <= len(shown) < len((await client.list_tools()).tools)
         assert page.url.endswith("#/tools?q=overlaps")
+        await expect(page.locator("#clear-tool-search")).to_be_visible()
         await page.locator("#clear-tool-search").click()
         await expect(page.locator("#tool-list article.tool").nth(10)).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#clear-tool-search")).to_be_hidden()
+        assert w.problems == []
+
+
+async def test_the_tools_page_has_no_second_title_beside_the_one_in_the_top_bar(
+    board: str,
+) -> None:
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/tools")
+        await listed(page)
+        # The top bar names the page. The page's one h1 says the same for a screen reader only
+        # (clipped to 1 px by 1 px), and nothing that is on show says "Tools" again as a heading.
+        await expect(page.locator("#crumb-page")).to_have_text("Tools")
+        title = page.locator("#page h1")
+        assert await title.count() == 1
+        assert await title.get_attribute("class") == "sr-only"
+        box = await title.bounding_box()
+        assert box is not None and box["width"] <= 1 and box["height"] <= 1, box
+        on_show = await page.evaluate(
+            """() => [...document.querySelectorAll('#page h1, #page h2, #page h3, .page-title')]
+                .filter((e) => e.getBoundingClientRect().width > 2)
+                .map((e) => e.textContent.trim())"""
+        )
+        assert "Tools" not in on_show, on_show
+        # What the header row holds is what can be done on the page: the link to the agent keys.
+        header = page.locator("#page header.page-header")
+        assert await header.count() == 1
+        assert await header.locator("a, button").all_inner_texts() == ["Agent keys"]
         assert w.problems == []
 
 

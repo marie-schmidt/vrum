@@ -101,7 +101,7 @@ async function leaveOtherSession() {
 }
 
 function drawDone(main) {
-  const done = h('div', { class: 'mail-done', id: 'reset-done', role: 'status', tabindex: '-1' }, h('p', {}, 'Your password is changed. Sign in with the new one.'));
+  const done = h('div', { class: 'mail-done', id: 'reset-done', role: 'status', tabindex: '-1' }, h('p', {}, 'Sign in with your new password.'));
   put(main, card('reset-page', 'ok', heading('check', 'Password changed'), done, goOn(false)));
   done.focus();
 }

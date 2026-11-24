@@ -9,9 +9,13 @@ the text before and after, so the history says who changed it and what it said.
 Its list lines are a checklist: each is an item that a story or task can have ticked, by an agent
 or a person (see checks.py). Every other line is context and cannot be ticked. An item's key is
 the first 8 hex digits of a SHA-256 of its words, so it stays the same while the words do. A line
-whose words start with `[person]` is a check only a person can judge: the tag is not part of its
-words (so adding or taking it away keeps the key and every tick), and an agent may not tick it. The
-items are kept in the table `definition_items`, rebuilt in the same step as the text."""
+may start with tags, after its checkbox and in any order, that say who may tick it: `[person]` is
+a check only a person can judge (an agent may not tick it), `[verifier]` one that only a verifier
+may tick (an agent whose key is marked a verifier and that did not do the work on the story or task;
+a person always may), and `[github]` one that a verifier ticks with a GitHub pull request address as
+the start of its evidence. A tag is not part of the words (so adding or taking one away keeps the
+key and every tick). The items are kept in the table `definition_items`, rebuilt in the same step as
+the text."""
 
 import hashlib
 import re
@@ -32,7 +36,8 @@ _COLUMNS = "body, version, updated_at, updated_by, updated_by_kind"
 # A list line: a dash or an asterisk, then its words, at any depth; `- [ ]` and `- [x]` too.
 _LIST_LINE = re.compile(r"^[ \t]*[-*][ \t]+(\S.*)$")
 _CHECKBOX = re.compile(r"^\[[ xX]\](?:\s+|$)")
-_PERSON_TAG = re.compile(r"^\[person\](?:\s+|$)", re.IGNORECASE)
+# The tags a line may start with, after its checkbox, in any order: they say who may tick it.
+_TAG = re.compile(r"^\[(person|verifier|github)\](?:\s+|$)", re.IGNORECASE)
 # Three or more dashes or asterisks with nothing else is a line across the page, not a list line.
 _RULER = re.compile(r"^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 _FENCE = re.compile(r"^[ \t]*(?:```|~~~)")
@@ -49,6 +54,18 @@ class DefinitionItem(BaseModel):
         description="True when the line is marked [person]: only a person can judge it, so an "
         "agent may not tick it.",
     )
+    verifier_only: bool = Field(
+        default=False,
+        description="True when the line is marked [verifier] or [github]: an agent may tick it "
+        "only if its key is a verifier and it did not do the work on the story or task (it never "
+        "claimed it or handed it off). A person always may.",
+    )
+    github: bool = Field(
+        default=False,
+        description="True when the line is marked [github]: a verifier's evidence must begin "
+        "with the address of a GitHub pull request, then say what was seen (merged, the checks, "
+        "the commit). Vrum does not ask GitHub: it records what the verifier reports.",
+    )
     ticks: int = Field(
         default=0,
         description="On how many stories and tasks it is ticked (only when you read the "
@@ -60,15 +77,26 @@ def _words(text: str) -> str:
     return " ".join(_CHECKBOX.sub("", text.strip()).split())
 
 
+def line_tags(text: str) -> tuple[frozenset[str], str]:
+    """The tags a list line starts with (person, verifier, github, in lower case) and what is left
+    of it, after its checkbox and its tags, with runs of white space made one space."""
+    rest = _words(text)
+    found: set[str] = set()
+    while (match := _TAG.match(rest)) is not None:
+        found.add(match.group(1).lower())
+        rest = rest[match.end() :]
+    return frozenset(found), " ".join(rest.split())
+
+
 def item_words(text: str) -> str:
-    """The words of a list line as an item has them: trimmed, with a leading [ ] or [x] and then a
-    [person] tag taken off and runs of white space made one space."""
-    return " ".join(_PERSON_TAG.sub("", _words(text)).split())
+    """The words of a list line as an item has them: trimmed, with a leading [ ] or [x] and then
+    any [person], [verifier] or [github] tags taken off and runs of white space made one space."""
+    return line_tags(text)[1]
 
 
 def is_person_only(text: str) -> bool:
     """True when a list line carries the [person] tag, after its checkbox if it has one."""
-    return _PERSON_TAG.match(_words(text)) is not None
+    return "person" in line_tags(text)[0]
 
 
 def item_key(words: str) -> str:
@@ -78,7 +106,7 @@ def item_key(words: str) -> str:
 def definition_items(body: str) -> list[DefinitionItem]:
     """The checklist a text holds, in the order it is written. A list line inside a fenced code
     block, a line across the page, and a line with no words are not items, and two lines with the
-    same words are one item, which only a person may tick if any of them is marked [person]."""
+    same words are one item, which carries every tag that any of them has."""
     found: dict[str, DefinitionItem] = {}
     fenced = False
     for line in body.splitlines():
@@ -90,15 +118,21 @@ def definition_items(body: str) -> list[DefinitionItem]:
         match = _LIST_LINE.match(line)
         if match is None:
             continue
-        words = item_words(match.group(1))
+        tags, words = line_tags(match.group(1))
         if not words:
             continue
         key = item_key(words)
-        person = is_person_only(match.group(1))
+        github = "github" in tags
+        verifier = github or "verifier" in tags
+        person = "person" in tags
         if key in found:
             found[key].person_only = found[key].person_only or person
+            found[key].verifier_only = found[key].verifier_only or verifier
+            found[key].github = found[key].github or github
         else:
-            found[key] = DefinitionItem(item=key, text=words, person_only=person)
+            found[key] = DefinitionItem(
+                item=key, text=words, person_only=person, verifier_only=verifier, github=github
+            )
     return list(found.values())
 
 
@@ -123,7 +157,9 @@ class DefinitionOfDone(BaseModel):
     )
     items: list[DefinitionItem] = Field(
         description="Its checks, one for each list line, in the order written: the key to send "
-        "to set_check, the words, and whether only a person may tick it (person_only)."
+        "to set_check, the words, whether only a person may tick it (person_only, [person]), "
+        "whether only a verifier may (verifier_only, [verifier] or [github]) and whether a "
+        "verifier's evidence must begin with a GitHub pull request address (github, [github])."
     )
 
 
@@ -169,10 +205,18 @@ async def _rebuild_items(conn: AsyncConnection, items: list[DefinitionItem]) -> 
     if items:
         async with conn.cursor() as cursor:
             await cursor.executemany(
-                "INSERT INTO definition_items (item_key, position, text, person_only) "
-                "VALUES (%s, %s, %s, %s)",
+                "INSERT INTO definition_items "
+                "(item_key, position, text, person_only, verifier_only, github) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
                 [
-                    (item.item, position, item.text, item.person_only)
+                    (
+                        item.item,
+                        position,
+                        item.text,
+                        item.person_only,
+                        item.verifier_only,
+                        item.github,
+                    )
                     for position, item in enumerate(items, 1)
                 ],
             )

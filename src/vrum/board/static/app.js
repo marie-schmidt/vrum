@@ -6,12 +6,15 @@
 // is a whole new page load, so nothing of the project left can be drawn in the one entered.
 //
 // Everything is a page, and a record never opens beside the page: the four views are the work
-// itself (Board, Graph, Roadmap, Lists); Search and Activity and the acceptance criteria coverage report are pages
+// itself (Board, Graph, Roadmap, Lists); Search, Activity, Needs a person (what only a person can settle) and the
+// acceptance criteria coverage report are pages
 // of their own, and so is every epic, story, task, acceptance criterion and note:
-// #/item?item=story:12&from=graph. `from` is the page the person is in (a view, Search, Activity or
+// #/item?item=story:12&from=graph, and every change that waits for a person has its own review page: #/review?change=plan:3, read from the page of
+// what needs a person and back to it. `from` is the page the person is in (a view, Search, Activity or
 // coverage), so the path and the sidebar keep it while they move from record to record. The
-// settings pages (the users and agent keys, the definition of done, the tools, the status and the export) are reached from the Settings
-// menu. The address holds all of it: #/search?search=login, #/board?q=status:blocked.
+// settings pages (the users and agent keys, the definition of done, the plan templates, the tools, the status and the export) are reached from the Settings
+// menu, and the person's own Account page from the account menu at the foot of the sidebar. The address holds all of it:
+// #/search?search=login, #/board?q=status:blocked.
 
 import {
   NotInProject,
@@ -31,6 +34,7 @@ import { showNoProject, showProjects, showSignIn } from './entry.js';
 import { INVITE_INTRO, showInvite } from './invite.js';
 import { icon } from './icons.js';
 import { showReset, showVerify } from './mail-pages.js';
+import * as accountPage from './account.js';
 import * as activity from './activity.js';
 import * as coverage from './coverage.js';
 import * as definition from './definition.js';
@@ -38,6 +42,8 @@ import * as graph from './graph.js';
 import * as item from './item.js';
 import * as kanban from './kanban.js';
 import * as lists from './lists.js';
+import * as needs from './needs.js';
+import * as review from './review.js';
 import { refreshReferences } from './references.js';
 import * as roadmap from './roadmap.js';
 import * as search from './search.js';
@@ -47,12 +53,14 @@ import { problemWords, providerName, takeSsoResult } from './sso.js';
 import * as status from './status.js';
 import { ensureContext, keepSynced, onChange, start, stopSyncing, store } from './store.js';
 import { keepSwitcher } from './switcher.js';
+import * as templates from './templates.js';
 import { setConnection, setIndexText, showEntryTop, showTop, updateTop } from './topbar.js';
 import * as tools from './tools.js';
 import * as users from './users.js';
 
 // Every page there is. Anything else in the address is the Board. The page of a record is in no
-// menu: the address names the record (#/item?item=story:12&from=board).
+// menu: the address names the record (#/item?item=story:12&from=board). The Account page is in the
+// account menu only.
 const PAGES = {
   board: { title: 'Board', view: kanban },
   graph: { title: 'Graph', view: graph },
@@ -60,12 +68,16 @@ const PAGES = {
   lists: { title: 'Lists', view: lists },
   search: { title: 'Search', view: search },
   activity: { title: 'Activity', view: activity },
+  needs: { title: 'Needs a person', view: needs },
   coverage: { title: 'Coverage', view: coverage },
   users: { title: 'Users', view: users },
   definition: { title: 'Definition of done', view: definition },
+  templates: { title: 'Plan templates', view: templates },
   tools: { title: 'Tools', view: tools },
   status: { title: 'Status and export', view: status },
+  account: { title: 'Account', view: accountPage },
   item: { title: 'Item', view: item },
+  review: { title: 'Review', view: review },
 };
 const TITLES = Object.fromEntries(Object.entries(PAGES).map(([name, page]) => [name, page.title]));
 const app = document.getElementById('app');
@@ -149,6 +161,7 @@ function route() {
   ui.page = page;
   ui.params = params;
   if (page === 'item') ui.from = FROM_PAGES.includes(params.get('from')) ? params.get('from') : 'board';
+  else if (page === 'review') ui.from = 'needs';
   else if (FROM_PAGES.includes(page)) ui.from = page;
   // A page that is not there (an old address, a mistake) is the Board, and the address says so; a
   // choice that means nothing is taken out of it.
@@ -287,7 +300,7 @@ function entryShell() {
 function projectShell() {
   app.dataset.shell = 'project';
   showSidebar({ session, project, projectList, views: VIEWS, settings: SETTINGS, titles: TITLES, leaveBoard });
-  showTop({ project, indexText, openSearch });
+  showTop({ indexText, openSearch });
 }
 
 onChange((change) => {
@@ -376,14 +389,10 @@ async function begin() {
   projectShell();
   keepSynced(connectionTrouble, () => showConnection(false));
   route();
-  // The Graph's number in the sidebar counts the acceptance criteria and the notes too, so they
-  // are read now (the quick switcher, the Graph and the path of an acceptance criterion or a
-  // note want them as well).
+  // The path of an acceptance criterion or a note, and the quick switcher, want them read, so they are
+  // read now.
   ensureContext()
-    .then(() => {
-      updateSidebar();
-      drawTop();
-    })
+    .then(() => drawTop())
     .catch(() => {});
 }
 
@@ -409,7 +418,7 @@ addEventListener('hashchange', route);
 // Ctrl+K (or ⌘K) opens the quick switcher on every page.
 const jumpTo = (page) => ({ name: page, title: PAGES[page].title, go: () => ui.navigate({}, { page }) });
 keepSwitcher(
-  [...VIEWS.map(jumpTo), jumpTo('search'), jumpTo('activity'), jumpTo('coverage'), ...SETTINGS.map(jumpTo)],
+  [...VIEWS.map(jumpTo), jumpTo('search'), jumpTo('activity'), jumpTo('needs'), jumpTo('coverage'), ...SETTINGS.map(jumpTo)],
   () => running,
 );
 
@@ -428,11 +437,11 @@ function unavailable(message) {
 }
 
 // A provider has just sent a signed-in person back with its answer: they were connecting it to their
-// account, so it is said on the Users page, where they started. (A person who is not signed in is
+// account, so it is said on the Account page, where they started. (A person who is not signed in is
 // told on the sign-in page instead.)
 function tellSso(result) {
   if (result === null) return;
-  if (running) ui.navigate({}, { page: 'users', replace: true });
+  if (running) ui.navigate({}, { page: 'account', replace: true });
   if ('error' in result) notify(problemWords(result.error, result.provider), { refusal: true });
   else notify(result.provider ? `${providerName(result.provider)} is now connected to your account.` : 'That sign-in is now connected to your account.');
 }

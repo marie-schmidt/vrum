@@ -6,7 +6,8 @@ number of private projects, and gives agents keys to reach one project each (a r
 once, of which only a hash is kept). The person's name and each key's name are the identities
 everything is recorded under (see identity.py): a key is named for its agent, and no two keys in
 force in a project share a name. A key may call the tools Vrum offers agents (see surface.py), or
-only the tools the owner chose for it (`allowed_tools`), checked on every call by the guard.
+only the tools the owner chose for it (`allowed_tools`), checked on every call by the guard, and
+calls them one at a time or, when the owner chose it (`code_mode`), by running code.
 
 A project has exactly one owner, who can do everything, and any number of other people the owner
 invited: an editor reads and writes the project's graph, a viewer only reads it, and neither makes
@@ -41,13 +42,13 @@ import logging
 import re
 import secrets
 from collections.abc import Collection, Coroutine
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, NamedTuple
 
 import psycopg
 from pydantic import BaseModel
 
-from vrum.common import Refusal, fetch_all, fetch_one
+from vrum.common import Refusal, fetch_all, fetch_one, parse_day
 from vrum.db import Database
 from vrum.logs import event
 from vrum.mail import (
@@ -61,6 +62,7 @@ from vrum.mail import (
 from vrum.ratelimit import AttemptLimiter
 from vrum.records import PEOPLE_ONLY_TOOLS
 from vrum.secret_formats import find_secret
+from vrum.surface import CODE_TOOLS
 
 log = logging.getLogger("vrum.accounts")
 
@@ -154,7 +156,7 @@ RESET_NO_MAIL = (
 )
 VERIFY_LINK_NOT_VALID = (
     "That confirmation link is not valid. It may be wrong, already used or expired. Sign in and "
-    "ask for a new one on the Users page."
+    "ask for a new one on the Account page."
 )
 RESET_LINK_NOT_VALID = (
     "That link to choose a new password is not valid. It may be wrong, already used or expired. "
@@ -191,7 +193,7 @@ SSO_WORDS = {
     "account_exists_unconfirmed": (
         "An account with your email address already exists here, but its address was never "
         "confirmed, so Vrum will not join the two. Sign in with its password, then connect {name} "
-        "from the Users page."
+        "from the Account page."
     ),
     "signups_off": (
         "This server does not make new accounts from {name} sign-in. Sign in with an account you "
@@ -260,6 +262,97 @@ def tool_not_offered(agent: str, tool: str) -> str:
     )
 
 
+def code_tool_for_a_tools_key(agent: str, tool: str) -> str:
+    """What an agent that calls one tool at a time is told when it asks for `explore` or `run`."""
+    return (
+        f"{tool} is for agent keys that call Vrum by running code, and this agent key ({agent}) "
+        "calls one tool at a time. If this agent should run code, the project's owner can change "
+        "how it calls Vrum on the Users page. Nothing was changed."
+    )
+
+
+def tool_by_name_for_a_code_key(agent: str, tool: str) -> str:
+    """What an agent that runs code is told when it calls a tool by its name: it is a function of
+    the script it runs."""
+    return (
+        f"This agent key ({agent}) calls Vrum by running code, so call it as vrum.{tool}(...) in "
+        "run. Use explore to see what the functions take and return. Nothing was changed."
+    )
+
+
+RUN_IS_NOT_FOR_THE_BOARD = (
+    "run runs a script for an agent key that calls Vrum by running code. The board does its work "
+    "one page at a time, so it does not use it. Nothing was changed."
+)
+
+# What a script is told when its key is changed while it runs: a revoked key stops it at its next
+# call, as a revoked key is refused at its next request anywhere else, and so does a key that has
+# been changed to call one tool at a time.
+SCRIPT_KEY_REVOKED = (
+    "The agent key is not valid any more: it was revoked while its script was running, so the "
+    "script was stopped and this call was not made. What the script had already done stays done. "
+    "Ask the project's owner for a new key (Users, then Agents, on the project's board)."
+)
+
+
+def script_key_expired_words(day: date) -> str:
+    """What a script is told when its key's last day passes while it runs: it is stopped at its
+    next call, as it would be refused at its next request anywhere else."""
+    return (
+        f"The agent key expired after {day.isoformat()} while its script was running, so the "
+        "script was stopped and this call was not made. What the script had already done stays "
+        "done. The project's owner can extend the key, or make a new one (Users, then Agents, on "
+        "the project's board)."
+    )
+
+
+SCRIPT_KEY_NOW_TOOLS = (
+    "This agent key was changed to call Vrum one tool at a time while its script was running, so "
+    "the script was stopped and this call was not made. What the script had already done stays "
+    "done. The project's owner can change how the key calls Vrum on the Users page."
+)
+
+
+def no_such_function(agent: str, name: str) -> str:
+    """What a script is told when it calls something that is not a function of its key. It names
+    the call only when it looks like a tool name, so nothing odd that was sent is repeated."""
+    called = _named([name])
+    return (
+        f"This agent key ({agent}) has no function called {called}. Use explore to see the "
+        "functions it has. Nothing was changed."
+    )
+
+
+NOT_A_TRUE_OR_FALSE = (
+    "How a key calls Vrum has to be true (it runs code) or false (one tool at a time). Nothing "
+    "was changed."
+)
+VERIFIER_NOT_A_TRUE_OR_FALSE = (
+    "Whether a key is a verifier's has to be true or false. Nothing was changed."
+)
+EXPIRY_NOT_A_DAY = (
+    "A key's expiry has to be a day written as YYYY-MM-DD (the last day it works), or empty for a "
+    "key that never expires. Nothing was changed."
+)
+
+
+def key_expired_words(day: date) -> str:
+    """What an agent is told when its key ran out: when, and who can fix it."""
+    return (
+        f"This agent key expired after {day.isoformat()}, so nothing was done. The project's "
+        "owner can extend it, or make a new key (Users, then Agents, on the project's board)."
+    )
+
+
+class KeyExpired(Exception):
+    """A key that is real and was not revoked, but whose last day has passed. It is told apart from
+    a wrong or revoked key so that the agent is told why, in words."""
+
+    def __init__(self, day: date) -> None:
+        super().__init__(key_expired_words(day))
+        self.day = day
+
+
 def _named(names: list[str]) -> str:
     """Tool names for a refusal, leaving out anything that does not look like a tool name, so that
     nothing odd that was sent is repeated."""
@@ -274,7 +367,8 @@ def clean_allowance(tools: Any, known: Collection[str]) -> list[str] | None:
     """What a key may be allowed to do, as it is kept: None for the tools Vrum offers agents, or the
     tools it may call (any the server has, offered to agents or not), sorted and without repeats. A
     list has to name at least one tool, only tools the server has, and none that only a person can
-    use."""
+    use, nor explore or run (a key that runs code has those two, whatever its list). For a key that
+    runs code the same list is what a script may call."""
     if tools is None:
         return None
     if not isinstance(tools, list) or not all(isinstance(name, str) for name in tools):
@@ -285,6 +379,13 @@ def clean_allowance(tools: Any, known: Collection[str]) -> list[str] | None:
     if not tools:
         raise AccessRefusal("Tick at least one tool, or leave the key with the standard tools.")
     chosen = sorted(set(tools))
+    code_tools = [name for name in chosen if name in CODE_TOOLS]
+    if code_tools:
+        raise AccessRefusal(
+            "explore and run are what a key that calls Vrum by running code gets, so they are not "
+            "ticked one by one. Untick them, or choose how the key calls Vrum instead. Nothing "
+            "was changed."
+        )
     people_only = [name for name in chosen if name in PEOPLE_ONLY_TOOLS]
     if people_only:
         many = len(people_only) > 1
@@ -300,6 +401,41 @@ def clean_allowance(tools: Any, known: Collection[str]) -> list[str] | None:
             f"{_named(unknown)}. Choose from the tools on the Tools page. Nothing was changed."
         )
     return chosen
+
+
+def clean_code_mode(code_mode: Any) -> bool:
+    """How a key calls Vrum: true to run code, false for one tool at a time. Nothing else is
+    taken for either (a text or a number is refused, not guessed at)."""
+    if not isinstance(code_mode, bool):
+        raise AccessRefusal(NOT_A_TRUE_OR_FALSE)
+    return code_mode
+
+
+def clean_verifier(verifier: Any) -> bool:
+    """Whether a key is a verifier's: true or false, and nothing else is taken for either."""
+    if not isinstance(verifier, bool):
+        raise AccessRefusal(VERIFIER_NOT_A_TRUE_OR_FALSE)
+    return verifier
+
+
+def clean_expiry(expires_on: Any) -> date | None:
+    """The last day a key works, as a day, or None for a key that never expires (an empty value).
+    A day that has already passed is refused: the way to stop a key now is to revoke it."""
+    if expires_on is None or (isinstance(expires_on, str) and not expires_on.strip()):
+        return None
+    if not isinstance(expires_on, str):
+        raise AccessRefusal(EXPIRY_NOT_A_DAY)
+    try:
+        day = parse_day("A key's expiry", expires_on.strip())
+    except Refusal as refusal:
+        raise AccessRefusal(f"{refusal} Nothing was changed.") from None
+    assert day is not None
+    if day < datetime.now(UTC).date():
+        raise AccessRefusal(
+            f"{day.isoformat()} has already passed. Choose today or a later day, or revoke the "
+            "key to stop it now. Nothing was changed."
+        )
+    return day
 
 
 def only_the_owner(what: str, *, changes: bool = True) -> AccessRefusal:
@@ -436,16 +572,30 @@ class KeyInfo(BaseModel):
     # The tools the key may call, sorted, or None when it has no list of its own and may call the
     # tools Vrum offers agents.
     tools: list[str] | None
+    # True when the key calls Vrum by running code: it is shown explore and run, and the tools
+    # above are what a script may call. False: one tool at a time.
+    code_mode: bool
+    # True when the key belongs to an agent that checks other agents' work: it may tick the checks
+    # the definition of done marks [verifier] or [github], on work it did not do itself.
+    verifier: bool = False
+    # The last day the key works, or None for a key that never expires; `expired` says its last day
+    # has passed (the server's day, UTC), so that no screen works the day out for itself.
+    expires_on: date | None = None
+    expired: bool = False
 
 
 class KeyAccess(NamedTuple):
     """What a key that is in force lets its holder do: reach one project, as the agent it names,
-    and call the tools in `tools` (the tools Vrum offers agents when that is None)."""
+    and call the tools in `tools` (the tools Vrum offers agents when that is None), one at a time
+    or, when `code_mode` is set, as the functions of a script it runs. `verifier` is the key's
+    flag of that name."""
 
     project_id: int
     key_id: int
     name: str
     tools: frozenset[str] | None = None
+    code_mode: bool = False
+    verifier: bool = False
 
 
 class SessionInfo(BaseModel):
@@ -530,10 +680,33 @@ def _key(row: dict[str, Any]) -> KeyInfo:
         last_used_at=row["last_used_at"],
         revoked_at=row["revoked_at"],
         tools=None if row["allowed_tools"] is None else sorted(row["allowed_tools"]),
+        code_mode=row["code_mode"],
+        verifier=row["verifier"],
+        expires_on=row["expires_on"],
+        expired=row["expired"],
     )
 
 
-_KEY_COLUMNS = "id, name, key_hint, created_at, last_used_at, revoked_at, allowed_tools"
+# Whether a key's last day has passed, by the database's clock and the UTC day.
+_KEY_EXPIRED = "(expires_on IS NOT NULL AND expires_on < (now() AT TIME ZONE 'UTC')::date)"
+_KEY_COLUMNS = (
+    "id, name, key_hint, created_at, last_used_at, revoked_at, allowed_tools, code_mode, "
+    f"verifier, expires_on, {_KEY_EXPIRED} AS expired"
+)
+
+
+def _key_access(row: dict[str, Any]) -> KeyAccess:
+    tools = row["allowed_tools"]
+    return KeyAccess(
+        row["project_id"],
+        row["id"],
+        row["name"],
+        None if tools is None else frozenset(tools),
+        row["code_mode"],
+        row["verifier"],
+    )
+
+
 _PROJECT_COLUMNS = "id, name, created_at, 'owner' AS role"
 # A project as a person sees it, with what that person is in it: its owner, or the role the owner
 # gave them. The account is the first parameter, twice, and a project's own conditions follow.
@@ -1418,23 +1591,43 @@ class Accounts:
         tools: Any = None,
         *,
         known_tools: Collection[str] = (),
+        code_mode: Any = False,
+        verifier: Any = False,
+        expires_on: Any = None,
     ) -> tuple[KeyInfo, str]:
         """A new key for an agent to reach this project, named for the agent: that name is what
         everything the agent does is recorded under, so it is the name of no other key in force.
         `tools` is what the key may call (see `clean_allowance`, checked against `known_tools`,
-        the tools the server has), or None for every tool. The key itself is returned this once
-        and kept nowhere: only a hash of it is."""
+        the tools the server has), or None for the tools Vrum offers agents. `code_mode` is how it
+        calls them: one at a time (false) or by running code (true). `verifier` says the agent
+        checks other agents' work (see `Identity.verifier`). `expires_on` is the last day it works
+        (see `clean_expiry`), or None for never. The key itself is returned this once and kept
+        nowhere: only a hash of it is."""
         await self.owned_project(account_id, project_id, to="make agent keys")
         cleaned = clean_agent_name(name)
         allowed = clean_allowance(tools, known_tools)
+        by_code = clean_code_mode(code_mode)
+        checks = clean_verifier(verifier)
+        last_day = clean_expiry(expires_on)
         key = KEY_PREFIX + secrets.token_urlsafe(32)
         try:
             async with self._db.admin_transaction() as conn:
                 row = await fetch_one(
                     conn,
-                    "INSERT INTO agent_keys (project_id, name, key_hash, key_hint, allowed_tools) "
-                    f"VALUES (%s, %s, %s, %s, %s) RETURNING {_KEY_COLUMNS}",
-                    (project_id, cleaned, digest_of(key), key[:8], allowed),
+                    "INSERT INTO agent_keys "
+                    "(project_id, name, key_hash, key_hint, allowed_tools, code_mode, verifier, "
+                    "expires_on) "
+                    f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_KEY_COLUMNS}",
+                    (
+                        project_id,
+                        cleaned,
+                        digest_of(key),
+                        key[:8],
+                        allowed,
+                        by_code,
+                        checks,
+                        last_day,
+                    ),
                 )
         except psycopg.errors.UniqueViolation:
             async with self._db.admin_transaction() as conn:
@@ -1488,19 +1681,49 @@ class Accounts:
         *,
         known_tools: Collection[str],
     ) -> KeyInfo:
-        """Change what a key may call (None for every tool; see `clean_allowance`). It takes effect
-        on the agent's next request, even on a connection that is already open. A key that was
-        revoked has nothing left to change."""
+        """Change what a key may call (None for the tools Vrum offers agents; see
+        `clean_allowance`). It takes effect on the agent's next request, even on a connection that
+        is already open. A key that was revoked has nothing left to change."""
         await self.owned_project(account_id, project_id, to="change what an agent key may do")
         allowed = clean_allowance(tools, known_tools)
+        return await self._change_key(project_id, key_id, "allowed_tools", allowed)
+
+    async def set_key_mode(
+        self, account_id: int, project_id: int, key_id: int, code_mode: Any
+    ) -> KeyInfo:
+        """Change how a key calls Vrum: by running code (true) or one tool at a time (false). It
+        takes effect on the agent's next request, even on a connection that is already open."""
+        await self.owned_project(account_id, project_id, to="change how an agent key calls Vrum")
+        return await self._change_key(project_id, key_id, "code_mode", clean_code_mode(code_mode))
+
+    async def set_key_verifier(
+        self, account_id: int, project_id: int, key_id: int, verifier: Any
+    ) -> KeyInfo:
+        """Mark a key as a verifier's (true) or not (false). It takes effect on the agent's next
+        request, even on a connection that is already open."""
+        await self.owned_project(account_id, project_id, to="change whether an agent key verifies")
+        return await self._change_key(project_id, key_id, "verifier", clean_verifier(verifier))
+
+    async def set_key_expiry(
+        self, account_id: int, project_id: int, key_id: int, expires_on: Any
+    ) -> KeyInfo:
+        """Set the last day a key works, or clear it (an empty value) so that it never expires. A
+        key whose day has passed works again from the moment it is changed to a day that has not.
+        It takes effect on the agent's next request, even on a connection that is already open."""
+        await self.owned_project(account_id, project_id, to="change when an agent key expires")
+        return await self._change_key(project_id, key_id, "expires_on", clean_expiry(expires_on))
+
+    async def _change_key(self, project_id: int, key_id: int, column: str, value: Any) -> KeyInfo:
+        """Set one column of a key that is in force (the column is always one of this module's
+        own names). A key that does not exist, or was revoked, is refused in words."""
         existing: dict[str, Any] | None = None
         async with self._db.admin_transaction() as conn:
             row = await fetch_one(
                 conn,
-                "UPDATE agent_keys SET allowed_tools = %s "
+                f"UPDATE agent_keys SET {column} = %s "
                 "WHERE id = %s AND project_id = %s AND revoked_at IS NULL "
                 f"RETURNING {_KEY_COLUMNS}",
-                (allowed, key_id, project_id),
+                (value, key_id, project_id),
             )
             if row is None:
                 existing = await fetch_one(
@@ -1517,15 +1740,19 @@ class Accounts:
 
     async def project_for_key(self, key: str) -> KeyAccess | None:
         """What a key lets its holder do (reach one project, as the agent the key is named for, and
-        call the tools it is allowed), or None when it is not a key, or was revoked."""
+        call the tools it is allowed, one at a time or by running code), or None when it is not a
+        key, or was revoked. A key whose last day has passed raises `KeyExpired`, which says so."""
         digest = digest_of(key)
         async with self._db.admin_transaction() as conn:
             row = await fetch_one(
                 conn,
-                "SELECT project_id, id, name, allowed_tools FROM agent_keys "
+                "SELECT project_id, id, name, allowed_tools, code_mode, verifier, expires_on, "
+                f"{_KEY_EXPIRED} AS expired FROM agent_keys "
                 "WHERE key_hash = %s AND revoked_at IS NULL",
                 (digest,),
             )
+            if row is not None and row["expired"]:
+                raise KeyExpired(row["expires_on"])
             if row is not None:
                 # Noted at most once a minute, so that busy agents do not write on every call.
                 await conn.execute(
@@ -1533,15 +1760,25 @@ class Accounts:
                     "AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
                     (digest,),
                 )
-        if row is None:
-            return None
-        tools = row["allowed_tools"]
-        return KeyAccess(
-            row["project_id"],
-            row["id"],
-            row["name"],
-            None if tools is None else frozenset(tools),
-        )
+        return None if row is None else _key_access(row)
+
+    async def access_of_key(self, key_id: int) -> KeyAccess | None:
+        """What a key that is in force lets its holder do, by the key's number, or None when it
+        was revoked (`KeyExpired` when its last day has passed). A script that is running asks this
+        before each of its calls (it holds the key's number, never the key), so a key that was
+        revoked, expired or changed while the script ran is seen at the script's next call, as it
+        is at an agent's next request."""
+        async with self._db.admin_transaction() as conn:
+            row = await fetch_one(
+                conn,
+                "SELECT project_id, id, name, allowed_tools, code_mode, verifier, expires_on, "
+                f"{_KEY_EXPIRED} AS expired FROM agent_keys "
+                "WHERE id = %s AND revoked_at IS NULL",
+                (key_id,),
+            )
+        if row is not None and row["expired"]:
+            raise KeyExpired(row["expires_on"])
+        return None if row is None else _key_access(row)
 
     # -- the people of a project -----------------------------------------------------------------
 
@@ -1868,7 +2105,7 @@ class Accounts:
         if taken is not None:
             return (
                 f"Someone in this project already uses the name {taken['display_name']}. "
-                "Change your name on the Users page first."
+                "Change your name on the Account page first."
             )
         return None
 

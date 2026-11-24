@@ -1,35 +1,26 @@
-// The Structure view of the Graph: how the work fits together, drawn as the folder structure of an
-// Obsidian graph. The whole project is a tree seen from above: each epic a hub, each story a smaller
-// hub, each task a small dot around its story, nothing but the hierarchy joined by lines, so nothing
-// crosses. Names are shown only where there is room and as you zoom in; the links between items (needs
-// first, duplicates, related, references) are drawn for the item looked at only, or for all when asked.
-// The "Look at" choice in the toolbar swaps the whole project for the radial view of one epic, with
-// every name. There is no card or side column: a click or Enter on any dot opens that item's page.
+// The Structure view of the Graph: how the work fits together, drawn as Obsidian draws its graph. The
+// whole project is a living map (graph-map.js, on the physics of graph-sim.js): each epic a big disc,
+// each story a smaller one, each task a small dot, nothing but the hierarchy joined by lines. You can
+// grab any dot and it eases back; names are shown only where there is room and as you zoom in; the
+// links between items (needs first, duplicates, related, references) are drawn for the item looked at
+// only, or for all when asked. The "Scope" choice in the toolbar swaps the whole project for the radial
+// view of one epic, with every name. There is no card or side column: a click or Enter on any dot opens
+// that item's page.
 //
 // What is looked at is the Graph's focus (`focus=` in the address, chosen in the box at the top), so
 // the other tabs follow it; here it is marked on the picture with its links. Its own choices are in the
 // address too: `scope` (project, or an epic's reference), `level` (epics, stories, tasks), `labels`
-// (off, zoom, always), `colour` (status, epic) and `links=1`. The zoom and the place of the picture are
-// not (they are kept while the page is open). Everything is read from the store.
+// (off, zoom, always), `colour` (status, epic) and `links=1`. The zoom and the place of the picture and
+// the Forces sliders are not (they are kept while the board is open). Everything is read from the store.
 
 import { projectId, projectInfo } from './api.js';
-import { h, plural, put } from './dom.js';
+import { h, put } from './dom.js';
 import { ICONS, icon } from './icons.js';
-import { KIND, PRIORITY, STATUS, actorLabel, parseItemRef, statusIcon } from './labels.js';
-import {
-  LEAF_DOT,
-  LEVEL_MAX,
-  RANK,
-  angleBetween,
-  epicExtent,
-  epicRadial,
-  polar,
-  sector,
-  treeCurve,
-  treeOf,
-  wholeLayout,
-} from './graph-radial.js';
+import { parseItemRef } from './labels.js';
+import { LEAF_DOT, angleBetween, epicExtent, epicRadial, polar, sector, treeCurve, treeOf } from './graph-radial.js';
 import { biggerChip, keyChip, lateChip, linkChips, mapStatusChips, ringChip, shapeChips, startedChip, statusChips, viewKey } from './graph-key.js';
+import { closeForces, createForces, forceValues, forcesAreDefault } from './graph-forces.js';
+import { createMap, hueOf, tipContent, words } from './graph-map.js';
 import { clip, code, codeOf, linksOf, s, segment, toggle, viewMessage, workModel, wrap } from './graph-shared.js';
 import { ensure, store } from './store.js';
 
@@ -52,9 +43,6 @@ const COLOURS = [
 ];
 // A project this big shows its stories first, and the tasks when asked.
 const MOST_DRAWN = 1500;
-const MOST_ZOOM = 8;
-const LEAST_ZOOM = 0.6;
-const HUES = 6;
 const R1 = (n) => Math.round(n * 10) / 10;
 
 let root = null;
@@ -62,14 +50,15 @@ let api = null;
 let stop = []; // what a drawing has to undo when the next one replaces it
 let name = null; // the project's name, for the middle of the picture
 let loadedRefs = false;
-const whole = { k: 1, x: 0, y: 0, level: null }; // the whole project's zoom and place
-const ring = { zoom: 1, x: 0, y: 0, epic: null }; // the same for one epic
+let live = null; // the living map while it is on the page: { level, map, forces, signatures, section, bar, key }
+const ring = { zoom: 1, x: 0, y: 0, epic: null }; // the zoom and place of one epic
 
 // -- the page ------------------------------------------------------------------------------------
 
 export function mount(element, nextApi) {
   root = element;
   api = nextApi;
+  closeForces();
   render();
   if (!loadedRefs) {
     loadedRefs = true;
@@ -92,6 +81,7 @@ export function refresh() {
 
 export function unmount() {
   undo();
+  dropLive();
   root = null;
   api = null;
 }
@@ -99,6 +89,13 @@ export function unmount() {
 function undo() {
   for (const fn of stop) fn();
   stop = [];
+}
+
+function dropLive() {
+  if (!live) return;
+  live.map.destroy();
+  live.forces.dispose();
+  live = null;
 }
 
 const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
@@ -140,7 +137,7 @@ function lookAt(model, epic) {
     model.epics.map((one) => h('option', { value: one.ref }, `${codeOf(one)} ${clip(one.title, 48)}`)),
   );
   select.value = epic || '';
-  return h('div', { class: 'graph-x-control graph-st-look' }, h('label', { class: 'graph-x-control-label', for: 'graph-st-scope' }, 'Look at'), select);
+  return h('div', { class: 'graph-x-control graph-st-look' }, h('label', { class: 'graph-x-control-label', for: 'graph-st-scope' }, 'Scope'), select);
 }
 
 // An acceptance criterion or a note in focus is not work, so nothing is marked on the whole map as
@@ -155,11 +152,12 @@ function concernedBy(model, ref) {
 }
 
 function render() {
-  undo();
   const keep = rememberFocus();
   // The work is read again for each drawing: it is cheap, and the store may have changed.
   const model = workModel();
   if (!model.list.length) {
+    undo();
+    dropLive();
     put(root, h('div', { class: 'graph-xv' }, viewMessage('Nothing is planned yet', 'The Structure map draws epics, stories and tasks. When the first epic is made, it appears here.')));
     return;
   }
@@ -172,8 +170,11 @@ function render() {
     api.setParams({ scope: null }, { replace: true });
   }
   if (epic && chosen === epic) chosen = null;
-  const page = epic ? epicPage(model, epic, chosen) : wholePage(model, cfg, chosen, concernedBy(model, api.focus));
-  put(root, h('div', { class: 'graph-xv' }, page));
+  undo();
+  if (epic) {
+    dropLive();
+    put(root, h('div', { class: 'graph-xv' }, epicPage(model, epic, chosen)));
+  } else showWhole(model, cfg, chosen);
   restoreFocus(keep);
 }
 
@@ -202,53 +203,6 @@ function statusMark(status, r) {
   return g;
 }
 
-function words(model, ref) {
-  const node = model.node(ref);
-  const late = model.late(ref);
-  const p = model.progress(ref);
-  const bits = [`${KIND[node.kind].label} ${codeOf(node)}`, node.title, STATUS[node.status].label];
-  if (late > 0) bits.push(`overdue ${plural(late, 'day')}`);
-  if (node.kind !== 'task') bits.push(`${p.done} of ${plural(p.total, 'task')} done`);
-  return `${bits[0]}: ${bits[1]}. ${bits.slice(2).join(', ')}.`;
-}
-
-// What a pointed-at node says about itself.
-function tipContent(model, ref) {
-  const node = model.node(ref);
-  const late = model.late(ref);
-  const p = model.progress(ref);
-  let line;
-  if (node.kind === 'epic') {
-    const stories = model.kids(ref).length;
-    line = `${plural(stories, 'story', 'stories')} · ${plural(p.total, 'task')} · ${p.total ? Math.round((100 * p.done) / p.total) : 0}% done`;
-  } else if (node.kind === 'story') {
-    line = `${plural(p.total, 'task')}, ${p.done} done`;
-  } else {
-    line = `${PRIORITY[node.priority].label} priority${node.target_on ? (late > 0 ? ` · overdue ${plural(late, 'day')}` : ` · due ${node.target_on}`) : ''}`;
-  }
-  return [
-    h('div', { class: 'graph-x-tip-top' }, statusIcon(node.status, 14), code(codeOf(node)), h('span', {}, `${KIND[node.kind].label} · ${STATUS[node.status].label}`)),
-    h('div', { class: 'graph-x-tip-title' }, node.title),
-    h('div', { class: 'quiet' }, line),
-    node.claimed_by ? h('div', { class: 'quiet' }, 'Held by ', actorLabel(node.claimed_by, node.claimed_by_kind)) : null,
-  ];
-}
-
-// The links of the item looked at, each with the other end lifted to something the picture shows.
-function partnersOf(ref, lift) {
-  const seen = new Set();
-  return linksOf(ref)
-    .map((row) => ({ ...row, other: lift(row.other) }))
-    .filter((row) => {
-      const key = `${row.type}:${row.dir}:${row.other}`;
-      if (row.other === ref || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-}
-
-const hueOf = (index) => `ep-${index % HUES}`;
-
 // A node opens its page on a click, Enter or Space.
 function opensItsPage(el, ref) {
   el.addEventListener('click', (e) => {
@@ -264,545 +218,36 @@ function opensItsPage(el, ref) {
 
 // -- the whole project -------------------------------------------------------------------------
 
-function wholePage(model, cfg, chosen, concernedRefs) {
-  const tree = treeOf(model);
-  const layout = wholeLayout(tree, cfg.level);
-  if (whole.level !== cfg.level) {
-    whole.level = cfg.level;
-    whole.k = 1;
-    whole.x = 0;
-    whole.y = 0;
-  }
-  const lift = (ref) => {
-    let node = model.node(ref);
-    while (node && RANK[node.kind] > LEVEL_MAX[cfg.level]) node = model.node(node.parent);
-    return node ? node.ref : ref;
-  };
-  const visibleKids = (ref) => model.kids(ref).filter((kid) => RANK[kid.kind] <= LEVEL_MAX[cfg.level]);
-  const sel = chosen ? lift(chosen) : null;
-  const partners = sel ? partnersOf(sel, lift) : [];
-  // What a record in focus concerns is lit like what an item looked at is linked to.
-  const concerned = [...new Set(concernedRefs.map(lift))];
-  const partnerSet = new Set(sel ? partners.map((row) => row.other) : concerned);
-  // What is lit: the item looked at, what it sits in, what sits in it, and what it is linked to.
-  const pathSet = new Set();
-  if (sel) {
-    let up = model.node(sel);
-    while (up) {
-      pathSet.add(up.ref);
-      up = up.parent ? model.node(up.parent) : null;
-    }
-    const down = (ref) => visibleKids(ref).forEach((kid) => { pathSet.add(kid.ref); down(kid.ref); });
-    down(sel);
-  }
-  for (const ref of concerned) {
-    for (let up = model.node(ref); up; up = up.parent ? model.node(up.parent) : null) pathSet.add(up.ref);
-  }
-  const lit = new Set([...pathSet, ...partnerSet]);
-
-  const b = layout.bounds;
-  const vb = { x: b.x0 - 30, y: b.y0 - 30, w: b.x1 - b.x0 + 60, h: b.y1 - b.y0 + 60 };
-  const rovingRef = sel || (model.epics[0] && model.epics[0].ref);
-  let hover = null;
-
-  const svg = s('svg', {
-    class: `graph-st-svg${cfg.colour === 'epic' ? ' is-by-epic' : ''}${sel || concerned.length ? ' has-sel' : ''}`,
-    viewBox: `${R1(vb.x)} ${R1(vb.y)} ${R1(vb.w)} ${R1(vb.h)}`,
-    role: 'group',
-    'aria-label': `The whole project: ${plural(model.epics.length, 'epic')}${cfg.level !== 'epics' ? ', their stories' : ''}${cfg.level === 'tasks' ? ' and tasks' : ''}, joined as a tree`,
-  });
-  const vp = s('g', { class: 'graph-st-vp' });
-  const hier = s('g', { class: 'graph-st-hier' });
-  const cross = s('g', { class: `graph-st-cross${cfg.links ? ' is-all' : ''}` });
-  const nodes = s('g', { class: 'graph-st-nodes' });
-  const names = s('g', { class: 'graph-st-names', 'aria-hidden': 'true' });
-  svg.append(s('defs', {}, s('marker', { id: 'graph-st-arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, orient: 'auto', markerUnits: 'userSpaceOnUse' }, s('path', { class: 'graph-st-arrow', d: 'M0 1 L10 5 L0 9 z' }))), vp);
-
-  // The hierarchy, the skeleton: a fine line from each parent to each child.
-  for (const [from, to] of layout.edges) {
-    const a = from === 'root' ? { x: 0, y: 0, r: layout.rProj } : layout.pos.get(from);
-    const c = layout.pos.get(to);
-    const dx = c.x - a.x;
-    const dy = c.y - a.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const on = pathSet.has(to) && (from === 'root' || pathSet.has(from));
-    hier.append(s('line', { class: `graph-st-line${on ? ' is-lit' : ''}`, x1: R1(a.x + (dx / len) * a.r), y1: R1(a.y + (dy / len) * a.r), x2: R1(c.x - (dx / len) * c.r), y2: R1(c.y - (dy / len) * c.r) }));
-  }
-
-  // Links between work: all when asked, and those of the item looked at always.
-  const bend = (p, q) => {
-    const mx = (p.x + q.x) / 2;
-    const my = (p.y + q.y) / 2;
-    const nx = -(q.y - p.y);
-    const ny = q.x - p.x;
-    const c1 = [mx + nx * 0.2, my + ny * 0.2];
-    const c2 = [mx - nx * 0.2, my - ny * 0.2];
-    return Math.hypot(...c1) < Math.hypot(...c2) ? c1 : c2;
-  };
-  const drawLink = (type, from, to, extra) => {
-    const p = layout.pos.get(from);
-    const q = layout.pos.get(to);
-    if (!p || !q) return;
-    const [cx, cy] = bend(p, q);
-    const trim = (o, extraR) => {
-      const vx = cx - o.x;
-      const vy = cy - o.y;
-      const len = Math.hypot(vx, vy) || 1;
-      return [o.x + (vx / len) * (o.r + extraR), o.y + (vy / len) * (o.r + extraR)];
-    };
-    const arrow = type === 'needs_first' || type === 'supersedes';
-    const [x1, y1] = trim(p, 1.5);
-    const [x2, y2] = trim(q, arrow ? 2.5 : 1.5);
-    cross.append(s('path', { class: `graph-st-link t-${type} ${extra}`, d: `M${R1(x1)} ${R1(y1)} Q${R1(cx)} ${R1(cy)} ${R1(x2)} ${R1(y2)}`, 'marker-end': arrow ? 'url(#graph-st-arrow)' : null }));
-  };
-  // The arrow points the way the work flows: from what comes first to what waits.
-  const direct = (type, dir, ref, other) => {
-    if ((type === 'needs_first' || type === 'supersedes') && dir === 'out') return type === 'needs_first' ? [other, ref] : [ref, other];
-    if ((type === 'needs_first' || type === 'supersedes') && dir === 'in') return type === 'needs_first' ? [ref, other] : [other, ref];
-    return dir === 'in' && type === 'mention' ? [other, ref] : [ref, other];
-  };
-  const drawn = new Set();
-  if (sel) {
-    for (const row of partners) {
-      const [from, to] = direct(row.type, row.dir, sel, row.other);
-      drawn.add(`${row.type}:${from}:${to}`);
-      drawn.add(`${row.type}:${to}:${from}`);
-      drawLink(row.type, from, to, 'is-chosen');
-    }
-  }
-  if (cfg.links) {
-    const all = new Map();
-    const add = (type, a, b) => {
-      const x = lift(a);
-      const y = lift(b);
-      if (x === y) return;
-      all.set(`${type}:${x}:${y}`, { type, from: x, to: y });
-    };
-    for (const link of store.links) {
-      if (!model.node(link.source) || !model.node(link.target)) continue;
-      if (link.link_type === 'needs_first') add('needs_first', link.target, link.source);
-      else add(link.link_type, link.source, link.target);
-    }
-    for (const mention of store.references || []) {
-      const [a, c] = [mention.source.ref, mention.target.ref];
-      if (!mention.target.exists || !model.node(a) || !model.node(c)) continue;
-      if (model.node(a).parent === c || model.node(c).parent === a) continue;
-      add('mention', a, c);
-    }
-    for (const link of all.values()) if (!drawn.has(`${link.type}:${link.from}:${link.to}`)) drawLink(link.type, link.from, link.to, 'is-all');
-  }
-
-  // The nodes: tasks first, so that hubs sit on top.
-  nodes.append(s('g', { class: 'graph-st-project' }, s('circle', { class: 'graph-st-project-ring', r: layout.rProj + 7 }), s('circle', { class: 'graph-st-project-body', r: layout.rProj })));
-  const byRank = layout.nodes.slice().sort((x, y) => RANK[y.kind] - RANK[x.kind]);
-  for (const o of byRank) {
-    const node = model.node(o.ref);
-    const late = model.late(o.ref);
-    const p = model.progress(o.ref);
-    const hub = o.kind !== 'task';
-    const flagged = node.status === 'blocked' || late > 0;
-    const g = s(
-      'g',
-      {
-        class: `graph-st-node is-${o.kind} s-${node.status} ${hueOf(o.epic)}${late > 0 ? ' is-late' : ''}${sel === o.ref ? ' is-sel' : ''}${partnerSet.has(o.ref) ? ' is-linked' : ''}${lit.has(o.ref) ? ' is-lit' : ''}`,
-        transform: `translate(${R1(o.x)} ${R1(o.y)})`,
-        tabindex: o.ref === rovingRef ? '0' : '-1',
-        role: 'button',
-        'data-ref': o.ref,
-        'aria-current': sel === o.ref ? 'true' : null,
-        'aria-label': `${words(model, o.ref)} Press Enter to open it.`,
-      },
-      s('circle', { class: 'graph-st-hit', r: Math.max(o.r + 3, 7) }),
-    );
-    if (hub && p.total && (o.kind === 'epic' || cfg.level !== 'tasks')) {
-      const rr = o.r + 3.6;
-      const C = Math.PI * 2 * rr;
-      g.append(s('circle', { class: 'graph-st-track', r: rr }), s('circle', { class: 'graph-st-fill', r: rr, 'stroke-dasharray': `${R1((C * p.done) / p.total)} ${R1(C)}`, transform: 'rotate(-90)' }));
-    }
-    g.append(s('circle', { class: 'graph-st-body', r: o.r }));
-    if (flagged) g.append(s('circle', { class: `graph-st-flag ${node.status === 'blocked' ? 'is-danger' : 'is-warn'}`, r: o.r + (hub ? (o.kind === 'epic' ? 9 : 7) : 2.3) }));
-    g.append(s('circle', { class: 'graph-st-ring', r: o.r + (hub ? (o.kind === 'epic' ? 11 : 9) : 6) }));
-    nodes.append(g);
-  }
-  vp.append(hier, cross, nodes, names);
-
-  // -- the names: a fixed size on the screen, placed so that none overlaps another --
-  const CHAR = 6.5;
-  const MONO = 7.5;
-  const textWidth = (lines) =>
-    Math.max(...lines.map((line) => {
-      const found = /^[EST]-\d+/.exec(line);
-      return found ? found[0].length * MONO + (line.length - found[0].length) * CHAR : line.length * CHAR;
-    }));
-  const LINE = 14.5;
-  const hubOf = (ref) => model.epicOf(ref).ref;
-
-  function drawNames() {
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return;
-    const sc = ctm.a;
-    const k = whole.k;
-    const inv = 1 / (sc * k);
-    const box = svg.getBoundingClientRect();
-    const px = (wx) => (wx * k + whole.x) * sc + ctm.e - box.left;
-    const py = (wy) => (wy * k + whole.y) * sc + ctm.f - box.top;
-    const near = (x, y, pad) => x > -pad && x < box.width + pad && y > -pad && y < box.height + pad;
-    const activeEpics = new Set();
-    // Choosing or pointing at a hub (not a single task) brings up the codes of the stories round it.
-    if (sel && model.node(sel).kind !== 'task') activeEpics.add(hubOf(sel));
-    if (hover && model.node(hover).kind !== 'task') activeEpics.add(hubOf(hover));
-    const named = new Set(sel ? [sel, ...partnerSet] : concerned);
-    const mode = cfg.labels;
-    const dirOf = (o) => {
-      const par = o.parent === 'root' ? { x: 0, y: 0 } : layout.pos.get(o.parent);
-      const dx = o.x - par.x;
-      const dy = o.y - par.y;
-      const len = Math.hypot(dx, dy) || 1;
-      return [dx / len, dy / len];
-    };
-    // Only the dots near the screen can be in the way of a name. A hub is wider than its body: its
-    // arc and, when it is flagged, its ring are drawn outside it, and a name keeps off those too.
-    const circles = [];
-    const ringOf = (o) => {
-      const flagged = model.node(o.ref).status === 'blocked' || model.late(o.ref) > 0;
-      if (o.kind === 'task') return o.r + (flagged ? 3.3 : 0);
-      return o.r + (flagged ? (o.kind === 'epic' ? 10 : 8) : 5.2);
-    };
-    for (const o of layout.nodes) {
-      const x = px(o.x);
-      const y = py(o.y);
-      if (near(x, y, 160)) circles.push({ x, y, r: o.r * sc * k + 2, ring: ringOf(o) * sc * k + 2 });
-    }
-    circles.push({ x: px(0), y: py(0), r: layout.rProj * sc * k + 8, ring: layout.rProj * sc * k + 8 });
-    const hitsCircle = (bx, size = 'r') => circles.some((c) => {
-      if (c.x < bx[0] - 60 || c.x > bx[2] + 60) return false;
-      const nx = Math.max(bx[0], Math.min(c.x, bx[2]));
-      const ny = Math.max(bx[1], Math.min(c.y, bx[3]));
-      return Math.hypot(c.x - nx, c.y - ny) < c[size];
-    });
-    const cands = [];
-    if (mode !== 'off') {
-      for (const o of layout.nodes) {
-        if (o.kind === 'epic') continue;
-        if (!near(px(o.x), py(o.y), 40)) continue;
-        const node = model.node(o.ref);
-        let [ux, uy] = dirOf(o);
-        const isStory = o.kind === 'story';
-        // A story's tasks fan out away from it, so its name goes on the line to its epic, where there is a gap.
-        if (isStory && LEVEL_MAX[cfg.level] > 1 && model.kids(o.ref).length) {
-          ux = -ux;
-          uy = -uy;
-        }
-        let lines = null;
-        let prio = 3;
-        const full = `${codeOf(node)} ${node.title}`;
-        if (named.has(o.ref)) {
-          lines = wrap(full, 24, 2);
-          prio = 1;
-        } else if (mode === 'always') {
-          lines = [isStory ? clip(full, 26) : codeOf(node)];
-          prio = isStory ? 2 : 4;
-        } else if (isStory) {
-          if (k >= 3.2) lines = [clip(full, 30)];
-          else if (k >= 1.8 || activeEpics.has(hubOf(o.ref))) lines = [codeOf(node)];
-          prio = 2;
-        } else if (k >= 5.5) lines = [clip(full, 30)];
-        else if (k >= 3.6) lines = [codeOf(node)];
-        else if (activeEpics.has(hubOf(o.ref)) && k >= 2.4) lines = [codeOf(node)];
-        if (lines) cands.push({ ref: o.ref, prio, o, ux, uy, lines });
-      }
-    }
-    cands.sort((a, c) => a.prio - c.prio);
-    const placed = [];
-    const out = [];
-    const overlaps = (bx) => placed.some((q) => bx[0] < q[2] + 2 && bx[2] > q[0] - 2 && bx[1] < q[3] + 2 && bx[3] > q[1] - 2);
-    // The picture's own buttons are in the way of a name, too.
-    const zoomBox = zoomButtons.getBoundingClientRect();
-    placed.push([zoomBox.left - box.left - 4, zoomBox.top - box.top - 4, zoomBox.right - box.left + 4, zoomBox.bottom - box.top + 4]);
-
-    // An epic's name sits as near to its hub as there is clear room: on the line to the project, or a
-    // little to either side of it.
-    if (mode !== 'off') {
-      const centre = { x: px(0), y: py(0) };
-      const spokes = model.epics.map((epic) => {
-        const o = layout.pos.get(epic.ref);
-        return { ref: epic.ref, x1: centre.x, y1: centre.y, x2: px(o.x), y2: py(o.y) };
-      });
-      const segHitsBox = (sg, bx) => {
-        const inside = (x, y) => x >= bx[0] && x <= bx[2] && y >= bx[1] && y <= bx[3];
-        if (inside(sg.x1, sg.y1) || inside(sg.x2, sg.y2)) return true;
-        const edges = [[bx[0], bx[1], bx[2], bx[1]], [bx[2], bx[1], bx[2], bx[3]], [bx[2], bx[3], bx[0], bx[3]], [bx[0], bx[3], bx[0], bx[1]]];
-        const ccw = (ax, ay, bx2, by, cx, cy) => (cy - ay) * (bx2 - ax) > (by - ay) * (cx - ax);
-        return edges.some(([x3, y3, x4, y4]) => ccw(sg.x1, sg.y1, x3, y3, x4, y4) !== ccw(sg.x2, sg.y2, x3, y3, x4, y4) && ccw(sg.x1, sg.y1, sg.x2, sg.y2, x3, y3) !== ccw(sg.x1, sg.y1, sg.x2, sg.y2, x4, y4));
-      };
-      for (const epic of model.epics) {
-        const o = layout.pos.get(epic.ref);
-        const hx = px(o.x);
-        const hy = py(o.y);
-        if (!near(hx, hy, 30)) continue;
-        const dist = Math.hypot(o.x, o.y);
-        const base = Math.atan2(-o.y, -o.x);
-        const full = `${codeOf(epic)} ${epic.title}`;
-        // The whole name if there is room, a narrower one if not, and the code alone as a last resort.
-        const variants = [wrap(full, 16, 3), wrap(full, 11, 4), [codeOf(epic)]];
-        let best = null;
-        let lines = variants[0];
-        for (const v of variants) {
-          const w = textWidth(v);
-          const hh = v.length * LINE;
-          for (const turn of [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8, Math.PI]) {
-            const ux = Math.cos(base + turn);
-            const uy = Math.sin(base + turn);
-            for (let t = o.r + 12; t < Math.max(dist - layout.rProj - 6, o.r + 40); t += 7) {
-              const cx = px(o.x + ux * t);
-              const cy = py(o.y + uy * t);
-              if (Math.hypot(cx - hx, cy - hy) > 190) break;
-              const bx = [cx - w / 2, cy - hh / 2, cx + w / 2, cy + hh / 2];
-              if (bx[0] < 4 || bx[2] > box.width - 4 || bx[1] < 4 || bx[3] > box.height - 4) continue;
-              if (overlaps(bx) || hitsCircle(bx, 'ring')) continue;
-              const crossings = spokes.filter((sg) => sg.ref !== epic.ref && segHitsBox(sg, bx)).length;
-              const cost = t + Math.abs(turn) * 10 + crossings * 30;
-              if (!best || cost < best.cost) best = { cost, bx, ux, uy, t };
-              break;
-            }
-          }
-          if (best) {
-            lines = v;
-            break;
-          }
-        }
-        if (!best) continue;
-        placed.push(best.bx);
-        out.push({ epic: true, ref: epic.ref, o, ux: best.ux, uy: best.uy, along: best.t, lines });
-      }
-    }
-
-    // A name sits just beyond its dot, away from its parent. The item looked at and what it is linked to
-    // may also sit a little to either side, or further out, if that is where there is room.
-    const settle = (c, turns, gaps, clear) => {
-      const w = textWidth(c.lines);
-      const hh = c.lines.length * LINE;
-      const rpx = c.o.r * sc * k;
-      const base = Math.atan2(c.uy, c.ux);
-      let best = null;
-      for (const turn of turns) {
-        const ux = Math.cos(base + turn);
-        const uy = Math.sin(base + turn);
-        const reach = (Math.abs(ux) * w) / 2 + (Math.abs(uy) * hh) / 2;
-        for (const gp of gaps) {
-          const dist = rpx + gp + reach;
-          const cx = px(c.o.x) + ux * dist;
-          const cy = py(c.o.y) + uy * dist;
-          const bx = [cx - w / 2, cy - hh / 2, cx + w / 2, cy + hh / 2];
-          if (bx[0] < 2 || bx[2] > box.width - 2 || bx[1] < 2 || bx[3] > box.height - 2) continue;
-          if (overlaps(bx) || (clear && hitsCircle(bx))) continue;
-          const cost = gp + Math.abs(turn) * 10;
-          if (!best || cost < best.cost) best = { cost, bx, ux, uy, dist };
-          break;
-        }
-      }
-      return best;
-    };
-    for (let c of cands) {
-      const prime = c.prio === 1;
-      const sideways = c.o.kind === 'story' ? [0, 0.5, -0.5, 1, -1] : [0];
-      let best = prime
-        ? settle(c, [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8, Math.PI], [4, 12, 24, 40], true) || settle(c, [0, 0.6, -0.6, 1.2, -1.2, Math.PI], [4, 16, 32], false)
-        : settle(c, sideways, [4], true);
-      if (!best && !prime && c.lines[0].length > 5) {
-        // No clear room for the whole name: the code alone, which is short enough to fit.
-        c = { ...c, lines: [codeOf(model.node(c.ref))] };
-        best = settle(c, sideways, [4], true);
-      }
-      if (!best) continue;
-      placed.push(best.bx);
-      out.push({ ...c, ux: best.ux, uy: best.uy, dist: best.dist });
-    }
-
-    put(names);
-    for (const c of out) {
-      const wx = c.epic ? c.o.x + c.ux * c.along : c.o.x + c.ux * c.dist * inv;
-      const wy = c.epic ? c.o.y + c.uy * c.along : c.o.y + c.uy * c.dist * inv;
-      const g = s('g', { class: `graph-st-name${c.epic ? ' is-epic' : ''}${named.has(c.ref) ? ' is-lit' : ''}`, transform: `translate(${R1(wx)} ${R1(wy)}) scale(${inv})` });
-      const first = (-(c.lines.length - 1) * LINE) / 2 + 4.2;
-      c.lines.forEach((line, i) => {
-        const text = s('text', { x: 0, y: R1(first + i * LINE), 'text-anchor': 'middle' });
-        const found = /^([EST]-\d+)( |$)/.exec(i === 0 ? line : '');
-        if (found) text.append(s('tspan', { class: 'graph-st-code' }, found[1]), line.slice(found[1].length));
-        else text.append(line);
-        g.append(text);
-      });
-      names.append(g);
-    }
-    // Epics keep their code inside the hub, whatever the labels are set to, and the project its name.
-    for (const epic of model.epics) {
-      const o = layout.pos.get(epic.ref);
-      const fs = Math.max(7, Math.min(12, (o.r * sc * k * 2) / 3.8));
-      const g = s('g', { class: 'graph-st-name is-hub', transform: `translate(${R1(o.x)} ${R1(o.y)}) scale(${inv})` });
-      const text = s('text', { x: 0, y: R1(fs * 0.36), 'text-anchor': 'middle' }, codeOf(epic));
-      text.style.fontSize = `${R1(fs)}px`;
-      g.append(text);
-      names.append(g);
-    }
-    if (name) {
-      const pf = Math.max(8, Math.min(12, (layout.rProj * sc * k * 2) / 8.4));
-      const lines = wrap(name, 11, 2);
-      const g = s('g', { class: 'graph-st-name is-project', transform: `scale(${inv})` });
-      lines.forEach((line, i) => {
-        const text = s('text', { x: 0, y: R1((i - (lines.length - 1) / 2) * pf * 1.2 + pf * 0.36), 'text-anchor': 'middle' }, line);
-        text.style.fontSize = `${R1(pf)}px`;
-        g.append(text);
-      });
-      names.append(g);
-    }
-  }
-
-  // -- the parts round the picture --
-  let frame = 0;
-  const later = () => {
-    if (frame) return;
-    frame = requestAnimationFrame(() => { frame = 0; drawNames(); });
-  };
-  stop.push(() => frame && cancelAnimationFrame(frame));
-  const applyView = () => {
-    vp.setAttribute('transform', `translate(${R1(whole.x)} ${R1(whole.y)}) scale(${Math.round(whole.k * 1000) / 1000})`);
-    later();
-  };
-  const zoomAround = (f, cx, cy) => {
-    const k2 = Math.min(MOST_ZOOM, Math.max(LEAST_ZOOM, whole.k * f));
-    whole.x = cx - (cx - whole.x) * (k2 / whole.k);
-    whole.y = cy - (cy - whole.y) * (k2 / whole.k);
-    whole.k = k2;
-    applyView();
-  };
-  const middle = { x: vb.x + vb.w / 2, y: vb.y + vb.h / 2 };
-  const centreOn = (ref, k) => {
-    const o = layout.pos.get(ref);
-    if (!o) return;
-    whole.k = k;
-    whole.x = middle.x - o.x * k;
-    whole.y = middle.y - o.y * k;
-    applyView();
-  };
-  const small = (label, fn, text) => h('button', { class: 'small icon-only', type: 'button', 'aria-label': label, title: label, onclick: fn }, text);
-  const zoomButtons = h(
-    'div',
-    { class: 'graph-st-zoom', role: 'group', 'aria-label': 'Zoom and move' },
-    sel ? h('button', { class: 'small', type: 'button', 'data-action': 'zoom-chosen', onclick: () => centreOn(sel, Math.max(whole.k, layout.pos.get(sel).kind === 'task' ? 4.2 : 2.4)) }, icon('search', { size: 14 }), 'Zoom to chosen') : null,
-    small('Zoom out', () => zoomAround(1 / 1.4, middle.x, middle.y), '\u2212'),
-    h('button', { class: 'small', type: 'button', 'aria-label': 'Fit the whole project in view', onclick: () => { whole.k = 1; whole.x = 0; whole.y = 0; applyView(); } }, 'Fit'),
-    small('Zoom in', () => zoomAround(1.4, middle.x, middle.y), '+'),
-  );
-  const tip = h('div', { class: 'graph-x-tip', hidden: true, role: 'presentation' });
-  const inner = h('div', { class: 'graph-st-inner' }, svg, tip);
-  const canvas = h('div', { class: 'graph-x-canvas graph-st-canvas' }, inner, zoomButtons);
-
-  const showTip = (el) => {
-    const ref = el.getAttribute('data-ref');
-    const r = el.querySelector('.graph-st-body').getBoundingClientRect();
-    const c = inner.getBoundingClientRect();
-    put(tip, tipContent(model, ref));
-    tip.hidden = false;
-    const left = Math.min(Math.max(r.left - c.left + r.width / 2, 130), Math.max(c.width - 130, 130));
-    const above = r.top - c.top > 120;
-    tip.classList.toggle('is-below', !above);
-    tip.style.left = `${Math.round(left)}px`;
-    tip.style.top = `${Math.round(above ? r.top - c.top - 10 : r.bottom - c.top + 10)}px`;
-  };
-  const setHover = (ref, el) => {
-    const was = hover;
-    hover = ref;
-    if (ref) showTip(el);
-    else tip.hidden = true;
-    const wasEpic = was ? hubOf(was) : null;
-    const nowEpic = ref ? hubOf(ref) : null;
-    if (wasEpic !== nowEpic && cfg.labels === 'zoom') later();
-  };
-  const siblingsOf = (ref) => {
-    const node = model.node(ref);
-    return node.parent ? visibleKids(node.parent) : model.epics;
-  };
-  for (const el of svg.querySelectorAll('.graph-st-node')) {
-    const ref = el.getAttribute('data-ref');
-    opensItsPage(el, ref);
-    el.addEventListener('keydown', (e) => {
-      if (['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
-        let target = null;
-        if (e.key === 'ArrowDown') target = visibleKids(ref)[0]?.ref;
-        else if (e.key === 'ArrowUp') target = model.node(ref).parent;
-        else {
-          const sibs = siblingsOf(ref);
-          const at = sibs.findIndex((x) => x.ref === ref);
-          target = sibs[(at + (e.key === 'ArrowRight' ? 1 : -1) + sibs.length) % sibs.length]?.ref;
-        }
-        const next = target && svg.querySelector(`.graph-st-node[data-ref="${target}"]`);
-        if (next) {
-          e.preventDefault();
-          el.setAttribute('tabindex', '-1');
-          next.setAttribute('tabindex', '0');
-          next.focus();
-        }
-      }
-    });
-    el.addEventListener('pointerenter', () => setHover(ref, el));
-    el.addEventListener('pointerleave', () => setHover(null, el));
-    el.addEventListener('focus', () => setHover(ref, el));
-    el.addEventListener('blur', () => setHover(null, el));
-  }
-  let drag = null;
-  svg.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.graph-st-node') || e.button !== 0) return;
-    drag = { sx: e.clientX, sy: e.clientY, x: whole.x, y: whole.y, moved: false };
-    svg.setPointerCapture(e.pointerId);
-    svg.classList.add('is-grabbing');
-  });
-  svg.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    const sc = svg.getScreenCTM().a;
-    if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 4) drag.moved = true;
-    whole.x = drag.x + (e.clientX - drag.sx) / sc;
-    whole.y = drag.y + (e.clientY - drag.sy) / sc;
-    vp.setAttribute('transform', `translate(${R1(whole.x)} ${R1(whole.y)}) scale(${Math.round(whole.k * 1000) / 1000})`);
-  });
-  svg.addEventListener('pointerup', () => {
-    if (!drag) return;
-    const moved = drag.moved;
-    drag = null;
-    svg.classList.remove('is-grabbing');
-    if (moved) later();
-  });
-  svg.addEventListener('pointercancel', () => { drag = null; svg.classList.remove('is-grabbing'); });
-  svg.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const ctm = svg.getScreenCTM();
-    const pt = svg.createSVGPoint();
-    pt.x = e.clientX;
-    pt.y = e.clientY;
-    const u = pt.matrixTransform(ctm.inverse());
-    zoomAround(Math.exp(-e.deltaY * 0.0016), u.x, u.y);
-  }, { passive: false });
-
-  if (whole.k > 1 && whole.x === 0 && whole.y === 0 && sel) centreOn(sel, whole.k);
-  else applyView();
-  watch(inner, later);
-
-  // -- the page round it --
-  const epicLegend = model.epics.map((epic, i) =>
-    h('li', { class: 'graph-key-chip is-button' }, h('button', { class: `graph-x-legend-button ${hueOf(i)}`, type: 'button', title: `${codeOf(epic)} ${epic.title}`, onclick: () => mark(epic.ref) }, h('span', { class: 'graph-x-swatch' }), codeOf(epic))),
-  );
-  // How many of the finest level drawn are in each status: the dots of the map, counted.
-  const finest = { epics: 'epic', stories: 'story', tasks: 'task' }[cfg.level];
+// How many of the finest level drawn are in each status: the dots of the map, counted.
+function countsOf(model, tree, level) {
   const counts = {};
-  for (const o of layout.nodes) if (o.kind === finest) counts[model.node(o.ref).status] = (counts[model.node(o.ref).status] || 0) + 1;
-  const key = viewKey({
+  const add = (ref) => { counts[model.node(ref).status] = (counts[model.node(ref).status] || 0) + 1; };
+  for (const epic of tree) {
+    if (level === 'epics') add(epic.ref);
+    for (const story of epic.stories) {
+      if (level === 'stories') add(story.ref);
+      if (level === 'tasks') story.tasks.forEach((task) => add(task.ref));
+    }
+  }
+  return counts;
+}
+
+function keyOf(model, tree, cfg, chosen) {
+  const epicLegend = model.epics.map((epic, i) =>
+    h('li', { class: 'graph-key-chip is-button' }, h('button', { class: `graph-x-legend-button ${hueOf(i)}`, type: 'button', title: `${codeOf(epic)} ${epic.title}`, onclick: () => mark(epic.ref) }, h('span', { class: 'graph-x-swatch' }), code(codeOf(epic)), h('span', { class: 'graph-x-chip-name' }, epic.title))),
+  );
+  return viewKey({
     label: 'How to read the map',
     groups: [
-      { label: 'Shapes', chips: [...shapeChips({ stories: cfg.level !== 'epics', tasks: cfg.level === 'tasks' }), biggerChip('Bigger dot, higher priority'), lateChip('Amber ring: overdue', 'ring'), keyChip(h('span', { class: 'graph-x-late is-ring is-danger' }), 'Red ring: blocked')] },
-      cfg.colour === 'epic' ? { label: 'Colour by epic', chips: [...epicLegend, startedChip()] } : { label: 'Colour is the status', chips: mapStatusChips(counts, cfg.level) },
-      cfg.links || sel ? { label: 'Lines', chips: linkChips() } : null,
+      { label: 'Shapes', chips: [...shapeChips({ stories: cfg.level !== 'epics', tasks: cfg.level === 'tasks' }), biggerChip(cfg.level === 'epics' ? 'Bigger epic: more tasks under it' : 'Bigger dot: more tasks under it, or a higher priority'), lateChip('Dashed red ring: overdue', 'ring'), keyChip(h('span', { class: 'graph-x-late is-ring is-danger' }), 'Solid red ring: blocked')] },
+      cfg.colour === 'epic' ? { label: 'Colour by epic', chips: [...epicLegend, startedChip()] } : { label: 'Colour is the status', chips: mapStatusChips(countsOf(model, tree, cfg.level), cfg.level) },
+      cfg.links || chosen ? { label: 'Lines', chips: linkChips() } : null,
     ],
   });
-  const toolbar = h(
+}
+
+function barOf(model, cfg) {
+  return h(
     'div',
     { class: 'graph-st-toolbar' },
     lookAt(model, null),
@@ -810,15 +255,50 @@ function wholePage(model, cfg, chosen, concernedRefs) {
     segment('Colour by', 'What the colour means', COLOURS, cfg.colour, (v) => setLook({ colour: v === 'status' ? null : v }), 'colour'),
     segment('Labels', 'When to show names', LABEL_MODES, cfg.labels, (v) => setLook({ labels: v === 'zoom' ? null : v }), 'labels'),
     toggle('Show links between items', 'link', cfg.links, () => setLook({ links: cfg.links ? null : '1' }), { title: 'Needs first, duplicates, related and references, as soft curves', 'data-choice': 'links' }),
-    key,
+    live.forces.el,
+    h('button', { id: 'graph-st-tidy', class: 'small', type: 'button', onclick: () => live.map.tidy() }, icon('structure', { size: 14 }), 'Tidy'),
+    live.key,
   );
-  return h(
-    'section',
-    { class: 'graph-x-panel graph-st-main', 'aria-labelledby': 'graph-st-title' },
-    h('div', { class: 'graph-x-head' }, h('h2', { id: 'graph-st-title' }, 'Structure of the whole project')),
-    toolbar,
-    canvas,
-  );
+}
+
+// What each part of the page shows, to know when it has to be drawn again: the toolbar depends on the
+// choices and the epics, the key on the colour, the links, what is looked at and how many dots are in each status.
+function signaturesOf(model, tree, cfg, chosen) {
+  const epics = model.epics.map((epic) => [epic.ref, epic.title]);
+  return {
+    bar: JSON.stringify([cfg.colour, cfg.labels, cfg.links, epics]),
+    key: JSON.stringify([cfg.colour, cfg.links, Boolean(chosen), countsOf(model, tree, cfg.level), epics]),
+  };
+}
+
+// The whole project. The picture is made once and then changed in place, so that a refresh of the work
+// never moves a dot or interrupts a drag; only a choice of level makes a new one.
+function showWhole(model, cfg, chosen) {
+  const tree = treeOf(model);
+  const inputs = { api, model, tree, cfg, chosen, concerned: concernedBy(model, api.focus), name };
+  const now = signaturesOf(model, tree, cfg, chosen);
+  if (live && live.level === cfg.level && root.contains(live.section)) {
+    live.map.update(inputs);
+    if (now.key !== live.signatures.key) {
+      const next = keyOf(model, tree, cfg, chosen);
+      live.key.replaceWith(next);
+      live.key = next;
+    }
+    if (now.bar !== live.signatures.bar) {
+      const next = barOf(model, cfg);
+      live.bar.replaceWith(next);
+      live.bar = next;
+    }
+    live.signatures = now;
+    return;
+  }
+  dropLive();
+  const forces = createForces({ change: (values) => live.map.setForces(values), reset: () => live.map.resetForces() });
+  live = { level: cfg.level, map: createMap({ ...inputs, forces: forcesAreDefault() ? null : forceValues() }), forces, signatures: now };
+  live.key = keyOf(model, tree, cfg, chosen);
+  live.bar = barOf(model, cfg);
+  live.section = h('section', { class: 'graph-x-panel graph-st-main', 'aria-labelledby': 'graph-st-title' }, h('h2', { id: 'graph-st-title', class: 'sr-only' }, 'Structure of the whole project'), live.bar, live.map.el);
+  put(root, h('div', { class: 'graph-xv' }, live.section));
 }
 
 // Calls fn whenever the element's size changes; undone when the next drawing replaces this one.
@@ -846,10 +326,10 @@ function epicPage(model, epicRef, chosen) {
   const linked = new Set(rows.filter((row) => row.inside).map((row) => row.other));
   const selStory = sel && model.node(sel).kind === 'story' ? sel : null;
 
-  const svg = s('svg', { class: 'graph-rd-svg', role: 'group', 'aria-label': `Radial tree of ${codeOf(epic)}: stories in a ring, tasks on the outside` });
+  const svg = s('svg', { class: 'graph-rd-svg', role: 'group', 'aria-label': `Radial tree of ${codeOf(epic)} ${epic.title}: stories in a ring, tasks on the outside` });
   const tip = h('div', { class: 'graph-x-tip', hidden: true, role: 'presentation' });
   const inner = h('div', { class: 'graph-rd-inner' }, svg, tip);
-  const scroller = h('div', { class: 'graph-rd-scroll', tabindex: '0', role: 'region', 'aria-label': `The tree of ${codeOf(epic)}. It scrolls sideways on a small screen.` }, inner);
+  const scroller = h('div', { class: 'graph-rd-scroll', tabindex: '0', role: 'region', 'aria-label': `The tree of ${codeOf(epic)} ${epic.title}. It scrolls sideways on a small screen.` }, inner);
   const note = h('div', { class: 'graph-rd-note-holder' });
   const small = (label, fn, text) => h('button', { class: 'small icon-only', type: 'button', 'aria-label': label, title: label, onclick: fn }, text);
   const controls = h(
@@ -866,7 +346,7 @@ function epicPage(model, epicRef, chosen) {
     : viewKey({
         label: 'How to read the tree',
         groups: [
-          { label: 'The leaves', chips: [...statusChips(), biggerChip('Bigger leaf, higher priority'), ringChip('Ring round a story: how much is done'), hasSquare ? keyChip(h('span', { class: 'graph-key-square' }), 'Square: a story with no tasks yet') : null, lateChip()].filter(Boolean) },
+          { label: 'The leaves', chips: [...statusChips(), biggerChip('Bigger leaf, higher priority'), ringChip('Ring round a story: how much is done'), hasSquare ? keyChip(h('span', { class: 'graph-key-square' }), 'Square: a story with no tasks yet') : null, lateChip('Red dot: overdue')].filter(Boolean) },
           rows.some((row) => row.inside) ? { label: 'Lines', chips: linkChips() } : null,
         ],
       });
@@ -874,10 +354,22 @@ function epicPage(model, epicRef, chosen) {
   const main = h(
     'section',
     { class: 'graph-x-panel graph-st-main', 'aria-labelledby': 'graph-st-title' },
-    h('div', { class: 'graph-x-head' }, h('h2', { id: 'graph-st-title' }, `Focus on ${codeOf(epic)}`)),
+    h('h2', { id: 'graph-st-title', class: 'sr-only' }, `Focus on ${codeOf(epic)} ${epic.title}`),
     toolbar,
     canvas,
   );
+
+  // The epic's code and name and, when it has work, how much of it is done, inside its hub.
+  const hubWords = (percent) => {
+    const lines = wrap(epic.title, 11, 2);
+    const block = 14 + lines.length * 10.5 + (percent ? 12 : 0);
+    const top = -block / 2;
+    const g = s('g', { class: 'graph-rd-epic-words' });
+    g.append(s('text', { class: 'graph-rd-epic-code', 'text-anchor': 'middle', y: R1(top + 11) }, codeOf(epic)));
+    lines.forEach((line, i) => g.append(s('text', { class: 'graph-rd-epic-name', 'text-anchor': 'middle', y: R1(top + 23 + i * 10.5) }, line)));
+    if (percent) g.append(s('text', { class: 'graph-rd-epic-pct', 'text-anchor': 'middle', y: R1(top + block - 2) }, percent));
+    return g;
+  };
 
   if (L.empty) {
     controls.remove();
@@ -885,10 +377,10 @@ function epicPage(model, epicRef, chosen) {
     const hub = s(
       'g',
       { class: 'graph-rd-epic', tabindex: '0', role: 'button', 'data-ref': epicRef, 'aria-label': `${words(model, epicRef)} Press Enter to open it.` },
-      s('circle', { class: 'graph-rd-ring', r: 46 }),
-      s('circle', { class: 'graph-rd-epic-track', r: 41 }),
-      s('circle', { class: 'graph-rd-epic-body', r: 36 }),
-      s('text', { class: 'graph-rd-epic-code', 'text-anchor': 'middle', y: 4 }, codeOf(epic)),
+      s('circle', { class: 'graph-rd-ring', r: 50 }),
+      s('circle', { class: 'graph-rd-epic-track', r: 45 }),
+      s('circle', { class: 'graph-rd-epic-body', r: 40 }),
+      hubWords(''),
     );
     opensItsPage(hub, epicRef);
     svg.append(hub, s('text', { class: 'graph-rd-empty', 'text-anchor': 'middle', y: 78 }, 'Nothing is planned yet: no stories, so no leaves'));
@@ -970,15 +462,15 @@ function epicPage(model, epicRef, chosen) {
       nodes.append(sg);
     }
     const ep = model.progress(epicRef);
-    const EC = 2 * Math.PI * 41;
+    const EC = 2 * Math.PI * 45;
     const eg = s(
       'g',
       { class: 'graph-rd-epic', tabindex: '-1', role: 'button', 'data-ref': epicRef, 'aria-label': `${words(model, epicRef)} Press Enter to open it.` },
-      s('circle', { class: 'graph-rd-ring', r: 46 }),
-      s('circle', { class: 'graph-rd-epic-track', r: 41 }),
+      s('circle', { class: 'graph-rd-ring', r: 50 }),
+      s('circle', { class: 'graph-rd-epic-track', r: 45 }),
     );
-    if (ep.total) eg.append(s('circle', { class: 'graph-rd-epic-fill', r: 41, 'stroke-dasharray': `${R1((EC * ep.done) / ep.total)} ${R1(EC)}`, transform: 'rotate(-90)' }));
-    eg.append(s('circle', { class: 'graph-rd-epic-body', r: 36 }), s('text', { class: 'graph-rd-epic-code', 'text-anchor': 'middle', y: -3 }, codeOf(epic)), s('text', { class: 'graph-rd-epic-pct', 'text-anchor': 'middle', y: 14 }, ep.total ? `${Math.round((100 * ep.done) / ep.total)}%` : ''));
+    if (ep.total) eg.append(s('circle', { class: 'graph-rd-epic-fill', r: 45, 'stroke-dasharray': `${R1((EC * ep.done) / ep.total)} ${R1(EC)}`, transform: 'rotate(-90)' }));
+    eg.append(s('circle', { class: 'graph-rd-epic-body', r: 40 }), hubWords(ep.total ? `${Math.round((100 * ep.done) / ep.total)}%` : ''));
     nodes.append(eg);
     for (const gr of L.groups) {
       for (const leafOf of gr.leaves) {
@@ -1009,6 +501,44 @@ function epicPage(model, epicRef, chosen) {
     }
     g.append(nodes);
 
+    // The names of the stories go in the room round each one: toward the middle first, then to either
+    // side, then outward, wherever a name clears the hub, the other stories and the other names.
+    const storyNames = s('g', { class: 'graph-rd-story-names', 'aria-hidden': 'true' });
+    const stories = L.groups.filter((gr) => !gr.leafStory).sort((a, b) => Number(linked.has(b.story.ref) || sel === b.story.ref) - Number(linked.has(a.story.ref) || sel === a.story.ref));
+    const obstacles = [{ x: 0, y: 0, r: 54 }, ...stories.map((gr) => ({ x: L.pos.get(gr.story.ref).x, y: L.pos.get(gr.story.ref).y, r: 23 }))];
+    const taken = [];
+    const clear = (b) =>
+      [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].every(([x, y]) => Math.hypot(x, y) <= L.R2 - 16) &&
+      !taken.some((q) => b[0] < q[2] + 3 && b[2] > q[0] - 3 && b[1] < q[3] + 1 && b[3] > q[1] - 1) &&
+      !obstacles.some((c) => Math.hypot(c.x - Math.max(b[0], Math.min(c.x, b[2])), c.y - Math.max(b[1], Math.min(c.y, b[3]))) < c.r);
+    for (const gr of stories) {
+      const p = L.pos.get(gr.story.ref);
+      const title = model.node(gr.story.ref).title;
+      let found = null;
+      for (const lines of full ? [wrap(title, 13, 3), wrap(title, 10, 3), [clip(title, 10)]] : [wrap(title, 10, 3), [clip(title, 10)]]) {
+        const w = Math.max(...lines.map((line) => line.length)) * 6.4;
+        const hh = lines.length * 13;
+        for (const turn of [0, 0.5, -0.5, 1, -1, 1.5, -1.5, 2.1, -2.1, 2.7, -2.7, Math.PI]) {
+          const ux = Math.cos(p.ang + Math.PI + turn);
+          const uy = Math.sin(p.ang + Math.PI + turn);
+          const reach = (Math.abs(ux) * w) / 2 + (Math.abs(uy) * hh) / 2;
+          for (const gap of [3, 10, 20]) {
+            const cx = p.x + ux * (21 + gap + reach);
+            const cy = p.y + uy * (21 + gap + reach);
+            const b = [cx - w / 2, cy - hh / 2, cx + w / 2, cy + hh / 2];
+            if (!found && clear(b)) found = { lines, cx, cy, b };
+          }
+        }
+        if (found) break;
+      }
+      if (!found) continue;
+      taken.push(found.b);
+      const name = s('g', { class: `graph-rd-story-name${sel === gr.story.ref ? ' is-sel' : ''}${linked.has(gr.story.ref) ? ' is-linked' : ''}`, transform: `translate(${R1(found.cx)} ${R1(found.cy)})` });
+      found.lines.forEach((line, i) => name.append(s('text', { x: 0, y: R1((i - (found.lines.length - 1) / 2) * 13 + 4), 'text-anchor': 'middle' }, line)));
+      storyNames.append(name);
+    }
+    g.append(storyNames);
+
     // Names last, so they sit over the lines and never under a node.
     const labels = s('g', { class: 'graph-rd-labels', 'aria-hidden': 'true' });
     for (const gr of L.groups) {
@@ -1018,7 +548,7 @@ function epicPage(model, epicRef, chosen) {
         const deg = (p.ang * 180) / Math.PI;
         const flip = Math.cos(p.ang) < -0.0001;
         const off = (leaf.kind === 'story' ? 8 : LEAF_DOT[leaf.priority] || LEAF_DOT.normal) + 9;
-        const text = full ? clip(`${codeOf(leaf)} ${leaf.title}`, labelMax) : codeOf(leaf);
+        const text = clip(`${codeOf(leaf)} ${leaf.title}`, full ? labelMax : 14);
         labels.append(
           s(
             'g',
@@ -1049,10 +579,11 @@ function epicPage(model, epicRef, chosen) {
         ? h(
             'div',
             { class: 'graph-rd-note' },
-            h('span', { class: 'quiet' }, `${codeOf(model.node(sel))} is also linked outside this epic:`),
+            h('span', { class: 'quiet' }, `${codeOf(model.node(sel))} ${clip(model.node(sel).title, 40)} is also linked outside this epic:`),
             outside.map((row) => {
               const other = model.epicOf(row.other);
-              return h('button', { class: 'chip graph-x-chip-link', type: 'button', title: model.node(row.other).title, onclick: () => api.setParams({ scope: other.ref, focus: row.other }) }, icon('arrow_right', { size: 14 }), `${codeOf(model.node(row.other))} in ${codeOf(other)}`);
+              const found = model.node(row.other);
+              return h('button', { class: 'chip graph-x-chip-link', type: 'button', title: `${codeOf(found)} ${found.title}, in ${codeOf(other)} ${other.title}`, onclick: () => api.setParams({ scope: other.ref, focus: row.other }) }, icon('arrow_right', { size: 14 }), code(codeOf(found)), h('span', { class: 'graph-x-chip-name' }, `${clip(found.title, 32)} in ${codeOf(other)} ${clip(other.title, 24)}`));
             }),
           )
         : null,

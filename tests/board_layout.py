@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from mcp import Client
-from playwright.async_api import BrowserContext, Page, async_playwright
+from playwright.async_api import BrowserContext, Page, async_playwright, expect
 
 from tests.board_helpers import SLOW, Watched, board_url, item_address, made, tree_expand
 from tests.helpers import (
@@ -34,7 +34,14 @@ from tests.helpers import (
     set_definition_on_board,
     set_status,
 )
-from tests.world import SESSION_COOKIE, Project, make_project, project_at, register
+from tests.world import (
+    SESSION_COOKIE,
+    Project,
+    make_limited_key,
+    make_project,
+    project_at,
+    register,
+)
 
 THEMES = ("light", "dark")
 ACTOR = "Layout Tester"
@@ -100,8 +107,7 @@ class Screen:
 
     @property
     def phone(self) -> bool:
-        """The pages are one column, and the claims of the Activity page start folded (under 700
-        CSS pixels)."""
+        """The pages are one column (under 700 CSS pixels)."""
         return self.width < 700
 
 
@@ -145,6 +151,11 @@ async def the_world(server_url: str) -> World:
     """The project these tests look at, made the first time it is asked for."""
     if server_url not in _worlds:
         project = make_project(register(name="Layout tester"), "Layout test project")
+        # Keys of each kind, so that the Users page is drawn with a row of every look: one tool at a
+        # time with the standard tools, a key that runs code with a list of its own, and a verifier's.
+        make_limited_key(project, "standard-agent", None)
+        make_limited_key(project, "script-agent", ["get_node", "list_nodes"], code_mode=True)
+        make_limited_key(project, "review-agent", None, verifier=True)
         world = World(project, board_url(server_url, project))
         async with connect(server_url, project.key) as client:
             await build(client, world)
@@ -183,7 +194,7 @@ async def build(client: Client, world: World) -> None:
     await node("E6", "epic", "A wide row of tasks", None)
     await node("S7", "story", "Many small tasks", "E6")
     for number in range(1, 14):
-        await node(f"W{number}", "task", f"Wide task {number:02d}", "S7")
+        await node(f"W{number}", "task", f"Wide tile {number:02d}", "S7")
 
     # E1 is dense in the Ready column and sparse in the others. Its cards say the same things in
     # the same number of words, so that their heights can be compared.
@@ -255,7 +266,11 @@ async def build(client: Client, world: World) -> None:
         await ok(client, "create_rule", actor="ann", title=LONG_TITLE, node=refs["D1"]),
     )
     set_definition_on_board(
-        f"- Tests pass\n- {LONG_TITLE}\n- A person has tried it", project=world.project
+        f"- Tests pass\n- {LONG_TITLE}\n- A person has tried it"
+        "\n- [verifier] Reviewed by an agent that did not write it"
+        "\n- [github] The pull request is merged and its checks passed"
+        "\n- [person] Looks right on a phone",
+        project=world.project,
     )
     claims = await make_decision(
         client,
@@ -439,11 +454,14 @@ def stops(world: World) -> list[Stop]:
     Graph (map and list, Work, Context and Everything), the Roadmap, the page of an epic, a story, a
     task, an acceptance criterion, a decision and a fact (each reached from a view or from Search, so the
     breadcrumb and the sidebar are audited with their longest paths), the coverage report, Search
-    (with results, with none and Possible duplicates), Activity, the four settings pages, and the
+    (with results, with none and Possible duplicates), Activity (its three views: the changes, who
+    is working, the work free to take), the settings pages (Users, Account, Definition of done,
+    Tools, Status), and the
     pages that have no project open. The groups are board, graph, roadmap, item, coverage, search,
     activity, settings and entry."""
     e1 = world.number("E1")
-    structure = "#graph-view[data-tab=structure] svg.graph-st-svg"
+    # The Structure map is a live layout: it is looked at once it rests.
+    structure = "#graph-view[data-tab=structure] svg.graph-st-svg[data-resting=true]"
 
     def page_of(name: str, item: str, ready: str, from_page: str | None = None) -> Stop:
         """The page of a record, reached from a view (the Board unless said): ready once its table,
@@ -470,19 +488,21 @@ def stops(world: World) -> list[Stop]:
         ),
         Stop("graph-around", f"#/graph?tab=around&focus={world['S2']}", ".graph-around", "graph"),
         Stop("graph-around-overview", "#/graph?tab=around", "#graph-around-empty", "graph"),
-        Stop("graph-order", "#/graph?tab=order", ".graph-xv", "graph"),
-        Stop("graph-order-epic", f"#/graph?tab=order&focus={world['E1']}", ".graph-xv", "graph"),
+        # With nothing chosen Order is only a sentence asking for a choice.
+        Stop("graph-order", "#/graph?tab=order", "#graph-or-empty", "graph"),
+        Stop("graph-order-epic", f"#/graph?tab=order&focus={world['E1']}", ".graph-or", "graph"),
         Stop("lists-work", f"#/lists?view=work&epic={e1}", "#work-tree li", "lists"),
         Stop("lists-requirements", "#/lists?view=requirements", "#requirements-summary", "lists"),
         Stop("graph-context-list", "#/lists?view=notes", "tr.record-line[data-kind=note]", "lists"),
-        Stop("graph-everything-list", "#/lists?view=everything", ".gv-record", "lists"),
+        # The old address of the Everything list opens the work list.
+        Stop("graph-everything-list", "#/lists?view=everything", "#work-tree li", "lists"),
         Stop("roadmap", "#/roadmap", ".rm-bar", "roadmap"),
         page_of("item-epic", "E1", rows),
         page_of("item-epic-long", "E3", rows),
-        page_of("item-epic-empty", "E4", "#item-empty .empty-text"),
+        page_of("item-epic-empty", "E4", "#item-children #new-child"),
         page_of("item-story", "S2", rows),
         page_of("item-story-long", "S5", rows),
-        page_of("item-task", "D1", "#item-part-title", "graph"),
+        page_of("item-task", "D1", "#item-links", "graph"),
         page_of("item-requirement", "R3", record),
         page_of("item-decision", "X2", record, "search"),
         page_of("item-decision-replaced", "X5", record),
@@ -495,9 +515,18 @@ def stops(world: World) -> list[Stop]:
         ),
         Stop("search-duplicates", "#/search?dups=1", "#dup-pairs > *", "search"),
         Stop("activity", "#/activity", "#feed .event", "activity"),
+        # The other two views of the toggle: who is working on what, and the work free to take.
+        Stop("activity-working", "#/activity?tab=working", "#agents li.agent", "activity"),
+        Stop("activity-free", "#/activity?tab=free", "#free li.claim", "activity"),
+        # What needs a person: the world holds nothing for one, so this is the empty page.
+        Stop("needs", "#/needs", "#needs-empty", "activity"),
         # The Users page keeps the name its stop had as the Agent access page.
         Stop("access", "#/users", ".settings-page", "settings"),
+        # The person's own page, reached from the account menu.
+        Stop("account", "#/account", "#account-settings", "settings"),
         Stop("definition", "#/definition", "#definition-page .definition-checks", "settings"),
+        # The world has no plan template, so this is the empty page with what a template is.
+        Stop("templates", "#/templates", "#templates-empty", "settings"),
         Stop("tools", "#/tools", ".tool", "settings"),
         Stop("status", "#/status", "#status-body table", "settings"),
         Stop("projects", "/board", "#projects", "entry"),
@@ -883,6 +912,31 @@ for (let n = texts.nextNode(); n; n = texts.nextNode()) {
     break;
   }
 }
+
+// 9. An item is called by its code and its name (E-1, S-12, T-4, AC-3, N-7, each followed by what it is
+// called) and, in a sentence, by its name in curly quotes; never #3, "story 12", "criterion 3", "note 7"
+// or story:12, in anything a person reads or hears: the words on the page (what is only for a screen
+// reader too), a tooltip, a label and a placeholder. The Tools page and the Agent view show what an
+// agent is told, in an agent's own syntax, and are the two places those forms belong.
+const FORBIDDEN = [/(?<![\w&])#\d+\b/, /\b(?:story|task|epic|note|criterion|rule) \d+\b/i,
+  /\b(?:epic|story|task|rule|note):\d+\b/i];
+const forbidden = (text) => FORBIDDEN.some((re) => re.test(text));
+out.forbidden = [];
+if (!location.hash.startsWith('#/tools')) {
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    const p = n.parentElement;
+    if (!p || p.closest('script, style, noscript, textarea, .agent-view-body') || !vis(p)) continue;
+    if (forbidden(n.nodeValue)) out.forbidden.push(desc(p) + ' says ' + words(n.nodeValue).slice(0, 90));
+  }
+  for (const e of document.body.querySelectorAll('[title], [aria-label], [placeholder]')) {
+    if (!vis(e) || e.closest('.agent-view-body')) continue;
+    for (const name of ['title', 'aria-label', 'placeholder']) {
+      const value = e.getAttribute(name);
+      if (value && forbidden(value)) out.forbidden.push(desc(e) + ' has ' + name + ' ' + words(value).slice(0, 90));
+    }
+  }
+}
 return out;
 }"""
 ).replace("OLD.includes", f"{OLD_GLYPHS!r}.includes")
@@ -1011,11 +1065,21 @@ for (const f of document.querySelectorAll('.board-frame')) {
   if (f.dataset.right === 'true') fades.push({ l: r.right - 32, r: r.right, t: r.top, b: r.bottom });
 }
 const faded = (b) => fades.some((f) => b.l < f.r && b.r > f.l && b.t < f.b && b.b > f.t);
+// SVG text takes no pointer events, so a panel that covers only part of it (the Forces panel over a
+// hub's code) is found by looking at a point in each quarter of its box too.
+const covered = (e, box) => {
+  if (obscured(e, box, true)) return true;
+  if (!(e instanceof SVGElement)) return false;
+  const dx = (box.r - box.l) / 4;
+  const dy = (box.b - box.t) / 4;
+  return [[box.l + dx, box.t + dy], [box.r - dx, box.t + dy], [box.l + dx, box.b - dy],
+    [box.r - dx, box.b - dy]].some(([x, y]) => obscured(e, { l: x, r: x, t: y, b: y }, true));
+};
 const seen = (e, r) => {
   const c = clipBox(e, r);
   const box = { l: Math.max(0, c.l), t: Math.max(0, c.t), r: Math.min(w, c.r), b: Math.min(h, c.b) };
   if (box.r - box.l < 2 || box.b - box.t < 2 || faded(box)) return null;
-  return obscured(e, box, true) ? null : box;
+  return covered(e, box) ? null : box;
 };
 const fade = (e) => {
   let o = 1;
@@ -1327,9 +1391,12 @@ class State:
 
 
 def states(screen: Screen, world: World) -> dict[str, State]:
-    """The sidebar (on a window narrow enough to hide it), the Settings menu,
-    the sidebar's navigator with an epic and a story opened, and three dialogs (the Board's New
-    item, a note to add, and a task to add on a story's page)."""
+    """The sidebar (on a window narrow enough to hide it), the Settings menu and the account menu,
+    the sidebar's navigator with an epic and a story opened, three dialogs (the Board's New
+    item, a note to add, and a task to add on a story's page), the Structure map's Forces panel
+    open, the dialogs of an agent key (a new
+    one as it opens, the same refused for the choice it lacks, and one that runs code being
+    changed) and the Tools page showing the two tools of a key that runs code."""
 
     async def sidebar(w: Watched) -> None:
         await w.page.locator("#sidebar-toggle").click()
@@ -1349,6 +1416,12 @@ def states(screen: Screen, world: World) -> dict[str, State]:
         await w.page.keyboard.press("Escape")
         if screen.narrow:
             await close_sidebar(w)
+
+    async def account_menu(w: Watched) -> None:
+        if screen.narrow:
+            await sidebar(w)
+        await w.page.locator("#account").click()
+        await w.page.wait_for_selector("#account-list", state="visible")
 
     async def navigator(w: Watched) -> None:
         for ref in (world["E1"], world["S2"]):
@@ -1387,12 +1460,63 @@ def states(screen: Screen, world: World) -> dict[str, State]:
         await w.page.evaluate("() => { location.hash = '#/board'; }")
         await w.page.wait_for_selector(".card[data-ref]", state="attached")
 
+    async def forces_panel(w: Watched) -> None:
+        # The Structure map's Forces panel, open under its button in the toolbar.
+        await w.page.evaluate("() => { location.hash = '#/graph'; }")
+        await w.page.wait_for_selector(
+            "svg.graph-st-svg[data-resting=true]", state="attached", timeout=SLOW
+        )
+        await w.page.locator("#graph-st-forces").click()
+        await w.page.wait_for_selector("#graph-st-forces-panel", state="visible")
+
+    async def leave_forces_panel(w: Watched) -> None:
+        await w.page.keyboard.press("Escape")
+        await w.page.evaluate("() => { location.hash = '#/board'; }")
+        await w.page.wait_for_selector(".card[data-ref]", state="attached")
+
+    async def users_page(w: Watched) -> None:
+        await w.page.evaluate("() => { location.hash = '#/users'; }")
+        await w.page.wait_for_selector("#keys li.key button.change-tools", state="visible")
+
+    async def new_key(w: Watched) -> None:
+        # The dialog that makes an agent key, as it opens: neither way of calling Vrum chosen.
+        await users_page(w)
+        await w.page.locator("#key-open").click()
+        await w.page.wait_for_selector("dialog#new-key-dialog[open]", state="visible")
+
+    async def new_key_refused(w: Watched) -> None:
+        # The same dialog with a name typed and nothing chosen, which says so in words.
+        await new_key(w)
+        await w.page.locator("#key-name").fill("review-agent")
+        await w.page.locator("#create-key").click()
+        await w.page.wait_for_selector("#key-form .problem:not(:empty)", state="visible")
+
+    async def change_key(w: Watched) -> None:
+        # What may a key that runs code do: its way of calling Vrum, above the list of tools.
+        await users_page(w)
+        await (
+            w.page.locator("#keys li.key", has_text="script-agent")
+            .locator("button.change-tools")
+            .click()
+        )
+        await w.page.wait_for_selector("dialog#change-tools-dialog[open]", state="visible")
+
+    async def tools_for_code(w: Watched) -> None:
+        await w.page.evaluate("() => { location.hash = '#/tools?show=code'; }")
+        await w.page.wait_for_selector("#tool-list article.tool[data-code='1']", state="visible")
+
     found = {
         "settings-menu": State("settings-menu", settings, close_settings, quick=True),
+        "account-menu": State("account-menu", account_menu, close_settings, quick=True),
         "navigator-open": State("navigator-open", navigator, close_navigator),
         "new-item-dialog": State("new-item-dialog", new_item, close_dialog),
         "record-fact-dialog": State("record-fact-dialog", record_fact, back_to_board),
         "new-task-dialog": State("new-task-dialog", new_task, back_to_board),
+        "forces-panel": State("forces-panel", forces_panel, leave_forces_panel),
+        "new-key-dialog": State("new-key-dialog", new_key, back_to_board),
+        "new-key-refused": State("new-key-refused", new_key_refused, back_to_board),
+        "change-key-dialog": State("change-key-dialog", change_key, back_to_board),
+        "tools-for-code": State("tools-for-code", tools_for_code, back_to_board),
     }
     if screen.narrow:
         found = {"sidebar": State("sidebar", sidebar, close_sidebar), **found}
@@ -1480,17 +1604,23 @@ STRUCTURE_MAP = """
   const shown = (selector) => { const e = document.querySelector(selector);
     return e && !e.hidden && e.checkVisibility() ? box(e) : null; };
   const nodes = [...svg.querySelectorAll('g.graph-st-node')].map((g) => {
-    const r = g.querySelector('.graph-st-body').getBoundingClientRect();
+    const body = g.querySelector('.graph-st-body');
+    const r = body.getBoundingClientRect();
     const kind = ['epic', 'story', 'task'].find((k) => g.classList.contains('is-' + k));
+    const s = getComputedStyle(body);
     return { ref: g.dataset.ref, kind, x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2,
-      r: r.width / 2 };
+      r: r.width / 2, fill: s.fill, stroke: s.stroke, strokeWidth: parseFloat(s.strokeWidth),
+      opacity: parseFloat(getComputedStyle(g).opacity),
+      dropped: g.classList.contains('s-dropped') };
   });
   const lines = [...svg.querySelectorAll('.graph-st-line')].map((line) => {
     const m = line.getScreenCTM();
     const at = (x, y) => { const p = svg.createSVGPoint(); p.x = x; p.y = y;
       const q = p.matrixTransform(m); return [q.x, q.y]; };
     const n = (a) => parseFloat(line.getAttribute(a));
-    return { from: at(n('x1'), n('y1')), to: at(n('x2'), n('y2')) };
+    const s = getComputedStyle(line);
+    return { from: at(n('x1'), n('y1')), to: at(n('x2'), n('y2')), stroke: s.stroke,
+      opacity: parseFloat(s.strokeOpacity) * parseFloat(s.opacity) };
   });
   const names = [...svg.querySelectorAll('.graph-st-names .graph-st-name')].map((g) => {
     const text = g.querySelector('text');
@@ -1518,3 +1648,38 @@ async def structure_map(page: Page) -> dict[str, Any]:
     """The Structure map as it is drawn."""
     found: dict[str, Any] = await page.evaluate(STRUCTURE_MAP)
     return found
+
+
+Point = tuple[float, float]
+
+
+def crossing(first: tuple[Point, Point], second: tuple[Point, Point]) -> bool:
+    """Whether two segments cross each other properly: each one has the other's ends on its two
+    sides (touching at an end is not crossing)."""
+
+    def side(p: Point, q: Point, r: Point) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    (a, b), (c, d) = first, second
+    return side(c, d, a) * side(c, d, b) < -0.01 and side(a, b, c) * side(a, b, d) < -0.01
+
+
+def distance_to_segment(point: Point, segment: tuple[Point, Point]) -> float:
+    """How far a point is from a segment."""
+    (ax, ay), (bx, by) = segment
+    dx, dy = bx - ax, by - ay
+    length = dx * dx + dy * dy
+    at = (
+        0.0
+        if not length
+        else max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / length))
+    )
+    return float(((point[0] - (ax + at * dx)) ** 2 + (point[1] - (ay + at * dy)) ** 2) ** 0.5)
+
+
+async def rested(page: Page) -> None:
+    """Wait until the Structure map has stopped moving: its simulation rests and nothing is easing
+    (the map flags this on its svg; while it rests no frame is drawn at all)."""
+    await expect(page.locator("svg.graph-st-svg")).to_have_attribute(
+        "data-resting", "true", timeout=SLOW
+    )

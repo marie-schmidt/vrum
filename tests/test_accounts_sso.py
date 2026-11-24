@@ -134,7 +134,7 @@ def test_every_problem_has_the_words_the_pages_show() -> None:
     assert str(said["account_exists_unconfirmed"]) == (
         "An account with your email address already exists here, but its address was never "
         "confirmed, so Vrum will not join the two. Sign in with its password, then connect "
-        "Example login from the Users page."
+        "Example login from the Account page."
     )
     assert str(said["signups_off"]) == (
         "This server does not make new accounts from Example login sign-in. Sign in with an "

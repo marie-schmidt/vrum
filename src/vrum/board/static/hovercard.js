@@ -23,11 +23,13 @@ let current = null; // the card that is open: { trigger, card, timer, frame, box
 
 // Makes a card for `trigger` and returns it. Put it in the page right after the trigger:
 // `h('span', {}, trigger, hoverCard(trigger, content))`. `content` is anything `h` takes as
-// children. `size` is 'wide' for a card that holds a table.
-export function hoverCard(trigger, content, { size = 'normal' } = {}) {
+// children. `size` is 'wide' for a card that holds a table. `onOpen({ card, update })` runs each time the
+// card opens, for a card that fills itself then; `update()` places it again after it grew. `closeOnPress`
+// is for the card of a button that does something when it is pressed: the press ends the hover.
+export function hoverCard(trigger, content, { size = 'normal', onOpen = null, closeOnPress = false } = {}) {
   counter += 1;
   const card = h('div', { id: `hovercard-${counter}`, class: 'hovercard', role: 'tooltip', hidden: true, dataset: { size } }, content);
-  const state = { trigger, card, timer: 0, frame: 0, box: '', opened: 0, touched: false };
+  const state = { trigger, card, timer: 0, frame: 0, box: '', opened: 0, touched: false, onOpen };
   trigger.setAttribute('aria-describedby', card.id);
 
   trigger.addEventListener('pointerdown', (event) => {
@@ -56,6 +58,10 @@ export function hoverCard(trigger, content, { size = 'normal' } = {}) {
   });
   // A tap, or Enter on a button, shows or hides the card; a mouse click leaves it as hovering made it.
   trigger.addEventListener('click', (event) => {
+    if (closeOnPress) {
+      close(state);
+      return;
+    }
     if (current !== state) open(state);
     else if ((state.touched || event.detail === 0) && performance.now() - state.opened > TAP_GRACE) close(state);
   });
@@ -73,6 +79,8 @@ function open(state) {
   (trigger.closest('dialog[open]') || document.body).append(card);
   state.opened = performance.now();
   place(state);
+  // A card that fills itself when it opens (who someone is, from the server) is placed again once it has its words.
+  state.onOpen?.({ card, update: () => current === state && place(state) });
   document.addEventListener('keydown', onKey, true);
   document.addEventListener('pointerdown', onOutside, true);
   document.addEventListener('dragstart', onOutside, true);

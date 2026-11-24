@@ -39,6 +39,11 @@ ACCOUNT_TABLES = (
     "agent_keys",
     "project_members",
     "project_invites",
+    "webhooks",
+    "webhook_deliveries",
+    "nudges",
+    "nudge_mails",
+    "notify_cursor",
 )
 
 

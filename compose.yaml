@@ -76,6 +76,11 @@ services:
       VRUM_SMTP_USER: ${VRUM_SMTP_USER:-}
       VRUM_SMTP_PASSWORD: ${VRUM_SMTP_PASSWORD:-}
       VRUM_SMTP_FROM: ${VRUM_SMTP_FROM:-}
+      # Outgoing webhooks (M48) are always available to a project's owner. These two widen what
+      # an address may be: names, addresses or networks that may be reached although they are not
+      # public ones, and http for a receiver on this machine. See .env.example.
+      VRUM_WEBHOOK_ALLOWED_HOSTS: ${VRUM_WEBHOOK_ALLOWED_HOSTS:-}
+      VRUM_WEBHOOK_ALLOW_INSECURE_HTTP: ${VRUM_WEBHOOK_ALLOW_INSECURE_HTTP:-}
       # Signing in with another provider, if any (OpenID Connect, GitHub, LDAP): see .env.example.
       # Without VRUM_OIDC_ISSUER, VRUM_GITHUB_CLIENT_ID and VRUM_LDAP_URL there is none.
       VRUM_SSO_CREATE_ACCOUNTS: ${VRUM_SSO_CREATE_ACCOUNTS:-}
@@ -105,6 +110,11 @@ services:
       VRUM_LDAP_ALLOWED_DOMAINS: ${VRUM_LDAP_ALLOWED_DOMAINS:-}
     volumes:
       - vrum-secrets:/secrets:ro
+      # The socket of the sandbox (below). Read-only is enough to connect to it; the group lets the
+      # app use a socket that belongs to the sandbox's group.
+      - vrum-sandbox:/run/sandbox:ro
+    group_add:
+      - "10003"
     ports:
       # The same port inside and outside, because the server only accepts requests addressed to
       # localhost on that port. Bound to this machine only unless VRUM_BIND_ADDRESS says otherwise.
@@ -138,6 +148,32 @@ services:
       start_period: 20s
       retries: 20
 
+  # The sandbox of code mode, where the scripts agents write are run (see docs/agents.md): built from
+  # sandbox/, with Deno inside at a pinned version. A script can reach only what the app lets it reach
+  # through the socket in the shared volume: this container has no network at all, no secret, no
+  # database, a read-only root file system, no capabilities, no root user, and limits on memory,
+  # processes and processor time. The app does not wait for it: Vrum starts and answers while it is
+  # still starting, and `run` says plainly that it is not available until it answers. To go without
+  # it, start with `docker compose up -d --build --wait --scale sandbox=0`.
+  sandbox:
+    build: ./sandbox
+    init: true
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    pids_limit: 128
+    cpus: 2
+    tmpfs:
+      - /tmp:uid=10002,gid=10003,mode=0700,size=64m
+      - /deno:uid=10002,gid=10003,mode=0700,size=128m
+    volumes:
+      - vrum-sandbox:/run/sandbox
+    # Healthy when its supervisor answers a ping on the socket (the health check is in sandbox/Dockerfile).
+
 volumes:
   vrum-data:
   vrum-secrets:
+  vrum-sandbox:

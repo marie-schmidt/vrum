@@ -89,7 +89,10 @@ _NODE_EXTRAS = {
     "similar_note",
     "handoff_count",
     "last_handoff",
+    "where",
+    "asks",
     "checks",
+    "gates",
 }
 
 # The list tools that page over nodes: they are continued by `after` (the reference of the last

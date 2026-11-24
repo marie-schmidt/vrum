@@ -24,12 +24,13 @@ from tests.board_helpers import (
     board_url,
     browser_page,
     cards_are,
+    crumbs,
     go,
     made,
     no_panel_or_drawer,
     open_editor,
 )
-from tests.board_m14 import events_of, feed_ids, ids_of, spoken
+from tests.board_m14 import events_of, feed_ids, ids_of, open_working, show_tab, spoken
 from tests.board_search import (
     address,
     asked,
@@ -51,6 +52,7 @@ from tests.helpers import (
     unique_word,
 )
 from tests.world import join_project
+from vrum.records import PEOPLE_ONLY_TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -62,10 +64,12 @@ def board(server_url: str) -> str:
     return board_url(server_url)
 
 
-async def claims_on_page(page: Page, section: str) -> set[tuple[str, str]]:
-    rows: list[list[str]] = await page.locator(f"#{section} li.claim").evaluate_all(
-        "els => els.map(e => [e.dataset.node, e.dataset.actor])"
-    )
+async def claims_on_page(page: Page, live: bool) -> set[tuple[str, str]]:
+    """The claims listed under the people and agents who hold them: the ones in force, or the ones
+    that ran out."""
+    rows: list[list[str]] = await page.locator(
+        f"#agents li.claim[data-live='{int(live)}']"
+    ).evaluate_all("els => els.map(e => [e.dataset.node, e.dataset.actor])")
     return {(node, who) for node, who in rows}
 
 
@@ -113,32 +117,47 @@ async def test_activity_tools_and_status_open_with_the_keyboard_and_match_mcp(
         assert await feed_ids(page) == wanted
         handoff = page.locator("#feed li.event[data-action=handoff]", has_text=finisher)
         assert spoken(await handoff.locator(".handoff-note").inner_text()) == spoken(note)
+        # Who is working on what is the Working view of the toggle, and is the server's own claims.
+        await open_working(page)
         who = (await ok(client, "who_is_working"))["agents"]
         live = {(m["node"], a["actor"]) for a in who for m in a["holding"]}
         assert {(held, agent), (loose, ann)} <= live
-        assert await claims_on_page(page, "claims-live") == live
+        assert await claims_on_page(page, True) == live
         lapsed = {(m["node"], a["actor"]) for a in who for m in a["lapsed"]}
-        assert not lapsed or await claims_on_page(page, "claims-lapsed") == lapsed
+        assert not lapsed or await claims_on_page(page, False) == lapsed
         page_agents: list[list[str]] = await page.locator("#agents li.agent").evaluate_all(
             "els => els.map(e => [e.dataset.actor, e.dataset.state])"
         )
         assert sorted(page_agents) == sorted([a["actor"], a["state"]] for a in who)
+        await show_tab(page, "changes")
         # It is a page like the others: nothing is left to close, and the way back is the
-        # browser's, to the view the person came from.
+        # browser's: through the views the toggle was used for, then to the view the person came
+        # from.
         await page.keyboard.press("Escape")
         await expect(page.locator("#feed li.event").first).to_be_visible()
+        await page.go_back()
+        await expect(page.locator("#activity-tab-working")).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        await page.go_back()
+        await expect(page.locator("#activity-tab-changes")).to_have_attribute(
+            "aria-pressed", "true"
+        )
         await page.go_back()
         await on_view(page, "roadmap")
 
         # Tools: through the Settings menu, the server's own tools: every tool a key can have, as
-        # an agent lists them, and the two that only a person can use, which the page lists too.
+        # an agent lists them, the three that only a person can use and the two that only a key that
+        # runs code is given, which the page lists too.
         await open_settings(page, "tools")
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         names: list[str] = await page.locator("#tool-list article.tool").evaluate_all(
             "els => els.map(e => e.dataset.name)"
         )
-        people_only = {"set_confirmation", "set_definition_of_done"}
-        assert sorted(names) == sorted({*tools, *people_only}) and len(names) == 47
+        people_only = set(PEOPLE_ONLY_TOOLS)
+        code_tools = {"explore", "run"}
+        everything = {*tools, *people_only, *code_tools}
+        assert sorted(names) == sorted(everything) and len(names) == len(everything)
         for name in ("search", "find_overlaps", "add_note"):
             entry = page.locator(f"#tool-entry-{name}")
             assert spoken(await entry.locator("p.first").inner_text()) == spoken(
@@ -151,22 +170,29 @@ async def test_activity_tools_and_status_open_with_the_keyboard_and_match_mcp(
         await expect(page).to_have_url(re.compile(r"#/tools$"), timeout=SLOW)
         await expect(page.locator("#tool-list article.tool").first).to_be_visible(timeout=SLOW)
 
-        # Status: the health, the sizes and the index, and the export, which is MCP's.
+        # Status: the health in one sentence and search by meaning in one word, the sizes, versions
+        # and index behind the closed Technical details, and the export, which is MCP's.
         await open_settings(page, "status")
-        await expect(page.locator("#versions")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#status-summary")).to_be_visible(timeout=SLOW)
         status = await ok(client, "server_status")
-        await expect(page.locator("#versions .ok")).to_contain_text("can reach its database")
-        for name in ("vrum_version", "postgres_version", "pgvector_version"):
-            row = page.locator(f"#status-body tr[data-name={name}] .value")
-            assert (await row.inner_text()).strip() == status[name]
-        for name, count in status["counts"].items():
-            row = page.locator(f"#status-body tr[data-name={name}] .value")
-            assert (await row.inner_text()).strip() == str(count), name
+        await expect(page.locator("#status-summary .ok")).to_contain_text("can reach its database")
         index = status["index"]
         assert index["embedding_service"] == "answering" and index["waiting_to_index"] == 0
-        for name, value in (("service", "Answering"), ("waiting", "0"), ("meaning", "In use")):
-            row = page.locator(f"#status-body tr[data-name={name}] .value")
-            assert (await row.inner_text()).strip() == value
+        meaning = page.locator("#status-summary tr[data-name=meaning] .value")
+        assert (await meaning.inner_text()).strip() == "In use"
+        technical = page.locator("details#technical")
+        await expect(technical).not_to_have_attribute("open", "")
+        await expect(page.locator("#versions")).to_be_hidden()
+        await technical.locator("summary").click()
+        await expect(page.locator("#versions")).to_be_visible()
+        for name in ("vrum_version", "postgres_version", "pgvector_version"):
+            row = page.locator(f"#technical tr[data-name={name}] .value")
+            assert (await row.inner_text()).strip() == status[name]
+        for name, count in status["counts"].items():
+            row = page.locator(f"#technical tr[data-name={name}] .value")
+            assert (await row.inner_text()).strip() == str(count), name
+        service = page.locator("#technical tr[data-name=service] .value")
+        assert (await service.inner_text()).strip() == "Answering"
         await page.locator("#download-export").focus()
         async with page.expect_download() as waiting:
             await page.keyboard.press("Enter")
@@ -244,7 +270,8 @@ async def test_search_and_view_addresses_reopen_the_selected_state_in_another_br
         await page.locator("#search-results tr.result a.result-title").click()
         await expect(page.locator(f"#item-page[data-ref='{key}']")).to_be_visible(timeout=SLOW)
         await expect(page.locator("nav.crumbs .crumb-view a")).to_have_text("Search")
-        await expect(page.locator("#crumb-page")).to_have_text(f"N-{note['id']}")
+        await expect(page.locator("#crumb-page .crumb-code")).to_have_text(f"N-{note['id']}")
+        assert (await crumbs(page))[-1].startswith(f"N-{note['id']} ")
         await page.locator("nav.crumbs .crumb-view a").click()
         await expect(page.locator("#search-box")).to_have_value(word, timeout=SLOW)
         assert page.url == search_url
@@ -420,9 +447,12 @@ async def test_a_draft_survives_everything_that_does_not_leave_the_page(
         await branch.locator("button.tree-twisty").first.click()
         await expect(branch).to_have_attribute("aria-expanded", "true")
         await kept("opening a branch of the tree")
-        # The section list jumps within the page.
-        await page.locator(".item-jump[data-jump=history]").click()
-        await kept("the section list")
+        # The Agent view is a dialog over the page: opened and closed, it leaves the draft alone.
+        await page.locator("#item-agent-view").click()
+        await expect(page.locator("dialog.modal")).to_be_visible(timeout=SLOW)
+        await page.keyboard.press("Escape")
+        await expect(page.locator("dialog.modal")).to_have_count(0)
+        await kept("the Agent view")
         # `[` and `]` go to the neighbours only when nobody is typing: typed in the draft they are
         # text, and the page stays.
         await page.locator("#edit-body").press("Control+End")
@@ -553,7 +583,7 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
                 await expect(note).to_be_visible()
                 await expect(chip).to_be_visible()
             await open_settings(page, "status")
-            await expect(page.locator("#versions")).to_be_visible(timeout=SLOW)
+            await expect(page.locator("#status-summary")).to_be_visible(timeout=SLOW)
             await expect(note).to_be_visible()
             await expect(chip).to_be_visible()
 
@@ -576,6 +606,9 @@ async def test_a_connection_failure_is_told_in_the_current_view_and_not_only_in_
         await w.go("#/board")
         await page.locator("#new-item").click()
         dialog = page.locator("dialog.modal")
+        # The dialog opens with nothing chosen, so a kind is chosen (an epic) before it is sent.
+        await expect(dialog.locator("#new-kind")).to_have_value("")
+        await dialog.locator("#new-kind").select_option("epic")
         await dialog.locator("#new-title").fill(f"Not made {word}")
         await dialog.get_by_role("button", name="Create").click()
         await expect(dialog.locator("form > .problem")).to_contain_text(
@@ -613,6 +646,7 @@ async def test_the_definition_of_done_is_set_in_settings_and_read_on_every_story
             assert await page.locator("#settings-list a").all_inner_texts() == [
                 "Users",
                 "Definition of done",
+                "Plan templates",
                 "Tools",
                 "Status and export",
             ]
@@ -622,7 +656,8 @@ async def test_the_definition_of_done_is_set_in_settings_and_read_on_every_story
             await expect(part.get_by_role("link", name="Set it in Settings")).to_have_attribute(
                 "href", "#/definition"
             )
-            await expect(page.locator(".item-jump[data-jump=definition]")).to_contain_text("empty")
+            # With nothing written the section has no count to say, as the jump bar once did.
+            await expect(page.locator("#checks-ticked")).to_have_count(0)
             # An epic holds neither acceptance criteria nor the definition of done.
             await go(page, board, f"#/item?item={epic}")
             await expect(page.locator("#item-page[data-kind=epic]")).to_be_visible(timeout=SLOW)
@@ -643,7 +678,8 @@ async def test_the_definition_of_done_is_set_in_settings_and_read_on_every_story
             await expect(page.locator(".check-ticks-text")).to_have_text(
                 ["Tests pass", "A person can try it"], timeout=SLOW
             )
-            await expect(page.locator(".check-ticks-count")).to_have_text(["not ticked yet"] * 2)
+            # A check nobody has ticked says nothing: the count only appears next to a tick.
+            await expect(page.locator(".check-ticks-count")).to_have_count(0)
             await expect(page.locator(".definition-meta")).to_contain_text(f"Last changed by {ADA}")
             saved = await ok(client, "get_definition_of_done")
             assert (saved["body"], saved["version"], saved["updated_by"]) == (
@@ -665,9 +701,7 @@ async def test_the_definition_of_done_is_set_in_settings_and_read_on_every_story
                 await expect(part.get_by_role("link", name="Edit in Settings")).to_have_attribute(
                     "href", "#/definition"
                 )
-                await expect(page.locator(".item-jump[data-jump=definition]")).to_contain_text(
-                    "0/2"
-                )
+                await expect(part.locator("#checks-ticked")).to_have_text("0 of 2 ticked")
             await part.get_by_role("link", name="Edit in Settings").click()
             await expect(page.locator("#definition-page")).to_be_visible(timeout=SLOW)
 

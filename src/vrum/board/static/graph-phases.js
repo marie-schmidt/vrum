@@ -7,12 +7,12 @@
 import { itemLink } from './ctx.js';
 import { h, plural } from './dom.js';
 import { icon } from './icons.js';
-import { kindIcon, pointsOf, sizeChip, statusChip } from './labels.js';
+import { dueChip, kindIcon, pointsOf, sizeChip, statusChip } from './labels.js';
 import { byStory, runsOf, sumPoints } from './graph-plan.js';
-import { code, codeOf, dueChip } from './graph-shared.js';
+import { code, codeOf } from './graph-shared.js';
 
 // What a piece of work waits for, as buttons that go to its phase when it is in this plan, and as links
-// to its page when it is not (another epic, or a story).
+// to its page when it is not (another epic, or a story). Each says what it waits for by its code and its name.
 function waitsFor(ctx, node) {
   const refs = ctx.plan.waits.get(node.ref) || [];
   if (!refs.length) return null;
@@ -20,27 +20,28 @@ function waitsFor(ctx, node) {
   const epic = model.epicOf(node.ref);
   const chips = refs.map((ref) => {
     const found = model.node(ref);
-    const label = codeOf(found);
+    const words = [code(codeOf(found)), h('span', { class: 'graph-or-wait-name' }, found.title)];
     const phase = ctx.plan.phaseOf.get(ref);
     if (phase) {
-      return h('button', { class: 'graph-or-wait mono', type: 'button', title: `${found.title}. In phase ${phase}`, 'data-fk': `w:${node.ref}:${ref}`, onclick: () => ctx.jump(ref, phase) }, label);
+      return h('button', { class: 'graph-or-wait', type: 'button', title: `${codeOf(found)} ${found.title}. In phase ${phase}`, 'data-fk': `w:${node.ref}:${ref}`, onclick: () => ctx.jump(ref, phase) }, words);
     }
     const other = model.epicOf(ref);
     const away = other && epic && other.ref !== epic.ref;
-    return itemLink(ref, { class: 'graph-or-wait mono', title: `${found.title}${away ? `. In ${codeOf(other)}, outside this epic` : ''}`, 'data-fk': `w:${node.ref}:${ref}` }, label, away ? ` in ${codeOf(other)}` : null);
+    return itemLink(ref, { class: 'graph-or-wait', title: `${codeOf(found)} ${found.title}${away ? `. In ${codeOf(other)} ${other.title}, outside this epic` : ''}`, 'data-fk': `w:${node.ref}:${ref}` }, words, away ? h('span', { class: 'graph-or-wait-in' }, `in ${codeOf(other)} ${other.title}`) : null);
   });
-  return h('p', { class: 'graph-or-waits' }, 'Waits for ', chips.flatMap((chip, i) => (i ? [', ', chip] : [chip])));
+  return h('p', { class: 'graph-or-waits' }, h('span', { class: 'graph-or-waits-label' }, 'Waits for'), chips);
 }
 
 // One piece of work: its code and title (a link to its page), where it stands, its size and due date,
-// and what it waits for.
+// and what it waits for. Finished work in the Done fold says neither that it is done (the fold does) nor when it was due.
 export function itemRow(ctx, node) {
   const picked = ctx.highlight === node.ref;
+  const finished = ctx.finished && node.status === 'done';
   return h(
     'li',
     { class: `graph-or-item s-${node.status}${node.status === 'dropped' ? ' is-ended' : ''}${picked ? ' is-sel' : ''}`, 'data-ref': node.ref, 'aria-current': picked ? 'true' : null },
     itemLink(node.ref, { class: 'graph-or-item-link', 'data-fk': `r:${node.ref}` }, code(codeOf(node)), h('span', { class: 'graph-or-item-title' }, node.title)),
-    h('span', { class: 'graph-or-item-meta' }, statusChip(node.status), sizeChip(node), dueChip(ctx.model, node.ref)),
+    h('span', { class: 'graph-or-item-meta' }, finished ? null : statusChip(node.status), sizeChip(node), node.status === 'done' || node.status === 'dropped' ? null : dueChip(node, { size: 14, days: true })),
     waitsFor(ctx, node),
   );
 }
@@ -74,7 +75,7 @@ export function doneGroup(ctx, { open, toggle }) {
       { class: 'graph-or-fold-head' },
       h('button', { class: 'graph-or-fold', type: 'button', id: 'graph-or-done-toggle', 'data-fk': 'done', 'aria-expanded': String(open), 'aria-controls': 'graph-or-done-body', onclick: toggle }, icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }), `Done (${done.length})`),
     ),
-    open ? h('div', { class: 'graph-or-done-body', id: 'graph-or-done-body' }, storyGroups(ctx, done)) : null,
+    open ? h('div', { class: 'graph-or-done-body', id: 'graph-or-done-body' }, storyGroups({ ...ctx, finished: true }, done)) : null,
   );
 }
 
@@ -113,7 +114,7 @@ export function phaseSection(ctx, index) {
   return h(
     'section',
     { class: 'graph-or-phase', id: 'graph-or-phase', 'data-phase': index, 'aria-labelledby': 'graph-or-phase-title' },
-    h('h3', { class: 'graph-or-phase-head', id: 'graph-or-phase-title' }, `Phase ${index} `, h('span', { class: 'graph-or-phase-words' }, phaseWords(nodes, sized))),
+    h('h3', { class: 'graph-or-phase-head', id: 'graph-or-phase-title' }, h('span', { class: 'sr-only' }, `Phase ${index} `), h('span', { class: 'graph-or-phase-words' }, phaseWords(nodes, sized))),
     body,
   );
 }

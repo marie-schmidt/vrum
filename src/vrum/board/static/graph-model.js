@@ -3,12 +3,14 @@
 // how a person names an item, what needs attention, and what is around one item, grouped the way
 // recall groups it. Nothing here draws or keeps a page of its own.
 //
-// An item is named by its reference: epic:3, story:12, task:40, rule:3 or note:7. A
-// person reads S-12 for work and #7 for the rest.
+// An item is named by its reference (epic:3, story:12, task:40, rule:3 or note:7) inside the code. A
+// person reads its code and its title: E-3, S-12, T-40, AC-3 and N-7 before the title (a note's title is
+// its headline).
 
 import { Refusal, call } from './api.js';
-import { toDay, todayDay } from './dates.js';
-import { decidedWords, inForce, isNodeKind, nodeCode, parseItemRef } from './labels.js';
+import { lateDaysOf } from './dates.js';
+import { decidedWords, inForce, isNodeKind, itemCode, parseItemRef } from './labels.js';
+import { plainText } from './markdown.js';
 import { ensure, headlineOf, store } from './store.js';
 
 // Where items sort: epics, stories, tasks, acceptance criteria and notes, each by number.
@@ -69,26 +71,31 @@ const needMaps = () =>
 export const childrenOf = (ref) => kidsOf().get(ref) || [];
 export const waitingFor = (node) => (node.waiting_on || []).filter((ref) => store.nodes.get(ref) && !ended(store.nodes.get(ref).status));
 
-export function lateDays(node) {
-  if (!node || !node.overdue || !node.target_on || ended(node.status)) return 0;
-  return Math.max(1, todayDay() - toDay(node.target_on));
-}
-
-// Any of the five kinds by reference: { ref, kind, number, code, title, work, record }, or null when
-// there is no such item (or the acceptance criteria and notes are not read yet).
+// Any of the five kinds by reference: { ref, kind, number, code, title, work, record }, or null when there
+// is no such item (or the acceptance criteria and notes are not read yet). `code` is what a person reads
+// before the title: E-1, S-4, T-20, AC-3 or N-7.
 export function resolve(ref) {
   const found = parseItemRef(ref);
   if (!found) return null;
   const { kind, number } = found;
   if (isNodeKind(kind)) {
     const node = store.nodes.get(found.ref);
-    return node ? { ref: found.ref, kind, number, code: nodeCode(kind, number), title: node.title, work: true, record: node } : null;
+    return node ? { ref: found.ref, kind, number, code: itemCode(kind, number), title: node.title, work: true, record: node } : null;
   }
   const table = { rule: store.rules, note: store.notes }[kind];
   const record = byId(table).get(number);
   if (!record) return null;
-  return { ref: found.ref, kind, number, code: `#${number}`, title: kind === 'note' ? clip(headlineOf(record), 120) : record.title, work: false, record };
+  return { ref: found.ref, kind, number, code: itemCode(kind, number), title: kind === 'note' ? clip(plainText(headlineOf(record)), 120) : record.title, work: false, record };
 }
+
+// An item inside a sentence: its title in curly quotes, cut when it is long, or "an item" when it is not known.
+export const nameOf = (ref) => {
+  const item = resolve(ref);
+  return item ? `“${clip(item.title, 60)}”` : 'an item';
+};
+
+// An item in a list, a label or a tooltip: its code and then its title ("S-4 Audit log").
+export const named = (item) => `${item.code} ${item.title}`;
 
 // An acceptance criterion that is dropped, a note that is replaced or withdrawn.
 export const isEnded = (item) => (item.kind === 'rule' ? item.record.status === 'dropped' : !item.work && !inForce(item.record));
@@ -103,8 +110,8 @@ const PRIORITY_WEIGHT = { low: 0, normal: 1, high: 2, urgent: 3 };
 // Work that is blocked or overdue, the most urgent first: where a person is most likely to want to look.
 export function attention(limit = 5) {
   return [...store.nodes.values()]
-    .filter((node) => node.kind !== 'epic' && !ended(node.status) && (node.status === 'blocked' || lateDays(node) > 0))
-    .map((node) => ({ node, score: (node.status === 'blocked' ? 4 : 0) + PRIORITY_WEIGHT[node.priority] * 1.5 + Math.min(lateDays(node), 30) / 10 + (node.kind === 'task' ? 0.2 : 0) }))
+    .filter((node) => node.kind !== 'epic' && !ended(node.status) && (node.status === 'blocked' || lateDaysOf(node) > 0))
+    .map((node) => ({ node, score: (node.status === 'blocked' ? 4 : 0) + PRIORITY_WEIGHT[node.priority] * 1.5 + Math.min(lateDaysOf(node), 30) / 10 + (node.kind === 'task' ? 0.2 : 0) }))
     .sort((a, b) => b.score - a.score || byRef(a.node.ref, b.node.ref))
     .slice(0, limit)
     .map(({ node }) => resolve(node.ref));
@@ -119,7 +126,7 @@ export function epicSummaries() {
   const summaries = new Map();
   for (const node of store.nodes.values()) {
     if (node.kind === 'epic') {
-      summaries.set(node.ref, { ref: node.ref, node, code: nodeCode('epic', node.number), title: node.title, stories: 0, tasks: 0, blocked: 0, late: 0, progress: progressOf(node), under: new Set(), linked: new Map() });
+      summaries.set(node.ref, { ref: node.ref, node, code: itemCode('epic', node.number), title: node.title, stories: 0, tasks: 0, blocked: 0, late: 0, progress: progressOf(node), under: new Set(), linked: new Map() });
     }
   }
   const epicOfNode = (node) => {
@@ -134,7 +141,7 @@ export function epicSummaries() {
     if (node.kind === 'story') top.stories += 1;
     else top.tasks += 1;
     if (node.status === 'blocked') top.blocked += 1;
-    if (lateDays(node) > 0) top.late += 1;
+    if (lateDaysOf(node) > 0) top.late += 1;
   }
   for (const record of store.notes || []) {
     if (!inForce(record)) continue;
@@ -207,11 +214,11 @@ export function groupsFor(item, reach, answer) {
     if (node.parent) {
       const parent = store.nodes.get(node.parent);
       add('up', node.parent, `The ${parent.kind} this ${noun} is part of`);
-      if (reach > 1 && parent.parent) add('up', parent.parent, `The ${store.nodes.get(parent.parent).kind} that ${nodeCode(parent.kind, parent.number)} is part of`, { via: parent.ref });
+      if (reach > 1 && parent.parent) add('up', parent.parent, `The ${store.nodes.get(parent.parent).kind} that ${nameOf(parent.ref)} is part of`, { via: parent.ref });
     }
     for (const child of childrenOf(item.ref)) {
       add('down', child.ref, `Part of this ${noun}`);
-      if (reach > 1) for (const grand of childrenOf(child.ref)) add('down', grand.ref, `Part of ${nodeCode(child.kind, child.number)}`, { via: child.ref });
+      if (reach > 1) for (const grand of childrenOf(child.ref)) add('down', grand.ref, `Part of ${nameOf(child.ref)}`, { via: child.ref });
     }
     const { needs, needed } = needMaps();
     const walk = (map, list, say) => {
@@ -226,25 +233,25 @@ export function groupsFor(item, reach, answer) {
         frontier = next;
       }
     };
-    walk(needs, 'needs', (step, from) => (step === 1 ? `This ${noun} needs it first` : `${resolve(from).code} needs it first`));
-    walk(needed, 'blocks', (step, from) => (step === 1 ? `It needs this ${noun} first` : `It needs ${resolve(from).code} first`));
+    walk(needs, 'needs', (step, from) => (step === 1 ? `This ${noun} needs it first` : `${nameOf(from)} needs it first`));
+    walk(needed, 'blocks', (step, from) => (step === 1 ? `It needs this ${noun} first` : `It needs ${nameOf(from)} first`));
     // The acceptance criteria on the item itself. At reach 2 those on what is under an epic or a story, and
     // on the story above a task, are added too, each marked "via" the item they are on.
     for (const rule of store.rules || []) {
       const on = rule.node ? store.nodes.get(rule.node) : null;
       if (!on) continue;
-      const code = resolve(on.ref).code;
+      const holder = nameOf(on.ref);
       if (on.ref === item.ref) add('reqs', `rule:${rule.id}`, `Placed on this ${noun}`);
-      else if (reach > 1 && item.kind === 'epic' && (on.kind === 'task' ? store.nodes.get(on.parent)?.parent : on.parent) === item.ref) add('reqs', `rule:${rule.id}`, `Placed on ${code}, under this epic`, { via: on.ref });
-      else if (reach > 1 && item.kind === 'story' && on.parent === item.ref) add('reqs', `rule:${rule.id}`, `Placed on ${code}, a task of this story`, { via: on.ref });
-      else if (reach > 1 && item.kind === 'task' && on.ref === node.parent) add('reqs', `rule:${rule.id}`, `Placed on ${code}, the story this task is part of`, { via: on.ref });
+      else if (reach > 1 && item.kind === 'epic' && (on.kind === 'task' ? store.nodes.get(on.parent)?.parent : on.parent) === item.ref) add('reqs', `rule:${rule.id}`, `Placed on ${holder}, under this epic`, { via: on.ref });
+      else if (reach > 1 && item.kind === 'story' && on.parent === item.ref) add('reqs', `rule:${rule.id}`, `Placed on ${holder}, a task of this story`, { via: on.ref });
+      else if (reach > 1 && item.kind === 'task' && on.ref === node.parent) add('reqs', `rule:${rule.id}`, `Placed on ${holder}, the story this task is part of`, { via: on.ref });
     }
   } else if (item.kind === 'rule') {
     const on = item.record.node && store.nodes.get(item.record.node);
     if (on) {
       add('up', on.ref, `The ${on.kind} this acceptance criterion is placed on`);
       const above = on.parent && store.nodes.get(on.parent);
-      if (reach > 1 && above) add('up', above.ref, `The ${above.kind} that ${nodeCode(on.kind, on.number)} is part of`, { via: on.ref });
+      if (reach > 1 && above) add('up', above.ref, `The ${above.kind} that ${nameOf(on.ref)} is part of`, { via: on.ref });
     }
   } else {
     const record = item.record;
@@ -262,10 +269,10 @@ export function groupsFor(item, reach, answer) {
     for (const child of childrenOf(item.ref)) scope.push(child.ref);
   } else if (reach > 1 && item.kind === 'rule' && item.record.node) scope.push(item.record.node);
 
-  // The server writes "epic:3"; the board writes E-3.
-  const codes = (text) => text.replace(/\b(epic|story|task):(\d+)\b/g, (_, kind, number) => nodeCode(kind, Number(number)));
+  // The server writes "epic:3" and "note 7"; the board writes the titles.
+  const names = (text) => text.replace(/\b(epic|story|task|rule|note):(\d+)\b/g, (found) => nameOf(found));
   const noteWhy = (record, serverWhy) => {
-    const base = sentence(codes(String(serverWhy || '')).replace(/\bthis (node|rule)\b/, `this ${noun}`).replace(/\bnote (\d+)/, 'note #$1'));
+    const base = sentence(names(String(serverWhy || '')).replace(/\bthis (node|rule)\b/, `this ${noun}`).replace(/\bnote (\d+)/g, (_, number) => nameOf(`note:${number}`)));
     const by = inForce(record) ? decidedPhrase(record) : '';
     return [base, by].filter(Boolean).join('; ');
   };
@@ -286,14 +293,14 @@ export function groupsFor(item, reach, answer) {
     // The acceptance criteria that apply to the item: its own and, for a task, its story's (an epic has
     // none of its own; at reach 2 those on what is under it are added above).
     for (const { criterion, inherited_from: from } of recalled.acceptance_criteria?.items || []) {
-      add('reqs', `rule:${criterion.id}`, from ? `Placed on ${resolve(from).code}, the story this ${noun} is part of` : `Placed on this ${noun}`, { via: from || null });
+      add('reqs', `rule:${criterion.id}`, from ? `Placed on ${nameOf(from)}, the story this ${noun} is part of` : `Placed on this ${noun}`, { via: from || null });
     }
   }
   const place = (record, via) => {
-    const word = `Linked to ${resolve(via).code}`;
+    const word = `Linked to ${nameOf(via)}`;
     if (record.project_wide && inForce(record)) return;
     if (inForce(record)) add('notes', `note:${record.id}`, [word, decidedPhrase(record)].filter(Boolean).join('; '), { via });
-    else add('past', `note:${record.id}`, `${word}. ${record.status === 'superseded' ? `Replaced by note #${record.superseded_by_id}` : `Withdrawn: ${record.status_reason}`}; kept so the reason is not lost`, { via });
+    else add('past', `note:${record.id}`, `${word}. ${record.status === 'superseded' ? `Replaced by ${nameOf(`note:${record.superseded_by_id}`)}` : `Withdrawn: ${record.status_reason}`}; kept so the reason is not lost`, { via });
   };
   for (const via of scope) {
     for (const record of store.notes || []) if ((record.nodes || []).includes(via)) place(record, via);
@@ -316,7 +323,7 @@ export function groupsFor(item, reach, answer) {
   if (item.work) {
     const kin = new Set([item.record.parent, ...childrenOf(item.ref).map((child) => child.ref)]);
     for (const { type, ref, outgoing } of needMaps().other.get(item.ref) || []) {
-      const say = { relates_to: 'Linked as related', duplicates: 'Marked as a duplicate', supersedes: outgoing ? 'This one supersedes it' : 'It supersedes this one' }[type];
+      const say = { relates_to: 'Linked as related', duplicates: 'Marked as a duplicate', supersedes: outgoing ? 'This one supersedes it' : 'It supersedes this one', discovered_from: outgoing ? 'This one was discovered from it' : 'It was discovered from this one' }[type];
       if (add('sim', ref, say, { link: type })) linked.add(ref);
     }
     for (const ref of kin) linked.add(ref);

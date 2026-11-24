@@ -9,7 +9,7 @@ import { h, plural, put } from './dom.js';
 import { dataTable, opens, ruleStatusChip } from './entries.js';
 import { refuse } from './forms.js';
 import { icon } from './icons.js';
-import { codeOf, criteriaCount, kindIcon } from './labels.js';
+import { codeOf, criteriaCount, kindIcon, ruleCode } from './labels.js';
 import { can, itemLink } from './ctx.js';
 import { pageHeader } from './page.js';
 import { loadingView, placeRequirementDialog, requirementDialog } from './records.js';
@@ -35,7 +35,7 @@ function unplacedTable(rules) {
       {
         key: 'id',
         label: 'Criterion',
-        cell: (rule) => h('th', { scope: 'row', class: 'cell-id' }, itemLink(`rule:${rule.id}`, { class: 'item-code-link', 'data-focus-key': `open:rule:${rule.id}` }, kindIcon('rule', 14), h('span', { class: 'item-code' }, `#${rule.id}`))),
+        cell: (rule) => h('th', { scope: 'row', class: 'cell-id' }, itemLink(`rule:${rule.id}`, { class: 'item-code-link', 'data-focus-key': `open:rule:${rule.id}` }, kindIcon('rule', 14), h('span', { class: 'item-code' }, ruleCode(rule.id)))),
       },
       { key: 'title', label: 'Title', cell: (rule) => h('td', { class: 'cell-clamp cell-title' }, h('span', { class: 'clamp', title: rule.title }, itemLink(`rule:${rule.id}`, { class: 'record-title', tabindex: -1 }, rule.title))) },
       { key: 'status', label: 'Status', cell: (rule) => h('td', { class: 'cell-status' }, ruleStatusChip(rule)) },

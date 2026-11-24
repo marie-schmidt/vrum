@@ -132,8 +132,8 @@ async def history_on_page(page: Page) -> list[str]:
 
 
 async def strip(page: Page) -> dict[str, str]:
-    """The strip in the head of a note's page ("Recorded by", "Recorded"): each label and what it
-    says."""
+    """The strip in the head of a note's page (Status, Scope and, for a decided note, "Decided
+    by"): each label and what it says."""
     found: list[list[str]] = await page.locator("#item-page dl.state-strip > div").evaluate_all(
         "els => els.map(e => [e.querySelector('dt').textContent.trim(),"
         " e.querySelector('dd').textContent.replace(/\\s+/g, ' ').trim()])"
@@ -141,12 +141,17 @@ async def strip(page: Page) -> dict[str, str]:
     return {label: words for label, words in found}
 
 
-async def says_in_the_path(page: Page, view: str, name: str) -> None:
+def status_chip(page: Page) -> Locator:
+    """The chip in the strip of a note's page that says where the note stands."""
+    return page.locator("#item-page .card-summary dd.status .chip.note-status")
+
+
+async def says_in_the_path(page: Page, view: str, code_: str, headline: str) -> None:
     """The path above a note's page: the view it was reached from, then the note itself, by its
-    code alone ("N-7"); the code and the first line of the note are in the step's tooltip."""
-    await expect(page.locator("nav.crumbs li").last).to_have_text(name, timeout=SLOW)
-    assert (await crumbs(page))[2:] == [view, name], await crumbs(page)
-    assert (await page.locator("#crumb-page").get_attribute("title") or "").startswith(name)
+    code and its headline ("N-7 Use short codes"); the whole of it is the step's tooltip."""
+    name = f"{code_} {headline}"
+    await expect(page.locator("#crumb-page")).to_have_attribute("title", name, timeout=SLOW)
+    assert await crumbs(page) == [view, name], await crumbs(page)
 
 
 # -- 1. a note with and without a decider, added on the board, are the same records everywhere ---
@@ -258,7 +263,7 @@ async def test_a_note_with_and_without_a_decider_added_on_the_board_are_the_same
                 listed(page, decision_key).locator("td.cell-decided .clamp")
             ).to_have_attribute("title", f"Decided by {MARIE} on 2026-11-02")
             await expect(listed(page, note_key).locator("td.cell-applies")).to_contain_text(
-                f"Criterion #{rule}"
+                f"AC-{rule}"
             )
             # A row's title goes to the note's own page, in the view it was reached from.
             await listed(page, note_key).locator("a.record-title").click()
@@ -283,14 +288,16 @@ async def test_a_note_with_and_without_a_decider_added_on_the_board_are_the_same
             await open_item(w, note_key, "lists")
             shown = detail(page, note_key)
             await expect(shown).to_have_attribute("data-status", "unconfirmed")
-            await expect(page.locator("#item-title")).to_contain_text(f"Note #{full_plain['id']}")
+            await expect(page.locator("#item-title")).to_contain_text(f"N-{full_plain['id']} ")
             await expect(page.locator("#item-title")).to_contain_text(f"Note about {word}")
             await expect(part(page, "why")).to_contain_text(f"The call with Marie {word}")
-            assert (await strip(page))["Recorded by"] == ADA
+            assert (await strip(page)).get("Recorded by") is None
+            # Who recorded it is in its history now, the last row, and not in the strip.
+            await expect(
+                part(page, "history").locator("li[data-action=note_recorded]")
+            ).to_contain_text(ADA)
             assert "Decided by" not in await page.locator("#item-page").inner_text()
-            await expect(page.locator("#item-page .record-chips .chip.note-status")).to_have_text(
-                "Unconfirmed"
-            )
+            await expect(status_chip(page)).to_have_text("Unconfirmed")
             assert [r["ref"] for r in await record_rows(page, "concerns")] == [
                 story,
                 f"rule:{rule}",
@@ -298,7 +305,7 @@ async def test_a_note_with_and_without_a_decider_added_on_the_board_are_the_same
             assert await history_on_page(page) == await history_actions(
                 client, "note_history", "note_id", full_plain["id"]
             )
-            await says_in_the_path(page, "Lists", f"N-{full_plain['id']}")
+            await says_in_the_path(page, "Lists", f"N-{full_plain['id']}", f"Note about {word}")
             await expect(page.locator("#crumb-page")).to_have_attribute(
                 "title", re.compile(f"Note about {word}")
             )
@@ -308,18 +315,16 @@ async def test_a_note_with_and_without_a_decider_added_on_the_board_are_the_same
             await item_loaded(page, story)
             assert (await current_address(page))[1]["from"] == "lists"
 
-            # The page of the note someone decided: its text, its reason, and in a quiet line
-            # under the title who decided it and when.
+            # The page of the note someone decided: its text, its reason, and in the strip who
+            # decided it and when.
             await open_item(w, decision_key, "lists")
-            await expect(page.locator("#item-title")).to_contain_text(
-                f"Note #{full_decision['id']}"
-            )
+            await expect(page.locator("#item-title")).to_contain_text(f"N-{full_decision['id']} ")
             await expect(part(page, "record").locator(".record-text")).to_contain_text(
                 f"What was decided {word}"
             )
             await expect(part(page, "why")).to_contain_text(f"Because of {word}")
-            await expect(page.locator("#item-what")).to_contain_text(
-                f"Decided by {MARIE} on 2026-11-02"
+            await expect(page.locator("#item-page .card-summary dd.decided")).to_have_text(
+                f"{MARIE} on 2026-11-02"
             )
             assert [r["ref"] for r in await record_rows(page, "concerns")] == [story]
             assert await history_on_page(page) == ["note_recorded", "note_linked"]
@@ -368,7 +373,7 @@ async def test_confirming_asks_for_the_person_and_shows_who_and_when_and_unconfi
             page = w.page
             await open_item(w, note_key, "lists")
             record = detail(page, note_key)
-            chip = page.locator("#item-page .record-chips .chip.note-status")
+            chip = status_chip(page)
             await expect(chip).to_have_attribute("data-status", "unconfirmed", timeout=SLOW)
             # One chip says where the note stands. Its menu offers to confirm it (it is not
             # confirmed yet), to replace it, to withdraw it and to change what it concerns.
@@ -479,9 +484,7 @@ async def test_confirming_asks_for_the_person_and_shows_who_and_when_and_unconfi
             await expect(detail(page, decision_key)).to_have_attribute(
                 "data-status", "confirmed", timeout=SLOW
             )
-            await expect(page.locator("#item-page .record-chips .chip.note-status")).to_have_text(
-                "Confirmed"
-            )
+            await expect(status_chip(page)).to_have_text("Confirmed")
             await expect(part(page, "confirmation")).to_contain_text(f"Confirmed by {MARIE}")
             await expect(
                 part(page, "history").locator("li[data-action=note_confirmed]")
@@ -664,9 +667,7 @@ async def test_replacing_and_withdrawing_a_note_keeps_it_and_its_confirmation_an
             ended_page = detail(page, old_key)
             await expect(ended_page).to_have_attribute("data-status", "superseded", timeout=SLOW)
             await expect(page.locator("#record-ended")).to_be_visible()
-            await expect(page.locator("#item-page .record-chips .chip.note-status")).to_have_text(
-                "Replaced"
-            )
+            await expect(status_chip(page)).to_have_text("Replaced")
             await expect(part(page, "confirmation")).to_contain_text(f"It was confirmed by {MARIE}")
             await expect(
                 page.locator(
@@ -756,9 +757,7 @@ async def test_replacing_and_withdrawing_a_note_keeps_it_and_its_confirmation_an
                 "No longer needed",
             )
             assert dropped["confirmed_by"] is None
-            await expect(page.locator("#item-page .record-chips .chip.note-status")).to_have_text(
-                "Withdrawn"
-            )
+            await expect(status_chip(page)).to_have_text("Withdrawn")
 
             await notes_open(page, board, context_list(epic))
             await status_filter(page, "withdrawn")
@@ -1015,7 +1014,7 @@ async def test_a_project_wide_note_is_in_its_projects_recall_and_briefing_and_ne
             # It is in the list although it is linked to nothing, and says it is project-wide.
             row = listed(page, key)
             await expect(row).to_have_attribute("data-project-wide", "true", timeout=SLOW)
-            await expect(row.locator("td.cell-applies")).to_contain_text("Whole project")
+            await expect(row.locator("td.cell-applies")).to_contain_text("The whole project")
             await expect(row.locator(".chip.note-status")).to_have_text("Unconfirmed")
 
             # Recall of any item of the project carries it, flagged as unconfirmed; so does the
@@ -1046,7 +1045,7 @@ async def test_a_project_wide_note_is_in_its_projects_recall_and_briefing_and_ne
             assert whole["kind"] == "project" and whole["ref"] == "project"
             assert "Every epic, story and task in the project" in whole["text"]
             await expect(
-                page.locator("#item-page .record-chips .chip.project-wide")
+                page.locator("#item-page .card-summary .chip.project-wide")
             ).to_be_visible()
 
             # Once a person confirms it, recall and the briefing say so, and who confirmed it.
@@ -1233,14 +1232,14 @@ async def test_notes_are_tables_of_one_line_a_row_that_open_the_notes_page(
             await record_row(page, decision_key).locator("td.cell-decided").click()
             await item_loaded(page, decision_key)
             assert (await current_address(page))[1]["from"] == "roadmap"
-            assert (await crumbs(page))[2] == "Roadmap"
+            assert (await crumbs(page))[0] == "Roadmap"
             await expect(part(page, "record").locator(".record-text")).to_contain_text(
                 f"A statement {long_words.strip()}"
             )
             await expect(part(page, "why")).to_contain_text(f"A reason {long_words.strip()}")
             await page.go_back()
             await item_loaded(page, story)
-            await record_row(page, note_key).locator("td.cell-on").click()
+            await record_row(page, note_key).locator("td.cell-recorded").click()
             await item_loaded(page, note_key)
             await expect(part(page, "why")).to_contain_text(f"A source {long_words.strip()}")
             await no_panel_or_drawer(page)
@@ -1287,7 +1286,6 @@ async def test_the_notes_list_filters_by_one_status_and_its_filters_count_what_t
                 "Status",
                 "Applies to",
                 "Decided by",
-                "Recorded by",
                 "Recorded",
             ]
             # In force by default: the newest on top, the count says how many of how many.
@@ -1388,12 +1386,10 @@ async def test_a_viewer_sees_the_notes_and_has_no_control_to_change_one(server_u
             # withdraw, link or confirm.
             for key in (note_key, decision_key):
                 await open_item(w, key, "lists")
-                await expect(
-                    page.locator("#item-page .record-chips .chip.note-status")
-                ).to_have_count(1)
+                await expect(status_chip(page)).to_have_count(1)
                 await expect(
                     page.locator(
-                        "#item-page .record-chips button, #item-page button.add-note, "
+                        "#item-page .card-summary button, #item-page button.add-note, "
                         "#item-page button.supersede, #item-page button.withdraw, "
                         "#item-page button.change-concerns"
                     )
@@ -1486,11 +1482,63 @@ async def test_a_note_that_comes_down_from_an_epic_or_story_says_where_from(
             await expect(via).to_have_count(2)
             await expect(
                 page.locator(f"button.graph-node[data-ref='{keys[down_epic['id']]}'] .n-via")
-            ).to_have_text(f"via {code(epic)}")
+            ).to_have_text(f"via {code(epic)} Checkout {word}")
             await expect(
                 page.locator(f"button.graph-node[data-ref='{keys[down_story['id']]}'] .n-via")
-            ).to_have_text(f"via {code(story)}")
+            ).to_have_text(f"via {code(story)} Pay {word}")
             await expect(
                 page.locator(f"button.graph-node[data-ref='{keys[own['id']]}']")
             ).not_to_have_class(re.compile(r"\bis-via\b"))
+            assert w.problems == [], w.problems
+
+
+# -- 11. Around draws a few notes of a group and opens the rest, in recall's order ----------------
+
+
+async def test_around_draws_three_notes_and_show_more_opens_the_rest_in_recalls_order(
+    server_url: str,
+) -> None:
+    word = unique_word()
+    async with fresh_project(server_url) as (client, board, project):
+        epic = await made(client, "epic", f"Many notes {word}")
+        story = await made(client, "story", f"Holds seven notes {word}", epic)
+        for number_ in range(1, 8):
+            await make_note(client, f"Note {number_} {word}", "Seen", nodes=[story])
+        recalled = await ok(client, "recall", node=story)
+        every = [ref_of_note(i["note"]) for i in recalled["notes"]["items"]]
+        assert len(every) == 7
+
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await go(page, board, f"#/graph?tab=around&focus={story}")
+            await expect(page.locator(f".graph-around[data-focus='{story}']")).to_be_visible(
+                timeout=SLOW
+            )
+            drawn = page.locator("section[data-group=notes] button.graph-node.n-note")
+
+            async def refs() -> list[str]:
+                found: list[str] = await drawn.evaluate_all("els => els.map(e => e.dataset.ref)")
+                return found
+
+            # Three notes and a button for the other four, the three being recall's first three.
+            await expect(drawn).to_have_count(3, timeout=SLOW)
+            assert await refs() == every[:3]
+            more = page.locator("section[data-group=notes] button.graph-more")
+            await expect(more).to_have_text("Show 4 more")
+            await expect(more).to_have_attribute("aria-expanded", "false")
+            # Opening it lists every note in recall's order, and the same button closes it again.
+            await more.click()
+            await expect(drawn).to_have_count(7)
+            assert await refs() == every
+            await expect(more).to_have_text("Show fewer")
+            await expect(more).to_have_attribute("aria-expanded", "true")
+            await more.click()
+            await expect(drawn).to_have_count(3)
+            assert await refs() == every[:3]
+            # Escape closes an open group too.
+            await more.click()
+            await expect(drawn).to_have_count(7)
+            await page.keyboard.press("Escape")
+            await expect(drawn).to_have_count(3)
+            assert await refs() == every[:3]
             assert w.problems == [], w.problems

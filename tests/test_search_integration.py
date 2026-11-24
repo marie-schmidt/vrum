@@ -528,7 +528,7 @@ async def test_the_server_indexes_new_work_by_itself(client: Client) -> None:
     assert (await search(client, word))["index"]["waiting_to_index"] == 0
 
 
-async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
+async def test_new_and_changed_items_are_counted_as_waiting_tasks_included(
     client: Client,
 ) -> None:
     await reindexed(client)
@@ -540,13 +540,13 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
         task = await ok(
             client, "create_node", actor="a", kind="task", title="A task", parent=story["ref"]
         )
-        assert await waiting(client) == start + 2
+        # A task is indexed like a story, so it waits too.
+        assert await waiting(client) == start + 3
         await make_fact(client, "A new fact")
         await make_decision(client, "A new decision")
         await make_rule(client, "A new rule")
-        assert await waiting(client) == start + 5
-        # Changing the text of one that is waiting does not count it twice, and changing a task
-        # does nothing.
+        assert await waiting(client) == start + 6
+        # Changing the text of one that is waiting does not count it twice, a task included.
         await ok(
             client,
             "update_node",
@@ -563,7 +563,7 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
             expected_version=task["version"],
             body="Changed task text",
         )
-        assert await waiting(client) == start + 5
+        assert await waiting(client) == start + 6
     await reindexed(client)
     # A change that is not to the text (here, the status) leaves it indexed.
     current = await ok(client, "get_node", node=story["ref"])
@@ -578,7 +578,7 @@ async def test_new_and_changed_items_are_counted_as_waiting_and_tasks_are_not(
     assert await waiting(client) == 0
 
 
-async def test_tasks_are_found_by_words_only(client: Client) -> None:
+async def test_tasks_are_found_by_words_and_by_meaning(client: Client) -> None:
     word = unique_word()
     (story,) = await make_stories(client, 1)
     task = await ok(
@@ -591,16 +591,84 @@ async def test_tasks_are_found_by_words_only(client: Client) -> None:
     )
     await reindexed(client)
 
-    by_words = await search(client, word)
+    by_words = await search(client, word, mode="words")
     assert by_item(by_words)[("task", task["ref"])]["matched"] == "words"
-    by_meaning = await search(client, "Clients receive a bill by mail", mode="meaning")
-    assert ("task", task["ref"]) not in by_item(by_meaning)
+    # Reworded with no word in common, it is found by meaning, and both ways at once when the
+    # query uses its words and its meaning.
+    by_meaning = await search(client, "Clients receive a bill by mail", mode="meaning", limit=200)
+    assert by_item(by_meaning)[("task", task["ref"])]["matched"] == "meaning"
+    both = await search(client, f"Customers get an invoice by email {word}", limit=200)
+    assert by_item(both)[("task", task["ref"])]["matched"] == "both"
+    only_tasks = await search(
+        client, "Clients receive a bill by mail", mode="meaning", types=["task"], limit=200
+    )
+    assert only_tasks["items"] and all(i["item_type"] == "task" for i in only_tasks["items"])
+    # Nothing is left to embed, and the task is the thing similar items can be found for.
     count = await ok(client, "reindex")
     assert count["indexed_total"] >= 1 and count["embedded"] == 0
-    # A task can still be the thing to find similar items for: its text is embedded as asked.
     similar = await ok(client, "similar_items", node=task["ref"], min_similarity=0.0, limit=5)
     assert similar["items"] and all(i["matched"] == "meaning" for i in similar["items"])
     assert ("task", task["ref"]) not in by_item(similar)
+
+
+async def test_a_changed_task_is_indexed_again_and_a_dropped_one_is_left_out_of_overlaps(
+    client: Client,
+) -> None:
+    word = unique_word()
+    (story,) = await make_stories(client, 1)
+    task = await ok(
+        client,
+        "create_node",
+        actor="a",
+        kind="task",
+        title=f"Export the monthly report as a CSV file {word}",
+        parent=story["ref"],
+    )
+    await reindexed(client)
+    query = "Dark theme for the mobile app"
+    before = await search(client, query, mode="meaning", limit=200)
+    assert ("task", task["ref"]) not in by_item(before)
+
+    # Its text now says something else, so it waits and is then found by the new meaning.
+    with embeddings_stopped():
+        await ok(
+            client,
+            "update_node",
+            actor="a",
+            node=task["ref"],
+            expected_version=task["version"],
+            title=f"Night theme for the smartphone app {word}",
+        )
+        assert await waiting(client) == 1
+    await reindexed(client)
+    after = await search(client, query, mode="meaning", limit=200)
+    assert ("task", task["ref"]) in by_item(after)
+    again = await ok(client, "get_node", node=task["ref"])
+    await ok(
+        client,
+        "update_node",
+        actor="a",
+        node=task["ref"],
+        expected_version=again["version"],
+        status="dropped",
+    )
+    other = await new_story(client, "Another story for the same words")
+    twin = await ok(
+        client,
+        "create_node",
+        actor="a",
+        kind="task",
+        title=f"Dark theme for the mobile app {word}",
+        parent=other["ref"],
+    )
+    await reindexed(client)
+    pair = {task["ref"], twin["ref"]}
+    shown = await every_overlap(client, item_type="task", epics=[story["parent"]])
+    assert not any({p["first"]["ref"], p["second"]["ref"]} == pair for p in shown["items"])
+    included = await every_overlap(
+        client, item_type="task", epics=[story["parent"]], include_dropped=True
+    )
+    assert any({p["first"]["ref"], p["second"]["ref"]} == pair for p in included["items"])
 
 
 async def test_dropping_the_index_and_rebuilding_it_gives_the_same_results(
@@ -903,6 +971,33 @@ async def test_overlaps_can_compare_epics_and_rules_and_refuse_bad_asks(client: 
     other = await new_story(client, "Another story")
     rule_one = await make_rule(client, "Every customer gets an invoice by email", node=story["ref"])
     rule_two = await make_rule(client, "Each client gets a bill by mail", node=other["ref"])
+    task_one = await ok(
+        client,
+        "create_node",
+        actor="a",
+        kind="task",
+        title=f"Every customer gets an invoice by email {word}",
+        parent=story["ref"],
+    )
+    task_two = await ok(
+        client,
+        "create_node",
+        actor="a",
+        kind="task",
+        title=f"Each client gets a bill by mail {word}",
+        parent=other["ref"],
+    )
+    # A task in another story of the same epic is as alike, and is still not a pair: pairs are in
+    # different epics.
+    sibling_story = await new_story(client, "A sibling story", parent=story["parent"])
+    sibling_task = await ok(
+        client,
+        "create_node",
+        actor="a",
+        kind="task",
+        title=f"Each client gets a bill by mail {word}",
+        parent=sibling_story["ref"],
+    )
     await reindexed(client)
 
     epics = await every_overlap(client, item_type="epic", epics=[first["ref"]])
@@ -914,9 +1009,34 @@ async def test_overlaps_can_compare_epics_and_rules_and_refuse_bad_asks(client: 
     assert (rule_one["id"], rule_two["id"]) in {
         (p["first"]["id"], p["second"]["id"]) for p in rules["items"]
     }
+    tasks = await every_overlap(client, item_type="task", epics=[story["parent"]])
+    assert all(p["first"]["item_type"] == "task" for p in tasks["items"])
+    pairs = {frozenset((p["first"]["ref"], p["second"]["ref"])): p for p in tasks["items"]}
+    pair = pairs[frozenset((task_one["ref"], task_two["ref"]))]
+    # A task's epic is the epic of its story, not the story.
+    sides = {pair["first"]["ref"]: pair["first"], pair["second"]["ref"]: pair["second"]}
+    assert sides[task_one["ref"]]["epic"] == story["parent"]
+    assert sides[task_two["ref"]]["epic"] == other["parent"]
+    assert sides[task_one["ref"]]["status"] == "ready" and pair["already_linked"] == []
+    assert frozenset((task_one["ref"], sibling_task["ref"])) not in pairs
+    await ok(
+        client,
+        "add_link",
+        actor="a",
+        source=task_one["ref"],
+        target=task_two["ref"],
+        link_type="duplicates",
+    )
+    linked = await every_overlap(client, item_type="task", epics=[story["parent"]])
+    again = next(
+        p
+        for p in linked["items"]
+        if {p["first"]["ref"], p["second"]["ref"]} == {task_one["ref"], task_two["ref"]}
+    )
+    assert again["already_linked"] == ["duplicates"]
 
-    assert "item_type must be one of story, epic, rule" in await refused(
-        client, "find_overlaps", item_type="task"
+    assert "item_type must be one of story, epic, task, rule" in await refused(
+        client, "find_overlaps", item_type="note"
     )
     assert "There is no epic 987654321 in this project" in await refused(
         client, "find_overlaps", epics=["epic:987654321"]

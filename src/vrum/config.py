@@ -24,6 +24,8 @@ DEFAULT_OVERLAP_THRESHOLD = 0.55
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
 # How often the board asks for what changed. An agent's work shows on the board within this long.
 DEFAULT_BOARD_POLL_SECONDS = 5.0
+# Where the sandbox service listens (a volume shared with this server, see compose.yaml).
+DEFAULT_SANDBOX_SOCKET = "/run/sandbox/run.sock"
 
 
 class ConfigError(Exception):
@@ -689,6 +691,38 @@ class SsoSettings:
         return tuple(found)
 
 
+@dataclass(frozen=True)
+class WebhookSettings:
+    """Outgoing webhooks (M48). They are always available to a project's owner, but an address
+    must be a public one and `https`: the two settings below widen that for a self-hosted install,
+    which is the person's own network."""
+
+    # Names, addresses or networks (such as 10.0.0.0/8) that a webhook may go to even though they
+    # are not public addresses. Empty by default: loopback, private, link-local and metadata
+    # addresses are refused when a webhook is saved and again when it is called.
+    allowed_hosts: tuple[str, ...] = ()
+    # Whether a webhook's address may be http. Only for a receiver on this machine, for testing.
+    allow_insecure_http: bool = False
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> "WebhookSettings":
+        raw = env.get("VRUM_WEBHOOK_ALLOWED_HOSTS", "")
+        hosts = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+        for host in hosts:
+            if not _WEBHOOK_HOST.fullmatch(host):
+                raise ConfigError(
+                    f"VRUM_WEBHOOK_ALLOWED_HOSTS holds {host!r}, which is not a host name, an "
+                    "address or a network such as 10.0.0.0/8. Give a comma separated list."
+                )
+        return cls(
+            allowed_hosts=hosts,
+            allow_insecure_http=_flag(env, "VRUM_WEBHOOK_ALLOW_INSECURE_HTTP", False),
+        )
+
+
+_WEBHOOK_HOST = re.compile(r"[a-z0-9][a-z0-9.:/-]{0,252}")
+
+
 def _public_url(env: Mapping[str, str], port: int) -> str:
     """Where people reach the board, which every link in an email is built from."""
     raw = env.get("VRUM_PUBLIC_URL", "").strip()
@@ -711,6 +745,19 @@ def _public_url(env: Mapping[str, str], port: int) -> str:
     return raw.rstrip("/")
 
 
+def _sandbox_socket(env: Mapping[str, str]) -> str:
+    """Where the sandbox service's socket is: an absolute path."""
+    raw = env.get("VRUM_SANDBOX_SOCKET", "").strip()
+    if not raw:
+        return DEFAULT_SANDBOX_SOCKET
+    if not raw.startswith("/") or not raw.isprintable():
+        raise ConfigError(
+            "VRUM_SANDBOX_SOCKET must be the full path of the sandbox service's socket, such as "
+            f"{DEFAULT_SANDBOX_SOCKET}, but it is {raw!r}."
+        )
+    return raw
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str
@@ -731,6 +778,11 @@ class Settings:
     mail: MailSettings | None = None
     # Signing in with another provider (OpenID Connect, GitHub, LDAP): off unless one is set up.
     sso: SsoSettings = field(default_factory=SsoSettings)
+    # Outgoing webhooks and the addresses they may go to (see WebhookSettings).
+    webhooks: WebhookSettings = field(default_factory=WebhookSettings)
+    # The Unix socket of the sandbox service that runs the scripts of agent keys that call Vrum by
+    # running code. Nothing waits for it: when it is not there, a script says so.
+    sandbox_socket: str = DEFAULT_SANDBOX_SOCKET
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -759,6 +811,8 @@ class Settings:
             public_url=_public_url(env, port),
             mail=MailSettings.from_env(env),
             sso=SsoSettings.from_env(env),
+            webhooks=WebhookSettings.from_env(env),
+            sandbox_socket=_sandbox_socket(env),
         )
 
     def secrets(self) -> tuple[str, ...]:

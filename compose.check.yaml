@@ -47,6 +47,27 @@ services:
       timeout: 4s
       retries: 20
 
+  # Stands in for the place a webhook goes (tests/scripted_webhooks.py): it keeps every message and
+  # answers the way the address says (ok, fail, slow, redirect and so on), and shows them as JSON.
+  # Published on this machine only at VRUM_WEBHOOK_PORT (a free one if that is not set); the tests
+  # find it with `docker compose port`. Vrum reaches it as scripted-webhooks:8030.
+  scripted-webhooks:
+    image: python:3.12-slim
+    volumes:
+      - ./tests/scripted_webhooks.py:/service.py:ro
+    command: ["python", "/service.py"]
+    ports:
+      - "127.0.0.1:${VRUM_WEBHOOK_PORT:-}:8030"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=3)
+      interval: 2s
+      timeout: 4s
+      retries: 20
+
   # Stands in for an OpenID Connect provider (tests/scripted_oidc.py): fictional people on a page of
   # buttons, discovery, keys, token endpoint, and a control endpoint that makes the next token
   # misbehave. The server reaches it as scripted-oidc:8080 (that is its issuer); a browser reaches
@@ -179,6 +200,14 @@ services:
       VRUM_DB_HOST: db
       VRUM_DB_PASSWORD_FILE: /secrets/db-password
       VRUM_PUBLIC_URL: http://localhost:${VRUM_DEX_APP_PORT:-8096}
+      # Two servers on one database each run the job that sends webhooks and nudges, so this one
+      # has the same mail and webhook settings as `app`: whichever takes a piece of news sends it.
+      VRUM_SMTP_HOST: scripted-mail
+      VRUM_SMTP_PORT: "2525"
+      VRUM_SMTP_SECURITY: none
+      VRUM_SMTP_FROM: Vrum <vrum@example.com>
+      VRUM_WEBHOOK_ALLOWED_HOSTS: scripted-webhooks
+      VRUM_WEBHOOK_ALLOW_INSECURE_HTTP: "true"
       VRUM_OIDC_ISSUER: http://dex.localhost:${VRUM_DEX_PORT:-8095}/dex
       VRUM_OIDC_CLIENT_ID: vrum-dex
       VRUM_OIDC_CLIENT_SECRET: dex-client-secret
@@ -203,6 +232,8 @@ services:
         condition: service_healthy
       ldap:
         condition: service_healthy
+      scripted-webhooks:
+        condition: service_healthy
     environment:
       EMBEDDING_BASE_URL: http://scripted-embeddings:8080/v1
       EMBEDDING_MODEL: scripted-embedding
@@ -214,6 +245,11 @@ services:
       VRUM_SMTP_SECURITY: none
       VRUM_SMTP_FROM: Vrum <vrum@example.com>
       VRUM_PUBLIC_URL: http://localhost:${VRUM_PORT:-8000}
+      # Webhooks may go to the stand-in above, which is a private address and plain http on this
+      # network. Nothing else is opened: an address that is loopback, private or the metadata one
+      # is still refused.
+      VRUM_WEBHOOK_ALLOWED_HOSTS: scripted-webhooks
+      VRUM_WEBHOOK_ALLOW_INSECURE_HTTP: "true"
       # Signing in with another provider: OpenID through the scripted provider, GitHub through the
       # scripted GitHub, and LDAP through the real directory (all of them plain http on this
       # network, which is why the insecure settings are on). A browser reaches the sign-in pages

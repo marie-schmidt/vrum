@@ -7,11 +7,11 @@ The chapter makes its own account, project and key, so it needs nothing from the
 it. A real MCP client makes three epics, four stories and five tasks and sees each kind count from
 1; a second project starts again; no answer or database column holds an integer id; a bad
 reference, one that names nothing and one of the wrong kind are refused in plain words; the
-board's own New item goes on from each kind's highest number; the Board, the Graph's list and the
-Roadmap show the codes the server's references give; `#/item?item=story:1` is the page of a story,
-whose table of tasks is what `list_nodes` lists and whose previous and next go through the stories
-of its epic; and an export loads into a second copy of Vrum with every number, which then goes on
-from the highest of each kind."""
+board's own New item goes on from each kind's highest number; the Board, the Lists view's Work
+list and the Roadmap show the codes the server's references give; `#/item?item=story:1` is the
+page of a story, whose table of tasks is what `list_nodes` lists and whose previous and next go
+through the stories of its epic; and an export loads into a second copy of Vrum with every
+number, which then goes on from the highest of each kind."""
 
 import re
 import tempfile
@@ -148,9 +148,9 @@ async def no_integer_ids(project: Project, client: Client, word: str) -> None:
         "M19",
         "no answer (a node, the whole list, the change feed, mentions, search, recall, coverage, "
         "the export's lists) and no database column holds an integer node id: a node has a ref, "
-        "a kind and a number, the 14 columns that name a node hold its ref, and every event "
+        "a kind and a number, the 12 columns that name a node hold its ref, and every event "
         "names nodes by ref",
-        not problems and renamed == "" and len(holding_refs) == 14 and odd_events == "0",
+        not problems and renamed == "" and len(holding_refs) == 12 and odd_events == "0",
         f"{len(answers)} answers read, none with an id",
     )
 
@@ -243,11 +243,11 @@ async def codes_equal_references(w: Watched, client: Client) -> None:
     everything = await all_nodes(client)
     wanted = {node["ref"]: code_of(node["ref"]) for node in everything}
     epics = sum(1 for node in everything if node["kind"] == "epic")
-    await w.open("#/board")
+    await w.open("#/board?show=both")
     await expect(page.locator(".lane")).to_have_count(epics, timeout=SLOW)
     await expect(page.locator(".card")).to_have_count(len(everything) - epics, timeout=SLOW)
     on_board = await page.evaluate(ON_THE_BOARD)
-    await w.open("#/graph?view=work&as=list")
+    await w.open("#/lists?view=work")
     rows = page.locator("#work-tree li[role=treeitem]")
     await expect(rows).to_have_count(len(everything), timeout=SLOW)
     in_list = await page.evaluate(IN_THE_LIST)
@@ -256,9 +256,10 @@ async def codes_equal_references(w: Watched, client: Client) -> None:
     on_roadmap = await page.evaluate(ON_THE_ROADMAP)
     proof(
         "M19",
-        "the Board, the Graph's list and the Roadmap show E-, S- and T- codes that equal the "
-        "server's references (epic:4 is E-4, story:5 is S-5, task:6 is T-6): the Board and the "
-        "list for every item the server lists, the Roadmap for the three that have dates",
+        "the Board, the Lists view's Work list and the Roadmap show E-, S- and T- codes that "
+        "equal the server's references (epic:4 is E-4, story:5 is S-5, task:6 is T-6): the "
+        "Board and the list for every item the server lists, the Roadmap for the three that "
+        "have dates",
         on_board == in_list == wanted
         and len(wanted) == 15
         and on_roadmap == {ref: wanted[ref] for ref in ("epic:1", "story:1", "task:1")},
@@ -272,7 +273,7 @@ async def addresses(w: Watched, client: Client) -> None:
     await w.open("#/item?item=story:1")
     await expect(page.locator("#item-title")).to_contain_text("S-1 ", timeout=SLOW)
     opened = words(await page.locator("#item-title").inner_text())
-    await w.open("#/board")
+    await w.open("#/board?show=both")
     await expect(page.locator(".card[data-ref='story:1']")).to_be_visible(timeout=SLOW)
     await page.locator(".card[data-ref='story:1'] .card-title a").click()
     await expect(page.locator("#item-page")).to_have_attribute("data-ref", "story:1", timeout=SLOW)
@@ -317,7 +318,7 @@ async def the_page(w: Watched, client: Client) -> None:
         for s in stories
     ]
     done = [
-        f"{s['progress_done']} of {s['progress_total']} done" if s["progress_total"] else "No tasks"
+        f"{s['progress_done']} of {s['progress_total']} done" if s["progress_total"] else ""
         for s in stories
     ]
     proof(
@@ -327,7 +328,7 @@ async def the_page(w: Watched, client: Client) -> None:
         "epic lists its stories with the progress the server gives",
         title == f"S-1 {story['title']}"
         and rows == [t["ref"] for t in story_tasks] == ["task:1", "task:5"]
-        and count == "(2)"
+        and count == "2"
         and epic_rows == [s["ref"] for s in stories] == ["story:1", "story:4"]
         and progress == done,
         f"{title}: {', '.join(rows)}",
@@ -384,29 +385,29 @@ async def the_page(w: Watched, client: Client) -> None:
         f"{len(siblings['epic:1'])} epics, {len(siblings['story:1'])} stories under E-1",
     )
 
-    await w.open("#/board?epic=1")
+    await w.open("#/board?epic=1&show=both")
     await expect(page.locator(".card[data-ref='story:1']")).to_be_visible(timeout=SLOW)
     await page.locator(".card[data-ref='story:1'] .card-title a").click()
     await is_at("story:1")
     by_card = page.url.endswith("#/item?item=story:1&from=board")
-    await w.open("#/graph?view=work&as=list&epic=1")
+    await w.open("#/lists?view=work&epic=1")
     tree = page.locator("#work-tree")
     await expect(tree.locator("li[data-key='story:1']")).to_be_visible(timeout=SLOW)
     await tree.locator("li[data-key='story:1'] > .gv-row a.gv-title").click()
     await is_at("story:1")
-    by_title = page.url.endswith("#/item?item=story:1&from=graph")
-    await w.open("#/graph?view=work&as=list&epic=1")
+    by_title = page.url.endswith("#/item?item=story:1&from=lists")
+    await w.open("#/lists?view=work&epic=1")
     await expect(tree.locator("li[data-key='task:1']")).to_be_visible(timeout=SLOW)
     await tree.locator("li[data-key='task:1'] > .gv-row a.gv-title").click()
     await is_at("task:1")
-    task_has_a_page = page.url.endswith("#/item?item=task:1&from=graph")
+    task_has_a_page = page.url.endswith("#/item?item=task:1&from=lists")
     proof(
         "M19",
-        "a card on the Board and the title of a story or a task in the Graph's Work list each "
-        "open that item's own page, and the address says which view it came from (from=board, "
-        "from=graph)",
+        "a card on the Board and the title of a story or a task in the Lists view's Work list "
+        "each open that item's own page, and the address says which view it came from "
+        "(from=board, from=lists)",
         by_card and by_title and task_has_a_page and w.problems == [],
-        "story:1's page from the Board and from the Graph, task:1's from the Graph",
+        "story:1's page from the Board and from Lists, task:1's from Lists",
     )
 
 
@@ -441,7 +442,7 @@ async def moving(project: Project, client: Client) -> None:
     expected = {f"{n['kind']}-{n['number']}" for n in original["nodes"]}
     proof(
         "M19",
-        "an export loads into a second copy of Vrum with every number, link, decision, fact and "
+        "an export loads into a second copy of Vrum with every number, link and "
         "event as it was; the next epic, story and task go on from the highest number of their "
         "own kind; and the Markdown copy has one file per item named by kind and number",
         same

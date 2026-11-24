@@ -3,12 +3,16 @@ should, and that the sample project it fills holds what it is documented to hold
 what the demo makes in a real stack is looked at by hand, as ./demo.sh's own run (see
 tests/demo_world.py) checks the amounts against server_status."""
 
+import asyncio
 import datetime
+import json
 import os
 import re
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -16,24 +20,56 @@ from tests import demo_data as data
 from tests import demo_details
 from tests import scripted_github as github
 from tests import scripted_oidc as oidc
+from tests.demo_flow import (
+    Flow,
+    comments_on,
+    later_counts,
+    spring_plan,
+    winter_plan,
+    winter_revision,
+)
 from tests.demo_world import (
     Names,
     agents_of_description,
     allowances,
+    ask_arguments,
+    asks_of_description,
     check_words,
     confirmer_of,
     derived_criteria,
     expected_counts,
+    expected_needs,
     expected_note_counts,
+    expected_totals,
+    give_a_key_a_last_day,
+    kept_of_description,
     place,
     plan_arguments,
+    pull_request_number,
     recorder_of,
+    verified_words,
+    whereabouts,
 )
+from vrum.asks import AskInput, clean_ask
+from vrum.checks import pull_request_address
+from vrum.plan_revise import RevisionItem
+from vrum.plan_revisions import (
+    FIELDS,
+    MOST_COMMENT_CHARS,
+    MOST_NOTE_CHARS,
+    MOST_SUMMARY_CHARS,
+    PlanCommentInput,
+)
+from vrum.plan_templates import expand, parse_template
+from vrum.records import PEOPLE_ONLY_TOOLS
 from vrum.secret_formats import find_secret
+from vrum.whereabouts import clean_whereabouts
+from vrum.workflow import PlanItem, PlanLink, PlanRule
 
 SCRIPT = Path(__file__).resolve().parent.parent / "demo.sh"
 REFERENCE = re.compile(r"\[\[([a-z0-9][a-z0-9-]*)\]\]")
 OPEN = ("new", "in_progress", "blocked")
+TODAY = datetime.date(2026, 11, 22)
 
 
 def code_lines() -> list[str]:
@@ -220,16 +256,32 @@ def tasks() -> list[data.Item]:
 
 def texts() -> list[str]:
     found = [item.title for item in all_items()] + [item.body for item in all_items()]
+    found += [loose.title for loose in data.LOOSE] + [loose.body for loose in data.LOOSE]
+    found += [data.INBOX_BODY, data.GROUPED.epic_title, data.GROUPED.epic_body, data.GROUPED.reason]
+    found += [data.SUGGESTION_REJECTED, data.CHECKED_REASON]
+    for gate in data.GATES:
+        found += [gate.question or "", gate.comment or ""]
+    found += [item.get("title", "") + item.get("body", "") for item in data.WINTER_ITEMS]
+    found += [title for _, title in data.WINTER_CRITERIA]
+    found += [data.WINTER_FEEDBACK_SUMMARY, data.WINTER_REVISION_NOTE, data.SPRING_TITLE]
+    found += [text for _, _, text in (*data.WINTER_FEEDBACK, *data.SPRING_FEEDBACK)]
+    found += [data.SPRING_FEEDBACK_SUMMARY]
+    found += [text for parts in data.WINTER_REVISED.values() for text in parts.values()]
+    found += [item.get("title", "") + item.get("body", "") for item in data.SPRING_ITEMS]
+    found += [json.dumps(template) for template in data.TEMPLATES.values()]
     found += [rule.title for rule in data.RULES] + [rule.body for rule in data.RULES]
     found += list(demo_details.TASK_DETAILS.values())
     found += [title for titles in demo_details.ACCEPTS.values() for title in titles]
     found.append(data.DEFINITION_OF_DONE)
     found += [text for wordings in data.CHECK_EVIDENCE for text in wordings]
+    found += [*data.VERIFIED_EVIDENCE, data.PULL_REQUEST_SEEN, data.PULL_REQUEST_ADDRESS]
     found += [*data.PERSON_TRIED, data.UNTICK.first, data.UNTICK.reason, data.UNTICK.again]
     for note in data.NOTES:
         found += [note.text, note.why]
     for step in data.HANDOFFS:
         found.append(step.note)
+    for _, ask in asks_of_description():
+        found += [ask.question, *ask.choices, ask.answer or "", ask.comment or ""]
     found += [step.quote for step in data.CONFIRMATIONS]
     found += [step.reason for step in data.WITHDRAWALS]
     found += [edit.body or "" for edit in data.EDITS] + [edit.title or "" for edit in data.EDITS]
@@ -388,9 +440,9 @@ def test_details_and_criteria_are_plain_words_about_items_that_exist() -> None:
         data.DEFINITION_OF_DONE,
     ]
     for text in plain:
-        assert not re.search(r"[0-9\[\]]|[\u2010-\u2015\u2212]", text.replace("[person] ", "")), (
-            text
-        )
+        tags_removed = text.replace("[person] ", "").replace("[verifier] ", "")
+        tags_removed = tags_removed.replace("[github] ", "")
+        assert not re.search(r"[0-9\[\]]|[\u2010-\u2015\u2212]", tags_removed), text
         assert not any(find_secret(line) for line in text.splitlines())
 
 
@@ -412,12 +464,18 @@ def test_about_half_the_tasks_and_most_stories_have_acceptance_criteria_some_of_
 
 def test_the_definition_of_done_is_a_short_list_in_plain_words() -> None:
     lines = data.DEFINITION_OF_DONE.splitlines()
-    assert 5 <= len(lines) <= 7 and all(line.startswith("- ") for line in lines)
+    assert 5 <= len(lines) <= 9 and all(line.startswith("- ") for line in lines)
     text = data.DEFINITION_OF_DONE.lower()
     for word in ("tests", "real phone", "changelog", "half done"):
         assert word in text
-    # Exactly one line is for a person alone, and it is the last.
+    # Exactly one line is for a person alone, and it is the last; one is for a verifier and one is
+    # for a verifier with a pull request, just before it, and all of the others are ordinary.
     assert [line for line in lines if "[person]" in line] == [lines[-1]]
+    assert [line for line in lines if "[verifier]" in line] == [lines[-3]]
+    assert [line for line in lines if "[github]" in line] == [lines[-2]]
+    assert lines[-3] == "- [verifier] Reviewed by an agent that did not write it."
+    assert lines[-2] == "- [github] The pull request is merged and its checks passed."
+    assert not any(line.startswith("- [") for line in lines[:-3])
 
 
 def test_most_tasks_have_a_size_and_about_an_eighth_are_left_without_one_on_purpose() -> None:
@@ -453,8 +511,9 @@ def test_the_plan_carries_every_size() -> None:
 
 def test_every_check_of_the_definition_of_done_has_wordings_for_how_it_was_done() -> None:
     lines = [line.removeprefix("- ") for line in data.DEFINITION_OF_DONE.splitlines()]
-    checks = [line for line in lines if not line.startswith("[person]")]
-    assert len(data.CHECK_EVIDENCE) == len(checks) == len(lines) - 1 == 6
+    tags = ("[person]", "[verifier]", "[github]")
+    checks = [line for line in lines if not line.startswith(tags)]
+    assert len(data.CHECK_EVIDENCE) == len(checks) == len(lines) - 3 == 6
     assert all(len(wordings) == 3 for wordings in data.CHECK_EVIDENCE)
     assert len({text for wordings in data.CHECK_EVIDENCE for text in wordings}) == 18
     # Every wording can be said for every piece of work, and says something about the work.
@@ -511,7 +570,13 @@ def test_links_do_not_run_in_a_circle_and_name_items_that_exist() -> None:
     names = Names.of_description()
     waits: dict[str, set[str]] = {}
     for link in data.LINKS:
-        assert link.kind in ("needs_first", "relates_to", "duplicates", "supersedes")
+        assert link.kind in (
+            "needs_first",
+            "relates_to",
+            "duplicates",
+            "supersedes",
+            "discovered_from",
+        )
         assert link.source != link.target
         names.node(link.source), names.node(link.target)
         if link.kind == "needs_first":
@@ -549,7 +614,7 @@ def test_handoffs_and_claims_can_be_made_in_the_order_they_are_listed() -> None:
     held = {held.key for held in data.HELD} | {held.key for held in data.LAPSED}
     for key in held:
         assert [target for source, target in needs if source == key and target not in reached] == []
-    assert len(data.HELD) >= 4 and len(data.LAPSED) == 1
+    assert len(data.HELD) >= 4 and len(data.LAPSED) == 2
     assert len({held.actor for held in data.HELD}) >= 3
 
 
@@ -660,13 +725,194 @@ def test_the_demo_keeps_three_keys_with_different_allowances_made_from_the_serve
             "people_only": True,
             "offered_to_agents": False,
         },
+        {
+            "name": "set_check",
+            "area": "Definition of done",
+            "changes_something": True,
+            "people_only": False,
+            "offered_to_agents": True,
+        },
+        {
+            "name": "update_node",
+            "area": "Work",
+            "changes_something": True,
+            "people_only": False,
+            "offered_to_agents": True,
+        },
     ]
     chosen = allowances(tools)
     # A key that is not narrowed is the standard one (None); the narrowed ones are made only from
-    # the tools agents are offered, so they never reach administration tools.
+    # the tools agents are offered, so they never reach administration tools. The verifier may
+    # also tick a check and set work done, which is what a verifier does.
     assert chosen["api-agent"] is None
-    assert chosen["review-agent"] == ["list_nodes"]
-    assert chosen["docs-agent"] == ["add_note", "create_node", "list_nodes"]
+    assert chosen["review-agent"] == ["list_nodes", "set_check", "update_node"]
+    assert chosen["docs-agent"] == ["add_note", "create_node", "list_nodes", "update_node"]
+
+
+def test_the_verifier_is_an_agent_with_a_kept_key_that_never_works_on_what_it_checks() -> None:
+    assert data.VERIFIER.endswith(data.AGENT_SUFFIX) and data.VERIFIER in data.KEPT_KEYS
+    assert data.VERIFIER in agents_of_description()
+    # It is nobody's worker, holds nothing, hands nothing over and edits nothing, so it never did
+    # the work on an item whose checks it ticks, which the server would refuse.
+    worked = {step.actor for step in data.HANDOFFS} | {held.actor for held in data.HELD}
+    worked |= {held.actor for held in data.LAPSED} | {edit.actor for edit in data.EDITS}
+    worked |= {actor for _, _, actor in (*data.RULE_PLACES, *data.RULE_MOVES)}
+    worked |= {edit.actor for edit in data.RULE_EDITS} | set(data.WORKERS.values())
+    assert data.VERIFIER not in worked
+
+
+def test_work_waits_for_a_verifier_that_is_blocked_handed_over_and_held_by_nobody() -> None:
+    names = Names.of_description()
+    assert len(data.WAITING_FOR_VERIFIER) >= 3
+    held = {held.key for held in (*data.HELD, *data.LAPSED)}
+    for key in data.WAITING_FOR_VERIFIER:
+        placed = names.node(key)
+        assert placed.item.kind == "task" and placed.item.status == "blocked", key
+        assert key not in held
+        (step,) = [step for step in data.HANDOFFS if step.key == key]
+        assert step.outcome == "blocked" and step.actor == data.WORKERS[placed.epic]
+        assert "ready for a verifier" in names.text(step.note).lower(), key
+        # The note says which pull request to look at, in the form the server reads.
+        found = re.search(r"https://\S+/pull/\d+", step.note)
+        assert found and pull_request_address(found.group(0)) == found.group(0)
+    # No other blocked work is said to wait for a verifier.
+    assert {step.key for step in data.HANDOFFS if "verifier" in step.note.lower()} == set(
+        data.WAITING_FOR_VERIFIER
+    )
+
+
+def test_what_the_verifier_says_it_saw_is_in_the_form_the_server_reads_and_always_the_same() -> (
+    None
+):
+    today = datetime.date(2026, 11, 22)
+    seen = re.compile(
+        r"https://github\.com/example-org/bike-share/pull/\d+ merged "
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:00Z, merge commit [0-9a-f]{10}, checks passed (\d+) of \1"
+    )
+    for placed in place(data.EPICS):
+        github_words = verified_words(True, placed, today)
+        assert seen.fullmatch(github_words), github_words
+        assert pull_request_address(github_words) is not None
+        assert github_words == verified_words(True, placed, today)
+        assert not find_secret(github_words)
+        said = verified_words(False, placed, today)
+        assert said.strip() and "{" not in said and not re.search(r"[\u2010-\u2015\u2212]", said)
+        assert pull_request_address(said) is None
+    # The merge is never in the future, and the address is a made-up organisation's.
+    merged = [
+        datetime.datetime.fromisoformat(
+            verified_words(True, placed, today).split(" merged ")[1].split(",")[0]
+        ).date()
+        for placed in place(data.EPICS)
+    ]
+    assert max(merged) < today
+    assert "example-org" in data.PULL_REQUEST_ADDRESS
+
+
+def work_said_about() -> list[data.Handoff | data.Held]:
+    """Every handoff note and claim of the description, which each say where the work is or not."""
+    return [*data.HANDOFFS, *data.HELD, *data.LAPSED]
+
+
+def said_in_the_demo() -> list[tuple[str, str, dict[str, str | None]]]:
+    """Every handoff note and claim of the description, with what it says about where the work is
+    (as the tools are given it) when the demo is made on the day below."""
+    names = Names.of_description()
+    return [
+        (
+            step.key,
+            step.actor,
+            whereabouts(step.where, step.actor, names.node(step.key).item.title, TODAY),
+        )
+        for step in work_said_about()
+    ]
+
+
+def test_what_agents_say_about_where_their_work_is_is_what_the_server_accepts() -> None:
+    said = said_in_the_demo()
+    assert sum(1 for _, _, words in said if words) >= 12
+    for key, actor, words in said:
+        given = {field: value for field, value in words.items() if value is not None}
+        assert clean_whereabouts(**given) == given, key
+        assert not find_secret(" ".join(given.values())), key
+        if given:
+            assert given["repository"] == data.REPOSITORY_ADDRESS
+        if "pull_request" in given:
+            assert given["pull_request"].startswith(data.REPOSITORY_ADDRESS + "/pull/"), key
+        # A run label is said with the client it ran in, and never for a person.
+        assert ("run_label" in given) == ("client_name" in given), key
+        if "client_name" in given:
+            assert actor.endswith(data.AGENT_SUFFIX) and given["client_name"] == data.CLIENTS[actor]
+    assert "example-org" in data.REPOSITORY_ADDRESS
+
+
+def test_the_claims_held_now_say_where_the_work_is_in_different_ways() -> None:
+    said = {key: words for key, _, words in said_in_the_demo()}
+    assert sum(1 for held in data.HELD if held.where) >= 3
+    # One says nothing, which is what a claim that says nothing looks like.
+    assert any(held.where is None for held in data.HELD)
+    assert sum(1 for held in data.HELD if held.where and held.where.pull_request) >= 2
+    assert all(held.where for held in data.LAPSED)
+    labels: dict[str, set[str | None]] = {}
+    for held in data.HELD:
+        if held.where and held.where.run:
+            labels.setdefault(held.actor, set()).add(said[held.key]["run_label"])
+    # Two instances of one key, told apart by their run labels.
+    assert any(len(found) >= 2 for found in labels.values())
+    assert all(
+        held.where is None or held.where.run is None
+        for held in data.HELD
+        if not held.actor.endswith(data.AGENT_SUFFIX)
+    )
+
+
+def test_the_handoff_of_verified_work_names_the_pull_request_its_github_tick_names() -> None:
+    names = Names.of_description()
+    for step in data.HANDOFFS:
+        if step.where is None:
+            continue
+        placed = names.node(step.key)
+        if step.where.merged:
+            # Done work is the work the verifier ticked the [github] line of, with this address.
+            assert placed.item.status == "done" and step.outcome == "done", step.key
+            said = whereabouts(step.where, step.actor, placed.item.title, TODAY)
+            assert said["pull_request"] == pull_request_address(
+                verified_words(True, placed, TODAY)
+            ), step.key
+        elif step.where.pull_request is not None:
+            # Work waiting for a verifier says, in its note and in its words, the same address.
+            assert step.key in data.WAITING_FOR_VERIFIER, step.key
+            found = re.search(r"https://\S+/pull/(\d+)", step.note)
+            assert found and int(found.group(1)) == step.where.pull_request, step.key
+    for key in data.WAITING_FOR_VERIFIER:
+        (step,) = [step for step in data.HANDOFFS if step.key == key]
+        assert step.where and step.where.pull_request is not None and not step.where.merged
+    # A number that is said outright is never another item's made-up number.
+    worked_out = {pull_request_number(item.title) for item in all_items()}
+    said_outright = {
+        step.where.pull_request
+        for step in work_said_about()
+        if step.where and step.where.pull_request is not None
+    }
+    assert not worked_out & said_outright
+
+
+def test_one_kept_key_runs_out_ninety_days_after_the_day_the_demo_is_made() -> None:
+    assert data.EXPIRING_KEY in data.KEPT_KEYS and data.EXPIRING_KEY != data.VERIFIER
+    assert data.KEY_EXPIRES_AFTER_DAYS == 90
+    sent: list[tuple[str, str, Any]] = []
+
+    class Owner:
+        def call(self, method: str, path: str, body: Any) -> SimpleNamespace:
+            sent.append((method, path, body))
+            return SimpleNamespace(
+                status=200, body={"key": {"expires_on": body["expires_on"], "expired": False}}
+            )
+
+    day = asyncio.run(give_a_key_a_last_day(cast(Any, Owner()), "/keys", {data.EXPIRING_KEY: 7}))
+    assert sent == [("PATCH", "/keys/7", {"expires_on": day})]
+    today = datetime.datetime.now(datetime.UTC).date()
+    assert (datetime.date.fromisoformat(day) - today).days == 90
 
 
 def test_the_team_has_an_owner_an_editor_and_a_viewer_with_names_and_addresses_of_their_own() -> (
@@ -682,3 +928,510 @@ def test_the_team_has_an_owner_an_editor_and_a_viewer_with_names_and_addresses_o
     assert data.VIEWER not in {edit.actor for edit in data.EDITS}
     assert data.PLANNER in {edit.actor for edit in data.EDITS}
     assert data.PLANNER in data.WORKERS.values()
+
+
+def how_each_ask_is_put() -> list[tuple[str, data.Ask, str, str]]:
+    """Every ask of the description with the key of the work, the agent that puts it and what it
+    does to the work: blocks (finish_work blocked, or update_node blocked) or parks (finish_work
+    released)."""
+    names = Names.of_description()
+    put = [
+        (asked.key, asked.ask, data.WORKERS[names.node(asked.key).epic], "blocks")
+        for asked in data.ASKED
+    ]
+    for step in data.HANDOFFS:
+        if step.ask is not None:
+            assert step.outcome in ("blocked", "released"), step.key
+            put.append(
+                (step.key, step.ask, step.actor, "blocks" if step.outcome == "blocked" else "parks")
+            )
+    return put
+
+
+def test_six_asks_three_wait_for_a_person_and_three_were_answered_by_people_with_accounts() -> None:
+    put = how_each_ask_is_put()
+    assert len(put) == 6 and [(k, a) for k, a, _, _ in put] == asks_of_description()
+    waiting = [(key, ask, effect) for key, ask, _, effect in put if ask.answer is None]
+    answered = [ask for _, ask, _, _ in put if ask.answer is not None]
+    # Two questions with choices that block work and an approval that parks it, waiting.
+    assert sorted((bool(ask.choices), ask.approval, effect) for _, ask, effect in waiting) == [
+        (False, True, "parks"),
+        (True, False, "blocks"),
+        (True, False, "blocks"),
+    ]
+    # A question, an approval and a question with a comment, answered.
+    assert any(ask.approval for ask in answered)
+    assert any(not ask.approval and ask.comment for ask in answered)
+    assert any(not ask.approval and not ask.comment for ask in answered)
+    for ask in answered:
+        assert ask.by in (data.OWNER, data.PLANNER), ask.question
+        options = ["yes", "no"] if ask.approval else list(ask.choices)
+        assert ask.answer in options, ask.question
+    for _, ask, _, _ in put:
+        assert (ask.by is not None) == (ask.answer is not None), ask.question
+        assert ask.comment is None or ask.answer is not None, ask.question
+    assert len({ask.question for _, ask, _, _ in put}) == 6
+
+
+def test_every_ask_is_one_the_server_accepts_about_work_that_exists_by_an_agent() -> None:
+    names = Names.of_description()
+    for key, ask, actor, effect in how_each_ask_is_put():
+        arguments = ask_arguments(ask)
+        cleaned = clean_ask(AskInput(**arguments))
+        assert cleaned["question"] == ask.question and cleaned["kind"] == (
+            "approval" if ask.approval else "question"
+        )
+        assert not (ask.approval and ask.choices), key
+        placed = names.node(key)
+        assert placed.item.kind in ("story", "task") and actor.endswith(data.AGENT_SUFFIX), key
+        assert actor != data.VERIFIER, key
+        status = placed.item.status
+        if effect == "blocks" and ask.answer is None:
+            # Still blocked, and nobody holds it, as the description says.
+            assert status == "blocked" and key not in {held.key for held in data.HELD}, key
+        elif effect == "blocks":
+            # Answered, so free again, and the work went on.
+            assert status in ("in_progress", "done"), key
+        else:
+            assert status != "blocked", key
+
+
+def test_what_needs_a_person_has_all_four_kinds_in_a_few_rows_under_five_or_six_stories() -> None:
+    rows = expected_needs()
+    kinds = {kind: sum(1 for found, _, _ in rows if found == kind) for kind, _, _ in rows}
+    assert set(kinds) == {"ask", "check", "note", "lapse"}
+    assert kinds["ask"] == 3 and kinds["check"] == 1 and kinds["lapse"] == 1 and kinds["note"] >= 1
+    assert 8 <= len(rows) <= 12 and len(set(rows)) == len(rows)
+    assert 5 <= len({story for _, _, story in rows}) <= 6
+
+
+def test_work_that_waits_for_a_person_is_blocked_handed_over_and_held_by_nobody() -> None:
+    names = Names.of_description()
+    held = {held.key for held in (*data.HELD, *data.LAPSED)}
+    for key in data.WAITING_FOR_A_PERSON:
+        placed = names.node(key)
+        assert placed.item.kind == "task" and placed.item.status == "blocked", key
+        assert key not in held and key not in data.WAITING_FOR_VERIFIER
+        (step,) = [step for step in data.HANDOFFS if step.key == key]
+        assert step.outcome == "blocked" and step.ask is None
+        assert step.actor == data.WORKERS[placed.epic] or step.actor.endswith(data.AGENT_SUFFIX)
+        assert "verifier" not in step.note.lower() and "phone" in step.note.lower()
+    # The checks of the definition of done end with the one only a person ticks.
+    assert data.DEFINITION_OF_DONE.strip().splitlines()[-1].startswith("- [person]")
+
+
+def test_one_piece_of_work_has_a_claim_that_ran_out_twice_under_two_different_agents() -> None:
+    twice = [held for held in data.LAPSED if held.after]
+    assert len(twice) == 1 and len(data.LAPSED) == 2
+    (held,) = twice
+    assert held.after != held.actor and held.where is not None
+    assert {held.actor, held.after} <= set(agents_of_description())
+    assert data.VERIFIER not in {held.actor, held.after}
+    assert held.key not in {other.key for other in (*data.HELD, *data.LAPSED) if other is not held}
+    assert Names.of_description().node(held.key).item.status == "in_progress"
+
+
+# -- the later part: an Inbox, a steward, gates, drafted plans and templates (M42 to M47) ----------
+
+
+def test_seven_loose_stories_wait_in_the_inbox_and_two_of_them_group_under_a_new_epic() -> None:
+    titles = [loose.title for loose in data.LOOSE]
+    assert len(titles) == 7 and len(set(titles)) == 7
+    assert not set(titles) & {item.title for item in all_items()}
+    # They are written loosely, as said on a call: one or two sentences each, no markdown.
+    for loose in data.LOOSE:
+        assert 1 <= sentences(loose.body) <= 2 and "#" not in loose.body, loose.title
+    assert set(data.GROUPED.stories) <= set(titles) and len(data.GROUPED.stories) == 2
+    assert data.GROUPED.epic_title not in {epic.title for epic in data.EPICS}
+    assert data.INBOX == "Inbox"
+    # The description never says where a loose story belongs: only the server does.
+    assert not hasattr(data.LOOSE[0], "epic") and not hasattr(data.LOOSE[0], "parent")
+
+
+def test_the_steward_proposes_two_loose_stories_by_hand_for_a_person_to_look_at_twice() -> None:
+    titles = [loose.title for loose in data.LOOSE]
+    assert len(data.CHECKED_STORIES) == 2 and set(data.CHECKED_STORIES) <= set(titles)
+    # Not the stories that group under a new epic, and the script's first stories keep their order
+    # (the first it proposes is accepted and the second rejected), so the first loose story, the
+    # one the loader asks the server about, is the one the steward leaves to be checked.
+    assert not set(data.CHECKED_STORIES) & set(data.GROUPED.stories)
+    assert data.CHECKED_STORIES[0] == titles[0]
+    assert data.CHECKED_REASON and "\u2014" not in data.CHECKED_REASON
+
+
+def test_one_story_of_the_winter_plan_repeats_work_that_exists_in_other_words() -> None:
+    repeated = [item for item in data.WINTER_ITEMS if item["title"] == data.WINTER_REPEATS]
+    assert len(repeated) == 1 and repeated[0]["kind"] == "story"
+    # It is not the same title as anything that exists: it is found by meaning, not by words.
+    assert data.WINTER_REPEATS not in {item.title for item in all_items()}
+    existing = [item for item in all_items() if item.title == "Battery swap schedule"]
+    assert len(existing) == 1 and existing[0].key == "battery" and existing[0].status == "new"
+
+
+def test_the_steward_may_use_four_tools_and_none_that_a_person_decides_with() -> None:
+    assert set(data.STEWARD_TOOLS) == {
+        "list_nodes",
+        "suggest_parent",
+        "list_placements",
+        "propose_placement",
+    }
+    assert not set(data.STEWARD_TOOLS) & PEOPLE_ONLY_TOOLS
+    assert data.STEWARD not in agents_of_description()
+    assert data.INTAKE in agents_of_description() and data.INTAKE.endswith(data.AGENT_SUFFIX)
+    assert data.STEWARD not in data.KEPT_KEYS
+
+
+def test_gates_hold_work_nobody_has_taken_and_show_every_state() -> None:
+    names = Names.of_description()
+    needs = {(link.source, link.target) for link in data.LINKS if link.kind == "needs_first"}
+    status = {key: names.node(key).item.status for key in names.nodes}
+    busy = {step.key for step in data.HANDOFFS} | {held.key for held in data.HELD}
+    busy |= {held.key for held in data.LAPSED} | {asked.key for asked in data.ASKED}
+    busy |= set(data.WAITING_FOR_VERIFIER) | set(data.WAITING_FOR_A_PERSON)
+    for gate in data.GATES:
+        placed = names.node(gate.key)
+        assert placed.item.kind == "task" and status[gate.key] == "new", gate.key
+        assert gate.key not in busy and gate.actor.endswith(data.AGENT_SUFFIX), gate.key
+        assert gate.actor == data.WORKERS[placed.epic], gate.key
+        # Free to take until it is gated: whatever it needs first is finished.
+        assert all(status[target] == "done" for source, target in needs if source == gate.key)
+    assert len({gate.key for gate in data.GATES}) == len(data.GATES)
+    timers = [gate for gate in data.GATES if gate.kind == "timer"]
+    approvals = [gate for gate in data.GATES if gate.kind == "approval"]
+    assert len(timers) == 1 and timers[0].days is not None and 7 <= timers[0].days <= 30
+    assert len(approvals) == 3 and all(gate.question for gate in approvals)
+    for gate in approvals:
+        assert gate.days is None
+        cleaned = clean_ask(AskInput(question=gate.question or "", approval=True))
+        assert cleaned["kind"] == "approval"
+        assert (gate.answer is None) == (gate.by is None), gate.key
+        assert gate.comment is None or gate.answer is not None, gate.key
+    # One is waiting for a person, one was refused (the work stays held), one approved.
+    assert sorted(str(gate.answer) for gate in approvals) == ["None", "no", "yes"]
+    for gate in approvals:
+        assert gate.by in (None, data.OWNER, data.PLANNER)
+
+
+def test_the_drafted_winter_plan_hangs_under_an_existing_epic_and_is_worth_reviewing() -> None:
+    names = Names.of_description()
+    items = data.WINTER_ITEMS
+    keys = [str(item["key"]) for item in items]
+    assert len(set(keys)) == len(keys) and not set(keys) & set(names.nodes)
+    kinds = [item["kind"] for item in items]
+    # No epic of its own: the stories hang under one that exists, so the review has context.
+    assert (kinds.count("epic"), kinds.count("story"), kinds.count("task")) == (0, 3, 4)
+    assert names.node(data.WINTER_UNDER).item.kind == "epic"
+    assert data.WINTER_TITLE not in {epic.title for epic in data.EPICS}
+    by_key = {str(item["key"]): item for item in items}
+    for item in items:
+        parent = str(item["parent"])
+        if item["kind"] == "story":
+            assert parent == data.WINTER_UNDER, item["key"]
+        else:
+            assert by_key[parent]["kind"] == "story", item["key"]
+        assert item.get("size", "m") in ("xs", "s", "m", "l", "xl")
+    # What makes it worth reviewing: one item left unsized on purpose, one high priority, details
+    # of two or three lines on each story and on two tasks, dates on one story and a criterion on
+    # each story and on one task.
+    assert [key for key, item in by_key.items() if "size" not in item] == ["fit-covers"]
+    assert [key for key, item in by_key.items() if item.get("priority") == "high"] == ["studded"]
+    for key, item in by_key.items():
+        lines = len(item.get("body", "").splitlines())
+        if item["kind"] == "story":
+            assert 2 <= lines <= 3, key
+    assert sorted(
+        key for key, item in by_key.items() if item["kind"] == "task" and item.get("body")
+    ) == [
+        "fit-covers",
+        "fit-tyres",
+    ]
+    assert list(data.WINTER_DAYS) == ["studded"] and by_key["studded"]["kind"] == "story"
+    start, target = data.WINTER_DAYS["studded"]
+    assert 0 < start < target
+    on = [node for node, _ in data.WINTER_CRITERIA]
+    assert sorted(on) == ["covers", "fit-tyres", "studded", "winter-battery"]
+    for source, target_key, kind in data.WINTER_LINKS:
+        assert kind in ("needs_first", "relates_to") and source in by_key and source != target_key
+        if kind == "needs_first":
+            assert by_key[source]["kind"] == by_key[target_key]["kind"] == "task"
+    relates = [link for link in data.WINTER_LINKS if link[2] == "relates_to"]
+    assert len(relates) == 1 and relates[0][1] not in by_key
+    assert names.node(relates[0][1]).item.kind == "story"
+    assert sum(link[2] == "needs_first" for link in data.WINTER_LINKS) >= 1
+
+
+def test_the_winter_plan_is_written_as_the_references_the_server_gave_and_create_plan_takes() -> (
+    None
+):
+    names = Names.of_description()
+    arguments = winter_plan(TODAY, lambda key: names.node(key).ref)
+    assert arguments == winter_plan(TODAY, lambda key: names.node(key).ref)
+    items = [PlanItem(**item) for item in arguments["items"]]
+    links = [PlanLink(**link) for link in arguments["links"]]
+    rules = [PlanRule(**rule) for rule in arguments["rules"]]
+    under = names.node(data.WINTER_UNDER).ref
+    assert [str(item.parent) for item in items if item.kind == "story"] == [under] * 3
+    assert {str(item.parent) for item in items if item.kind == "task"} == {"studded", "covers"}
+    assert [(item.start_on, item.target_on) for item in items if item.start_on] == [
+        ("2026-12-02", "2027-01-06")
+    ]
+    reached = names.node(next(t for _, t, kind in data.WINTER_LINKS if kind == "relates_to")).ref
+    assert [
+        (str(link.source), str(link.target)) for link in links if link.link_type == "relates_to"
+    ] == [("studded", reached)]
+    assert [str(rule.node) for rule in rules] == [
+        "studded",
+        "covers",
+        "winter-battery",
+        "fit-tyres",
+    ]
+
+
+def test_the_winter_plan_has_a_conversation_whose_revision_changes_only_what_was_asked() -> None:
+    names = Names.of_description()
+    by_key = {str(item["key"]): item for item in data.WINTER_ITEMS}
+    # The owner commented on the title of a story and on the details of a task.
+    assert [(key, part) for key, part, _ in data.WINTER_FEEDBACK] == [
+        ("studded", "title"),
+        ("fit-tyres", "body"),
+    ]
+    assert by_key["studded"]["kind"] == "story" and by_key["fit-tyres"]["kind"] == "task"
+    for key, part, text in data.WINTER_FEEDBACK:
+        assert key in by_key and part in FIELDS
+        assert PlanCommentInput(item="story:1", field=part, text=text).text == text
+        assert 0 < len(text) <= MOST_COMMENT_CHARS and "\u2014" not in text
+    assert 0 < len(data.WINTER_FEEDBACK_SUMMARY) <= MOST_SUMMARY_CHARS
+    assert 0 < len(data.WINTER_REVISION_NOTE) <= MOST_NOTE_CHARS
+    # The revision changes exactly the parts commented on, to other words, and nothing else.
+    assert {key: set(parts) for key, parts in data.WINTER_REVISED.items()} == {
+        "studded": {"title"},
+        "fit-tyres": {"body"},
+    }
+    for key, parts in data.WINTER_REVISED.items():
+        for part, words in parts.items():
+            assert words.strip() and words != by_key[key][part], (key, part)
+    now = {str(item["key"]): item for item in data.WINTER_NOW}
+    assert list(now) == list(by_key)
+    assert {key for key in now if now[key] != by_key[key]} == {"studded", "fit-tyres"}
+    # The story that repeats existing work and the one left unsized are as they were drafted, so
+    # the plan's checks do not change with the revision.
+    assert now["winter-battery"] == by_key["winter-battery"]
+    assert now["fit-covers"] == by_key["fit-covers"] and "size" not in now["fit-covers"]
+    # What revise_plan is given: the whole plan again, every item continuing its own, links and
+    # criteria left out (so they are kept), and nothing different from the draft but those parts.
+    refs = {key: f"{by_key[key]['kind']}:{number}" for number, key in enumerate(by_key, 1)}
+    under = names.node(data.WINTER_UNDER).ref
+    drafted = winter_plan(TODAY, lambda key: names.node(key).ref)["items"]
+    revision = winter_revision(TODAY, lambda key: names.node(key).ref, refs)
+    parsed = [RevisionItem(**item) for item in revision]
+    assert [str(item.ref) for item in parsed] == list(refs.values())
+    assert [str(item.parent) for item in parsed if item.kind == "story"] == [under] * 3
+    for before, after in zip(drafted, revision, strict=True):
+        key = str(before["key"])
+        assert {**after, "ref": None} == {**before, **data.WINTER_REVISED.get(key, {}), "ref": None}
+        assert after["ref"] == refs[key]
+    assert [item.start_on for item in parsed if item.start_on] == ["2026-12-02"]
+    # The comments are written as request_plan_changes takes them, each on its item's reference.
+    comments = comments_on(refs, data.WINTER_FEEDBACK)
+    assert [(c["item"], c["field"]) for c in comments] == [
+        (refs["studded"], "title"),
+        (refs["fit-tyres"], "body"),
+    ]
+
+
+def test_the_spring_plan_is_small_and_sized_and_its_request_waits_for_its_agent() -> None:
+    names = Names.of_description()
+    items = data.SPRING_ITEMS
+    keys = [str(item["key"]) for item in items]
+    assert [item["kind"] for item in items] == ["story", "task", "task"]
+    assert len(set(keys)) == 3 and not set(keys) & (
+        set(names.nodes) | {str(item["key"]) for item in data.WINTER_ITEMS}
+    )
+    assert all(item.get("size") in ("xs", "s", "m", "l", "xl") for item in items)
+    assert data.SPRING_TITLE not in {epic.title for epic in data.EPICS}
+    assert data.SPRING_TITLE != data.WINTER_TITLE
+    # The operations agent works on the epic it hangs under, as it does for every fleet item.
+    assert data.WORKERS[data.WINTER_UNDER] == data.SPRING_BY
+    assert data.SPRING_BY.endswith(data.AGENT_SUFFIX) and data.SPRING_BY != data.RECORDER
+    arguments = spring_plan(lambda key: names.node(key).ref)
+    assert arguments == spring_plan(lambda key: names.node(key).ref)
+    parsed = [PlanItem(**item) for item in arguments["items"]]
+    assert str(parsed[0].parent) == names.node(data.WINTER_UNDER).ref
+    assert {str(item.parent) for item in parsed[1:]} == {"spring-check"}
+    # The owner asked about the story's details and about a size, and said why in a summary.
+    assert [(key, part) for key, part, _ in data.SPRING_FEEDBACK] == [
+        ("spring-check", "body"),
+        ("spring-replace", "size"),
+    ]
+    for key, part, text in data.SPRING_FEEDBACK:
+        assert key in keys and part in FIELDS and 0 < len(text) <= MOST_COMMENT_CHARS
+    assert 0 < len(data.SPRING_FEEDBACK_SUMMARY) <= MOST_SUMMARY_CHARS
+    # Nothing is revised: there is no revision of it in the description.
+    assert not hasattr(data, "SPRING_REVISED")
+
+
+def test_both_templates_are_ones_the_server_accepts_and_make_the_plans_described() -> None:
+    assert sorted(data.TEMPLATES) == ["release-checklist", "station-launch-checklist"]
+    for name, template in data.TEMPLATES.items():
+        parsed = parse_template(template)
+        assert parsed.description and name == name.lower()
+    station = parse_template(data.TEMPLATES[data.STATION_LAUNCH])
+    values = {**data.LAUNCH_VALUES, "epic": "epic:5"}
+    items, links, rules = expand(station, values)
+    assert data.LAUNCH_VALUES["neighbourhood"] in data.NEIGHBOURHOODS
+    assert [i["kind"] for i in items] == ["story", "task", "task", "task", "task"]
+    assert items[0]["parent"] == "epic:5" and "Millbank Quay" in items[0]["title"]
+    assert len(links) == 3 and len(rules) == 1
+    release = parse_template(data.TEMPLATES[data.RELEASE_CHECKLIST])
+    made, _, _ = expand(release, {"version": "2.4"})
+    assert made[0]["title"] == "Release 2.4" and made[-1]["title"] == "Tag 2.4"
+    assert data.LAUNCH_EPIC in Names.of_description().nodes
+    assert data.LAUNCH_BY.endswith(data.AGENT_SUFFIX) and data.LAUNCH_TITLE.startswith("Launch")
+
+
+def test_one_answer_is_kept_as_a_decision_by_the_person_who_gave_it() -> None:
+    (kept,) = kept_of_description()
+    key, ask = kept
+    # Put when work is handed over, so that the numbers of the notes of the description hold, and
+    # on work that nobody is working on, so that the unconfirmed decision adds no row to what needs
+    # a person.
+    assert key in {step.key for step in data.HANDOFFS if step.ask is not None}
+    assert ask.answer is not None and ask.by in (data.OWNER, data.PLANNER) and ask.comment
+    assert Names.of_description().node(key).item.status not in ("in_progress", "blocked", "done")
+    assert key not in {held.key for held in data.HELD} | {step.key for step in data.LAPSED}
+    assert expected_totals()["notes"] == expected_counts()["notes"] + 1
+
+
+NODES: dict[str, dict[str, Any]] = {
+    "epic:1": {"kind": "epic", "ref": "epic:1", "title": "Billing", "parent": None},
+    "story:1": {"kind": "story", "ref": "story:1", "title": "Pay", "parent": "epic:1"},
+    "task:1": {"kind": "task", "ref": "task:1", "title": "Charge", "parent": "story:1"},
+    "epic:2": {"kind": "epic", "ref": "epic:2", "title": "Appearance", "parent": None},
+    "story:2": {"kind": "story", "ref": "story:2", "title": "Theme", "parent": "epic:2"},
+    "task:2": {"kind": "task", "ref": "task:2", "title": "Night", "parent": "story:2"},
+}
+
+
+class TheServer:
+    """Answers the reads that the check of the standard review makes, from NODES."""
+
+    async def call(self, tool: str, actor: str | None = None, **arguments: Any) -> dict[str, Any]:
+        assert tool == "get_node"
+        return NODES[arguments["node"]]
+
+
+def a_row(
+    kind: str,
+    node: str,
+    level: str,
+    decision: str,
+    topic: dict[str, str] | None,
+    plan: dict[str, Any] | None = None,
+    placement: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "node": node,
+        "level": level,
+        "decision": decision,
+        "topic": topic,
+        "plan": plan,
+        "placement": placement,
+    }
+
+
+def the_rows_of_a_list() -> list[dict[str, Any]]:
+    billing = {"id": "epic:1", "label": "Billing", "basis": "epic"}
+    theme = {"id": "epic:2", "label": "Appearance", "basis": "epic"}
+    together = {"id": "topic:3", "label": "Charge", "basis": "meaning"}
+    return [
+        a_row("ask", "task:1", "task", "answer", billing),
+        a_row("note", "task:1", "note", "approve", billing),
+        a_row("plan", "epic:2", "plan", "approve", theme, plan={"items": ["epic:2", "story:2"]}),
+        a_row(
+            "placement",
+            "task:2",
+            "task",
+            "approve",
+            theme,
+            placement={"parent": "story:2", "items": [{"ref": "task:2"}]},
+        ),
+        a_row("gate", "task:2", "task", "look_into", theme),
+        a_row("lapse", "task:1", "task", "look_into", together),
+    ]
+
+
+def read_the_standard_review(rows: list[dict[str, Any]]) -> str:
+    flow = Flow(cast(Any, TheServer()))
+    needs = {"groups": [{"story": None, "title": None, "items": rows}]}
+    return asyncio.run(flow.read_the_standard_review(needs))
+
+
+def test_the_loader_reads_the_level_decision_and_topic_of_every_row_by_relations_only() -> None:
+    said = read_the_standard_review(the_rows_of_a_list())
+    assert "6 rows" in said and "1 put together by meaning" in said and "3 topics" in said
+
+
+def test_an_epic_can_name_a_cluster_of_meaning_and_a_row_that_is_only_under_it() -> None:
+    rows = the_rows_of_a_list()
+    rows[1]["topic"] = {"id": "epic:1", "label": "Billing", "basis": "meaning"}
+    said = read_the_standard_review(rows)
+    assert "3 topics" in said and "2 put together by meaning" in said
+
+
+def a_second_name(rows: list[dict[str, Any]]) -> None:
+    rows[1]["topic"] = {**rows[1]["topic"], "label": "Billing and more"}
+
+
+WRONG_ROWS = [
+    (lambda rows: rows[0].update(level="story"), "says story and answer, not task and answer"),
+    (lambda rows: rows[1].update(level="task"), "says task and approve, not note and approve"),
+    (lambda rows: rows[3].update(level="story"), "says story and approve, not task and approve"),
+    (lambda rows: rows[4].update(decision="approve"), "not task and look_into"),
+    (lambda rows: rows[0].update(topic=None), "has no topic"),
+    (a_second_name, "called two things"),
+    (lambda rows: rows[2]["topic"].update(label="Theme"), "is called Theme, not Appearance"),
+    (
+        lambda rows: rows[5].update(topic={"id": "elsewhere:9", "label": "x", "basis": "meaning"}),
+        "not an epic and not one of meaning",
+    ),
+    (lambda rows: rows[0].update(topic=dict(rows[4]["topic"])), "under another epic"),
+]
+
+
+@pytest.mark.parametrize(("change", "wanted"), WRONG_ROWS)
+def test_the_loader_stops_with_a_plain_message_when_a_row_says_the_wrong_thing(
+    change: Any, wanted: str
+) -> None:
+    rows = the_rows_of_a_list()
+    change(rows)
+    with pytest.raises(SystemExit, match=wanted):
+        read_the_standard_review(rows)
+
+
+def test_what_the_later_part_adds_is_counted_and_the_totals_are_sensible() -> None:
+    added = later_counts()
+    assert added == {"epics": 1, "stories": 12, "tasks": 10, "links": 6, "rules": 5}
+    totals = expected_totals()
+    base = expected_counts()
+    kept = len(kept_of_description())
+    assert all(
+        totals[kind] == base[kind] + added.get(kind, 0) + (kept if kind == "notes" else 0)
+        for kind in base
+    )
+    assert (totals["epics"], totals["stories"], totals["tasks"]) == (13, 65, 190)
+    assert totals["links"] == len(data.LINKS) + 6
+    assert totals["notes"] == 40
+
+
+def test_four_tasks_say_where_they_were_found_and_never_wait_for_it() -> None:
+    found = [link for link in data.LINKS if link.kind == data.DISCOVERED]
+    assert len(found) == 4 and len({link.source for link in found}) == 4
+    names = Names.of_description()
+    other = {(link.source, link.target) for link in data.LINKS if link.kind != data.DISCOVERED}
+    for link in found:
+        for key in (link.source, link.target):
+            assert names.node(key).item.kind == "task", key
+        # The pair is not linked another way too, so each link says one thing.
+        assert (link.source, link.target) not in other
+        assert (link.target, link.source) not in other

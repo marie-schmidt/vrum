@@ -451,10 +451,17 @@ async def test_search_by_words_and_by_meaning_similar_items_overlaps_and_recall_
             overlaps = await ok(side.client, "find_overlaps", min_similarity=0.0)
             for other in others:
                 assert other.word not in json.dumps(overlaps)
+            task_overlaps = await ok(
+                side.client, "find_overlaps", item_type="task", min_similarity=0.0
+            )
+            for other in others:
+                assert other.word not in json.dumps(task_overlaps)
             owns(side, others, await ok(side.client, "recall", node=side.world["story1"]["ref"]))
             # The index of a project holds exactly that project's own embeddable items.
             counts = (await ok(side.client, "server_status"))["counts"]
-            embeddable = sum(counts[name] for name in ("epics", "stories", "rules", "notes"))
+            embeddable = sum(
+                counts[name] for name in ("epics", "stories", "tasks", "rules", "notes")
+            )
             assert report["indexed_total"] == embeddable
             assert (await ok(side.client, "server_status"))["index"]["indexed"] == embeddable
 

@@ -13,7 +13,16 @@ import urllib.request
 import pytest
 from playwright.async_api import expect
 
-from tests.board_helpers import SLOW, browser_page, create_in_browser, made
+from tests.board_helpers import (
+    SLOW,
+    browser_page,
+    create_in_browser,
+    made,
+    nothing_open,
+    on_page,
+    open_account_menu,
+    sign_out,
+)
 from tests.helpers import compose, connect, ok, refused, unique_word
 from tests.world import api, make_project, register, server_base
 from vrum.surface import AGENT_TOOLS
@@ -104,14 +113,23 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
         # records over MCP.
         await w.page.locator("#settings-menu").click()
         await w.page.locator("#settings-users").click()
-        await expect(w.page.locator("#key-name")).to_be_visible(timeout=SLOW)
+        await expect(w.page.locator("#key-open")).to_be_visible(timeout=SLOW)
         assert "#/users" in w.page.url
+        await w.page.locator("#key-open").click()
+        await expect(w.page.locator("#key-name")).to_be_visible(timeout=SLOW)
         await w.page.locator("#key-name").fill("build agent")
+        # How it calls Vrum and what it may do are chosen, not assumed: Standard is the one that
+        # sends no list.
+        await w.page.locator("#key-call-tools").check()
+        await w.page.locator("#key-tools-choice-standard").click()
         await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await w.page.locator("#create-key").click()
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
         # A key made with no choice of tools is the standard one: the tools Vrum offers agents.
         await expect(w.page.locator("#new-key-allowed")).to_contain_text("Standard, 25 tools")
+        await expect(w.page.locator("#new-key-calls")).to_have_text(
+            "How it calls Vrum: One tool at a time."
+        )
         key = (await w.page.locator("#key-secret").inner_text()).strip()
         async with connect(f"{base}/mcp", key) as agent:
             nodes = (await ok(agent, "list_nodes"))["items"]
@@ -120,8 +138,9 @@ async def test_a_person_registers_makes_a_project_works_in_it_and_survives_a_res
             )
             assert {node["ref"] for node in nodes} == {epic, story, task}
 
-        # Sign out, and the old session is of no use; sign back in with the email and password.
-        await w.page.locator("#sign-out").click()
+        # Sign out (from the account menu), and the old session is of no use; sign back in with
+        # the email and password.
+        await sign_out(w.page)
         await expect(w.page.locator("#sign-in-form")).to_be_visible(timeout=SLOW)
         assert w.page.url.rstrip("/").endswith("/board")
 
@@ -328,10 +347,18 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
     async with browser_page(project.address, token=project.key, name=None) as w:
         await w.open("#/users")
         await expect(w.page.locator("#keys li.key")).to_have_count(1, timeout=SLOW)
+        # Making a key is a dialog opened by one button; it closes when the key is made, and the
+        # key just made is shown above the list, once.
+        await expect(w.page.locator("#key-name")).to_have_count(0)
+        await w.page.locator("#key-open").click()
+        await expect(w.page.locator("dialog#new-key-dialog")).to_be_visible(timeout=SLOW)
         await w.page.locator("#key-name").fill(f"second agent {word}")
+        await w.page.locator("#key-call-tools").check()
+        await w.page.locator("#key-tools-choice-standard").click()
         await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
         await w.page.locator("#create-key").click()
         await expect(w.page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
+        await expect(w.page.locator("dialog#new-key-dialog")).to_have_count(0)
         secret = (await w.page.locator("#key-secret").inner_text()).strip()
         await expect(w.page.locator("#keys li.key")).to_have_count(2, timeout=SLOW)
         # The key is shown once: after leaving the page it is not anywhere on it.
@@ -341,7 +368,11 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
         assert secret not in await w.page.locator("body").inner_text()
         row = w.page.locator("#keys li.key", has_text=f"second agent {word}")
         await expect(row).to_contain_text(f"{secret[:8]}…")
-        await expect(row.locator(".key-allowance")).to_have_text("Standard, 25 tools")
+        # A key with the standard tools says nothing about them: only a key that may do something
+        # else wears a chip for it. Nothing yet says it was used.
+        await expect(row.locator(".key-allowance")).to_have_count(0)
+        await expect(row).to_contain_text("Never used")
+        await expect(row.locator(".key-calls")).to_have_text("One tool at a time")
 
         # A real MCP client with the key does a day's work here, and cannot see the other project.
         async with connect(project.mcp_url, secret) as agent:
@@ -364,7 +395,7 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
             )
             titles = json.dumps(await ok(agent, "list_nodes", limit=200))
             assert f"Elsewhere {word}" not in titles and f"Work {word}" in titles
-            await expect(row).to_contain_text("last used", timeout=SLOW)
+            await expect(row).to_contain_text("Last used", timeout=SLOW)
 
             # Revoke it on the board: the open connection and a new one are refused at once.
             await row.locator("button.revoke").click()
@@ -372,9 +403,19 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
                 "refused on its next request"
             )
             await w.page.locator("dialog.modal button.primary").click()
-            await expect(w.page.locator("#keys li.key[data-state=revoked]")).to_have_count(
+            # A revoked key leaves the list of keys in force and goes to the fold below it, closed.
+            await expect(w.page.locator("#revoked li.key[data-state=revoked]")).to_have_count(
                 1, timeout=SLOW
             )
+            await expect(w.page.locator("#keys li.key")).to_have_count(1)
+            assert await w.page.locator("#keys li.key[data-state=revoked]").count() == 0
+            folded = w.page.locator("details#revoked-keys")
+            assert await folded.evaluate("e => e.open") is False
+            assert await folded.locator("summary").inner_text() == "Revoked keys (1)"
+            await folded.locator("summary").click()
+            gone = w.page.locator("#revoked li.key", has_text=f"second agent {word}")
+            await expect(gone).to_contain_text("Revoked ")
+            assert await gone.locator("button").count() == 0
             with pytest.raises(BaseException) as open_connection:
                 await agent.call_tool("list_nodes", {})
             assert "agent key is not valid" in messages(open_connection.value)
@@ -387,17 +428,23 @@ async def test_an_agent_key_made_on_the_board_works_for_that_project_only_until_
             assert f"Work {word}" in json.dumps(await ok(agent, "list_nodes", limit=200))
 
 
-async def make_key_on_the_page(w, name: str, choice: str | None = None) -> str:  # type: ignore[no-untyped-def]
-    """Make an agent key on the Users page, with one of the quick choices of what it may do (the
-    standard tools when none is chosen), and give the key that is shown once."""
+async def make_key_on_the_page(  # type: ignore[no-untyped-def]
+    w, name: str, choice: str = "standard", *, code: bool = False
+) -> str:
+    """Make an agent key on the Users page (the New agent key dialog), with how it calls Vrum (one
+    tool at a time, or by running code) and one of the quick choices of what it may do (a new key
+    has neither lit, so both are always chosen: the standard tools by default), and give the key
+    that is shown once."""
     await w.go("#/users")
+    await expect(w.page.locator("#key-open")).to_be_visible(timeout=SLOW)
+    await w.page.locator("#key-open").click()
     await expect(w.page.locator("#key-name")).to_be_visible(timeout=SLOW)
     await expect(w.page.locator("#create-key")).to_be_enabled(timeout=SLOW)
-    if choice is not None:
-        await w.page.locator(f"#key-tools-choice-{choice}").click()
-        await expect(w.page.locator(f"#key-tools-choice-{choice}")).to_have_attribute(
-            "aria-checked", "true"
-        )
+    await w.page.locator("#key-call-code" if code else "#key-call-tools").check()
+    await w.page.locator(f"#key-tools-choice-{choice}").click()
+    await expect(w.page.locator(f"#key-tools-choice-{choice}")).to_have_attribute(
+        "aria-checked", "true"
+    )
     await w.page.locator("#key-name").fill(name)
     await w.page.locator("#create-key").click()
     await expect(w.page.locator("#new-key-title")).to_contain_text(name, timeout=SLOW)
@@ -417,35 +464,53 @@ async def test_the_key_picker_makes_standard_read_only_and_everything_keys_the_s
     offered = {t["name"] for t in tools if t["offered_to_agents"]}
     assert offered == set(AGENT_TOOLS) and listing.body["most_agent_tools"] == len(offered) == 25
     readers = {t["name"] for t in tools if t["offered_to_agents"] and not t["changes_something"]}
-    grantable = {t["name"] for t in tools if not t["people_only"]}
-    assert len(grantable) == len(tools) - 2
+    # The two tools of a key that runs code are how a key calls Vrum, not something it may do: they
+    # are never in the picker, in what a key can be given or in the count of it.
+    code_tools = {t["name"] for t in tools if t["code_mode"]}
+    assert code_tools == {"explore", "run"}
+    people_only = {t["name"] for t in tools if t["people_only"]}
+    assert "answer_ask" in people_only
+    grantable = {t["name"] for t in tools if not t["people_only"] and not t["code_mode"]}
+    assert len(grantable) == len(tools) - len(people_only) - len(code_tools)
+    pickable = len(tools) - len(code_tools)
 
     async with browser_page(project.address, token=project.key, name=None) as w:
         page = w.page
         await w.open("#/users")
+        await expect(page.locator("#key-open")).to_be_visible(timeout=SLOW)
+        await page.locator("#key-open").click()
         await expect(page.locator("#create-key")).to_be_enabled(timeout=SLOW)
-        # A new key starts as the standard one, which sends no list of tools of its own; the
-        # tools that are not offered to agents by default are in a fold that starts closed.
+        # The standard choice sends no list of tools of its own; the list of tools starts closed,
+        # and the tools that are not offered to agents by default are in a fold of it that starts
+        # closed too. (A new key has no choice lit: the next test.)
+        await page.locator("#key-tools-choice-standard").click()
         await expect(page.locator("#key-tools-choice-standard")).to_have_attribute(
             "aria-checked", "true"
         )
         await expect(page.locator("#key-tools-choice-everything")).to_be_visible()
+        await expect(page.locator("#key-tools-panel")).to_be_hidden()
         await page.locator("#key-tools-toggle").click()
         fold = page.locator("#key-tools-not-offered")
         await expect(fold).to_be_hidden()
         await page.locator(".kt-group-other .kt-fold-named").click()
         await expect(fold).to_be_visible()
-        await expect(fold.locator("li.kt-tool[data-offered='0']")).to_have_count(len(tools) - 25)
+        await expect(fold.locator("li.kt-tool[data-offered='0']")).to_have_count(pickable - 25)
         await expect(page.locator("li.kt-tool[data-offered='1']")).to_have_count(25)
+        await expect(
+            page.locator("li.kt-tool[data-name=explore], li.kt-tool[data-name=run]")
+        ).to_have_count(0)
         await page.locator("#key-tools-toggle").click()
+        # Closing the dialog makes no key.
+        await page.keyboard.press("Escape")
+        await expect(page.locator("dialog#new-key-dialog")).to_have_count(0)
+        await expect(page.locator("#keys li.key")).to_have_count(1)
 
         # Standard: exactly the 25 tools, and any other is refused in words that say it is done
         # on the board.
         standard = await make_key_on_the_page(w, f"standard-{word}")
         row = page.locator("#keys li.key", has_text=f"standard-{word}")
-        await expect(row.locator(".key-allowance")).to_have_text("Standard, 25 tools")
         await expect(row).to_have_attribute("data-state", "active")
-        await expect(row.locator(".key-allowance")).to_have_attribute("data-allowance", "standard")
+        await expect(row.locator(".key-allowance")).to_have_count(0)
         async with connect(project.mcp_url, standard) as agent:
             assert {t.name for t in (await agent.list_tools()).tools} == set(AGENT_TOOLS)
             said = await refused(agent, "server_status")
@@ -477,6 +542,271 @@ async def test_the_key_picker_makes_standard_read_only_and_everything_keys_the_s
             assert (await ok(agent, "server_status"))["counts"]["epics"] == 0
             assert (await ok(agent, "export_graph", limit=1))["format"] == "vrum-export"
         assert w.problems == []
+
+
+async def test_a_new_agent_key_starts_with_nothing_lit_and_a_missing_choice_is_refused() -> None:
+    word = unique_word()
+    owner = register(name=f"Blank key {word}")
+    project = make_project(owner, f"Blank key project {word}")
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        page = w.page
+        await w.open("#/users")
+        await expect(page.locator("#keys li.key")).to_have_count(1, timeout=SLOW)
+        await page.locator("#key-open").click()
+        dialog = page.locator("dialog#new-key-dialog")
+        await expect(dialog).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#key-name")).to_be_focused()
+        # How it calls Vrum and what an agent may do are decisions: neither way is chosen, no quick
+        # choice is lit, the list of tools is closed, and nothing in the dialog is open.
+        calls = page.locator("#key-call input[name=key-call]")
+        assert await calls.evaluate_all("els => els.map(e => e.value)") == ["code", "tools"]
+        await expect(page.locator("#key-call input:checked")).to_have_count(0)
+        await expect(page.locator("#key-call-title")).to_have_text("How it calls Vrum")
+        await nothing_open(page)
+        buttons = page.locator("button.kt-choice-option")
+        assert (
+            await buttons.evaluate_all("els => els.map(e => e.getAttribute('aria-checked'))")
+            == ["false"] * await buttons.count()
+        )
+        assert await page.locator("button.kt-choice-option:visible").count() == 5
+        assert await dialog.locator("[data-choice='none']").count() == 1
+        await expect(page.locator("#key-tools-says")).to_have_text("Choose what this key may do.")
+        # One choice is a tab stop (the first), so the keyboard can reach the row.
+        assert await page.locator("button.kt-choice-option[tabindex='0']").evaluate_all(
+            "els => els.map(e => e.dataset.choice)"
+        ) == ["standard"]
+        await expect(page.locator("#key-tools-panel")).to_be_hidden()
+        assert await page.locator("#key-tools-toggle").get_attribute("aria-expanded") == "false"
+        await expect(
+            dialog.locator("[role=menu]:visible, [role=listbox]:visible, .vselect-list:visible")
+        ).to_have_count(0)
+
+        def keys_made() -> int:
+            return len(owner.call("GET", f"/board/api/projects/{project.id}/keys").body["keys"])
+
+        # Create key with nothing chosen is refused in words, in the dialog, which stays open with
+        # the typed name; no key was made. The way it calls comes first, then what it may do.
+        await page.locator("#key-name").fill(f"blank-{word}")
+        await page.locator("#create-key").click()
+        await expect(page.locator("#key-form .problem")).to_have_text(
+            "Choose how it calls Vrum.", timeout=SLOW
+        )
+        await expect(dialog).to_be_visible()
+        await expect(page.locator("#key-name")).to_have_value(f"blank-{word}")
+        await expect(page.locator("#keys li.key")).to_have_count(1)
+        assert keys_made() == 1
+
+        # With a way chosen, what it may do is the next thing asked, and the way stays chosen.
+        await page.locator("#key-call-tools").check()
+        await page.locator("#create-key").click()
+        await expect(page.locator("#key-form .problem")).to_have_text(
+            "Choose what this agent may do.", timeout=SLOW
+        )
+        await expect(page.locator("#key-call-tools")).to_be_checked()
+        await expect(page.locator("#key-name")).to_have_value(f"blank-{word}")
+        assert keys_made() == 1
+
+        # A choice is lit by choosing it, and then the key is made.
+        await page.locator("#key-tools-choice-read").click()
+        await expect(page.locator("#key-tools-choice-read")).to_have_attribute(
+            "aria-checked", "true"
+        )
+        await expect(page.locator("#key-tools-says")).to_contain_text("changes nothing")
+        await page.locator("#create-key").click()
+        await expect(page.locator("#key-secret")).to_contain_text("vrk_", timeout=SLOW)
+        await expect(dialog).to_have_count(0)
+        await expect(page.locator("#keys li.key")).to_have_count(2)
+        assert keys_made() == 2
+        assert w.problems == []
+
+
+async def test_invite_someone_opens_with_no_role_chosen_and_refuses_in_words_until_one_is() -> None:
+    word = unique_word()
+    owner = register(name=f"Inviter {word}")
+    project = make_project(owner, f"Invites {word}")
+    where = f"/board/api/projects/{project.id}/invites"
+    assert owner.call("GET", "/board/api/info").body["mail"]["enabled"] is True
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        page = w.page
+        await w.open("#/users")
+        await expect(page.locator("#invite-open")).to_be_visible(timeout=SLOW)
+        await page.locator("#invite-open").click()
+        dialog = page.locator("dialog.modal")
+        await expect(dialog).to_be_visible(timeout=SLOW)
+        await expect(dialog.locator("h2")).to_have_text("Invite someone")
+        # What the person can do is a decision: both roles are offered and neither is chosen, and
+        # the address (mail is on) is where the typing starts.
+        roles = dialog.locator("input[name=role]")
+        assert await roles.evaluate_all("els => els.map(e => e.value)") == ["editor", "viewer"]
+        await expect(dialog.locator("input[name=role]:checked")).to_have_count(0)
+        await expect(page.locator("#invite-email")).to_be_focused()
+        await expect(dialog.locator("[role=menu]:visible, [role=listbox]:visible")).to_have_count(0)
+
+        # Create with no role is refused in words; the dialog stays open with the address typed,
+        # and no invitation was made.
+        address = f"guest-{word}@example.test"
+        await page.locator("#invite-email").fill(address)
+        await dialog.locator("button[type=submit]").click()
+        await expect(dialog.locator(".problem")).to_have_text(
+            "Choose what the person can do.", timeout=SLOW
+        )
+        await expect(dialog).to_be_visible()
+        await expect(page.locator("#invite-email")).to_have_value(address)
+        assert owner.call("GET", where).body == {"invites": []}
+
+        # With a role chosen it is made, the dialog closes and the link is shown once.
+        await page.locator("#invite-role-editor").check()
+        await dialog.locator("button[type=submit]").click()
+        await expect(page.locator("#invite-link")).to_contain_text(
+            "/board/invite/vri_", timeout=SLOW
+        )
+        await expect(dialog).to_have_count(0)
+        (made,) = owner.call("GET", where).body["invites"]
+        assert (made["role"], made["sent_to"]) == ("editor", address)
+        assert w.problems == []
+
+
+async def test_the_account_menu_holds_account_the_appearance_choices_and_sign_out() -> None:
+    word = unique_word()
+    owner = register(name=f"Menu {word}")
+    project = make_project(owner, f"Menu project {word}")
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        page = w.page
+        await w.open("#/board")
+        button, menu = page.locator("#account"), page.locator("#account-list")
+        # Closed, the foot of the sidebar shows the person's name and nothing to click but that:
+        # no Sign out button, and no appearance control in the top bar.
+        await expect(button).to_have_text(owner.name, timeout=SLOW)
+        assert await button.get_attribute("aria-haspopup") == "menu"
+        assert await button.get_attribute("aria-expanded") == "false"
+        await expect(menu).to_be_hidden()
+        await expect(page.locator("#sign-out")).to_be_hidden()
+        assert await page.locator("#top .appearance, #top [data-appearance]").count() == 0
+
+        # Open, it holds Account, the three Appearance choices and Sign out, and nothing else.
+        await button.click()
+        await expect(menu).to_be_visible()
+        assert await button.get_attribute("aria-expanded") == "true"
+        choices = menu.locator("[role=menuitem], [role=menuitemradio]")
+        assert await choices.all_inner_texts() == ["Account", "Light", "Dark", "System", "Sign out"]
+        assert await menu.locator("[role=menuitemradio]").evaluate_all(
+            "els => els.map(e => [e.dataset.appearance, e.getAttribute('aria-checked')])"
+        ) == [["light", "false"], ["dark", "false"], ["system", "true"]]
+
+        # Dark applies at once and is kept in this browser; the menu closes and the focus is back
+        # on its button. Opened again it says Dark is the one chosen.
+        await page.locator("#account-appearance-dark").click()
+        await expect(menu).to_be_hidden()
+        await expect(button).to_be_focused()
+        await expect(page.locator("html")).to_have_attribute("data-theme-choice", "dark")
+        assert await page.evaluate("document.documentElement.dataset.theme") == "dark"
+        assert await page.evaluate("localStorage.getItem('vrum.theme')") == "dark"
+        await button.click()
+        await expect(page.locator("#account-appearance-dark")).to_have_attribute(
+            "aria-checked", "true"
+        )
+        await expect(page.locator("#account-appearance-system")).to_have_attribute(
+            "aria-checked", "false"
+        )
+        # The keyboard: arrows move round it, Escape closes it and gives the focus back.
+        await page.keyboard.press("Escape")
+        await expect(menu).to_be_hidden()
+        await expect(button).to_be_focused()
+        await page.keyboard.press("ArrowDown")
+        await expect(page.locator("#account-page")).to_be_focused()
+        await page.keyboard.press("End")
+        await expect(page.locator("#sign-out")).to_be_focused()
+        await page.keyboard.press("Escape")
+        await expect(button).to_be_focused()
+
+        # Account opens the Account page and marks the button; it is on no other menu.
+        await button.click()
+        await page.locator("#account-page").click()
+        await on_page(page, "account")
+        await expect(menu).to_be_hidden()
+        assert page.url.endswith("#/account")
+        assert await page.locator("#settings-list a[href='#/account']").count() == 0
+
+        # Sign out ends the session and goes to the sign-in; the choice of appearance stays.
+        await sign_out(page)
+        await expect(page.locator("#sign-in-form")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("html")).to_have_attribute("data-theme-choice", "dark")
+        assert await page.evaluate("localStorage.getItem('vrum.theme')") == "dark"
+        assert w.problems == [] or all("status of 4" in problem for problem in w.problems)
+
+
+async def test_the_account_page_holds_the_person_and_users_holds_only_members_and_agents() -> None:
+    word = unique_word()
+    owner = register(name=f"Pager {word}")
+    project = make_project(owner, f"Pager project {word}")
+    info = owner.call("GET", "/board/api/info").body
+    providers = [one["id"] for one in info["sign_in"]["providers"]]
+    assert providers, "the check stack has sign-in providers"
+    async with browser_page(project.address, token=project.key, name=None) as w:
+        page = w.page
+        await w.open("#/board")
+        await open_account_menu(page)
+        await page.locator("#account-page").click()
+        await on_page(page, "account")
+        # The page is the person and nothing about the project: their name, their email and the
+        # ways they sign in. There is no heading above it that says Account again.
+        section = page.locator("section#account-settings")
+        await expect(section).to_be_visible(timeout=SLOW)
+        assert await page.locator("main#page h1").all_inner_texts() == ["Account"]
+        assert await page.locator("main#page h2").count() == 0
+        assert await page.locator("#account-display-name").input_value() == owner.name
+        assert (await page.locator("#account-email-shown").inner_text()).strip() == owner.email
+        await expect(page.locator("#email-state")).to_have_attribute("data-state", "unverified")
+        assert await page.locator("#send-verification").count() == int(info["mail"]["enabled"])
+        # The ways to sign in: the password and each provider the server has, a way that is not
+        # connected saying nothing but its button.
+        await expect(page.locator("#setting-methods")).to_be_visible(timeout=SLOW)
+        methods = page.locator("#methods li.method")
+        await expect(methods).to_have_count(1 + len(providers), timeout=SLOW)
+        assert await methods.evaluate_all("els => els.map(e => e.dataset.method)") == [
+            "password",
+            *providers,
+        ]
+        await expect(page.locator("#change-password")).to_be_visible()
+        for provider in providers:
+            await expect(page.locator(f"#connect-{provider}")).to_be_visible()
+            assert await page.locator(f"#method-{provider}-state").count() == 0
+        assert "Not connected" not in await page.locator("#methods").inner_text()
+        assert await page.locator("#method-password-state").count() == 0
+
+        # A new name is saved here, shown at the foot of the sidebar at once and kept by the server.
+        renamed = f"Renamed {word}"
+        await page.locator("#account-display-name").fill(renamed)
+        await page.locator("#save-name").click()
+        await expect(page.locator("#account")).to_have_text(renamed, timeout=SLOW)
+        signed = owner.sign_in_again()
+        assert signed.call("GET", "/board/api/session").body["account"]["name"] == renamed
+
+        # The Users page is only the project's people, its agents and, for the owner, its
+        # webhooks: nothing of the account is on it any more, and how to connect an agent is said
+        # once, in Agents.
+        await w.go("#/users")
+        await on_page(page, "users")
+        await expect(page.locator("#users-members")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#users-agents")).to_be_visible()
+        await expect(page.locator("#users-webhooks")).to_be_visible()
+        assert await page.locator("main#page section[id^='users-']").evaluate_all(
+            "els => els.map(e => e.id)"
+        ) == ["users-members", "users-agents", "users-webhooks"]
+        for gone in (
+            "#users-account",
+            "#account-settings",
+            "#account-display-name",
+            "#account-nudges",
+            "#setting-methods",
+            "#methods",
+            "#change-password",
+            "#send-verification",
+        ):
+            assert await page.locator(gone).count() == 0, gone
+        assert await page.locator("#users-agents #connect").count() == 1
+        assert await page.locator("#page").get_by_text("Connect an agent").count() == 1
+        assert w.problems == [] or all("status of 4" in problem for problem in w.problems)
 
 
 async def test_a_session_that_ended_sends_the_page_back_to_sign_in_and_signing_in_returns() -> None:
@@ -524,8 +854,9 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
     long_title = (
         f"Under the bar, with a title that is a good deal longer than the bar is wide {word}"
     )
-    # What sticks under the bar on a page (the section list of a record's page, the side column of
-    # the Activity page) starts below where the bar really ends: it is published as --top-now.
+    # What sticks under the bar on a page (the head of a record's table of what is under it, the day
+    # headings of the Activity feed) starts below where the bar really ends:
+    # it is published as --top-now.
     agreed = """(selector) => {
         const near = (a, b) => Math.abs(a - b) < 0.5;
         const bar = document.getElementById('top').getBoundingClientRect().height;
@@ -540,24 +871,28 @@ async def test_what_sticks_under_the_top_bar_starts_where_the_bar_really_ends() 
         browser_page(project.address, token=project.key, name=None) as w,
     ):
         epic = await made(agent, "epic", long_title)
+        await made(agent, "story", f"A story under the long one {word}", epic)
         await w.open(f"#/item?item={epic}&from=board")
         await expect(w.page.locator("#item-page")).to_have_attribute("data-ref", epic, timeout=SLOW)
         await expect(w.page.locator("#main-nav")).to_be_visible(timeout=SLOW)
         # The long names (the person's, the project's and the item's, which are in the sidebar and
         # the path) are cut short instead of making the bar taller, and what sticks starts below it.
-        await w.page.wait_for_function(agreed, arg=".item-nav", timeout=SLOW)
+        head = "#item-table thead th"
+        await expect(w.page.locator(head).first).to_be_visible(timeout=SLOW)
+        await w.page.wait_for_function(agreed, arg=head, timeout=SLOW)
         top = await w.page.evaluate(
-            "parseFloat(getComputedStyle(document.querySelector('.item-nav')).top)"
+            f"parseFloat(getComputedStyle(document.querySelector('{head}')).top)"
         )
         bar = await w.page.evaluate("document.getElementById('top').getBoundingClientRect().height")
         assert abs(top - bar) < 0.5
         # There is no panel or drawer that could stick under it as well.
         assert await w.page.locator("#panel, #drawer").count() == 0
-        await w.page.set_viewport_size({"width": 700, "height": 1500})
-        await w.page.wait_for_function(agreed, arg=".item-nav", timeout=SLOW)
-        await w.page.set_viewport_size({"width": 1500, "height": 1500})
-        # The Activity page keeps who is working on what in view beside the feed, below the bar.
+        # The Activity page has no side column now: the day headings of its feed stick under the
+        # bar, at a wide width and at a narrow one.
         await w.go("#/activity")
-        await expect(w.page.locator("#working")).to_be_visible(timeout=SLOW)
-        await w.page.wait_for_function(agreed, arg=".activity-side", timeout=SLOW)
+        await expect(w.page.locator(".feed-day").first).to_be_visible(timeout=SLOW)
+        await w.page.wait_for_function(agreed, arg=".feed-day", timeout=SLOW)
+        await w.page.set_viewport_size({"width": 700, "height": 1500})
+        await w.page.wait_for_function(agreed, arg=".feed-day", timeout=SLOW)
+        await w.page.set_viewport_size({"width": 1500, "height": 1500})
         assert await w.page.locator("#panel, #drawer").count() == 0

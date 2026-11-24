@@ -3,7 +3,10 @@
 // who ticked each one, when, and how it was checked (the evidence, in full). Ticking asks nothing and is saved
 // at once, by the operation an agent calls; "Add how you checked" opens a one-line field that ticks it with
 // those words. A person who can only look sees the boxes, disabled. Every other line of the text is context,
-// shown as it was written above the boxes.
+// shown as it was written above the boxes. A line may start with tags that say who may tick it ([person], [verifier],
+// [github]); a check carries one chip for them. When an agent ticked a [github] check, the evidence starts with a pull request
+// address, which is a link to look again, and a quiet line says that the agent reported it and GitHub did not confirm it:
+// Vrum never asks GitHub.
 //
 // `checkItems` and `itemWords` read a text the way the server does (definition_of_done.py), so that the
 // Settings page can say how many checks a text holds before it is saved.
@@ -12,19 +15,38 @@ import { Refusal, call } from './api.js';
 import { can, notify, viewLink } from './ctx.js';
 import { announce, h, moment } from './dom.js';
 import { refuse } from './forms.js';
-import { actorLabel, personOnlyChip } from './labels.js';
+import { actorLabel, checkChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { sync } from './store.js';
+import { plainHttps } from './whereabouts.js';
 
 const LIST_LINE = /^[ \t]*[-*][ \t]+(\S.*)$/;
 const CHECKBOX = /^\[[ xX]\](?:\s+|$)/;
-const PERSON_TAG = /^\[person\](?:\s+|$)/i;
+const TAG = /^\[(?:person|verifier|github)\](?:\s+|$)/i;
 const RULER = /^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const FENCE = /^[ \t]*(?:```|~~~)/;
 
-// The words of a list line as a check has them: trimmed, a leading [ ] or [x] and then a [person] tag taken off,
-// white space made one space.
-export const itemWords = (text) => String(text).trim().replace(CHECKBOX, '').replace(PERSON_TAG, '').split(/\s+/).filter(Boolean).join(' ');
+// The words of a list line as a check has them: trimmed, a leading [ ] or [x] and then any [person], [verifier] or
+// [github] tags (in any order) taken off, white space made one space.
+export function itemWords(text) {
+  let rest = String(text).trim().replace(CHECKBOX, '');
+  while (TAG.test(rest)) rest = rest.replace(TAG, '');
+  return rest.split(/\s+/).filter(Boolean).join(' ');
+}
+
+// The pull request address a piece of evidence starts with, as a link a person may follow: an https address whose path is
+// exactly /OWNER/REPO/pull/NUMBER, with nothing after it but the words of what was seen. Anything else (another scheme, a
+// page of the repository, an address with a login, a query or a fragment) is not one, and is left as plain text
+// (whereabouts.js decides that, for every page).
+export function pullRequestOf(evidence) {
+  const written = String(evidence || '');
+  const start = written.search(/\S/);
+  if (start < 0) return null;
+  const address = written.slice(start).split(/\s/, 1)[0];
+  const url = plainHttps(address, { pullRequest: true });
+  if (!url) return null;
+  return { address, href: url.href, after: written.slice(start + address.length) };
+}
 
 // The checks a text holds, in the order written (a list line inside a code block, a line across the page and two
 // lines with the same words are not checks, or not two), and the rest of the text, which is context.
@@ -59,13 +81,12 @@ export const checkItems = (text) => scan(text).items;
 export const contextOf = (text) => scan(text).context;
 
 // "4 of 6 ticked".
-export const tickedWords = (ticked, total) => `${ticked} of ${total} ticked`;
+const tickedWords = (ticked, total) => `${ticked} of ${total} ticked`;
 
 // The section of the definition of done on the page of a story or task, with every check as a box. `node` is the
-// item as get_node sent it (its `checks`), `definition` the project's definition of done, `state` the card's
-// (the drafts of "how you checked" live in it, so that a redraw never loses one) and `onChange({ ticked, total })`
-// is told after each change, for the page's list of sections.
-export function checksSection({ node, definition, state, onChange }) {
+// item as get_node sent it (its `checks`), `definition` the project's definition of done and `state` the card's
+// (the drafts of "how you checked" live in it, so that a redraw never loses one).
+export function checksSection({ node, definition, state }) {
   const writes = can('write');
   state.evidence = state.evidence || new Map();
   let checks = node.checks;
@@ -78,7 +99,6 @@ export function checksSection({ node, definition, state, onChange }) {
     holder.replaceWith(fresh);
     holder = fresh;
     if (key) [...fresh.querySelectorAll('[data-focus-key]')].find((one) => one.dataset.focusKey === key)?.focus();
-    onChange?.({ ticked: result.checks_ticked, total: result.checks_total });
   }
 
   // Tick or untick. A refusal is said in the server's words: beside the field when there is one, else as a notice,
@@ -174,17 +194,29 @@ export function checksSection({ node, definition, state, onChange }) {
     const how = writes
       ? h('button', { type: 'button', class: 'link check-how', dataset: { focusKey: `how-button:${check.item}` }, onclick: openForm }, check.evidence ? 'Change how you checked' : 'Add how you checked')
       : null;
+    // What an agent reported about a pull request is not something Vrum looked at: the address is a link to look again, and the
+    // line says so. A person's tick, and any other check, is shown as written.
+    const reported = check.checked && check.github && check.checked_by_kind === 'agent';
+    const pull = reported ? pullRequestOf(check.evidence) : null;
+    const evidence = check.checked && check.evidence
+      ? h(
+          'p',
+          { class: 'check-evidence' },
+          pull ? [h('a', { class: 'external check-pull-request', href: pull.href, target: '_blank', rel: 'noopener noreferrer' }, pull.address), pull.after] : check.evidence,
+        )
+      : null;
     return h(
       'li',
       { class: `check-item${check.checked ? ' ticked' : ''}`, dataset: { item: check.item, checked: String(check.checked) } },
       h(
         'div',
         { class: 'check-line' },
-        h('label', { class: 'check-label', for: id }, box, h('span', { class: 'check-text' }, check.text), check.person_only ? personOnlyChip() : null),
+        h('label', { class: 'check-label', for: id }, box, h('span', { class: 'check-text' }, check.text), checkChip(check)),
         check.checked ? h('span', { class: 'check-who quiet', id: `${id}-who` }, actorLabel(check.checked_by, check.checked_by_kind), `, ${moment(check.checked_at)}`) : null,
         state.evidence.has(check.item) ? null : how,
       ),
-      check.checked && check.evidence ? h('p', { class: 'check-evidence' }, check.evidence) : null,
+      evidence,
+      reported ? h('p', { class: 'check-reported quiet' }, 'Reported by ', actorLabel(check.checked_by, check.checked_by_kind), ', not confirmed by GitHub.') : null,
       state.evidence.has(check.item) ? howForm(check) : null,
     );
   }
@@ -198,7 +230,7 @@ export function checksSection({ node, definition, state, onChange }) {
       h(
         'div',
         { class: 'part-head' },
-        h('h3', {}, 'Definition of done', h('span', { class: 'heading-count', id: 'checks-ticked' }, ` (${tickedWords(ticked, checks.length)})`)),
+        h('h3', {}, 'Definition of done', h('span', { class: 'heading-count', id: 'checks-ticked' }, tickedWords(ticked, checks.length))),
         writes ? viewLink('definition', {}, { class: 'action-link small edit-definition' }, 'Edit in Settings') : null,
       ),
       context ? h('div', { class: 'body-text check-intro' }, renderMarkdown(context)) : null,

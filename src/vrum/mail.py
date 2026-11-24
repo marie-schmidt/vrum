@@ -125,6 +125,30 @@ def reset_message(*, link: str, expires_in_hours: int) -> Message:
     )
 
 
+_NUDGES = {
+    "ask.raised": "A question or an approval is waiting for a person",
+    "plan.proposed": "A drafted plan is waiting for approval",
+    "placement.proposed": "A suggested move of work is waiting for a person",
+    "work.blocked": "Work was blocked",
+    "claim.lapsed": "A claim ran out with no handoff",
+}
+
+
+def nudge_message(*, kind: str, node: str | None, link: str) -> Message:
+    """What a person who asked to be mailed is told: what kind of news it is, which story or task
+    when there is one, and where to look. It never says what anything is called or what anyone
+    wrote."""
+    what = _NUDGES.get(kind, "There is news")
+    about = f" ({node})" if node else ""
+    return Message(
+        f"{what} on Vrum",
+        f"{what}{about}.\n\n"
+        f"Open this link to look at it:\n{link}\n\n"
+        "You get this email because you asked for it in your account settings. You can turn "
+        "it off there.\n",
+    )
+
+
 def _reason(code: int, text: bytes | str, *hide: str) -> str:
     """What the mail server said, short and on one line, without the address it was sent to."""
     said = text.decode("utf-8", "replace") if isinstance(text, bytes) else text

@@ -42,8 +42,8 @@ SLOW = 15_000  # milliseconds a page may take to show what a change should bring
 # `from`), and the pages that the Settings menu opens. The page of one record is `item`: it is in no
 # menu, and its address names the record.
 VIEWS = ["board", "graph", "roadmap", "lists"]
-SETTINGS = ["users", "definition", "tools", "status"]
-FROM_PAGES = [*VIEWS, "search", "activity", "coverage"]
+SETTINGS = ["users", "definition", "templates", "tools", "status"]
+FROM_PAGES = [*VIEWS, "search", "activity", "needs", "coverage"]
 PAGES = [*FROM_PAGES, *SETTINGS]
 # The heading (the page's only h1) of each page that has a fixed one.
 HEADINGS = {
@@ -53,11 +53,14 @@ HEADINGS = {
     "lists": "Lists",
     "search": "Search",
     "activity": "Activity",
+    "needs": "Needs a person",
     "coverage": "Coverage",
     "users": "Users",
     "definition": "Definition of done",
+    "templates": "Plan templates",
     "tools": "Tools",
     "status": "Status and export",
+    "account": "Account",
 }
 # What the board's old addresses named, which are not pages any more (and have no alias).
 GONE = ["home", "table", "outline", "rules", "memory", "overlaps", "ask", "access"]
@@ -100,10 +103,44 @@ async def made(
     return str((await ok(client, "create_node", **fields))["ref"])
 
 
+async def item_name(client: Client, ref: str) -> str:
+    """An item as the board writes it where a code stands before a name: 'S-12 Scan a QR code'
+    (an acceptance criterion 'AC-3 title', a note 'N-7' and its headline), read from the server."""
+    kind, _, number = ref.partition(":")
+    if kind == "rule":
+        words = (await ok(client, "get_rule", rule_id=int(number)))["title"]
+    elif kind == "note":
+        words = (await ok(client, "get_note", note_id=int(number)))["headline"]
+    else:
+        words = (await ok(client, "get_node", node=ref))["title"]
+    letter = {"epic": "E", "story": "S", "task": "T", "rule": "AC", "note": "N"}[kind]
+    return f"{letter}-{number} {words}"
+
+
+_AN_ITEM = "\u2039item\u203a"
+# How the server names an item to an agent (story:12, S-12, note 7); the board shows the item's name
+# in curly quotes instead (api.js, namesIn), so the two are compared with each name made one mark.
+# An ask the server calls "Ask 12" is Q-12 on the board.
+_REFERENCE = re.compile(
+    r"([\"'])?\b(?:(?:epic|story|task|rule|note):\d+|(?:AC|[ESTN])-\d+"
+    r"|(?:[Nn]ote|(?:[Aa]cceptance )?[Cc]riterion) \d+)\b\1?"
+)
+_ASK = re.compile(r"\b[Aa]sk (\d+)\b")
+
+
 def plain(board_words: str, mcp_words: str) -> None:
-    """The board said what the tool says: the same words, without the protocol's prefix."""
+    """The board said what the tool says: the same words, without the protocol's prefix, with each
+    item the tool names by its reference named by what it is called."""
     assert board_words.strip() and not board_words.startswith("Error executing tool")
-    assert mcp_words.endswith(board_words.strip()), (board_words, mcp_words)
+    mcp_words = _ASK.sub(r"Q-\1", mcp_words)
+    if mcp_words.endswith(board_words.strip()):
+        return
+    on_board = re.sub(r"\u201c[^\u201d]*\u201d", _AN_ITEM, board_words.strip())
+    said = _REFERENCE.sub(_AN_ITEM, mcp_words)
+    assert said.replace("an item", _AN_ITEM).endswith(on_board.replace("an item", _AN_ITEM)), (
+        board_words,
+        mcp_words,
+    )
 
 
 @dataclass
@@ -265,6 +302,21 @@ async def cards_are(page: Page, wanted: set[str]) -> None:
     )
 
 
+async def drag_card(page: Page, ref: str, target: str, landed: Locator) -> None:
+    """Drag a Board card onto a cell (`target` is its selector) and wait for `landed`, what shows
+    that the drop was taken: the card in its new column, or a refusal. A drag that never starts
+    (the Board is drawn again between the press and the first move, which a loaded machine makes
+    likely) is tried again, up to three times; a drop that is taken and is wrong fails at once."""
+    for attempt in range(3):
+        await page.drag_and_drop(f".card[data-ref='{ref}']", target)
+        try:
+            await expect(landed).to_be_visible(timeout=5_000)
+            return
+        except AssertionError:
+            if attempt == 2:
+                raise
+
+
 async def shown_cards(page: Page, count: int) -> list[str]:
     """The references of the cards the Board shows (stories and tasks), in the order shown, once
     there are `count` of them."""
@@ -381,12 +433,63 @@ async def current_address(page: Page) -> tuple[str, dict[str, str]]:
 
 async def on_page(page: Page, name: str) -> None:
     """Wait until the page the address names is the one on show: its heading says so. The page of a
-    record (`item`) has the record's own heading, so for it this waits for the page itself."""
+    record (`item`) and the review page of a change (`review`) have their own headings, so for them
+    this waits for the page itself."""
     if name == "item":
         await expect(page.locator("#item-page")).to_be_visible(timeout=SLOW)
+    elif name == "review":
+        await expect(page.locator("#review-page")).to_be_visible(timeout=SLOW)
     else:
         await expect(page.locator("main#page h1").first).to_have_text(HEADINGS[name], timeout=SLOW)
     assert (await page.evaluate("location.hash")).startswith(f"#/{name}")
+
+
+async def open_review(page: Page, change: str, *, timeout: int = SLOW) -> None:
+    """Open a change's review page by pressing Open on its card in the list, and wait for the
+    page. `change` is the card's `data-change`: `plan:9`, `placement:12`, `ask:522`,
+    `check:task:160`, `note:task:160`, `lapse:task:160` or `gate:5`."""
+    card = page.locator(f"#needs-body li.needs-row[data-change='{change}']")
+    await card.locator("a.change-open").click()
+    await expect(page.locator("#review-page")).to_be_visible(timeout=timeout)
+    assert f"change={change}" in await page.evaluate("location.hash")
+
+
+async def open_review_by_address(w: Watched, change: str, *, timeout: int = SLOW) -> None:
+    """Load a change's review page from its address alone, with no list before it (so it has no
+    steps), and wait for the page."""
+    await w.open(f"#/review?change={change}")
+    await expect(w.page.locator("#review-page")).to_be_visible(timeout=timeout)
+
+
+# Every text node of six words or more in the places these pages are drawn that is not somebody's
+# own words (`data-words="theirs"`), the server's refusal (`.problem`, `[role=alert]`) or a hover
+# card: the board explains nothing in sentences (M52).
+SENTENCE_SCAN = """(roots) => {
+  const out = [];
+  const theirs = '[data-words="theirs"], .problem, [role="alert"], .hovercard, script, style';
+  for (const selector of roots) for (const root of document.querySelectorAll(selector)) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent.trim();
+      if (text.split(/\\s+/).filter(Boolean).length < 6) continue;
+      const element = node.parentElement;
+      if (element.closest(theirs)) continue;
+      const part = element.closest('[data-part]')?.dataset.part ?? '';
+      const where = `${selector} ${part} ${element.tagName.toLowerCase()}.${element.className}`;
+      out.push(`${where}: ${text.slice(0, 140)}`);
+    }
+  }
+  return out;
+}"""
+
+REVIEW_PLACES = ["#needs-body", "#needs-rail", "#review-page", "dialog[open]"]
+
+
+async def sentences(page: Page, places: list[str] | None = None) -> list[str]:
+    """The sentences the page draws that it should not (an empty list when there are none)."""
+    found: list[str] = await page.evaluate(SENTENCE_SCAN, places or REVIEW_PLACES)
+    return found
 
 
 async def page_drawn(page: Page) -> None:
@@ -437,6 +540,30 @@ async def no_panel_or_drawer(page: Page) -> None:
     name, choices = await current_address(page)
     for key in ("drawer", "panel") + (() if name in ("graph", "lists") else ("sel",)):
         assert key not in choices, f"{key}= is in the address {choices}"
+
+
+async def nothing_open(page: Page, where: str = "dialog[open]") -> None:
+    """Nothing the person did not ask for is open: no menu or list of a select, no list of
+    suggestions, no calendar and no hover card anywhere on the page, and, inside `where` (the open
+    dialog unless another place is named), no open fold and no control that says it is expanded
+    (one inside a part that is itself closed does not count: nobody can see it).
+    A dialog or card that has just opened is checked with this: it starts empty."""
+    found: list[str] = await page.evaluate(
+        """(where) => {
+            const name = (e) => e.tagName.toLowerCase() + '#' + e.id + '.' + e.className;
+            const seen = (e) => e.checkVisibility({ checkVisibilityCSS: true });
+            const popups = [...document.querySelectorAll(
+                '.vselect-list, [role=listbox], [role=menu], .ref-picker, .dp, .hovercard')]
+                .filter(seen);
+            const place = document.querySelector(where);
+            const inside = place ? [...place.querySelectorAll(
+                'details[open], button[aria-expanded=true], input[aria-expanded=true], ' +
+                'select[aria-expanded=true]')].filter(seen) : [];
+            return [...popups, ...inside].map(name);
+        }""",
+        where,
+    )
+    assert found == [], found
 
 
 # -- the page of one epic, story, task, acceptance criterion or note ------------------------------
@@ -510,20 +637,48 @@ async def record_text(page: Page) -> str:
     return " ".join((await page.locator("#item-page").inner_text()).split())
 
 
+async def strip_labels(page: Page) -> list[str]:
+    """The labels of the ONE strip of properties in the header of a record's page, as written (the
+    page draws them in capitals, which inner_text would give): ['Status', 'Priority', 'Size',
+    'Start', 'Target', 'Held by']."""
+    found: list[str] = await page.locator("#item-page .state-strip dt").evaluate_all(
+        "els => els.map(e => e.textContent.trim())"
+    )
+    return found
+
+
+CRUMB_WORDS = """(li) => [...li.querySelectorAll('.crumb-code, .crumb-name')].length
+    ? [...li.querySelectorAll('.crumb-code, .crumb-name')].map(s => s.textContent.trim()).join(' ')
+    : li.textContent.replace(/\\s+/g, ' ').trim()"""
+
+
 async def crumbs(page: Page) -> list[str]:
-    """The breadcrumb, in order, as a person reads it: ['Projects', 'My project', 'Board',
-    'E-3 An epic', 'S-12 A story']."""
+    """The breadcrumb, in order, as a person reads it: on a view, one step ['Board']; on a record's
+    page the view it was reached from first and the record last, each record as its code and its
+    name ['Board', 'E-3 Platform foundations', 'S-12 Scan a QR code', 'T-40 Read the code'] (an
+    acceptance criterion is AC-3, a note N-7 and its headline)."""
     texts: list[str] = await page.locator("nav.crumbs li").evaluate_all(
-        "els => els.map(e => e.textContent.replace(/\\s+/g, ' ').trim())"
+        f"els => els.map({CRUMB_WORDS})"
+    )
+    return texts
+
+
+async def crumb_codes(page: Page) -> list[str]:
+    """The breadcrumb with only the code of each record step (the name after it is clipped by the
+    page when there is no room): ['Board', 'E-3', 'S-12', 'T-40']."""
+    texts: list[str] = await page.locator("nav.crumbs li").evaluate_all(
+        """els => els.map(e => e.querySelector('.crumb-code')
+            ? e.querySelector('.crumb-code').textContent.trim()
+            : e.textContent.replace(/\\s+/g, ' ').trim())"""
     )
     return texts
 
 
 async def crumb_links(page: Page) -> list[tuple[str, str | None]]:
     """The breadcrumb as (words, address of the link or None when it is plain text): the last one,
-    the page itself, is never a link."""
+    the page itself, is never a link. The words are those of `crumbs`."""
     rows: list[list[str | None]] = await page.locator("nav.crumbs li").evaluate_all(
-        """els => els.map(e => [e.textContent.replace(/\\s+/g, ' ').trim(),
+        f"""els => els.map(e => [({CRUMB_WORDS})(e),
             e.querySelector('a') ? e.querySelector('a').getAttribute('href') : null])"""
     )
     return [(str(words), href) for words, href in rows]
@@ -536,9 +691,11 @@ def view_crumb(page: Page) -> Locator:
 
 
 async def sidebar_current(page: Page) -> list[str]:
-    """The views (and Activity) the sidebar marks as where the person is: normally exactly one."""
+    """The views (and Activity, and Needs a person) the sidebar marks as where the person is:
+    normally exactly one."""
     pages: list[str] = await page.locator(
-        "#main-nav a[aria-current=page], #activity-open[aria-current=page]"
+        "#main-nav a[aria-current=page], #activity-open[aria-current=page], "
+        "#needs-open[aria-current=page]"
     ).evaluate_all("els => els.map(e => e.dataset.page)")
     return pages
 
@@ -768,6 +925,22 @@ async def open_sidebar(page: Page) -> None:
         await expect(page.locator("#sidebar.open")).to_be_visible(timeout=SLOW)
 
 
+async def open_account_menu(page: Page) -> None:
+    """Open the account menu at the foot of the sidebar (the button with the person's name: Account,
+    the three Appearance choices and Sign out) and wait for it. It does nothing when it is open."""
+    await open_sidebar(page)
+    button = page.locator("#account")
+    if await button.get_attribute("aria-expanded") != "true":
+        await button.click()
+    await expect(page.locator("#account-list")).to_be_visible(timeout=SLOW)
+
+
+async def sign_out(page: Page) -> None:
+    """Sign out, as a person does: open the account menu and choose Sign out."""
+    await open_account_menu(page)
+    await page.locator("#sign-out").click()
+
+
 def tree_item(page: Page, ref: str) -> Locator:
     """The tree item (`li[role=treeitem]`) of an epic, story or task in the sidebar."""
     return page.locator(f"#epic-list li[role=treeitem][data-key='{ref}']")
@@ -881,14 +1054,14 @@ async def asked(client: Client, query: str, mode: str = "both") -> list[tuple[st
 
 
 async def search_for(page: Page, query: str) -> None:
-    """Type a search into the Search page and press its button. When the Search page is not on
-    show, the box of the top bar takes the person there first, as it does for a person."""
+    """Type a search into the Search page and press Enter (it has no button). When the Search page
+    is not on show, the box of the top bar takes the person there first, as it does for a person."""
     if not await page.locator("#search-box").count():
         await page.locator("#global-search").fill(query)
-        await page.locator("#global-search-go").click()
+        await page.locator("#global-search").press("Enter")
         await expect(page.locator("#search-box")).to_be_visible(timeout=SLOW)
     await page.locator("#search-box").fill(query)
-    await page.locator("#search-go").click()
+    await page.locator("#search-box").press("Enter")
 
 
 async def listed(page: Page, count: int) -> list[tuple[str, str, str]]:

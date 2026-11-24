@@ -1,0 +1,37 @@
+/* The dialog a red, green or changed line opens (change-dialog.js): the layout of the form the work is made or edited in, read only, with a `+`
+   gutter and the added colours on what is new and a `-` gutter and the removed colours on what was. The sign carries the meaning and the
+   colour only helps. Colours are only ever a token (tokens.css). */
+
+dialog.modal.change-dialog { width: min(42rem, calc(100vw - var(--space-5))); }
+.change-dialog-about { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); color: var(--text-2); }
+.change-dialog-about .icon { color: var(--text-2); }
+.change-dialog-body > .loading { margin: 0; }
+
+.change-fields { display: grid; gap: var(--space-3); margin: 0; min-width: 0; }
+.change-field { display: grid; gap: var(--space-1); min-width: 0; }
+.change-label { margin: 0; color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
+.change-values { display: grid; gap: 1px; margin: 0; min-width: 0; }
+@media (min-width: 700px) {
+  .change-field { grid-template-columns: 8.5rem minmax(0, 1fr); gap: var(--space-3); }
+  .change-label { padding-top: 0.3rem; }
+}
+
+/* A value: a gutter with its sign, and its words. A value that did not change has no gutter and is plain. */
+.change-value { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); min-width: 0; }
+.change-value:not([data-sign]) .change-body { grid-column: 2; }
+.change-sign { display: flex; align-items: flex-start; justify-content: center; padding-top: 0.3rem; background: var(--diff-context-gutter); color: var(--text-2); font-family: var(--font-mono); font-weight: 700; user-select: none; }
+.change-body { min-width: 0; padding: 0.3rem var(--space-3); color: var(--text); line-height: 1.45; overflow-wrap: anywhere; }
+.change-value[data-sign="+"] .change-sign { background: var(--diff-add-gutter); color: var(--diff-add-text); }
+.change-value[data-sign="+"] .change-body { background: var(--diff-add-bg); }
+.change-value[data-sign="-"] .change-sign { background: var(--diff-remove-gutter); color: var(--diff-remove-text); }
+.change-value[data-sign="-"] .change-body { background: var(--diff-remove-bg); }
+.change-body .quiet { color: var(--text-2); }
+.change-body .markdown > :first-child { margin-top: 0; }
+.change-body .markdown > :last-child { margin-bottom: 0; }
+.change-body .chip .icon, .change-day .icon { margin-right: var(--space-1); vertical-align: -0.15em; }
+.change-note-text { white-space: pre-wrap; }
+.change-links, .change-criteria { display: grid; gap: var(--space-1); margin: 0; padding: 0; }
+.change-criteria .markdown { margin-top: var(--space-1); }
+.change-parent .level-chip { margin-right: var(--space-1); }
+
+dialog.change-dialog .actions { align-items: center; }

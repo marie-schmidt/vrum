@@ -320,8 +320,10 @@ async def test_the_context_holds_exactly_what_the_work_needs(client: Client) -> 
         "definition_of_done",
         "definition_of_done_chars",
         "definition_checks",
+        "asks",
         "handoffs",
         "prerequisites",
+        "discovered_from",
         "notes",
         "project_wide_notes",
         "past_notes",
@@ -1505,6 +1507,9 @@ async def test_the_server_instructions_name_only_tools_that_exist(client: Client
     instructions = client.instructions
     assert instructions
     tools = {tool.name for tool in (await client.list_tools()).tools}
+    # The instructions also tell a key that runs code what it is given instead: a key that calls
+    # one tool at a time is never offered these two (tests/test_code_mode_integration.py).
+    tools |= {"explore", "run"}
 
     named = set(re.findall(r"`([a-z_]+)`", instructions))
 

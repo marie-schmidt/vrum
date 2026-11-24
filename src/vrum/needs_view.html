@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Needs a person</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; font-size: 14px; }
+  body { margin: 0; padding: 12px; background: Canvas; color: CanvasText; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  h2 { font-size: 13px; margin: 14px 0 4px; overflow-wrap: anywhere; }
+  .quiet { color: GrayText; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { border: 1px solid GrayText; border-radius: 6px; padding: 8px; margin: 6px 0; }
+  .kind { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: GrayText; }
+  .reason { margin: 2px 0; overflow-wrap: anywhere; }
+  .line { font-size: 12px; color: GrayText; overflow-wrap: anywhere; }
+  button { font: inherit; border: 1px solid GrayText; border-radius: 4px; padding: 3px 8px;
+           background: ButtonFace; color: ButtonText; cursor: pointer; margin-top: 4px; }
+  button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<h1>Needs a person</h1>
+<p id="count" class="quiet">Waiting for the list.</p>
+<div id="list"></div>
+<p id="note" class="quiet"></p>
+<script>
+"use strict";
+let nextId = 1;
+const pending = new Map();
+let board = null;
+
+function send(message) { window.parent.postMessage(message, "*"); }
+function request(method, params) {
+  const id = nextId++;
+  send({ jsonrpc: "2.0", id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+function notify(method, params) { send({ jsonrpc: "2.0", method, params }); }
+
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (className) node.className = className;
+  return node;
+}
+
+function code(ref) {
+  const found = /^(epic|story|task):(\d+)$/.exec(String(ref));
+  return found ? found[1][0].toUpperCase() + "-" + found[2] : String(ref);
+}
+
+function howLong(since, now) {
+  const seconds = Math.max(0, (Date.parse(now) - Date.parse(since)) / 1000);
+  if (!Number.isFinite(seconds)) return "a while";
+  if (seconds < 90) return "just now";
+  const minutes = seconds / 60;
+  if (minutes < 90) return Math.round(minutes) + " minutes";
+  const hours = minutes / 60;
+  if (hours < 36) return Math.round(hours) + " hours";
+  return Math.round(hours / 24) + " days";
+}
+
+const KINDS = {
+  ask: "Question",
+  check: "Check",
+  note: "Notes to confirm",
+  lapse: "Lapsed claim",
+  plan: "Plan to approve",
+  placement: "Suggested move",
+  gate: "Refused approval",
+};
+
+function openOnBoard(path) {
+  if (board) request("ui/open-link", { url: board + path }).catch(() => {});
+}
+
+function row(item, now) {
+  const li = el("li");
+  const answers = ["ask", "plan", "placement"].includes(item.kind);
+  li.appendChild(el("div", KINDS[item.kind] || item.kind, "kind"));
+  li.appendChild(el("div", item.reason, "reason"));
+  if (item.ask && item.ask.choices && item.ask.choices.length > 0) {
+    li.appendChild(el("div", "Q-" + item.ask.id + ". Choices: " + item.ask.choices.join(", "), "line"));
+  }
+  const target = item.kind === "plan" ? item.title : code(item.node) + " " + item.title;
+  const who = item.waiting ? item.waiting + " is waiting" : "Waiting";
+  li.appendChild(el("div", target + ". " + who + " for " + howLong(item.waiting_since, now) + ".", "line"));
+  if (board) {
+    const page = answers ? "#/needs" : "#/item?item=" + encodeURIComponent(item.node);
+    const button = el("button", answers ? "Answer on the board" : "Open on the board");
+    button.type = "button";
+    button.addEventListener("click", () => openOnBoard(page));
+    li.appendChild(button);
+  }
+  return li;
+}
+
+function render(result) {
+  const data = result && result.structuredContent;
+  const list = document.getElementById("list");
+  const count = document.getElementById("count");
+  list.replaceChildren();
+  if (!data || !Array.isArray(data.groups)) {
+    count.textContent = "The list could not be read.";
+    return;
+  }
+  board = typeof data.board_address === "string" && data.board_address ? data.board_address : null;
+  count.textContent = data.total === 0
+    ? "Nothing is waiting for a person."
+    : data.total + (data.total === 1 ? " thing is" : " things are") + " waiting for a person.";
+  for (const group of data.groups) {
+    list.appendChild(el("h2", group.story ? code(group.story) + " " + group.title : group.title || "Other"));
+    const ul = el("ul");
+    for (const item of group.items) ul.appendChild(row(item, data.as_of));
+    list.appendChild(ul);
+  }
+  document.getElementById("note").textContent = data.left_out > 0
+    ? data.left_out + " more are not shown."
+    : (board ? "Answers are given on the board, under your own name." : "");
+  reportSize();
+}
+
+function reportSize() {
+  notify("ui/notifications/size-changed", { height: Math.ceil(document.documentElement.scrollHeight) });
+}
+
+function refresh() {
+  request("tools/call", { name: "needs_a_person", arguments: {} }).then(render).catch(() => {});
+}
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data || data.jsonrpc !== "2.0") return;
+  if (data.id !== undefined && data.method === undefined && pending.has(data.id)) {
+    const waiting = pending.get(data.id);
+    pending.delete(data.id);
+    if (data.error) waiting.reject(new Error(data.error.message || "refused"));
+    else waiting.resolve(data.result);
+    return;
+  }
+  if (data.method === "ui/notifications/tool-result") render(data.params);
+});
+
+request("ui/initialize", {
+  protocolVersion: "2026-01-26",
+  appInfo: { name: "vrum-needs-a-person", version: "1.0.0" },
+  appCapabilities: {},
+}).then(() => {
+  notify("ui/notifications/initialized", {});
+  reportSize();
+}).catch(() => {
+  document.getElementById("count").textContent = "This view could not start.";
+});
+if (typeof ResizeObserver === "function") new ResizeObserver(reportSize).observe(document.body);
+window.addEventListener("focus", refresh);
+</script>
+</body>
+</html>

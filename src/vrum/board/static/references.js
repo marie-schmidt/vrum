@@ -10,13 +10,20 @@ import { itemLink } from './ctx.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
 import { plainText } from './forms.js';
-import { KIND, isNodeKind, itemCode, kindIcon, kindLabel, nodeRef, parseItemRef, statusLabel } from './labels.js';
+import { KIND, isNodeKind, itemCode, kindIcon, nodeRef, parseItemRef, statusLabel } from './labels.js';
 import { ensure, headlineOf, store, titleOf } from './store.js';
 
 // The same pattern as the server's (src/vrum/references.py); a test keeps the two equal.
 export const REFERENCE_PATTERN = String.raw`\[\[(epic|story|task|rule|note):([1-9][0-9]{0,17})\]\]`;
 
 export const refText = (kind, number) => `[[${kind}:${number}]]`;
+
+// The code a person reads for any of the five kinds: E-1, S-4 and T-20 for work, AC-3 for an acceptance criterion and
+// N-7 for a note.
+export const codeFor = itemCode;
+
+// A code and a name as one line of words: "S-4 Audit log of staff actions".
+const withCode = (kind, number, name) => [codeFor(kind, number), name].filter(Boolean).join(' ');
 
 // What each kind of item is called on the board. A rule is an "Acceptance criterion" to a person.
 export const kindWords = (type) => KIND[type] || { label: type };
@@ -66,21 +73,32 @@ export function resolve(kind, number) {
   return { exists: true, type: kind, title: kind === 'note' ? clip(headlineOf(found)) : found.title, status: found.status, record: found };
 }
 
+// A text with each reference in it (`[[story:12]]`) replaced by what it names, as plain words, for a place that can only
+// hold text, such as a tooltip: the code and the name in quotes. One that names nothing is "a missing story".
+export function namesInText(text) {
+  return String(text ?? '').replace(new RegExp(REFERENCE_PATTERN, 'g'), (_all, kind, number) => {
+    const found = resolve(kind, number);
+    if (!found.exists) return `a missing ${kindWords(kind).label.toLowerCase()}`;
+    return withCode(kind, number, found.title === null ? '' : `“${found.title}”`);
+  });
+}
+
 // A link to an epic, story or task, written as its code and its title now (S-12 Title), to its page.
 export function nodeLink(ref) {
   const parsed = parseItemRef(ref);
-  return itemLink(ref, { class: 'item-link', dataset: { ref } }, `${itemCode(parsed.kind, parsed.number)} ${titleOf(ref)}`);
+  return itemLink(ref, { class: 'item-link', dataset: { ref } }, withCode(parsed.kind, parsed.number, titleOf(ref)));
 }
 
 // A link to the page of any record, with words of the caller's choosing and, if wished, the icon
 // of its kind.
 export const openLink = (kind, number, words, mark = null) => itemLink(`${kind}:${number}`, { class: 'record-link', dataset: { record: `${kind}:${number}` } }, mark, words);
 
+// An acceptance criterion or a note that has not been read yet is its code for the moment; the references on the page are
+// drawn again once it has.
 function labelOf(kind, number, found) {
   const mark = kindIcon(found.type, 14);
-  if (found.title === null) return [mark, `${kind} ${number}`];
-  if (isNodeKind(kind)) return [mark, `${itemCode(kind, number)} ${found.title}`];
-  return [mark, `${kindLabel(found.type)} #${number}: ${found.title}`];
+  if (found.title === null) return [mark, codeFor(kind, number)];
+  return [mark, withCode(kind, number, found.title)];
 }
 
 // The hooks a reference carries: its kind and number, its reference (story:12), and for an
@@ -94,7 +112,7 @@ export function renderReference(kind, number) {
   const found = resolve(kind, number);
   const data = hooks(kind, number);
   if (!found.exists) {
-    return h('span', { class: 'reference missing', dataset: data, title: `There is no ${isNodeKind(kind) ? `${kind} ${number}` : `${kindWords(kind).label.toLowerCase()} #${number}`}` }, icon('alert', { size: 14 }), `${refText(kind, number)} (missing)`);
+    return h('span', { class: 'reference missing', dataset: data, title: `There is no ${codeFor(kind, number)}` }, icon('alert', { size: 14 }), `${refText(kind, number)} (missing)`);
   }
   return itemLink(`${kind}:${number}`, { class: 'reference', dataset: data }, labelOf(kind, number, found));
 }
@@ -125,8 +143,7 @@ const WHERE = { details: 'its details', text: 'its text', why: 'its why' };
 
 function sourceLink(source) {
   const { kind, number } = parseItemRef(source.ref);
-  const label = isNodeKind(kind) ? `${itemCode(kind, number)} ${clip(source.title, 70)}` : `${kindLabel(kind)} #${number}: ${clip(source.title, 70)}`;
-  return itemLink(`${kind}:${number}`, { class: 'mention-link', dataset: hooks(kind, number) }, kindIcon(kind, 14), label);
+  return itemLink(`${kind}:${number}`, { class: 'mention-link', title: withCode(kind, number, source.title), dataset: hooks(kind, number) }, kindIcon(kind, 14), withCode(kind, number, clip(source.title, 70)));
 }
 
 // The words of a snippet as they read, with Markdown marks gone and references as the items they name. A

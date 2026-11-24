@@ -198,3 +198,80 @@ session notes (`m35-audit.md`: 40 repeats, with a fix for each, and the measurem
 demo data, as with the Graph in M21. The MCP tools do not change for any option; the board keeps calling the same ones.
 
 **Default taken.** Nothing is changed until the owner answers.
+
+**Answered 2026-11-20 ("go with your recommendations"): options 1 and 2, built as M35.** Option 3 (merging the navigation) is still open and waits for a clickable mockup. Everything taken off a face is still one hover or click away; the MCP tools did not change.
+
+## Parked: a "code mode" MCP surface (2 tools instead of 25)
+
+**Question (owner, 2026-11-21).** Cloudflare now serves its whole API over MCP with two tools, `search()` and `execute()`, where the model writes code (TypeScript) that runs in a sandbox, instead of one tool per operation. Should Vrum's agent surface work that way?
+
+**What the sources say.** Cloudflare's "Code Mode: give agents an entire API in 1,000 tokens" (blog.cloudflare.com/code-mode-mcp) describes a server with two tools whose footprint stays near 1,000 tokens however many endpoints exist (an equivalent one-tool-per-endpoint server would be about 1.17 million tokens, a 99.9% saving); the model writes code against a typed SDK, the code runs in an isolated sandbox, and only the final result returns to the model. Cloudflare's agents documentation (developers.cloudflare.com/agents/model-context-protocol/guides/build-codemode-mcp-server) shows how to build one: `search` runs code against the API description to find the operations and schemas needed, `execute` runs code with an authenticated request function, or a single `code` tool. The saving is largest for huge APIs; Vrum's 25 offered tools are a small API, so the gain is smaller (a few thousand tokens of definitions) but it also removes the cap problem (clients allow only so many tools) and lets an agent do several steps in one call.
+
+**Why it is not a small change.** The server would run code an agent writes, so it needs a real sandbox (no network, no files, a time and memory limit); every rule the tools enforce today (the secret refusal on every argument, the identity stamped from the key, the key's allowance, project isolation, `done` refused while a check is unticked, person-only checks) must hold inside that sandbox, because each call it makes must be a normal tool call under the same guard. It also changes the trust story ("a trusted MCP for context handling"): a fixed, reviewable set of tools is easier to trust and to audit than code written by a model.
+
+**Options.**
+
+1. **Keep the 25 tools (today).** Small API, auditable, works in every client.
+2. **Add code mode beside the tools (recommended when there is demand).** Two extra tools, `search` (find an operation and its fields) and `execute` (run a short script whose only power is calling Vrum's tools, each call guarded as now), offered to an agent key only when its owner turns it on. The 25 stay.
+3. **Replace the tools with code mode.** Smallest context, biggest change and risk.
+
+**Recommendation.** Option 2, as its own milestone, after a spike that shows the token saving on a real Vrum session and a design of the sandbox (the same guard on every call, no way out of the project). Also worth doing first and cheaply: shorten tool descriptions and share argument shapes, which cuts most of the 25 tools' cost without any sandbox.
+
+**Answered 2026-11-21: build it (option 2, beside the tools, chosen per key), without regard to the size of the work.** It is M37 in `SPEC.md`. Choices made inside it: the language is TypeScript run by Deno with every permission denied, inside a sandbox container of its own with no network and no secrets (researched 2026-11-21: Cloudflare, Anthropic, OpenAI, Microsoft, AWS, Goose, Vercel, Pydantic and Deno's own security notes; Deno alone is not treated as the boundary), the functions are the tools under the same names with exact result types, a key's allowance decides which exist, and a key calls tools one at a time unless its owner chooses code, so nothing existing changes. The board asks the owner to choose how a new key calls Vrum (it starts empty).
+
+## M38: the living Structure map (answered by approval, defaults taken)
+
+**Question (owner, 2026-11-21).** Make the Structure graph feel like Obsidian's: it moves, nodes keep apart, epics are not all at the same distance from the centre, nodes can be grabbed and wiggled. Her answers: a dropped node eases back like Obsidian's; copy Obsidian's design as far as possible and keep the status colours and marks. She then wrote "approved" to a plan that asked five more questions and did not answer them, so the defaults below were taken.
+
+1. **Own simulation or d3-force?** Taken: our own, about 300 lines of plain JavaScript (the board has no library; d3-force would need an import map or rewritten imports and a licence file). Fallback if it proves hard to tune: vendor d3-force.
+2. **Rest or drift?** Taken: rest after about three seconds and stop completely until touched (Obsidian does; a constant drift would also fail the accessibility rule on moving content and burn battery).
+3. **Forces sliders remembered?** Taken: kept only while the page is open, with Reset (the app stores nothing about a person's look except the theme).
+4. **Look.** Taken: flat discs, thin quiet lines, the progress arc and red rings as thin marks.
+5. **Prototype first?** Taken: no, it is built in the app on the demo data, where it can be tried and tuned in place.
+
+The three smaller Graph and Roadmap notes she sent with it were taken as approved too (Around fits the page, Order with nothing chosen shows an empty state, the Roadmap fills the page, shows the hand cursor only where something drags and explains each status symbol on hover). Her third screenshot (the Roadmap) did not arrive, so that part is built from the code and its description.
+
+## M40 and M43: how the server reaches GitHub, and how a steward's proposals are kept (open questions)
+
+**Answered 2026-11-22, question 1 (owner: "let's do the beads approach"): option 4.** The server holds no GitHub credential and never calls GitHub. A verifier checks the pull request with `gh` on its own machine (`scripts/verify_pr.py`) and Vrum records what it reports, under its own name, with the address. Question 2 is dissolved by the design: the requirement is a tag on a line of the definition of done (`[verifier]`, `[github]`), written by a person, so nothing is required by default and no project setting exists. A GitHub App for a server-side check stays possible later on the same evidence. Question 3 (how a steward's proposals are kept) is still open, with its default beside it.
+
+**Question 1 (M40): how does the server get GitHub access to confirm a pull request and its checks?**
+
+1. **A GitHub App per install** (recommended): the owner of the install registers one App (read-only on pull requests, checks and contents), puts its id and private key in the environment (as the SMTP and sign-in secrets are today, never in the graph) and installs it on the repositories. Narrowest rights, short-lived tokens, no personal account involved. More to set up once.
+2. **One read-only token in the environment** (fine-grained personal access token): one setting, works at once, but it belongs to a person and expires.
+3. **A token a project owner pastes into the project's settings**: per project, but Vrum would then store a secret, which it has so far avoided (the graph holds no secret; a secret scan refuses them).
+4. **No server credential at all (how Beads does it; added 2026-11-22):** Beads has no GitHub App. Its `gh:pr` and `gh:run` gates run `gh pr view` and `gh run view` on the machine where someone runs `bd gate check`, using whatever GitHub login that machine already has, and its issue sync uses a personal access token (`github.token` or `GITHUB_TOKEN`). That works for a local command line, which can borrow a person's login. A server cannot, so for Vrum the equivalent is that a verifier (M40a) with `gh` on its own machine checks the pull request and records what it saw as evidence. Simplest and nothing to configure, but the server only believes the verifier and does not confirm anything itself, so it is weaker than options 1 to 3.
+
+Default I would take: option 1 if the owner wants a real GitHub proof, and until then build against the stand-in GitHub (as sign-in does) with the setting kept to the environment, so no secret is stored. Nothing real is created on her GitHub account without her say.
+
+**Question 2 (M40): should a verifier be required by default?** Recommended: off by default, a project setting the owner turns on (so existing flows are unchanged), and the board says plainly when it is on.
+
+**Question 3 (M43): how is a steward's work kept as a proposal until a person accepts it?**
+
+1. **A status on items**: an item a steward creates or moves is `proposed` (a new node status) until a person accepts or rejects it; the Board shows them apart. Clear, but touches readiness, counts and every view.
+2. **Notes as proposals** (recommended for a first version): the steward records an unconfirmed note linked to the item saying what it proposes (move story:12 under epic:3, because it is nearest by 0.71), and a person applies or dismisses it from the item's page. Reuses the confirmation rule that exists, changes no node, and an agent still cannot confirm its own record.
+3. **A separate proposals table.** Most flexible, most new code.
+
+Default I would take: option 2, and measure how people use it before building option 1.
+
+**Taken 2026-11-23, while building M43 (open to the owner's veto): a fourth way, which is option 3 done the way asks and plans were done.** A proposal is an event, `placement_proposed`, and its decision is another, `placement_accepted` or `placement_rejected`, a person's (`placement_state` in `schema.sql` reads them). It needs no node status (option 1) and no table, so the export, history and change feed carry it; unlike a note it says exactly what it would do (these items, under this parent or under a new epic), so the board can apply it in one press and notice work that has moved since, which a note's free words could not. Accepting makes the moves as the person, and an agent cannot decide. See `DECISIONS.md`.
+
+## After the research: the order, and four things that need the owner's yes (2026-11-22)
+
+**Answered 2026-11-22 (owner: "1. yes add 2. why do they stay out? 3. ok 4. ok add as m46 then"):** question 4 yes, as M45 (asks and the Needs a person view), M47 (gates, plan approval, plan templates) and, with it, question 7 as M46 (the MCP App); question 6 yes, the run label and key expiry go into M41, the write-scope key only on request. Question 5 she answered with a question, why the other non-goals stay out; the reasons were given in the reply of the same day and the list below stands until she says otherwise. Webhooks and email nudges (M48) were taken as agreed because she did not object to them. The text below is as it was asked.
+
+The compiled recommendations are in `files/m42-final-recommendations.md`. The owner agreed the order M40 (verifier and checkable GitHub evidence), M41 (branch, commit, pull request), M42 (importers and setup), M43 (embeddings test, `suggest_parent`, steward), M44 (`discovered_from` and a briefing ceiling), and added "embed tasks too" (M39, built). The research since then (Linear, Beads and the "Agent platform 2027" essay) suggests more, which has NOT been approved and is not in `SPEC.md`.
+
+**Question 4: add a human-loop tier ahead of importers and the steward?**
+
+1. **Yes, as two milestones** (recommended): M45 asks (a typed question or approval on an item, one immutable answer) with a "Needs a person" view and a hardened change feed; M46 gates (a person or a timer as a blocker item), plan approval (an agent submits a plan as a draft, a person approves it) and plan templates as data. The steward's proposals need a place to be accepted, and this is where the human gate lives.
+2. **Only the inbox** (M45), leaving gates and plan approval for later.
+3. **Not now**: keep the approved order.
+
+Default I would take: option 1, built after M40 and M41 and before M42 and M43's steward step. This reverses nothing already approved, but it needs a decision on the non-goals below.
+
+**Question 5: which `SPEC.md` non-goals may be reversed?** The original list says no comment threads, notifications, sprints and velocity, plugin system, importers other than M8, and no server-side generation. Asks are typed with one answer, so they are not a comment thread. Recommended: allow opt-in signed webhooks and email nudges (M47, "notifications"), keep comment threads, cycles and burndown, a plugin system and server-side generation out, and record importers (M42) as already reversed. Default: keep every other non-goal.
+
+**Question 6: should the server's identity model grow?** Recommended only these small, optional additions: a self-reported run label on a claim, optional key expiry, and later a key that may write only to the items it currently holds. Not recommended: an "on behalf of" field or per-instance keys (a shared key cannot prove who started a turn). Default: build the first two with M41, the third only on request.
+
+**Question 7: an MCP App for the "needs a person" view?** Recommended later (it needs M45 first, Claude Code does not render it, and Claude reaches servers from its cloud so localhost does not work). Default: not before M45 is built.

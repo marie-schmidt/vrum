@@ -60,17 +60,39 @@ export function wholeLayout(tree, level) {
   return found;
 }
 
+// How big a hub is drawn at each level: from the smallest to the biggest by how many tasks hang under
+// it, as Obsidian sizes a note by its links. [least, most] in the map's own units.
+const HUB_SIZE = {
+  epics: { epic: [26, 38] },
+  stories: { epic: [20, 30], story: [10, 14.5] },
+  tasks: { epic: [19, 31], story: [7, 11] },
+};
+const tasksUnder = (node) => (node.stories ? sum(node.stories.map((story) => story.tasks.length)) : node.tasks.length);
+
+// The radius of every epic and story, by the square root of its tasks against the busiest of its kind.
+export function hubRadii(tree, level) {
+  const sizes = HUB_SIZE[level];
+  const found = new Map();
+  const give = (nodes, [least, most]) => {
+    const peak = max(nodes.map(tasksUnder), 0);
+    for (const node of nodes) found.set(node.ref, Math.round((least + (most - least) * Math.sqrt(peak ? tasksUnder(node) / peak : 0)) * 10) / 10);
+  };
+  give(tree, sizes.epic);
+  if (sizes.story) give(tree.flatMap((epic) => epic.stories), sizes.story);
+  return found;
+}
+
 function lay(tree, level) {
   const rnd = seeded(20261117);
   const maxRank = LEVEL_MAX[level];
-  const rEpic = maxRank > 0 ? 25 : 32;
-  const rStory = maxRank > 1 ? 9 : 13;
+  const radius = hubRadii(tree, level);
   const rProj = 50;
 
   const storyCluster = (story) => {
     const tasks = maxRank > 1 ? story.tasks : [];
     const n = tasks.length;
-    if (!n) return { node: story, R: rStory + 5, dots: [] };
+    const rStory = radius.get(story.ref);
+    if (!n) return { node: story, r: rStory, R: rStory + 5, dots: [] };
     const gap = 0.5;
     const fan = Math.min(TWO_PI - 2 * gap, (n - 1) * 0.85);
     const step = n > 1 ? fan / (n - 1) : 0;
@@ -80,12 +102,13 @@ function lay(tree, level) {
       const dist = d + (rnd() - 0.5) * 2;
       return { node: task, x: dist * Math.cos(a), y: dist * Math.sin(a), r: TASK_DOT[task.priority] || TASK_DOT.normal };
     });
-    return { node: story, R: max(dots.map((o) => Math.hypot(o.x, o.y) + o.r), 0) + 4, dots };
+    return { node: story, r: rStory, R: max(dots.map((o) => Math.hypot(o.x, o.y) + o.r), 0) + 4, dots };
   };
 
   const epicCluster = (epic) => {
     const stories = maxRank > 0 ? epic.stories : [];
-    if (!stories.length) return { node: epic, R: rEpic + 8, items: [] };
+    const rEpic = radius.get(epic.ref);
+    if (!stories.length) return { node: epic, r: rEpic, R: rEpic + 8, items: [] };
     const cl = stories.map(storyCluster);
     const R = cl.map((c) => c.R);
     const m = cl.length;
@@ -104,11 +127,12 @@ function lay(tree, level) {
       if (i) a += gaps[i - 1] * f;
       return { cl: c, x: dist * Math.cos(a), y: dist * Math.sin(a) };
     });
-    return { node: epic, R: dist + max(R, 0), items };
+    return { node: epic, r: rEpic, R: dist + max(R, 0), items };
   };
 
   const clusters = tree.map(epicCluster);
   const n = clusters.length;
+  const rEpic = max(clusters.map((c) => c.r), 0);
   if (!n) return { nodes: [], edges: [], pos: new Map(), bounds: { x0: -rProj, y0: -rProj, x1: rProj, y1: rProj }, rProj, rEpic };
   const Re = clusters.map((c) => c.R);
 
@@ -164,13 +188,13 @@ function lay(tree, level) {
       if (i) t += steps[i - 1] * f;
       const ex = aEll * Math.cos(t);
       const ey = b * Math.sin(t);
-      put(c.node, 'epic', ex, ey, rEpic, 'root', i);
+      put(c.node, 'epic', ex, ey, c.r, 'root', i);
       const phi = Math.atan2(-ey, -ex);
       c.items.forEach((it) => {
         const [lx, ly] = rotate(it.x, it.y, phi);
         const sx = ex + lx;
         const sy = ey + ly;
-        put(it.cl.node, 'story', sx, sy, rStory, c.node.ref, i);
+        put(it.cl.node, 'story', sx, sy, it.cl.r, c.node.ref, i);
         const psi = Math.atan2(ey - sy, ex - sx);
         it.cl.dots.forEach((dot) => {
           const [dx, dy] = rotate(dot.x, dot.y, psi);
@@ -271,7 +295,7 @@ export function treeCurve(from, to) {
 
 // How far a one-epic picture reaches, with room for the names on the outer ring: { x, y, w, h }.
 export function epicExtent(layout, full) {
-  const labelLen = full ? 30 * 6.3 : 28;
+  const labelLen = full ? 30 * 6.3 : 14 * 6.5;
   let minX = -60;
   let maxX = 60;
   let minY = -60;

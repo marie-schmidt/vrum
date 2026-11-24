@@ -65,7 +65,7 @@ function draw(main, token, invite) {
       },
     },
     icon('check', { size: 16 }),
-    `Join ${invite.project_name} as ${asRole(invite.role)}`,
+    `Join as ${asRole(invite.role)}`,
   );
   // A name someone in the project already uses is the one refusal that the person can mend here, so
   // the form for it is on this page and not on a page of a project they cannot open yet.
@@ -117,12 +117,12 @@ function draw(main, token, invite) {
       h(
         'dl',
         { class: 'invite-facts' },
-        h('dt', {}, 'Owner'),
-        h('dd', {}, actorLabel(invite.owner_name, 'person')),
-        h('dt', {}, 'Your role'),
-        h('dd', { id: 'invite-role' }, roleChip(invite.role), h('span', { class: 'quiet' }, ROLES[invite.role]?.can || '')),
+        // The owner is the one who invites, so the name is said once; another person's name is said as well.
+        invite.invited_by === invite.owner_name ? null : [h('dt', {}, 'Owner'), h('dd', {}, actorLabel(invite.owner_name, 'person'))],
         h('dt', {}, 'Invited by'),
         h('dd', {}, actorLabel(invite.invited_by, 'person')),
+        h('dt', {}, 'Your role'),
+        h('dd', { id: 'invite-role' }, roleChip(invite.role), h('span', { class: 'quiet' }, ROLES[invite.role]?.can || '')),
         h('dt', {}, 'Good until'),
         h('dd', {}, moment(invite.expires_at)),
       ),

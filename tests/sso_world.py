@@ -51,7 +51,7 @@ WORDS = {
     "account_exists_unconfirmed": (
         "An account with your email address already exists here, but its address was never "
         "confirmed, so Vrum will not join the two. Sign in with its password, then connect <name> "
-        "from the Users page."
+        "from the Account page."
     ),
     "signups_off": (
         "This server does not make new accounts from <name> sign-in. Sign in with an account you "

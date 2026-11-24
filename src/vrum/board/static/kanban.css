@@ -148,7 +148,6 @@ a.lane-title:hover { color: var(--accent-text); text-decoration: underline; text
 .lane .id { color: var(--text-2); font-size: var(--text-xs); }
 .lane a.lane-code { text-decoration: none; }
 .lane a.lane-code:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 0.18em; }
-.lane-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .lane-progress { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-2); font-size: var(--text-sm); white-space: nowrap; }
 .lane-progress .meter { width: 5rem; }
 .lane-empty { position: sticky; left: var(--space-1); margin: 0; color: var(--text-3); font-size: var(--text-sm); }
@@ -159,10 +158,11 @@ a.lane-title:hover { color: var(--accent-text); text-decoration: underline; text
 .cards { display: flex; flex-direction: column; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
 .cell-empty { margin: 0; }
 
-/* A card: its id and kind, its title, its priority, and what it is under or waits for. The title
-   takes the spare room, so the rows of cards of any height line up. */
+/* A card: its code, its title, and a few quiet signs (priority only when high or urgent, size, due day, progress,
+   waiting, handoff, holder) and the story it is in. The title takes the spare room, so the rows of cards of any
+   height line up. A card with no signs is its code and its title and nothing else. */
 .board .card {
-  position: relative; display: flex; flex-direction: column; gap: var(--space-2); min-height: 9rem; padding: var(--space-3);
+  position: relative; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3);
   background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md);
   box-shadow: var(--shadow); cursor: grab; transition: border-color var(--ease);
 }
@@ -170,12 +170,12 @@ a.lane-title:hover { color: var(--accent-text); text-decoration: underline; text
 .board .card.dragging { opacity: 0.5; }
 .card-top { display: flex; align-items: center; gap: var(--space-2); color: var(--text-2); font-size: var(--text-xs); }
 .card .id { font-family: var(--font-mono); color: var(--text-2); white-space: nowrap; }
-/* The code says the kind (E-, S-, T-), so the kind is only its sign here. */
+/* The code says the kind (E-, S-, T-), so the kind is a sign only on a board that shows stories and tasks together. */
 .card-kind { display: inline-flex; align-items: center; flex: none; }
 .card .fold { flex: none; margin: -0.25rem -0.375rem -0.25rem auto; color: var(--text-2); }
-/* A card folded away is its code and its whole title: the chips, what it is under and its notes go. */
-.board .card.folded { min-height: 0; gap: var(--space-1); }
-.card.folded :is(.card-chips, .card-context, .card-note) { display: none; }
+/* A card folded away is its code and its whole title: the signs and what it is in go. */
+.board .card.folded { gap: var(--space-1); }
+.card.folded :is(.card-chips, .card-context) { display: none; }
 .card.folded .card-title { flex: none; }
 .card-title { flex: 1; font-size: var(--text-md); font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .card-title a { color: inherit; text-decoration: none; }
@@ -183,35 +183,46 @@ a.lane-title:hover { color: var(--accent-text); text-decoration: underline; text
 .board .card:hover .card-title a { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 0.18em; }
 .board .card:hover .card-title a:hover { text-decoration-color: currentColor; }
 .card-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-.card-chips .chip.danger, .card-chips .chip.warn { max-width: 100%; white-space: normal; }
-.card-context { margin: 0; min-height: 1.25rem; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.card-chips .chip { max-width: 100%; }
+.card-chips .chip.warn { white-space: normal; }
+/* The quiet signs are plain: no fill, only what changes a decision (high priority, late, a conflict, a claim that ran out) is coloured. */
+:is(.card-chips, .bk-mark) :is(.chip.due, .chip.progress-sign, .chip.held):not(.danger, .ok, .warn) { padding-inline: 0; background: transparent; color: var(--text-2); font-weight: 500; }
+:is(.card-chips, .bk-mark) .chip.progress-sign.ok { padding-inline: 0; background: transparent; font-weight: 500; }
+:is(.card-chips, .bk-mark) .chip.held .actor { color: inherit; }
+.card-context { margin: 0; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
 .card-context .id { font-size: var(--text-xs); }
+.card-context.under { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .card-context.progress-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .card-context .meter { width: 3.5rem; }
-.card-note { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; padding-top: var(--space-2); border-top: var(--border-w) solid var(--border); color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
-.card-note .icon { margin-top: 0.15em; }
-.card-note.lapsed { color: var(--warn); }
 .card-chips .card-waiting { cursor: default; }
 .chip.handoff-sign { background: var(--info-soft); color: var(--info); }
+/* The signs that are only a picture are as wide as they are tall. */
+.card-chips :is(.chip.priority, .chip.no-size, .card-waiting, .handoff-sign), .bk-mark :is(.chip.priority, .chip.no-size, .chip.waiting, .chip.handoff-sign) { justify-content: center; min-width: 1.5rem; padding-inline: 0; }
+.chip.held { min-width: 0; }
+.chip.held .actor { min-width: 0; }
+.chip.held.lapsed { max-width: 100%; }
+.chip.held.lapsed .actor-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* -- the Board's key: the card its Key button opens (key-button.js) --------------------------------- */
-.bk-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: var(--space-3) var(--space-5); width: min(38rem, calc(100vw - 3rem)); }
+.bk-card { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); align-items: start; gap: var(--space-3) var(--space-5); width: min(39rem, calc(100vw - 4rem)); }
+.bk-column { display: grid; align-content: start; gap: var(--space-3); min-width: 0; }
 .bk-group { min-width: 0; }
 .bk-group h3 { margin: 0 0 var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
 .bk-group ul { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.bk-group li { display: flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--text); font-size: var(--text-xs); line-height: 1.3; }
-.bk-mark { display: inline-flex; flex: none; align-items: center; width: 6.25rem; }
-.bk-words { display: flex; flex-direction: column; min-width: 0; }
+.bk-group li { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; color: var(--text); font-size: var(--text-xs); line-height: 1.3; }
+.bk-mark { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); width: 5rem; min-height: 1.5rem; }
+.bk-group.is-wide .bk-mark { width: 8rem; }
+.bk-words { display: flex; flex-direction: column; justify-content: center; min-width: 0; min-height: 1.5rem; }
 .bk-words .quiet { font-size: var(--text-xs); }
-.bk-group.is-status li { align-items: flex-start; }
-.bk-group.is-status .bk-mark { width: 1.25rem; padding-top: 1px; }
+.bk-group.is-status .bk-mark { width: 1.25rem; min-height: 0; padding-top: 1px; }
+.bk-group.is-status .bk-words { min-height: 0; justify-content: flex-start; }
 .bk-status { display: inline-flex; color: var(--text-2); }
 .bk-status.status-ready { color: var(--info); }
 .bk-status.status-done { color: var(--ok); }
 .bk-status.status-in_progress { color: var(--progress); }
 .bk-status.status-blocked { color: var(--danger); }
 .bk-status.status-dropped { color: var(--text-3); }
-.bk-lock { display: inline-flex; align-items: center; color: var(--text-2); }
+.bk-mark .chip.held { max-width: 100%; }
 @media (max-width: 599.98px) {
   .bk-card { grid-template-columns: minmax(0, 1fr); }
 }

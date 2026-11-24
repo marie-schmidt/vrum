@@ -265,7 +265,9 @@ function onKeyDown(event) {
     if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      show(select);
+      // A key held down on the button that opened a dialog goes on repeating into the <select> the dialog focused: a
+      // menu opens only for a key pressed on the <select> itself.
+      if (!event.repeat) show(select);
     }
     return;
   }

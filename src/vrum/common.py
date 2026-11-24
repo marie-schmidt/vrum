@@ -258,8 +258,9 @@ async def record_event(
     rule_id: int | None = None,
     note_id: int | None = None,
     other_note_id: int | None = None,
-) -> None:
-    """Append to the event log. It shows in the history of every node, rule and note it names:
+) -> int:
+    """Append to the event log, and give back the new event's id. It shows in the history of every
+    node, rule and note it names:
     `other_node` is the second node of a link, or the story a rule has just left, and
     `other_note_id` is the note a note has just been linked to or unlinked from.
 
@@ -270,9 +271,10 @@ async def record_event(
     well-known format is refused whatever path it came by. The refusal rolls the whole write
     back."""
     refuse_secrets({"actor": actor, **after})
-    await conn.execute(
+    cursor = await conn.execute(
         "INSERT INTO events (node, other_node, rule_id, note_id, other_note_id, action, "
-        "actor, actor_kind, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "actor, actor_kind, before, after) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "RETURNING id",
         (
             node,
             other_node,
@@ -286,3 +288,6 @@ async def record_event(
             Jsonb(after),
         ),
     )
+    row = await cursor.fetchone()
+    assert row is not None
+    return int(row[0])

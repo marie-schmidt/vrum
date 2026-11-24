@@ -6,13 +6,13 @@
 // nothing of its own but which branches are closed. The record chosen in the address (`sel`) is marked.
 
 import { itemLink, openItem } from './ctx.js';
-import { h, moment, plural } from './dom.js';
+import { h, plural } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, actorLabel, byRef, checksChip, codeOf, criteriaChip, itemSizeChip, kindIcon, nodeCode } from './labels.js';
+import { KIND, byRef, codeOf, itemSizeChip, kindIcon, nodeCode, progressChip } from './labels.js';
 import { statusChip } from './status-menu.js';
 import { store } from './store.js';
 import { byDot } from './lists-data.js';
-import { connectionsDetails } from './list-parts.js';
+import { connectionsDetails, heldChip, openDueChip } from './list-parts.js';
 
 // The tree is one stop of the keyboard, the row in use. The status chip of a row is the next stop after
 // the row, and is a stop only while its row is.
@@ -73,12 +73,6 @@ export function createWorkList() {
     return h('span', { class: 'gv-progress' }, `${node.progress_done} of ${plural(total, 'task')} done`, h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { css: { width: `${share}%` } })));
   }
 
-  function claim(node) {
-    if (node.claimed_by) return h('span', { class: 'gv-claim' }, 'Held by ', actorLabel(node.claimed_by, node.claimed_by_kind), ` until ${moment(node.claim_expires_at)}`);
-    if (node.lapsed_claim_by) return h('span', { class: 'gv-claim lapsed' }, actorLabel(node.lapsed_claim_by, node.lapsed_claim_by_kind), '’s claim ran out');
-    return null;
-  }
-
   // What else the item is joined to in this preset (what relates to it, the acceptance criteria and notes
   // that concern it, the references that name it). The hierarchy is
   // the tree, and what it needs first is said on the row.
@@ -117,7 +111,7 @@ export function createWorkList() {
         'aria-expanded': parent ? String(open) : null,
         'aria-selected': key === chosen ? 'true' : 'false',
         'aria-current': key === chosen ? 'true' : null,
-        'aria-label': `${KIND[node.kind].label} ${node.number}: ${node.title}. ${node.status.replace('_', ' ')}.${total !== null ? ` ${node.progress_done} of ${total} tasks done.` : ''}${node.claimed_by ? ` Held by ${node.claimed_by}.` : ''}`,
+        'aria-label': `${KIND[node.kind].label} ${nodeCode(node.kind, node.number)}: ${node.title}. ${node.status.replace('_', ' ')}.${total !== null ? ` ${node.progress_done} of ${total} tasks done.` : ''}${node.claimed_by ? ` Held by ${node.claimed_by}.` : ''}`,
         dataset: { key, ref: node.ref, kind: node.kind, number: node.number, status: node.status },
         onkeydown: (event) => walk(event, node, parent, open),
       },
@@ -127,12 +121,12 @@ export function createWorkList() {
         parent
           ? h('button', { type: 'button', class: 'gv-twisty', tabindex: -1, 'aria-label': `${open ? 'Close' : 'Open'} ${node.title}`, onclick: () => setOpen(node.ref, !open) }, icon(open ? 'chevron_down' : 'chevron_right', { size: 16 }))
           : h('span', { class: 'gv-twisty none' }),
-        h('span', { class: 'gv-kind' }, kindIcon(node.kind, 14), KIND[node.kind].label),
+        h('span', { class: 'gv-kind', title: KIND[node.kind].label }, kindIcon(node.kind, 14), h('span', { class: 'sr-only' }, KIND[node.kind].label)),
         h('span', { class: 'gv-label' }, h('span', { class: 'id' }, `${nodeCode(node.kind, node.number)} `), titleOf(node)),
         sizeOf(node),
         stateChip(node),
         total !== null ? progress(node, total) : null,
-        h('div', { class: 'gv-ties-line' }, criteriaChip(node), checksChip(node), claim(node), ties(node)),
+        h('div', { class: 'gv-ties-line' }, progressChip(node), openDueChip(node), heldChip(node), ties(node)),
         joined(dot),
       ),
       parent ? h('ul', { role: 'group', hidden: !open }, children.map((child) => branch(child, level + 1, kids))) : null,

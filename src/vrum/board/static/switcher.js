@@ -1,20 +1,21 @@
 // The quick switcher: one key combination (Ctrl+K, or ⌘K) on every view opens a box that jumps to
-// an item by a word of its title or by its code (`S-12`, `story 12`, `story:12`, `criterion 3`,
-// `note:7`, `note 7`; a bare number finds every kind that has it), and to any view, Search,
-// Activity, the coverage report and the settings pages. It only navigates: it changes nothing.
-// Every place it goes to is a page: an item opens its own page, in the page the person is in.
+// an item by a word of its title or by its code (`S-12`, `story 12`, `story:12`, `AC-3`, `criterion 3`,
+// `N-7`, `note:7`, `note 7`; a bare number finds every kind that has it), and to any view, Search,
+// Activity, what needs a person, the coverage report and the settings pages. It only navigates: it changes nothing.
+// Every place it goes to is a page: an item opens its own page, in the page the person is in. A row is the
+// kind's sign, the item's code and its title.
 
-import { openItem } from './ctx.js';
+import { openItem, recordCode } from './ctx.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
-import { isNodeKind, itemCode, kindIcon, kindLabel } from './labels.js';
+import { isNodeKind, kindIcon, kindLabel } from './labels.js';
 import { ensureContext, headlineOf, store } from './store.js';
 
 const SHOWN = 10;
 const ORDER = ['epic', 'story', 'task', 'rule', 'note'];
-const LETTERS = { e: 'epic', s: 'story', t: 'task' };
+const LETTERS = { e: 'epic', s: 'story', t: 'task', ac: 'rule', n: 'note' };
 // The sign each view has in the sidebar and the Settings menu.
-const VIEW_ICONS = { board: 'board', graph: 'graph', roadmap: 'roadmap', lists: 'lists', search: 'search', activity: 'activity', coverage: 'rule', users: 'person', definition: 'checklist', tools: 'settings', status: 'info' };
+const VIEW_ICONS = { board: 'board', graph: 'graph', roadmap: 'roadmap', lists: 'lists', search: 'search', activity: 'activity', needs: 'needs', coverage: 'rule', users: 'person', definition: 'checklist', templates: 'template', tools: 'settings', status: 'info' };
 
 const clip = (text, size = 70) => {
   const one = String(text).replace(/\s+/g, ' ').trim();
@@ -34,11 +35,10 @@ function items() {
 // What a typed start finds among the items (never the views). A code finds the item with it (S-12,
 // story 12, criterion 3); a bare number finds the items of every kind that has it; anything else is
 // words that must all be in the kind's name, the code or the title. `exact` says it was a code or a
-// number. Used by the
-// quick switcher and by the Graph's box for choosing what to look at.
+// number. Used by the quick switcher and by the Graph's box for choosing what to look at.
 export function findItems(query) {
   const typed = query.trim().toLowerCase();
-  const byCode = /^(epic|story|task|rule|acceptance criterion|criterion|requirement|note|[est])\s*[:#-]?\s*#?(\d+)$/.exec(typed);
+  const byCode = /^(epic|story|task|rule|acceptance criterion|criterion|requirement|note|[est]|ac|n)\s*[:#-]?\s*#?(\d+)$/.exec(typed);
   if (byCode) {
     const word = byCode[1];
     const kind = LETTERS[word] || (['requirement', 'criterion', 'acceptance criterion'].includes(word) ? 'rule' : word);
@@ -50,7 +50,7 @@ export function findItems(query) {
     return { exact: true, items: exact.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind)) };
   }
   const words = typed.split(/\s+/);
-  const matching = items().filter((item) => words.every((word) => `${kindLabel(item.kind)} ${itemCode(item.kind, item.number)} ${item.title}`.toLowerCase().includes(word)));
+  const matching = items().filter((item) => words.every((word) => `${kindLabel(item.kind)} ${recordCode(item.kind, item.number)} ${item.title}`.toLowerCase().includes(word)));
   const order = (item) => (item.title.toLowerCase().startsWith(typed) ? 0 : 1);
   matching.sort((a, b) => order(a) - order(b) || ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || b.number - a.number);
   return { exact: false, items: matching };
@@ -73,8 +73,10 @@ export function openSwitcher(pages) {
   if (document.getElementById('switcher')) return;
   let hits = [];
   let active = 0;
-  const input = h('input', { id: 'switcher-input', type: 'text', role: 'combobox', autocomplete: 'off', 'aria-expanded': 'true', 'aria-controls': 'switcher-list', 'aria-label': 'Jump to a view, or to an item by a word of its title or by its code', placeholder: 'A word of a title, a code such as S-12 or criterion 3, or a view' });
-  const list = h('ul', { id: 'switcher-list', class: 'plain switcher-list', role: 'listbox', 'aria-label': 'Where to jump' });
+  // The list of places is not open when the box appears: it opens when the person types, clicks the field or presses Down.
+  let listed = false;
+  const input = h('input', { id: 'switcher-input', type: 'text', role: 'combobox', autocomplete: 'off', 'aria-expanded': 'false', 'aria-controls': 'switcher-list', 'aria-label': 'Jump to a view, or to an item by a word of its title or by its code', placeholder: 'A word of a title, a code such as S-12 or AC-3, or a view' });
+  const list = h('ul', { id: 'switcher-list', class: 'plain switcher-list', role: 'listbox', 'aria-label': 'Where to jump', hidden: true });
   const box = h(
     'dialog',
     { id: 'switcher', class: 'modal switcher', 'aria-label': 'Jump to' },
@@ -94,42 +96,55 @@ export function openSwitcher(pages) {
     }
   };
   const draw = () => {
-    hits = find(input.value, pages);
+    const open = listed || input.value.trim() !== '';
+    hits = open ? find(input.value, pages) : [];
     active = Math.min(active, Math.max(0, hits.length - 1));
+    list.hidden = !open;
+    input.setAttribute('aria-expanded', String(open));
     list.replaceChildren(
-      ...(hits.length
-        ? hits.map((hit, at) =>
-            h(
-              'li',
-              {
-                id: `switcher-option-${at}`,
-                role: 'option',
-                class: 'switcher-option',
-                'aria-selected': String(at === active),
-                dataset: hit.page ? { page: hit.page } : { ref: `${hit.kind}:${hit.number}` },
-                onmousedown: (event) => {
-                  event.preventDefault();
-                  go(hit);
+      ...(!open
+        ? []
+        : hits.length
+          ? hits.map((hit, at) =>
+              h(
+                'li',
+                {
+                  id: `switcher-option-${at}`,
+                  role: 'option',
+                  class: 'switcher-option',
+                  'aria-selected': String(at === active),
+                  dataset: hit.page ? { page: hit.page } : { ref: `${hit.kind}:${hit.number}` },
+                  onmousedown: (event) => {
+                    event.preventDefault();
+                    go(hit);
+                  },
                 },
-              },
-              hit.page
-                ? h('span', { class: 'switcher-item' }, icon(VIEW_ICONS[hit.page] || 'info', { size: 14 }), ` ${hit.title}`)
-                : h('span', { class: 'switcher-item' }, kindIcon(hit.kind, 14), h('code', {}, itemCode(hit.kind, hit.number)), ` ${isNodeKind(hit.kind) ? '' : `${kindLabel(hit.kind)}: `}${hit.title}`),
-            ),
-          )
-        : [h('li', { class: 'quiet', role: 'presentation' }, 'Nothing matches.')]),
+                hit.page
+                  ? h('span', { class: 'switcher-item' }, icon(VIEW_ICONS[hit.page] || 'info', { size: 14 }), ` ${hit.title}`)
+                  : h('span', { class: 'switcher-item' }, kindIcon(hit.kind, 14), h('code', {}, recordCode(hit.kind, hit.number)), ` ${hit.title}`),
+              ),
+            )
+          : [h('li', { class: 'quiet', role: 'presentation' }, 'Nothing matches.')]),
     );
     if (hits.length) input.setAttribute('aria-activedescendant', `switcher-option-${active}`);
     else input.removeAttribute('aria-activedescendant');
   };
   input.addEventListener('input', () => {
+    listed = true;
     active = 0;
+    draw();
+  });
+  input.addEventListener('click', () => {
+    if (listed) return;
+    listed = true;
     draw();
   });
   input.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
-      if (hits.length) active = (active + (event.key === 'ArrowDown' ? 1 : -1) + hits.length) % hits.length;
+      // The first press only opens the list; the next ones move through it.
+      if (hits.length && listed) active = (active + (event.key === 'ArrowDown' ? 1 : -1) + hits.length) % hits.length;
+      listed = true;
       draw();
     } else if (event.key === 'Enter') {
       event.preventDefault();

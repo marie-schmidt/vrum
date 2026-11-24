@@ -1,26 +1,26 @@
 // Notes and acceptance criteria as the board shows them. This is where other pages get the operations on
 // them (`openRecord`, the dialogs, `confirmationNote`), and where the page of a
-// acceptance criterion or a note is drawn into the item page: all its fields, its status, what it concerns, who
+// acceptance criterion or a note is drawn into the item page: its status, all its fields, what it concerns, who
 // mentions it and its history. Every change is the operation an
 // agent would call, at the version the person saw, so a change made meanwhile is refused in the
 // same words and nothing typed is lost.
 
 import { Refusal, call, callAll } from './api.js';
 import { can, notify, openItem } from './ctx.js';
-import { clear, h, moment, put } from './dom.js';
-import { concernsTable, confirmationWords, lifecycleLines, recordChips, recordTitle, replacementRows, replacementTable, requirementKindChip, ruleStatusChip } from './entries.js';
+import { clear, day, h, moment, put } from './dom.js';
+import { concernsTable, confirmationWords, lifecycleLines, noteStatusChip, projectWideChip, recordTitle, replacementRows, replacementTable, ruleStatusChip } from './entries.js';
 import { describe, whatChanged } from './events.js';
 import { clip, dialogForm, field as formField, openDialog, refuse } from './forms.js';
 import { icon } from './icons.js';
-import { REQUIREMENT_STATUS, REQUIREMENT_STATUSES, actorLabel, codeOf, decidedWords, inForce, kindIcon } from './labels.js';
+import { REQUIREMENT_STATUS, REQUIREMENT_STATUSES, actorLabel, inForce, kindIcon, noteCode, ruleCode } from './labels.js';
 import { renderMarkdown } from './markdown.js';
-import { askRecall, recallBlock, recallTotal } from './recall.js';
+import { askRecall, askSimilar, knownRefs, recallBlock, recallTotal, similarSection } from './recall.js';
 import { addNoteDialog, linkDialog, placeRequirementDialog, requirementDialog, supersedeDialog, withdrawDialog } from './record-forms.js';
 import { withReferences } from './reference-picker.js';
-import { fetchMentions, loadTargets, mentionsList, nodeLink } from './references.js';
+import { fetchMentions, loadTargets, mentionsList } from './references.js';
 import { store, sync } from './store.js';
 
-export { addNoteDialog, linkDialog, placeRequirementDialog, requirementDialog, requirementKindChip, ruleStatusChip, supersedeDialog, withdrawDialog };
+export { addNoteDialog, linkDialog, placeRequirementDialog, requirementDialog, ruleStatusChip, supersedeDialog, withdrawDialog };
 
 // -- what other pages call ---------------------------------------------------------------------------
 
@@ -30,16 +30,14 @@ export function openRecord(kind, number) {
   openItem(`${kind}:${number}`);
 }
 
-// What a note says about its confirmation, in words: who confirmed it and when (or who took it back),
-// what the person said, and why it cannot be changed when it cannot. The status chip beside the title
-// is what changes it (status-menu.js): its menu opens the dialog that asks who reviewed it and, to
+// What a note says about its confirmation: who confirmed it and when (or who took it back) and what the person said. The status chip
+// beside the title is what changes it (status-menu.js): its menu opens the dialog that asks who reviewed it and, to
 // un-confirm, their words. `history` is the note's events, which hold those words.
 export function confirmationNote(record, history = []) {
   const active = inForce(record);
-  const ended = record.status === 'superseded' ? 'replaced' : 'withdrawn';
   const last = [...history].reverse().find((event) => event.action === 'note_confirmed' || event.action === 'note_unconfirmed') || null;
   const words = last?.after?.quote;
-  const note = h('p', { class: 'quiet confirmation-note' }, confirmationWords(record, last), active ? '' : ` It cannot be confirmed or un-confirmed: it was ${ended}.`);
+  const note = h('p', { class: 'quiet confirmation-note' }, confirmationWords(record, last));
   const said = words ? h('div', { class: 'confirmation-said' }, h('span', { class: 'quiet' }, last.action === 'note_confirmed' ? 'What they said' : 'What was said'), h('blockquote', {}, words)) : null;
   return h('div', { class: 'confirmation-control', dataset: { record: `note:${record.id}`, status: record.status, active: String(active) } }, note, said);
 }
@@ -50,12 +48,9 @@ export function confirmationNote(record, history = []) {
 export const section = (title, key, ...content) => h('section', { class: 'part', dataset: { part: key } }, h('h3', {}, title), content);
 
 // The same, with what can be done to it in the row of the heading (the button that adds a note,
-// say). `quietSection` is a section with nothing in it but a line saying so: the
-// line then sits beside the heading and takes one row.
+// say).
 export const sectionWith = (title, key, actions, ...content) =>
   h('section', { class: 'part', dataset: { part: key } }, h('div', { class: 'part-head' }, h('h3', {}, title), actions), content);
-export const quietSection = (title, key, line) =>
-  h('section', { class: 'part part-quiet', dataset: { part: key } }, h('h3', {}, title), line);
 
 // Whether the details have any words: only a blank is empty.
 export const hasDetails = (body) => Boolean(body && body.trim());
@@ -66,14 +61,15 @@ export const hasDetails = (body) => Boolean(body && body.trim());
 export const emptyField = (...actions) => h('div', { class: 'details-empty', dataset: { empty: 'true' } }, h('span', { class: 'chip empty-chip' }, 'Empty'), actions);
 
 // The details of an item or an acceptance criterion: what is written, read as Markdown; while `editing`, the
-// form is in its place and the text is not drawn twice. The Edit button is in the page's header.
+// form is in its place and the text is not drawn twice. The Edit button is in the page's header. The body
+// of the page needs no heading of its own.
 // With nothing written the section is an empty field, with a button that opens the editor when `onAdd`
 // is given (for a person who can change it).
 export function detailsSection({ body, form, editing, extras = [], onAdd = null }) {
   const read = hasDetails(body)
     ? h('div', { class: 'body-text' }, renderMarkdown(body))
     : emptyField(onAdd ? h('button', { type: 'button', class: 'small add-details', onclick: onAdd }, icon('plus', { size: 14 }), 'Add details') : null);
-  return section('Details', 'edit', editing ? form : read, ...extras);
+  return h('section', { class: 'part details-part', dataset: { part: 'edit' } }, h('h3', { class: 'sr-only' }, 'Details'), editing ? form : read, ...extras);
 }
 
 // The words of an Edit button that is in a page's header.
@@ -101,28 +97,20 @@ export function detailsHolder(state, build, after = () => {}) {
   };
 }
 
-// A heading with how many there are: "Mentioned in (3)".
-export const countTitle = (title, count) => [title, h('span', { class: 'heading-count' }, ` (${count})`)];
+// A heading with how many there are, as a quiet number after it: "Notes 13". Nothing is added to a heading with none.
+export const countTitle = (title, count) => [title, count ? h('span', { class: 'heading-count' }, String(count)) : null];
 
-// The state of the item as a row of small groups, each with its label over its value, for the head
+// The properties of an item as a row of small groups, each with its label over its value, for the head
 // of a page, where there is room to read them across. A group whose value is empty is left out.
-// `className` is for a row of its own that is quieter than the first (who made it, and when).
-export function stateStrip(rows, className = '') {
+// A row may carry `hideLabel` for a group whose value says all (the label is then for a screen reader).
+export function stateStrip(rows) {
   const shown = rows.filter((row) => row && row[1] !== null && row[1] !== undefined && row[1] !== false);
   if (!shown.length) return null;
-  return h('dl', { class: `state-strip ${className}`.trim() }, shown.map(([label, value, props = {}]) => h('div', { class: 'state-item' }, h('dt', {}, label), h('dd', props, value))));
-}
-
-// Who made an item or an acceptance criterion, when it last changed and which version it is at (a refused save
-// speaks of versions), as the rows of a quiet strip. Who made it is the event that made it: the
-// history is read to the end, so it is always there. An item that came in with an import and has no
-// such event says only when.
-export function madeAndChanged(record, history) {
-  const made = history.find((event) => event.action === 'create' || event.action === 'rule_created');
-  return [
-    [made ? 'Created by' : 'Created', made ? [actorLabel(made.actor, made.actor_kind), ', ', moment(record.created_at)] : moment(record.created_at), { class: 'created' }],
-    ['Last changed', [moment(record.updated_at), h('span', { class: 'version quiet' }, `Version ${record.version}`)], { class: 'changed' }],
-  ];
+  return h(
+    'dl',
+    { class: 'state-strip' },
+    shown.map(([label, value, { hideLabel = false, ...props } = {}]) => h('div', { class: 'state-item' }, h('dt', { class: hideLabel ? 'sr-only' : null }, label), h('dd', props, value))),
+  );
 }
 
 // What a page says when it has only something to say: that the server said no, or that the item is
@@ -236,12 +224,12 @@ export function historySection(events, { opened = new Set() } = {}) {
 export function releaseDialog(work, done = async () => {}) {
   const note = h('textarea', { id: 'release-note', name: 'note', rows: 4 });
   const { form } = dialogForm({
-    fields: [h('p', {}, `Release ${work.kind} ${codeOf(work.node)} “${work.title}”.`), formField('Handoff note', note, 'What was done, how far it got, and what is left.')],
+    fields: [h('p', {}, `Release “${work.title}”.`), formField('Handoff note', note, 'What was done, how far it got, and what is left.')],
     submit: 'Release it',
     work: async () => {
       await call('release_claim', { node: work.node, note: note.value });
       form.closest('dialog')?.close();
-      notify(`Released ${codeOf(work.node)}.`);
+      notify(`Released “${work.title}”.`);
       await sync();
       await done();
     },
@@ -257,14 +245,17 @@ export function recordButtons(concern) {
 }
 
 // What is known about whatever is open: the button that adds to it is in the heading's row, and
-// `recalled` (the recall block) is what the server says.
-export const contextSection = (concern, recalled, count = 0) => sectionWith(countTitle('Notes', count), 'context', recordButtons(concern), recalled);
+// `recalled` (the recall block) is what the server says. With no note and no way to add one, there is no section.
+export function contextSection(concern, recalled, count = 0) {
+  const add = recordButtons(concern);
+  if (!count && !add) return null;
+  return sectionWith(countTitle('Notes', count), 'context', add, count ? recalled : null);
+}
 
-// Who mentions it. With nobody, the section is one quiet line beside its heading.
-export const mentionsSection = (mentions) =>
-  mentions.length ? section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)) : quietSection(countTitle('Mentioned in', 0), 'mentions', mentionsList(mentions));
+// Who mentions it: a section only when somebody does.
+export const mentionsSection = (mentions) => (mentions.length ? section(countTitle('Mentioned in', mentions.length), 'mentions', mentionsList(mentions)) : null);
 
-// The page's own title: the kind's icon, its name and number, and the words.
+// The page's own title: the kind's icon, its code and the words.
 export const pageTitle = (kind, code, words) => [kindIcon(kind, 22), h('span', { class: 'item-code' }, code), ' ', words];
 
 // -- a note ----------------------------------------------------------------------------------------------------
@@ -277,43 +268,49 @@ function recordActions(record, state) {
   return [headerButton('Replace…', () => supersedeDialog(record, { onDone: done }), 'supersede'), headerButton('Withdraw…', () => withdrawDialog(record, { onDone: done }), 'withdraw')];
 }
 
-// A note's first line is its title; its full text is a section of its own only when the title does
-// not already say it all (it was cut, or it has lines, emphasis, a link or a reference).
+// A note's first line is its title; the rest of its text is the card's "What it says". When that line is too long, or
+// has lines, emphasis, a link or a reference to show, the title is cut and the card has the whole text, so that
+// nothing is left out.
 const sayableAsTitle = (text) => clip(text, 140) === text.trim() && !/[\n*_`[\]~<>#]|https?:\/\//.test(text);
+function splitText(text) {
+  const lines = String(text).split('\n');
+  const at = Math.max(0, lines.findIndex((line) => line.trim() !== ''));
+  const first = lines[at] ?? '';
+  return sayableAsTitle(first) ? { title: first.trim(), rest: lines.slice(at + 1).join('\n').trim() } : { title: null, rest: text };
+}
 
-// A note that names who decided it says so, in the line under the title.
-const decidedLine = (record) => (record.decided_by ? `${decidedWords(record)}.` : null);
-
-// Fills `root` with a note. The page's own places are in `options`: `title` and `what` (the heading
-// and the line under it), `summary` (its chips and facts), `actions` (what can be done to it) and
-// `drawn(counts)`, called after each drawing with how many entries each section holds.
+// Fills `root` with a note. The page's own places are in `options`: `title` (the heading), `summary` (its
+// status and who decided it), `actions` (what can be done to it).
 export async function renderNote(root, id, state = { dirty: false }, options = {}) {
   state.skipped = false;
   state.reload = () => renderNote(root, id, state, options);
   if (!root.querySelector('.record-detail')) put(root, loadingView());
-  const [record, history, mentions] = await Promise.all([call('get_note', { note_id: id }), callAll('note_history', { note_id: id }), fetchMentions('note', id), loadTargets()]);
+  const [record, history, mentions, similar] = await Promise.all([call('get_note', { note_id: id }), callAll('note_history', { note_id: id }), fetchMentions('note', id), askSimilar({ note_id: id }), loadTargets()]);
   // The page has moved on to something else while this was being fetched.
   if (state.dead) return state;
   state.version = null;
   state.dirty = false;
   // What it concerns, so that news about one of those (a rename, say) draws the page again.
   state.concerns = { node: record.nodes || [], rule: record.rule_ids || [], note: record.note_ids || [] };
-  const code = `Note #${record.id}`;
-  const statement = sayableAsTitle(record.text);
+  const said = splitText(record.text);
   const active = inForce(record);
   const concernCount = (record.project_wide ? 1 : 0) + state.concerns.node.length + state.concerns.rule.length + state.concerns.note.length;
   const replaces = replacementRows(record);
+  // What the person has already been told about is not suggested: what it concerns, and what it replaced or was replaced by.
+  const known = new Set([...state.concerns.node, ...state.concerns.rule.map((one) => `rule:${one}`), ...state.concerns.note.map((one) => `note:${one}`), ...replaces.map((row) => `note:${row.id}`)]);
+  // Only what has something to say about who stood behind it: a confirmed note, one that ended after being confirmed,
+  // and one whose confirmation was taken back. An unconfirmed note is told by its chip alone.
+  const confirmation = Boolean(record.confirmed_by) || history.some((event) => event.action === 'note_unconfirmed');
 
-  put(options.title, pageTitle('note', code, statement ? record.text.trim() : recordTitle(record)));
-  put(options.what, decidedLine(record));
+  put(options.title, pageTitle('note', noteCode(record.id), said.title || recordTitle(record)));
   // A chip that was just used keeps the focus when the header is drawn again.
   const restoreChips = rememberFocus(options.summary);
   put(
     options.summary,
-    recordChips(record, { kind: false, onChanged: () => state.reload() }),
     stateStrip([
-      ['Recorded by', actorLabel(record.recorded_by, record.recorded_by_kind)],
-      ['Recorded', moment(record.recorded_at)],
+      ['Status', noteStatusChip(record, { onChanged: () => state.reload() }), { class: 'status' }],
+      ['Scope', projectWideChip(record)],
+      ['Decided by', record.decided_by ? `${record.decided_by}${record.decided_on ? ` on ${day(record.decided_on)}` : ''}` : null, { class: 'decided' }],
     ]),
   );
   restoreChips();
@@ -328,35 +325,29 @@ export async function renderNote(root, id, state = { dirty: false }, options = {
         ...lifecycleLines(record, { replaces: false }),
         h('p', { class: 'quiet', id: 'record-ended' }, 'It is no longer in force, so it cannot be replaced, withdrawn or changed. Everything that happened to it is in its history.'),
       );
-  const main = [
-    statement ? null : section('What it says', 'record', renderMarkdown(record.text, { className: 'markdown record-text' })),
+  const main = h(
+    'div',
+    { class: 'card-main' },
+    said.rest ? section('What it says', 'record', renderMarkdown(said.rest, { className: 'markdown record-text' })) : null,
     section('Why', 'why', h('div', { class: 'reason' }, renderMarkdown(record.why, { className: 'markdown record-why' }))),
-  ];
+  );
+  const changeConcerns = active && can('write') ? button('Change what it applies to…', () => linkDialog(record), 'change-concerns', 'link') : null;
   const view = h(
     'article',
     { class: 'record-detail card-page', dataset: { record: `note:${record.id}`, kind: 'note', status: record.status, projectWide: String(Boolean(record.project_wide)) } },
     ended,
-    h(
-      'div',
-      { class: 'card-columns' },
-      h('div', { class: 'card-main' }, main),
-      h('div', { class: 'card-side' }, h('section', { class: 'part', dataset: { part: 'confirmation' } }, h('h3', {}, 'Confirmation'), confirmationNote(record, history))),
-    ),
-    sectionWith(
-      countTitle('Applies to', concernCount),
-      'concerns',
-      active && can('write') ? button('Change what it applies to…', () => linkDialog(record), 'change-concerns', 'link') : null,
-      concernCount ? concernsTable(record, { caption: 'What it applies to' }).element : h('p', { class: 'quiet none' }, 'None yet.'),
-    ),
+    confirmation
+      ? h('div', { class: 'card-columns' }, main, h('div', { class: 'card-side' }, h('section', { class: 'part', dataset: { part: 'confirmation' } }, h('h3', {}, 'Confirmation'), confirmationNote(record, history))))
+      : main,
+    concernCount || changeConcerns ? sectionWith(countTitle('Applies to', concernCount), 'concerns', changeConcerns, concernCount ? concernsTable(record, { caption: 'What it applies to' }).element : null) : null,
     replaces.length ? section(countTitle('Replaces and replaced by', replaces.length), 'replaces', replacementTable(record, { caption: 'What it replaced and what replaced it' }).element) : null,
     mentionsSection(mentions),
+    similarSection(similar, known),
     historySection(history, { opened: (state.opened = state.opened || new Set()) }),
   );
-  state.counts = { concerns: concernCount, replaces: replaces.length, mentions: mentions.length, history: history.length };
   const restoreFocus = rememberFocus(root);
   clear(root).append(view);
   restoreFocus();
-  options.drawn?.(state.counts);
   state.focus = () => document.getElementById('item-title')?.focus();
   return state;
 }
@@ -388,7 +379,7 @@ function ruleForm(rule, state, cancel) {
           await call('update_rule', args);
           state.dirty = false;
           state.editing = false;
-          notify(`Saved acceptance criterion #${rule.id}.`);
+          notify(`Saved “${args.title ?? rule.title}”.`);
           await sync();
           await state.reload(true);
         } catch (error) {
@@ -413,11 +404,12 @@ export async function renderRule(root, id, state = { dirty: false }, options = {
   state.open = state.open || {};
   state.reload = (now = false) => renderRule(root, id, state, options, now);
   if (!root.querySelector('.record-detail')) put(root, loadingView());
-  const [rule, recalled, history, mentions] = await Promise.all([
+  const [rule, recalled, history, mentions, similar] = await Promise.all([
     call('get_rule', { rule_id: id }),
     askRecall({ rule_id: id }),
     callAll('rule_history', { rule_id: id }),
     fetchMentions('rule', id),
+    askSimilar({ rule_id: id }),
     loadTargets(),
   ]);
   if (state.dead) return state;
@@ -430,9 +422,19 @@ export async function renderRule(root, id, state = { dirty: false }, options = {
   const unplaced = rule.node === null || rule.node === undefined;
   const onNode = unplaced ? null : store.nodes.get(rule.node);
   const story = onNode && onNode.kind === 'task' ? store.nodes.get(onNode.parent) : onNode;
-  const epic = story ? store.nodes.get(story.parent) : null;
+  // What the person has already been told about is not suggested: the story or task it is on, and what is above it.
+  const known = knownRefs(recalled, [rule.node, onNode?.parent, story?.parent]);
 
-  const placeButton = can('write') ? headerButton(unplaced ? 'Put on a story or task…' : 'Move to another story or task…', () => placeRequirementDialog(rule), 'place-requirement') : null;
+  // On a narrow page the button keeps to its first word, so that the buttons of the header stay on one row.
+  const placeWords = unplaced ? 'Put on a story or task…' : 'Move to another story or task…';
+  const placeButton = can('write')
+    ? h(
+        'button',
+        { type: 'button', class: 'place-requirement', 'aria-label': placeWords, title: placeWords, onclick: () => placeRequirementDialog(rule) },
+        h('span', { class: 'long-label' }, placeWords),
+        h('span', { class: 'short-label', 'aria-hidden': 'true' }, unplaced ? 'Put on…' : 'Move…'),
+      )
+    : null;
   const headerEdit = can('write') ? editButton(() => holder.set(true), 'edit-open') : null;
   const holder = detailsHolder(
     state,
@@ -449,8 +451,7 @@ export async function renderRule(root, id, state = { dirty: false }, options = {
     (editing) => put(options.actions, editing ? null : [headerEdit, placeButton]),
   );
 
-  put(options.title, pageTitle('rule', `Acceptance criterion #${rule.id}`, rule.title));
-  put(options.what, unplaced ? 'It is not placed on a story or task yet.' : ['On ', nodeLink(rule.node)]);
+  put(options.title, pageTitle('rule', ruleCode(rule.id), rule.title));
   // What the chip changed is at a new version, which the form has to be saved at; the page is drawn again
   // unless something is typed in it.
   const changed = (result) => {
@@ -458,15 +459,13 @@ export async function renderRule(root, id, state = { dirty: false }, options = {
     if (!state.dirty) state.reload(true);
   };
   const restoreChips = rememberFocus(options.summary);
+  // Its status is the whole of it: the story or task it is on is in the path above the page. One placed nowhere says so.
   put(
     options.summary,
-    h('div', { class: 'chips' }, ruleStatusChip(rule, { version: () => state.version, onChanged: changed })),
     stateStrip([
-      ['On', unplaced ? h('span', { class: 'quiet' }, 'Not placed yet') : nodeLink(rule.node), { class: 'in-story' }],
-      ['In story', onNode && onNode.kind === 'task' && story ? nodeLink(story.ref) : null],
-      ['In epic', epic ? nodeLink(epic.ref) : null],
+      ['Status', ruleStatusChip(rule, { version: () => state.version, onChanged: changed }), { class: 'status' }],
+      unplaced ? ['On', h('span', { class: 'quiet' }, 'Not placed yet'), { class: 'in-story' }] : null,
     ]),
-    stateStrip(madeAndChanged(rule, history), 'state-meta'),
   );
   restoreChips();
   put(options.actions, state.editing ? null : [headerEdit, placeButton]);
@@ -474,20 +473,20 @@ export async function renderRule(root, id, state = { dirty: false }, options = {
   const view = h(
     'article',
     { class: 'record-detail rule-detail card-page', dataset: { record: `rule:${rule.id}`, kind: 'rule', status: rule.status, node: rule.node ?? '' } },
-    h('div', { class: 'card-columns' }, h('div', { class: 'card-main' }, holder.element), h('div', { class: 'card-side' }, mentionsSection(mentions))),
+    h('div', { class: 'card-main' }, holder.element),
     contextSection(
       { rule_ids: [rule.id] },
       recallBlock({ rule_id: id }, recalled, { open: state.open, onOpen: (name, now) => (state.open[name] = now) }),
       recallTotal(recalled),
     ),
+    mentionsSection(mentions),
+    similarSection(similar, known),
     historySection(history, { opened: (state.opened = state.opened || new Set()) }),
   );
-  state.counts = { edit: hasDetails(rule.body) ? null : 'empty', context: recallTotal(recalled), mentions: mentions.length, history: history.length };
   const restoreFocus = rememberFocus(root);
   clear(root).append(view);
   restoreFocus();
   watchEdits(view, state);
-  options.drawn?.(state.counts);
   state.focus = () => document.getElementById('item-title')?.focus();
   return state;
 }

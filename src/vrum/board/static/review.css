@@ -1,0 +1,107 @@
+/* The review page (review.js): one change, full screen. A header (back, what it is, its title and facts, and on the right Viewed, the way to the
+   work, previous and next), then the parts that apply (a plan's checks, the change, the context of the work, the conversation) and, kept in
+   view at the bottom, the bar that decides. The lines of a diff are in diff.css and the conversation under them in plan-review.css. Colours
+   are only ever a token (tokens.css). */
+
+.review-page { display: grid; gap: var(--space-4); min-width: 0; align-content: start; }
+.review-page > * { min-width: 0; }
+.review-state-page { padding: var(--space-4) 0; }
+.review-state-page .state-text { margin: 0; color: var(--text-2); }
+
+.review-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-2) var(--space-4); align-items: start; padding-bottom: var(--space-3); border-bottom: var(--border-w) solid var(--border); }
+.review-back { flex: none; }
+.review-headline { display: grid; gap: var(--space-2); min-width: 0; }
+.review-lead { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0; }
+.review-title { margin: 0; font-size: var(--text-xl); line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.review-title a { color: inherit; text-decoration-color: var(--border-strong); }
+.review-title a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.review-title .change-title-text { white-space: pre-line; }
+.review-head .change-facts { padding: 0; }
+.review-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2) var(--space-3); }
+.review-tools .change-viewed-label { margin: 0; }
+.plan-state { gap: var(--space-1); background: var(--neutral-soft); color: var(--text); font-weight: 650; }
+.plan-state[data-state="proposed"], .plan-state[data-state="changes_requested"] { background: var(--warn-soft); color: var(--warn); }
+.plan-state[data-state="approved"] { background: var(--ok-soft); color: var(--ok); }
+.plan-state[data-state="rejected"] { background: var(--danger-soft); color: var(--danger); }
+.plan-state .icon { color: inherit; }
+.plan-reason { flex: 1 1 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 899.98px) {
+  .review-head { grid-template-columns: auto minmax(0, 1fr); }
+  .review-tools { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* Previous and next in the order of the list. */
+.review-steps { display: inline-flex; align-items: center; gap: var(--space-1); }
+.review-step { display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text); background: var(--surface); }
+a.review-step:hover { background: var(--surface-3); }
+.review-step.off { color: var(--text-3); border-color: var(--border); }
+.review-position { min-width: 4.5rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (pointer: coarse) {
+  .review-step { width: 2.75rem; height: 2.75rem; }
+}
+
+/* A part of the page: a quiet heading and what it holds. */
+.review-part { display: grid; gap: var(--space-3); min-width: 0; align-content: start; }
+.review-part-title { margin: 0; color: var(--text-2); font-size: var(--text-sm); font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; }
+.review-part > * { min-width: 0; }
+.review-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.review-toggles select { width: auto; min-width: 12rem; }
+.review-choice button { white-space: nowrap; }
+
+/* The change: the lines of a diff in a box of their own. */
+.review-page .change-diff { border: var(--border-w) solid var(--border); border-radius: var(--radius-md); overflow: clip; }
+.review-body { display: grid; gap: var(--space-3); min-width: 0; }
+.review-body > p { margin: 0; overflow-wrap: anywhere; }
+.review-question { font-size: var(--text-md); font-weight: 600; white-space: pre-line; }
+.review-ask .ask-offered { padding: 0; }
+.review-checks, .review-claims, .review-concerns { display: grid; gap: var(--space-2); margin: 0; padding: 0; }
+.review-check, .review-claim { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; overflow-wrap: anywhere; }
+.review-check .decision { flex: 1 1 100%; padding: 0; border-top: 0; }
+.review-check[data-waiting="true"] .diff-check-words { font-weight: 650; color: var(--text); }
+.review-note { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.review-note > p { margin: 0; }
+.note-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-note .decision { padding: 0; border-top: 0; }
+.review-gate { display: grid; gap: var(--space-2); }
+.review-gate > p { margin: 0; overflow-wrap: anywhere; }
+.review-facts { display: grid; gap: var(--space-1); margin: 0; }
+.review-fact { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: var(--space-3); }
+.review-fact dt { color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
+.review-fact dd { margin: 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.review-concerns { list-style: none; }
+@media (max-width: 699.98px) {
+  .review-fact { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .review-note { padding: var(--space-3); }
+}
+
+/* The context of the work. */
+.review-context { padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.context-about { display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.context-about .icon { flex: none; color: var(--text-2); }
+.context-path { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin: 0; padding: 0; }
+.context-path li { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.context-part { display: grid; gap: var(--space-2); min-width: 0; }
+.context-part h3 { margin: 0; color: var(--text-2); font-size: var(--text-xs); font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; }
+.context-details[data-clipped="true"] { max-height: 9rem; overflow: hidden; }
+.context-more { justify-self: start; }
+.context-criteria, .context-checks, .context-history { display: grid; gap: var(--space-2); margin: 0; padding: 0; }
+.context-criterion, .context-check, .context-history li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; overflow-wrap: anywhere; }
+.context-check[data-waiting="true"] .diff-check-words { font-weight: 650; }
+.context-handoff { display: grid; gap: var(--space-1); min-width: 0; }
+.context-handoff p { margin: 0; }
+
+/* The conversation of a plan. */
+.review-conversation { padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.plan-revisions { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.plan-revision { display: grid; gap: var(--space-1); min-width: 0; }
+.plan-revision > p { margin: 0; overflow-wrap: anywhere; }
+.plan-revision[data-shown="true"] .plan-revision-author { font-weight: 650; }
+.plan-revision-note { white-space: pre-line; color: var(--text-2); }
+.conversation-asked { margin: 0; color: var(--text-2); }
+.review-conversation .change-feedback { border: 0; padding: 0; }
+
+/* The bar that decides, kept in view at the bottom of the page. Its comment box opens upward. */
+.review-bar { position: sticky; bottom: 0; z-index: 3; margin: 0; background: var(--surface); border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); }
+.review-bar .decision { border-top: 0; }
+.review-bar .decision-comment-box { top: auto; bottom: calc(100% - var(--space-2)); }

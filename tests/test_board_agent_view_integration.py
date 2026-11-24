@@ -2,19 +2,25 @@
 what a real MCP client reads (see ./check.sh). Every kind of page has a button for it in its header,
 for a person who can only look too, and it opens a dialog with what an agent receives for the item:
 the call it makes and the answer it gets, as short lines. For an epic, story, task or acceptance
-criterion that is the `recall` of the item as it came; a note is read with `get_note`. The lines are
-the same ones the Graph drew before M34, which has no Agent view of its own any more."""
+criterion that is the `recall` of the item as it came; a note is read with `get_note`. The lines
+name every item by its code and its name (S-12 "Scan a QR code", AC-3, N-7), the server's own
+sentences in them name an item by its name in curly quotes, and the call is written as the agent
+makes it. They are the same ones the Graph drew before M34, which has no Agent view of its own any
+more."""
 
+import re
+from collections.abc import Callable
 from typing import Any
 
 import anyio
 import pytest
+from mcp import Client
 from playwright.async_api import Page, Route, expect
 
 from tests.board_context import context_world as world_of_notes
 from tests.board_context import fresh_project
-from tests.board_helpers import SLOW, browser_page, go, item_address
-from tests.helpers import code_of, ok
+from tests.board_helpers import SLOW, browser_page, go, item_address, item_name
+from tests.helpers import ok, reindexed
 from tests.world import join_project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -36,6 +42,14 @@ NOTE_FIELDS = [
     "rule_ids",
     "note_ids",
 ]
+# What a note names, and how each field's entries become the reference of an item.
+NAMES: dict[str, Callable[[Any], str]] = {
+    "nodes": lambda ref: ref,
+    "rule_ids": lambda number: f"rule:{number}",
+    "note_ids": lambda number: f"note:{number}",
+    "supersedes_ids": lambda number: f"note:{number}",
+    "superseded_by_id": lambda number: f"note:{number}",
+}
 ONLY_THE_EXACT = (
     "Only exact links are followed. What is linked to this item and to the story and epic above "
     "it is here (each entry says which); what is linked to its children is not: an agent recalls "
@@ -45,6 +59,13 @@ READS_A_NOTE = (
     "recall reads one epic, story, task or acceptance criterion; for a note the agent reads the "
     "note itself, and what links to it."
 )
+# How the server's words name an item (api.js, namesIn): story:12, S-12, AC-3, note 7.
+REFERENCE = re.compile(
+    r"([\"'])?\b(?:(epic|story|task|rule|note):([1-9][0-9]{0,17})"
+    r"|(AC|[ESTN])-([1-9][0-9]{0,17})"
+    r"|([Nn]ote|(?:[Aa]cceptance )?[Cc]riterion) ([1-9][0-9]{0,17}))\b\1?"
+)
+KIND_OF_LETTER = {"E": "epic", "S": "story", "T": "task", "AC": "rule", "N": "note"}
 
 
 def clip(text: Any, size: int) -> str:
@@ -57,65 +78,99 @@ def quoted(text: Any, size: int = 80) -> str:
     return f'"{clip(text, size)}"'
 
 
-def what_recall_says(asked: str, recalled: dict[str, Any]) -> list[str]:
+async def named(client: Client, ref: str) -> str:
+    """An item as a line of the Agent view names it: its code, then its name in quotes."""
+    code, _, name = (await item_name(client, ref)).partition(" ")
+    return f"{code} {quoted(name)}"
+
+
+async def in_names(client: Client, text: str) -> str:
+    """The server's words as the Agent view shows them: each item the words name by its reference
+    is named by what it is called, in curly quotes."""
+    out, last = "", 0
+    for found in REFERENCE.finditer(text):
+        word, number, letters, lettered, said, spoken = found.group(2, 3, 4, 5, 6, 7)
+        kind = (
+            word
+            or KIND_OF_LETTER.get(letters or "")
+            or ("note" if (said or "").lower() == "note" else "rule")
+        )
+        title = (await item_name(client, f"{kind}:{number or lettered or spoken}")).partition(" ")[
+            2
+        ]
+        out += text[last : found.start()] + f"“{title}”"
+        last = found.end()
+    return out + text[last:]
+
+
+async def what_recall_says(client: Client, asked: str, recalled: dict[str, Any]) -> list[str]:
     """The lines of the Agent view of a recall: the call, then each section with its first six
     entries and why each is there, and the sentence that closes it."""
     lines = [asked]
 
-    def section(name: str, entries: dict[str, Any] | None, write: Any) -> None:
+    async def section(name: str, entries: dict[str, Any] | None, write: Any) -> None:
         if not entries or not entries["count"]:
             lines.append(f"{name}: []")
             return
         lines.append(f"{name}: ({entries['count']})")
         for entry in entries["items"][:6]:
-            lines.extend(write(entry))
+            lines.extend(await write(entry))
         if entries["count"] > 6:
             lines.append(f"… {entries['count'] - 6} more")
 
-    def note(entry: dict[str, Any]) -> list[str]:
+    async def note(entry: dict[str, Any]) -> list[str]:
         record = entry["note"]
         headline = quoted(record.get("headline") or record["text"])
-        return [f"- note:{record['id']} {headline} [{record['status']}]", f"why: {entry['why']}"]
-
-    def criterion(entry: dict[str, Any]) -> list[str]:
-        record = entry["criterion"]
         return [
-            f"- rule:{record['id']} {quoted(record['title'])} [{record['status']}]",
-            f"why: {entry['why']}",
+            f"- N-{record['id']} {headline} [{record['status']}]",
+            f"why: {await in_names(client, entry['why'])}",
         ]
 
-    def alike(entry: dict[str, Any]) -> list[str]:
+    async def criterion(entry: dict[str, Any]) -> list[str]:
+        record = entry["criterion"]
+        return [
+            f"- AC-{record['id']} {quoted(record['title'])} [{record['status']}]",
+            f"why: {await in_names(client, entry['why'])}",
+        ]
+
+    async def alike(entry: dict[str, Any]) -> list[str]:
         score = entry.get("similarity")
         return [
-            f"- {entry['ref']} {quoted(entry['title'])}"
+            f"- {(await named(client, entry['ref']))}"
             + ("" if score is None else f" alike={score:.2f}")
         ]
 
-    section("notes", recalled.get("notes"), note)
-    section("project_wide_notes", recalled.get("project_wide_notes"), note)
-    section("past_notes", recalled.get("past_notes"), note)
-    section("acceptance_criteria", recalled.get("acceptance_criteria"), criterion)
+    await section("notes", recalled.get("notes"), note)
+    await section("project_wide_notes", recalled.get("project_wide_notes"), note)
+    await section("past_notes", recalled.get("past_notes"), note)
+    await section("acceptance_criteria", recalled.get("acceptance_criteria"), criterion)
     if recalled.get("similar"):
-        section("similar", recalled["similar"], alike)
+        await section("similar", recalled["similar"], alike)
     return [*lines, "", ONLY_THE_EXACT]
 
 
-def what_a_note_says(record: dict[str, Any]) -> list[str]:
-    """The lines of the Agent view of a note: the call, then each field it has."""
+async def what_a_note_says(client: Client, record: dict[str, Any]) -> list[str]:
+    """The lines of the Agent view of a note: the call, then each field it has, an item it names
+    by its code and its name."""
     lines = [f"get_note(note_id={record['id']})"]
     for field in NOTE_FIELDS:
         value = record.get(field)
         if value is None or (isinstance(value, list) and not value and field != "nodes"):
             continue
+        if field in NAMES:
+            many = value if isinstance(value, list) else [value]
+            shown = [await named(client, NAMES[field](one)) for one in many]
+            lines.append(
+                f"{field}: " + (f"[{', '.join(shown)}]" if isinstance(value, list) else shown[0])
+            )
+            continue
         if isinstance(value, bool):
-            shown = "true" if value else "false"
+            shown_value = "true" if value else "false"
         elif isinstance(value, str):
-            shown = quoted(value, 120)
-        elif isinstance(value, list):
-            shown = "[" + ", ".join(str(one) for one in value) + "]"
+            shown_value = quoted(value, 120)
         else:
-            shown = str(value)
-        lines.append(f"{field}: {shown}")
+            shown_value = str(value)
+        lines.append(f"{field}: {shown_value}")
     return [*lines, "", READS_A_NOTE]
 
 
@@ -147,6 +202,7 @@ async def test_the_agent_view_of_an_epic_a_story_and_a_task_is_the_recall_an_age
 ) -> None:
     async with fresh_project(server_url) as (client, board, project):
         world = await world_of_notes(client, "agentwork", project)
+        await reindexed(client)
         async with browser_page(board, token=project.key) as w:
             page = w.page
             for name in ("s1", "t1", "E", "s2"):
@@ -154,14 +210,16 @@ async def test_the_agent_view_of_an_epic_a_story_and_a_task_is_the_recall_an_age
                 await open_agent_view(page, board, ref)
                 dialog = page.locator("dialog#agent-view")
                 await expect(dialog.locator("h2")).to_have_text(
-                    f"What an agent receives for {code_of(ref)}"
+                    f"What an agent receives for {await item_name(client, ref)}"
                 )
                 assert "wide" in (await dialog.get_attribute("class") or "")
                 recalled = await ok(client, "recall", node=ref, limit=200, with_similar=True)
                 asked = f'recall(node="{ref}", limit=200, with_similar=true)'
-                assert await lines_drawn(page) == what_recall_says(asked, recalled), name
+                assert await lines_drawn(page) == await what_recall_says(client, asked, recalled), (
+                    name
+                )
                 await expect(page.locator("#agent-view-text")).to_have_attribute(
-                    "aria-label", f"What an agent receives for {code_of(ref)}"
+                    "aria-label", f"What an agent receives for {await item_name(client, ref)}"
                 )
                 await close_agent_view(page)
             # The story has notes of its own, one that came down to its tasks, a criterion and a
@@ -177,16 +235,17 @@ async def test_the_agent_view_of_a_criterion_and_of_a_note_is_what_an_agent_read
 ) -> None:
     async with fresh_project(server_url) as (client, board, project):
         world = await world_of_notes(client, "agentrecords", project)
+        await reindexed(client)
         async with browser_page(board, token=project.key) as w:
             page = w.page
             rule = f"rule:{world['r1']}"
             await open_agent_view(page, board, rule)
             await expect(page.locator("dialog#agent-view h2")).to_have_text(
-                f"What an agent receives for acceptance criterion #{world['r1']}"
+                f"What an agent receives for {await item_name(client, rule)}"
             )
             recalled = await ok(client, "recall", rule_id=world["r1"], limit=200, with_similar=True)
             asked = f"recall(rule_id={world['r1']}, limit=200, with_similar=true)"
-            assert await lines_drawn(page) == what_recall_says(asked, recalled)
+            assert await lines_drawn(page) == await what_recall_says(client, asked, recalled)
             await close_agent_view(page)
             # A note someone decided and confirmed, one nobody decided, one that was replaced and
             # one that was withdrawn: each is read as the record itself.
@@ -194,10 +253,10 @@ async def test_the_agent_view_of_a_criterion_and_of_a_note_is_what_an_agent_read
                 ref = f"note:{world[name]}"
                 await open_agent_view(page, board, ref)
                 await expect(page.locator("dialog#agent-view h2")).to_have_text(
-                    f"What an agent receives for note #{world[name]}"
+                    f"What an agent receives for {await item_name(client, ref)}"
                 )
                 record = await ok(client, "get_note", note_id=world[name])
-                assert await lines_drawn(page) == what_a_note_says(record), name
+                assert await lines_drawn(page) == await what_a_note_says(client, record), name
                 await close_agent_view(page)
             assert w.problems == [], w.problems
 
@@ -271,6 +330,7 @@ async def test_every_kind_of_page_has_the_agent_view_and_so_has_a_person_who_can
 ) -> None:
     async with fresh_project(server_url) as (client, board, project):
         world = await world_of_notes(client, "agentviewer", project)
+        await reindexed(client)
         refs = [
             world["E"],
             world["s1"],
@@ -296,6 +356,6 @@ async def test_every_kind_of_page_has_the_agent_view_and_so_has_a_person_who_can
             await open_agent_view(page, board, world["s1"])
             recalled = await ok(client, "recall", node=world["s1"], limit=200, with_similar=True)
             asked = f'recall(node="{world["s1"]}", limit=200, with_similar=true)'
-            assert await lines_drawn(page) == what_recall_says(asked, recalled)
+            assert await lines_drawn(page) == await what_recall_says(client, asked, recalled)
             await close_agent_view(page)
             assert v.problems == [], v.problems

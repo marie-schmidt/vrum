@@ -1,0 +1,84 @@
+/* The review conversation on the review page (M51, M52): what changed since the revision before (`~` lines with what each part was and is),
+   what was asked for in earlier feedback, the comments written on the lines of a plan, a plan changed outside a revision, comments that were
+   not kept and the dialog that asks for changes. The lines themselves are diff.css's and the page is review.css's. A sign and words carry
+   every meaning; colours only help, and are only ever a token (tokens.css). */
+
+/* -- what was asked for before, a plan changed outside a revision, comments that were not kept ------------------------ */
+
+.change-feedback, .change-drift, .change-lost-box { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface); min-width: 0; }
+.change-feedback > *, .change-drift > *, .change-lost-box > * { min-width: 0; }
+.feedback-item > summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-height: 1.75rem; cursor: pointer; list-style: none; font-weight: 600; }
+.feedback-item > summary::-webkit-details-marker { display: none; }
+.feedback-item > summary:hover { color: var(--accent-text); }
+.feedback-item[open] > summary > .disclosure-chevron { transform: rotate(90deg); }
+.feedback-count { font-weight: 400; }
+.feedback-summary { margin: var(--space-1) 0 0 var(--space-5); white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-orphans { display: grid; gap: var(--space-2); margin: var(--space-2) 0 0 var(--space-5); padding: 0; }
+.feedback-orphan { display: grid; gap: var(--space-1); min-width: 0; }
+.feedback-orphan p { margin: 0; overflow-wrap: anywhere; }
+
+.change-drift { grid-template-columns: auto minmax(0, 1fr); align-items: start; background: var(--danger-soft); border-left: 3px solid var(--danger); color: var(--text); }
+.change-drift > .icon { color: var(--danger); margin-top: 0.15em; }
+.drift-words { display: grid; gap: var(--space-1); min-width: 0; }
+.drift-words p { margin: 0; overflow-wrap: anywhere; }
+.drift-words a { color: inherit; text-decoration-color: var(--danger); }
+
+.change-lost-box { grid-template-columns: minmax(0, 1fr) auto; align-items: start; background: var(--warn-soft); border-left: 3px solid var(--warn); }
+.change-lost-text { display: grid; gap: var(--space-1); min-width: 0; }
+.change-lost { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.change-lost-list > summary { display: inline-flex; align-items: center; gap: var(--space-1); min-height: 1.5rem; cursor: pointer; color: var(--text); font-weight: 550; font-size: var(--text-sm); list-style: none; }
+.change-lost-list > summary::-webkit-details-marker { display: none; }
+.change-lost-list[open] > summary > .disclosure-chevron { transform: rotate(90deg); }
+.lost-comments { display: grid; gap: var(--space-1); margin: var(--space-2) 0 0; padding: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+
+/* -- the lines a revision changed -------------------------------------------------------------------------------- */
+
+.diff-part .diff-code { font-size: var(--text-md); }
+.diff-field { font-weight: 650; }
+.diff-line[data-unchanged="true"] .diff-code { color: var(--text-2); }
+.diff-before-head .diff-code { color: var(--text-2); }
+
+/* -- what is said under a line: earlier comments, comments not sent yet, the box to write one ------------------------- */
+
+.diff-annot .diff-sign { align-items: flex-start; background: var(--diff-context-gutter); color: var(--text-2); }
+.diff-annot .diff-sign .icon { color: inherit; }
+.diff-annot .diff-code > p, .diff-annot .diff-code > blockquote { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.diff-annot .diff-code > form { min-width: 0; }
+.diff-thread .diff-code { border-left: 3px solid var(--border-strong); }
+.diff-comment-pending .diff-code { border-left: 3px dashed var(--border-strong); background: var(--surface-2); }
+.diff-composer .diff-code { border-left: 3px solid var(--border-strong); background: var(--surface-2); }
+.comment-quote { padding-left: var(--space-2); border-left: 3px solid var(--border-strong); color: var(--text-2); white-space: pre-wrap; }
+.comment-body { white-space: pre-wrap; }
+.pending-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); }
+.comment-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* The button on a line: faint until the line is pointed at or the button has the focus, always there on a touch screen. */
+.diff-code .diff-comment { margin-left: var(--space-2); vertical-align: middle; opacity: 0; text-indent: 0; }
+.diff-line:hover .diff-comment, .diff-comment:focus-visible, .diff-comment:hover { opacity: 1; }
+@media (hover: none) {
+  .diff-code .diff-comment { opacity: 1; }
+}
+@media (pointer: coarse) {
+  .diff-comment, .comment-buttons button, .review-choice button, .unsent-go { min-height: 2.75rem; min-width: 2.75rem; }
+}
+
+.comment-form { display: grid; gap: var(--space-2); max-width: 40rem; }
+.comment-form .field { margin: 0; }
+.comment-form select, .comment-form textarea { width: 100%; }
+.comment-problem { margin: 0; }
+.comment-problem:empty { display: none; }
+
+/* -- the unsent comments of a plan, in its conversation ------------------------------------------------------------ */
+
+.change-unsent > summary { display: inline-flex; align-items: center; gap: var(--space-1); min-height: 1.5rem; cursor: pointer; color: var(--text-2); font-size: var(--text-sm); font-weight: 550; list-style: none; }
+.change-unsent > summary::-webkit-details-marker { display: none; }
+.change-unsent[open] > summary > .disclosure-chevron { transform: rotate(90deg); }
+.unsent-comments { display: grid; gap: var(--space-1); margin: var(--space-1) 0 0; padding: 0; font-size: var(--text-sm); }
+.unsent-go { text-align: left; overflow-wrap: anywhere; }
+
+/* -- the dialog that asks for changes ---------------------------------------------------------------------------------- */
+
+dialog.modal .changes-comments-box, dialog.modal .changes-no-comments { margin: 0 0 var(--space-3); }
+.changes-comments { display: grid; gap: var(--space-2); max-height: 14rem; margin: var(--space-1) 0 0; padding: 0; overflow: auto; }
+.changes-comments li { display: grid; gap: var(--space-1); min-width: 0; padding: var(--space-2); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.changes-comments p { margin: 0; }

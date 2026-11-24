@@ -174,7 +174,9 @@ def every_tool_a_key_can_have(owner: Person) -> list[str]:
         reply = owner.call("GET", "/board/api/tools")
         assert reply.status == 200, f"the tool list was refused: {reply.body}"
         _all_tools[owner.base] = sorted(
-            tool["name"] for tool in reply.body["tools"] if not tool["people_only"]
+            tool["name"]
+            for tool in reply.body["tools"]
+            if not tool["people_only"] and not tool["code_mode"]
         )
     return _all_tools[owner.base]
 
@@ -197,25 +199,43 @@ def make_project(owner: Person, name: str | None = None) -> Project:
     return project
 
 
-def make_key(project: Project, name: str) -> str:
+def make_key(
+    project: Project, name: str, *, code_mode: bool = False, verifier: bool = False
+) -> str:
     """Another agent key for the project, named for the agent that will use it (the name is who
     the agent is in the history), made the way its owner makes one, and allowed every tool.
-    Returns the key itself."""
+    With `code_mode` the key calls Vrum by running code (its tool list is `explore` and `run`, and
+    every tool is a function inside a script). With `verifier` it belongs to an agent that checks
+    other agents' work. Returns the key itself."""
     reply = project.owner.call(
         "POST",
         f"/board/api/projects/{project.id}/keys",
-        {"name": name, "tools": every_tool_a_key_can_have(project.owner)},
+        {
+            "name": name,
+            "tools": every_tool_a_key_can_have(project.owner),
+            "code_mode": code_mode,
+            "verifier": verifier,
+        },
     )
     assert reply.status == 201, f"the key was refused: {reply.body}"
     project.keys.append(reply.body["secret"])
     return str(reply.body["secret"])
 
 
-def make_limited_key(project: Project, name: str, tools: list[str] | None) -> str:
+def make_limited_key(
+    project: Project,
+    name: str,
+    tools: list[str] | None,
+    *,
+    code_mode: bool = False,
+    verifier: bool = False,
+) -> str:
     """An agent key that may use only the tools named (the tools Vrum offers agents when `tools`
     is None), made the way its owner makes one on the Users page. Returns the key itself."""
     reply = project.owner.call(
-        "POST", f"/board/api/projects/{project.id}/keys", {"name": name, "tools": tools}
+        "POST",
+        f"/board/api/projects/{project.id}/keys",
+        {"name": name, "tools": tools, "code_mode": code_mode, "verifier": verifier},
     )
     assert reply.status == 201, f"the key was refused: {reply.body}"
     project.keys.append(reply.body["secret"])

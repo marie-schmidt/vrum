@@ -39,6 +39,7 @@ from tests.board_helpers import (
     go,
     item_address,
     item_loaded,
+    item_name,
     item_row,
     made,
     no_panel_or_drawer,
@@ -48,12 +49,14 @@ from tests.board_helpers import (
     open_sidebar,
     pager,
     pager_go,
+    part,
     plain,
     record_rows,
     record_text,
     search_address,
     siblings,
     sidebar_current,
+    strip_labels,
     tree_expand,
     tree_item,
     tree_open,
@@ -328,9 +331,9 @@ async def nothing_beside_the_page(page: Page, where: str = "") -> None:
 
 
 def titled(world: World, ref: str, title: str) -> str:
-    """A piece of work as the path shows it: its code alone. Its title (`title`, then the world's
-    unique word) is in the step's tooltip, which on_record_page checks for the page itself."""
-    return code_of(ref)
+    """A piece of work as the path shows it: its code, then its name (`title`, then the world's
+    unique word): 'S-1 Place an order zq'."""
+    return f"{code_of(ref)} {title} {world.word}"
 
 
 async def on_record_page(
@@ -351,13 +354,11 @@ async def on_record_page(
     name, choices = await hash_of(page)
     assert (name, choices) == ("item", {"item": ref, "from": view}), (name, choices)
     path = await crumbs(page)
-    assert path[:3] == ["Projects", world.project.name, VIEW_NAMES[view]], path
-    assert path[3:-1] == trail[:-1] and path[-1] == trail[-1], (path, trail)
-    # The page's own step is its code (or "AC-3", "N-7"); its title is the
-    # tooltip.
-    assert (await page.locator("#crumb-page").get_attribute("title") or "").startswith(
-        trail[-1] + " "
-    ), (path, trail)
+    assert path[0] == VIEW_NAMES[view], path
+    assert path[1:-1] == trail[:-1] and path[-1] == trail[-1], (path, trail)
+    # The page's own step is its code and its name ("AC-3 A rider...", "N-7 headline"), which is
+    # also its tooltip, whole.
+    assert await page.locator("#crumb-page").get_attribute("title") == trail[-1], (path, trail)
     kept = await view_crumb(page).get_attribute("href")
     assert kept is not None and kept.split("?")[0] == f"#/{view}", kept
     # The back arrow at the left of the bar goes one step back, to the page the person was on, as
@@ -558,7 +559,7 @@ async def test_from_the_board_the_graph_and_the_roadmap_a_click_lands_on_the_rec
                 world,
                 rule,
                 "lists",
-                [*trail_story, f"AC-{world.ids['rule_placed']}"],
+                [*trail_story, await item_name(client, rule)],
             )
             await way_back(w, requirements)
             await w.go("#/lists?view=notes")
@@ -567,10 +568,10 @@ async def test_from_the_board_the_graph_and_the_roadmap_a_click_lands_on_the_rec
             )
             notes = await hash_now(page)
             await page.locator(f"#ctx-notes-list tr[data-ref='{decision}'] a.record-title").click()
-            await on_record_page(w, world, decision, "lists", [f"N-{world.ids['decision_kept']}"])
+            await on_record_page(w, world, decision, "lists", [await item_name(client, decision)])
             await way_back(w, notes)
             await page.locator(f"#ctx-notes-list tr[data-ref='{fact}'] a.record-title").click()
-            await on_record_page(w, world, fact, "lists", [f"N-{world.ids['fact_sure']}"])
+            await on_record_page(w, world, fact, "lists", [await item_name(client, fact)])
             await way_back(w, notes)
 
             # The Roadmap: a bar opens the page of what it draws.
@@ -617,10 +618,10 @@ async def test_from_search_activity_texts_history_the_switcher_and_coverage_a_cl
                 form: (f"Build the form {word}", trail_form),
                 rule: (
                     f"Fast {word}",
-                    [*trail_story, f"AC-{ids['rule_placed']}"],
+                    [*trail_story, await item_name(client, rule)],
                 ),
-                decision: (f"Use REST {word}", [f"N-{ids['decision_kept']}"]),
-                fact: (f"Orders are small {word}", [f"N-{ids['fact_sure']}"]),
+                decision: (f"Use REST {word}", [await item_name(client, decision)]),
+                fact: (f"Orders are small {word}", [await item_name(client, fact)]),
             }
             for ref, (query, trail) in found.items():
                 await w.open(f"#/search?search={quote(query)}")
@@ -640,9 +641,12 @@ async def test_from_search_activity_texts_history_the_switcher_and_coverage_a_cl
             await page.locator(f"#feed li.event a.item-link[href*='item={form}&']").first.click()
             await on_record_page(w, world, form, "activity", trail_form)
             await way_back(w, "#/activity")
-            await page.locator(f"#claims-live li.claim[data-node='{form}'] a").first.click()
+            # A held item is in the Working view, which is a choice of its own on the page.
+            await open_working(page)
+            working = await hash_now(page)
+            await page.locator(f"#agents li.claim[data-node='{form}'] a").first.click()
             await on_record_page(w, world, form, "activity", trail_form)
-            await way_back(w, "#/activity")
+            await way_back(w, working)
 
             # A reference in a text and a line of a history, from a page reached from Lists.
             await w.open("#/lists?view=work")
@@ -661,7 +665,7 @@ async def test_from_search_activity_texts_history_the_switcher_and_coverage_a_cl
             )
             name, choices = await hash_of(page)
             assert name == "item" and choices["from"] == "lists", (name, choices)
-            assert (await crumbs(page))[2] == "Lists"
+            assert (await crumbs(page))[0] == "Lists"
             # One step back from the note is the story it was reached from, not the list.
             await way_back(w, item_address(story, "lists"))
 
@@ -694,7 +698,9 @@ async def test_from_search_activity_texts_history_the_switcher_and_coverage_a_cl
                 timeout=SLOW
             )
             await page.locator(f"#unplaced-rules tr[data-rule='{loose}'] a.record-title").click()
-            await on_record_page(w, world, f"rule:{loose}", "coverage", [f"AC-{loose}"])
+            await on_record_page(
+                w, world, f"rule:{loose}", "coverage", [await item_name(client, f"rule:{loose}")]
+            )
             await way_back(w, "#/coverage")
             await page.locator(
                 f"#stories-without-rules tr[data-story='{pay}'] a.record-title"
@@ -724,17 +730,56 @@ def recalled(recall: dict[str, Any], section: str) -> list[str]:
 
 
 async def concern_rows(page: Page, client: Client, **target: Any) -> None:
-    """The tables of what concerns an item are exactly what `recall` says, section by section."""
+    """The tables of what concerns an item are exactly what `recall` says, section by section, and
+    each note's "Applies to" cell lists what the note concerns."""
     recall = await ok(client, "recall", **target)
     for section in ("notes", "project_wide_notes", "past_notes"):
         assert await recall_rows(page, section) == recalled(recall, section), section
         counted = page.locator(f".recall-section[data-section='{section}']")
         if recall[section]["count"]:
             assert await counted.get_attribute("data-count") == str(recall[section]["count"])
+    for row in await record_rows(page, "notes"):
+        note = await ok(client, "get_note", note_id=row["id"])
+        refs = [
+            *note["nodes"],
+            *(f"rule:{one}" for one in note["rule_ids"]),
+            *(f"note:{one}" for one in note["note_ids"]),
+        ]
+        lines = [*(["The whole project"] if note["project_wide"] else [])]
+        lines += [await item_name(client, ref) for ref in refs]
+        cell = page.locator(
+            f"#item-page table.notes-table tr.record-line[data-ref='note:{row['id']}'] "
+            "td.cell-applies"
+        ).first
+        if not lines:
+            assert " ".join((await cell.text_content() or "").split()) == "Nothing yet"
+            continue
+        # One item to a line, code and name, three lines at most and then "and 2 more"; the whole
+        # list is the cell's tooltip.
+        listing = cell.locator("div.applies-list")
+        assert await listing.get_attribute("title") == "\n".join(lines), row["ref"]
+        shown = [
+            " ".join(text.split())
+            for text in await listing.locator(".applies-name").all_text_contents()
+        ]
+        assert shown == lines[:3], row["ref"]
+        more = listing.locator(".applies-more")
+        if len(lines) > 3:
+            assert " ".join((await more.text_content() or "").split()) == (
+                f"and {len(lines) - 3} more"
+            )
+        else:
+            assert await more.count() == 0
 
 
 def words(status: str) -> str:
     return status.replace("_", " ").capitalize()
+
+
+def note_chip(page: Page) -> Locator:
+    """The chip in a note page's strip that says where the note stands (and, for a person, the
+    menu that changes it)."""
+    return page.locator("#item-page .state-strip dd.status .chip.note-status")
 
 
 async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: str) -> None:
@@ -763,7 +808,6 @@ async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: s
                 if node["progress_total"]:
                     assert f"{node['progress_done']} of {node['progress_total']}" in text
                 if node["parent"]:
-                    assert await page.locator("#item-what").count() == 0
                     parent_link = page.locator("nav.crumbs li.crumb-item a").last
                     assert code_of(node["parent"]) in await parent_link.inner_text()
                     assert await parent_link.get_attribute("href") == (
@@ -778,18 +822,12 @@ async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: s
                 if node["kind"] != "task":
                     below = await all_nodes(client, parent=ref)
                     assert await refs_in(page, "#item-table tbody tr") == [n["ref"] for n in below]
-                else:
-                    needs = [
-                        link
-                        for link in (await ok(client, "list_links", node=ref))["items"]
-                        if link["link_type"] == "needs_first"
-                    ]
-                    assert sorted(await refs_in(page, "#relations-table tbody tr")) == sorted(
-                        {
-                            link["target"] if link["source"] == ref else link["source"]
-                            for link in needs
-                        }
-                    )
+                # What it is linked to, in both directions, is the page's Links section, whatever
+                # the kind: the other end of every link the server lists.
+                links = (await ok(client, "list_links", node=ref))["items"]
+                assert sorted(await refs_in(page, "#links-table tbody tr")) == sorted(
+                    link["target"] if link["source"] == ref else link["source"] for link in links
+                )
                 if node["kind"] == "story":
                     rules = (await ok(client, "list_rules", node=ref))["items"]
                     assert sorted(
@@ -802,18 +840,37 @@ async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: s
             rule = await ok(client, "get_rule", rule_id=rule_id)
             await open_item(w, f"rule:{rule_id}")
             text = await record_text(page)
-            assert rule["title"] in await page.locator("#item-title").inner_text()
-            assert (
-                f"Acceptance criterion #{rule_id}" in await page.locator("#item-title").inner_text()
+            assert await page.locator("#item-title").inner_text() == (
+                f"AC-{rule_id} {rule['title']}"
             )
             assert words(rule["status"]) in text
-            assert await refs_in(page, "#item-page a[href*='item=story:']", "href") != []
-            assert code_of(rule["node"]) in text
+            # The story it is on and the epic above it are the path above the page, and its strip
+            # holds its status alone.
+            holder = await ok(client, "get_node", node=rule["node"])
+            assert await crumbs(page) == [
+                "Board",
+                await item_name(client, holder["parent"]),
+                await item_name(client, rule["node"]),
+                await item_name(client, f"rule:{rule_id}"),
+            ]
+            assert await strip_labels(page) == ["Status"]
             await concern_rows(page, client, rule_id=rule_id)
             loose = await ok(client, "get_rule", rule_id=ids["rule_loose"])
             await open_item(w, f"rule:{loose['id']}")
             assert loose["node"] is None
             assert await page.locator("#item-page [data-part=lifecycle]").count() == 0
+            # One placed nowhere says so in its strip, and its path is its own code and name.
+            assert await strip_labels(page) == [
+                "Status",
+                "On",
+            ]
+            await expect(page.locator("#item-page .state-strip dd.in-story")).to_have_text(
+                "Not placed yet"
+            )
+            assert await crumbs(page) == [
+                "Board",
+                await item_name(client, f"rule:{loose['id']}"),
+            ]
 
             # Notes: unconfirmed, confirmed, replaced, withdrawn, project-wide, decided or not.
             for name in (
@@ -830,13 +887,22 @@ async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: s
                 await open_item(w, f"note:{note['id']}")
                 text = await record_text(page)
                 heading = await page.locator("#item-title").inner_text()
-                assert heading.startswith(f"Note #{note['id']}")
+                assert heading.startswith(f"N-{note['id']} ")
                 assert note["headline"].rstrip("…")[:40] in heading, (name, heading)
                 for field in ("why", "decided_by"):
                     if note[field]:
                         assert note[field] in text, (name, field)
                 if note["decided_by"]:
-                    assert f"Decided by {note['decided_by']} on {note['decided_on']}" in text
+                    await expect(page.locator("#item-page .state-strip dd.decided")).to_have_text(
+                        f"{note['decided_by']} on {note['decided_on']}"
+                    )
+                # The strip holds only what the note has: its status, its scope when it is
+                # project-wide and who decided it when somebody did.
+                assert await strip_labels(page) == [
+                    "Status",
+                    *(["Scope"] if note["project_wide"] else []),
+                    *(["Decided by"] if note["decided_by"] else []),
+                ], name
                 detail = page.locator("article.record-detail")
                 assert await detail.get_attribute("data-status") == note["status"], name
                 assert (
@@ -844,9 +910,11 @@ async def test_each_record_page_shows_the_same_fields_as_the_tools(server_url: s
                     == str(note["project_wide"]).lower()
                 )
                 # One chip says where it stands, in the stored word and the word a person reads.
-                chip = page.locator("#item-page .record-chips .chip.note-status")
+                chip = note_chip(page)
                 assert await chip.get_attribute("data-status") == note["status"]
                 assert (await chip.inner_text()).strip() == NOTE_STATUS_WORDS[note["status"]]
+                # The Confirmation card is there only for a note somebody confirmed.
+                assert await part(page, "confirmation").count() == int(bool(note["confirmed_by"]))
                 if note["status"] == "confirmed":
                     assert f"Confirmed by {note['confirmed_by']}" in text
                 concerns = {f"rule:{one}" for one in note["rule_ids"]} | set(note["nodes"])
@@ -940,7 +1008,7 @@ async def test_the_back_arrow_goes_exactly_one_step_back_from_wherever_the_perso
     it: another record, a filtered view, a search, a settings page; it survives a reload, and with
     no step before it (the address was loaded fresh) it goes to the view the record was reached
     from."""
-    async with a_world(server_url) as (world, _):
+    async with a_world(server_url) as (world, client):
         form, api, story = world["form"], world["api"], world["story"]
         async with browser_page(world.board, token=world.project.key) as w:
             page = w.page
@@ -958,7 +1026,9 @@ async def test_the_back_arrow_goes_exactly_one_step_back_from_wherever_the_perso
             await expect(arrow).to_have_attribute("aria-label", "Back to Board")
             await w.go(item_address(api, "board"))
             await item_loaded(page, api)
-            await expect(arrow).to_have_attribute("aria-label", f"Back to {code_of(form)}")
+            await expect(arrow).to_have_attribute(
+                "aria-label", f"Back to {await item_name(client, form)}"
+            )
             await w.go(item_address(story, "board"))
             await item_loaded(page, story)
             await step_back(item_address(api, "board"))
@@ -1028,8 +1098,11 @@ async def test_from_an_epic_to_a_task_and_back_and_to_another_epic_by_links_and_
             await on_record_page(
                 w, world, form, "board", trail_form, came_from=item_address(story, "board")
             )
-            # Up, by the links on the page: the story it is part of, then the epic it is in.
-            await page.locator("#item-part h2 a").click()
+            # Up, by the links in the path above the page: the story it is part of, then the epic
+            # it is in.
+            await page.locator(
+                f"nav.crumbs li.crumb-item a[href='{item_address(story, 'board')}']"
+            ).click()
             await on_record_page(
                 w, world, story, "board", trail_story, came_from=item_address(form, "board")
             )
@@ -1292,7 +1365,7 @@ async def test_a_criterion_page_is_edited_without_losing_a_draft_and_refuses_a_s
             await expect(page.locator("#item-title")).to_contain_text("Saved at last", timeout=SLOW)
             saved = await ok(client, "get_rule", rule_id=rule_id)
             assert (saved["title"], saved["version"]) == (f"Saved at last {word}", 3)
-            assert (await crumbs(page))[-1] == f"AC-{rule_id}"
+            assert (await crumbs(page))[-1] == await item_name(client, f"rule:{rule_id}")
             await expect(page.locator("#crumb-page")).to_have_attribute(
                 "title", re.compile(f"Saved at last {word}")
             )
@@ -1314,8 +1387,10 @@ async def test_a_note_page_confirms_replaces_withdraws_and_changes_what_it_conce
             unsure = world.record("decision_story")
             await open_item(w, unsure)
             detail = page.locator(f"article.record-detail[data-record='{unsure}']")
-            chip = page.locator("#item-page .record-chips .chip.note-status")
+            chip = note_chip(page)
             await expect(chip).to_have_attribute("data-status", "unconfirmed")
+            # Nobody has confirmed it: there is no Confirmation card, only the chip.
+            await expect(part(page, "confirmation")).to_have_count(0)
             asks = {"note_id": ids["decision_story"]}
             nobody = board_refusal(
                 world.project, "set_confirmation", confirmation="confirmed", person="", **asks
@@ -1526,10 +1601,10 @@ async def test_the_search_duplicates_activity_and_coverage_pages_say_what_the_to
             before = (await links_of(client, first, second), await link_count(client))
             assert before[0] == {first: [], second: []}
             row = page.locator(f"tr.pair[data-first='{first}'][data-second='{second}']")
-            names = f"{code_of(first)} and {code_of(second)}"
-            await row.get_by_role("button", name=f"Mark {names} as duplicates").click()
+            names = f"“{DUPLICATES[0][0]}” and “{DUPLICATES[0][1]}”"
+            await row.get_by_role("button", name=f"Mark as duplicates: {names}").click()
             await expect(
-                row.get_by_role("button", name=f"{names} are marked as duplicates")
+                row.get_by_role("button", name=f"Marked as duplicates: {names}")
             ).to_be_disabled(timeout=SLOW)
             assert await links_of(client, first, second) == {
                 first: [(first, second, "duplicates")],
@@ -1563,7 +1638,9 @@ async def test_the_search_duplicates_activity_and_coverage_pages_say_what_the_to
             assert {(r["node"], r["actor"]) for r in rows if r["section"] == "claims-live"} == set(
                 held
             )
-            countdown = page.locator(f"#claims-live li.claim[data-node='{form}'] .countdown")
+            countdown = page.locator(
+                f"#agents li.claim[data-live='1'][data-node='{form}'] .countdown"
+            )
             assert datetime.fromisoformat(
                 str(await countdown.get_attribute("data-expires"))
             ) == datetime.fromisoformat(held[(form, "tests")])
@@ -1597,6 +1674,14 @@ def dot(page: Page, key: str) -> Locator:
     return page.locator(f"svg.graph-st-svg g.graph-st-node[data-ref='{key}']")
 
 
+async def map_at_rest(page: Page) -> None:
+    """The whole-project map is a live layout: it is still while nothing touches it, and a click
+    on a dot that is still moving is a click on where the dot was."""
+    await expect(page.locator("svg.graph-st-svg")).to_have_attribute(
+        "data-resting", "true", timeout=SLOW
+    )
+
+
 async def test_the_maps_dot_opens_its_page_and_a_roadmap_bar_opens_but_still_drags(
     server_url: str,
 ) -> None:
@@ -1609,6 +1694,7 @@ async def test_the_maps_dot_opens_its_page_and_a_roadmap_bar_opens_but_still_dra
             page = w.page
             await w.open("#/graph")
             await expect(page.locator("svg.graph-st-svg")).to_be_visible(timeout=SLOW)
+            await map_at_rest(page)
             # Nothing is beside the map and no node is chosen by pointing at it: a click opens the
             # page of the node, in the Graph, and the way back is the Graph as it was left.
             await expect(page.locator(".graph-x-side")).to_have_count(0)
@@ -1618,6 +1704,7 @@ async def test_the_maps_dot_opens_its_page_and_a_roadmap_bar_opens_but_still_dra
             await on_record_page(w, world, story, "graph", trail_story)
             await way_back(w, graph)
             await expect(dot(page, story)).to_be_visible(timeout=SLOW)
+            await map_at_rest(page)
             assert await hash_of(page) == ("graph", {})
 
             # By keyboard: Enter on a node opens its page.
@@ -1639,6 +1726,7 @@ async def test_the_maps_dot_opens_its_page_and_a_roadmap_bar_opens_but_still_dra
             await way_back(w, focused)
             await page.select_option("#graph-st-scope", "")
             await expect(page.locator("svg.graph-st-svg")).to_be_visible(timeout=SLOW)
+            await map_at_rest(page)
             assert "scope" not in (await hash_of(page))[1]
 
             # The Roadmap: a drag still moves a bar, and changes only its dates; a click and Enter
@@ -1737,6 +1825,16 @@ async def test_no_page_scrolls_sideways_every_control_is_named_and_it_all_works_
                             overflow,
                         )
                         assert overflow["offenders"] == [], (where, overflow["offenders"])
+                        if name == "roadmap":
+                            # The timeline's box fills the rest of the window and the page itself
+                            # does not scroll.
+                            box = await page.locator("#rm-scroll").bounding_box()
+                            assert box is not None, where
+                            scroll_height = await page.evaluate(
+                                "document.documentElement.scrollHeight"
+                            )
+                            assert scroll_height <= height, (where, scroll_height)
+                            assert height - (box["y"] + box["height"]) <= 20, (where, box)
                         for audit in ("unnamed", "unlabelled", "icons", "glyphs"):
                             assert found[audit] == [], (where, audit, found[audit])
                         assert found["mains"] == 1, where

@@ -1,6 +1,8 @@
 """The password hash, the failed-attempt counter and the checks on what a person typed, with no
 containers."""
 
+from datetime import UTC, date, datetime, timedelta
+
 import pytest
 
 from vrum.accounts import (
@@ -8,8 +10,10 @@ from vrum.accounts import (
     clean_agent_name,
     clean_display_name,
     clean_email,
+    clean_expiry,
     digest_of,
     hash_password,
+    key_expired_words,
     password_matches,
 )
 from vrum.ratelimit import AttemptLimiter
@@ -31,6 +35,36 @@ def test_a_name_that_is_a_secret_is_refused_without_repeating_it() -> None:
     with pytest.raises(AccessRefusal, match="looks like a secret") as person:
         clean_display_name(f"Ada {A_TOKEN}")
     assert A_TOKEN not in str(agent.value) and A_TOKEN not in str(person.value)
+
+
+def test_a_key_expiry_is_a_day_that_has_not_passed_or_nothing_for_a_key_that_never_expires() -> (
+    None
+):
+    today = datetime.now(UTC).date()
+    assert clean_expiry(None) is None and clean_expiry("") is None and clean_expiry("  ") is None
+    assert clean_expiry(today.isoformat()) == today
+    assert clean_expiry(f" {(today + timedelta(days=90)).isoformat()} ") == today + timedelta(
+        days=90
+    )
+    yesterday = (today - timedelta(days=1)).isoformat()
+    for typed, said in (
+        (yesterday, "already passed"),
+        ("next week", "YYYY-MM-DD"),
+        ("2030-02-30", "YYYY-MM-DD"),
+        ("2030-12-31T10:00", "YYYY-MM-DD"),
+        (20301231, "YYYY-MM-DD"),
+        (True, "YYYY-MM-DD"),
+    ):
+        with pytest.raises(AccessRefusal) as refused:
+            clean_expiry(typed)
+        assert said in str(refused.value) and "Nothing was changed" in str(refused.value)
+        assert refused.value.status == 400
+
+
+def test_an_expired_key_is_told_when_it_ran_out_and_who_can_fix_it() -> None:
+    words = key_expired_words(date(2026, 11, 30))
+    assert "expired after 2026-11-30" in words and "Users, then Agents" in words
+    assert "\u2014" not in words and "\u2013" not in words
 
 
 def test_a_person_is_shown_by_a_name_of_one_to_a_hundred_characters() -> None:

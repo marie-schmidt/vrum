@@ -74,10 +74,14 @@ async def test_a_person_gives_changes_and_clears_a_size_and_the_totals_follow(
             node = await ok(client, "get_node", node=first)
             assert (node["size"], node["points"]) == ("m", 3)
 
-            # A story that has tasks adds up theirs, and says how many are not sized.
+            # A story that has tasks adds up theirs (what is done, of all the points), and says how
+            # many are not sized.
             await go(page, board, f"#/item?item={story}")
             points = page.locator("#item-page .card-summary dd.points")
-            await expect(points.locator(".points-total")).to_have_text("3 points", timeout=SLOW)
+            await expect(points.locator(".points-total")).to_have_text(
+                "0 of 3 points", timeout=SLOW
+            )
+            await expect(points.locator(".points-rollup")).to_have_attribute("data-points", "3")
             await expect(points.locator(".points-unsized")).to_have_text("1 not sized")
             assert await page.locator("#item-page .card-summary [data-menu=size]").count() == 0
             story_node = await ok(client, "get_node", node=story)
@@ -92,7 +96,9 @@ async def test_a_person_gives_changes_and_clears_a_size_and_the_totals_follow(
                 "8 points", timeout=SLOW
             )
             assert (await ok(client, "get_node", node=second))["size"] == "l"
-            await expect(points.locator(".points-total")).to_have_text("8 points", timeout=SLOW)
+            await expect(points.locator(".points-total")).to_have_text(
+                "0 of 8 points", timeout=SLOW
+            )
             assert (await ok(client, "get_node", node=story))["points_total"] == 8
             assert await points.locator(".points-unsized").count() == 0
 
@@ -100,7 +106,7 @@ async def test_a_person_gives_changes_and_clears_a_size_and_the_totals_follow(
             await go(page, board, f"#/item?item={epic}")
             await expect(
                 page.locator("#item-page .card-summary dd.points .points-total")
-            ).to_have_text("8 points", timeout=SLOW)
+            ).to_have_text("0 of 8 points", timeout=SLOW)
             assert await page.locator("#item-page [data-menu=size]").count() == 0
             await page.locator("#edit-open").click()
             await expect(page.locator("#edit-title")).to_be_visible()
@@ -199,7 +205,6 @@ async def test_a_person_ticks_the_checks_and_says_how_and_an_agents_tick_appears
             await expect(part.locator(".check-text")).to_have_text(list(keys), timeout=SLOW)
             await expect(part.locator(".check-intro")).to_contain_text("Before it is done:")
             await expect(part.locator("h3")).to_contain_text("0 of 3 ticked")
-            await expect(page.locator(".item-jump[data-jump=definition]")).to_contain_text("0/3")
             items = part.locator(".check-item")
             boxes = part.locator("input.check-box")
             box = await boxes.first.bounding_box()
@@ -208,7 +213,6 @@ async def test_a_person_ticks_the_checks_and_says_how_and_an_agents_tick_appears
             # One click ticks it, as the person, with nothing asked.
             await boxes.nth(0).click()
             await expect(part.locator("h3")).to_contain_text("1 of 3 ticked", timeout=SLOW)
-            await expect(page.locator(".item-jump[data-jump=definition]")).to_contain_text("1/3")
             await expect(items.nth(0).locator(".check-who")).to_contain_text(ADA)
             first = (await ok(client, "get_node", node=task))["checks"][0]
             assert (first["checked"], first["checked_by"], first["checked_by_kind"]) == (
@@ -268,24 +272,42 @@ async def test_a_person_ticks_the_checks_and_says_how_and_an_agents_tick_appears
             await long.locator(".what-changed summary").click()
             await expect(long.locator(".change-text")).to_have_text(how)
             await go(page, board, "#/activity?act_kind=checks")
+            # Two ticks in a row by the same person on the same task are one line, with the checks
+            # folded inside it, each with what was said whole; the untick and the agent's tick
+            # are lines of their own.
             rows = page.locator("li.event")
-            await expect(rows).to_have_count(4, timeout=SLOW)
+            await expect(rows).to_have_count(3, timeout=SLOW)
+            run = page.locator("li.event.event-run")
+            await expect(run).to_have_count(1)
+            await expect(run).to_have_attribute("data-count", "2")
+            await expect(run).to_have_attribute("data-actor", ADA)
+            await expect(run.locator(".event-words")).to_contain_text(
+                f"ticked 2 checks on task T-{number(task)}"
+            )
+            await run.locator("summary", has_text="Show the checks").click()
+            await expect(run.locator("li.run-check .run-check-words")).to_have_text(
+                [re.compile(r"^“Tests pass”"), re.compile(r"^“A person tried it”")]
+            )
+            await expect(run.locator(".run-check-evidence")).to_have_text(how)
             await expect(
                 page.locator("li.event[data-action=check_unticked] .event-words")
             ).to_contain_text(f"unticked “Tests pass” on task T-{number(task)}")
 
-            # The Board's card says how many are ticked.
+            # The Board's card says how many are ticked, as the one progress sign that also holds
+            # the acceptance criteria (this task has none), with the checks in its words.
             await go(page, board, "#/board")
-            chip = page.locator(f".card[data-ref='{task}'] .chip.checks")
-            await expect(chip).to_have_text("2/3 checks", timeout=SLOW)
+            chip = page.locator(f".card[data-ref='{task}'] .chip.progress-sign")
+            await expect(chip).to_have_text("2/3", timeout=SLOW)
+            await expect(chip).to_have_attribute("aria-label", "2 of 3 checks ticked")
             assert "ok" not in (await chip.get_attribute("class") or "").split()
+            assert await page.locator(f".card[data-ref='{task}'] .chip.checks").count() == 0
 
             # The definition's own page says on how many each check is ticked, and what rewording
             # a ticked line would cost.
             await go(page, board, "#/definition")
             await expect(page.locator("#definition-checks-title")).to_have_text("3 checks")
             await expect(page.locator(".check-ticks-count")).to_have_text(
-                ["not ticked yet", "ticked on 1 story or task", "ticked on 1 story or task"]
+                ["ticked on 1 story or task", "ticked on 1 story or task"]
             )
             await page.locator("#edit-definition").click()
             reworded = "Before it is done:\n- Tests pass\n- A person tried it on a bike"
@@ -316,31 +338,35 @@ async def test_the_board_shows_size_and_checks_on_cards_and_has_a_key(server_url
         keys = await keys_of_checks(client)
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
-            await go(page, board, "#/board")
+            await go(page, board, "#/board?show=both")
             card = page.locator(f".card[data-ref='{medium}']")
             await expect(card.locator(".chip.size")).to_have_text("M", timeout=SLOW)
             await expect(card.locator(".chip.size")).to_have_attribute("title", "Medium, 3 points")
             assert await page.locator(f".card[data-ref='{plain}'] .chip.size").count() == 0
-            lane = page.locator(f".lane[data-ref='{epic}'] .lane-meta .chip.size-rollup")
-            await expect(lane).to_have_text("8 pts")
-            await expect(lane).to_have_attribute("title", "8 points, 1 not sized")
-            assert await card.locator(".chip.checks").count() == 0
+            # What a story adds up to is on its own card; the epic's lane head holds no size.
+            rollup = page.locator(f".card[data-ref='{story}'] .chip.size-rollup")
+            await expect(rollup).to_have_text("8 pts")
+            await expect(rollup).to_have_attribute("title", "8 points, 1 not sized")
+            assert await page.locator(f".lane[data-ref='{epic}'] .lane-head .chip").count() == 0
+            assert await card.locator(".chip.progress-sign").count() == 0
 
             # An agent ticks one of the two: the card counts it, and all of them is green.
             await ok(client, "set_check", node=medium, item=keys["Tests pass"], evidence="Passed")
-            chip = card.locator(".chip.checks")
-            await expect(chip).to_have_text("1/2 checks", timeout=NEWS)
+            chip = card.locator(".chip.progress-sign")
+            await expect(chip).to_have_text("1/2", timeout=NEWS)
+            await expect(chip).to_have_attribute("aria-label", "1 of 2 checks ticked")
             await ok(
                 client, "set_check", node=medium, item=keys["A person tried it"], evidence="Tried"
             )
-            await expect(chip).to_have_text("2/2 checks", timeout=NEWS)
+            await expect(chip).to_have_text("2/2", timeout=NEWS)
             assert "ok" in (await chip.get_attribute("class") or "").split()
-            # Finished work is in its column, so the card leaves the chip out.
+            # Finished work is in its column, so the card leaves the sign out.
             version = (await ok(client, "get_node", node=medium))["version"]
             await ok(client, "update_node", node=medium, expected_version=version, status="done")
-            await expect(card.locator(".chip.checks")).to_have_count(0, timeout=NEWS)
+            await expect(card.locator(".chip.progress-sign")).to_have_count(0, timeout=NEWS)
 
-            # The Key says what the statuses and the signs are.
+            # The Key says what the statuses and the signs are: each sign is drawn the way a card
+            # draws it, and has its words beside it.
             await page.locator("#board-key-button").hover()
             key = page.locator(".hovercard:visible")
             await expect(key).to_be_visible()
@@ -348,8 +374,25 @@ async def test_the_board_shows_size_and_checks_on_cards_and_has_a_key(server_url
                 await expect(
                     key.locator(".bk-group.is-status strong", has_text=words)
                 ).to_have_count(1)
-            for sign in ("Waiting", "Handoff", "criteria", "checks", "pts", "No size", "Overdue"):
-                await expect(key.locator(".bk-mark .chip", has_text=sign)).to_have_count(1)
+            for sign in (
+                ".chip.priority",
+                ".chip.size-m",
+                ".chip.size-rollup",
+                ".chip.no-size",
+                ".chip.progress-sign",
+                ".chip.waiting",
+                ".chip.handoff-sign",
+                ".chip.held:not(.lapsed)",
+                ".chip.held.lapsed",
+                ".chip.due.danger.overdue",
+                ".chip.conflict",
+            ):
+                await expect(key.locator(f".bk-card {sign}").first).to_be_visible()
+            await expect(key.locator(".bk-card .chip.waiting")).to_have_text("")
+            await expect(key).to_contain_text("Waiting for work that is not done yet")
+            await expect(key).to_contain_text("Has a handoff note")
+            await expect(key).to_contain_text("Not sized yet")
+            await expect(key).to_contain_text("Late: past its due day")
             await page.keyboard.press("Escape")
             await expect(page.locator(".hovercard:visible")).to_have_count(0)
             await page.locator("#board-key-button").focus()
@@ -383,14 +426,14 @@ async def test_the_board_marks_open_work_that_has_no_size_with_a_faint_chip(
         async with browser_page(board, token=project.key, name=ADA) as w:
             page = w.page
             await go(page, board, "#/board?show=both")
-            await expect(card(page, bare).locator(".chip.no-size")).to_have_text(
-                "No size", timeout=SLOW
+            await expect(card(page, bare).locator(".chip.no-size")).to_have_attribute(
+                "aria-label", "No size", timeout=SLOW
             )
             wearing = await page.locator(".card .chip.no-size").evaluate_all(
                 "els => els.map(e => e.closest('.card').dataset.ref)"
             )
             assert set(wearing) == asked and len(wearing) == len(asked)
-            assert await page.locator(".lane-meta .chip.no-size").count() == 0
+            assert await page.locator(".lane-head .chip.no-size").count() == 0
 
             # It is a quiet sign and not a control, fainter than a size's own chip.
             chip = card(page, bare).locator(".chip.no-size")

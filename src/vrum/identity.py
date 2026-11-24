@@ -8,7 +8,8 @@ no argument can say who is asking.
 
 An identity is a kind and a name. The kind is `person` or `agent`; history written before
 identities were verified (an old export that is loaded) has the kind `unknown`, which no call can
-have."""
+have. An agent whose key the owner marked as a verifier says so (`verifier`): it may tick the
+checks that only a verifier may, on work it did not do."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ Kind = Literal["person", "agent"]
 class Identity:
     kind: Kind
     name: str
+    verifier: bool = False
 
 
 class NoIdentity(RuntimeError):
@@ -37,8 +39,8 @@ def person(name: str) -> Identity:
     return Identity("person", name)
 
 
-def agent(name: str) -> Identity:
-    return Identity("agent", name)
+def agent(name: str, *, verifier: bool = False) -> Identity:
+    return Identity("agent", name, verifier)
 
 
 @contextmanager

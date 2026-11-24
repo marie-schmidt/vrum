@@ -355,8 +355,11 @@ async def test_recall_gives_what_the_exact_links_give_and_says_why_each_note_is_
         "past_notes",
         "acceptance_criteria",
         "similar",
+        "max_characters",
+        "left_out",
+        "cut_note",
     }
-    assert result["similar"] is None
+    assert result["similar"] is None and result["left_out"] == {}
     found = in_section(result["notes"])
     assert ids(found) == [decision["id"], plain["id"], elsewhere["id"], replacement["id"]]
     assert result["notes"]["count"] == 4 and result["notes"]["next_after_id"] is None

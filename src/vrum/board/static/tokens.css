@@ -81,6 +81,24 @@
   --danger: #b3261e;
   --danger-soft: #fbe6e3;
   --neutral-soft: #ece9e2;
+  /* A change on the page of what needs a person is drawn like a diff: added lines, removed lines, lines that stay for context, and
+     the hunk row. These are not statuses. The `+`, the `-` and the words carry the meaning; the colour only helps. */
+  --diff-add-bg: #e6f4ea;
+  --diff-add-gutter: #cde9d8;
+  --diff-add-text: #155a3a;
+  --diff-remove-bg: #fbe9e6;
+  --diff-remove-gutter: #f4d0cb;
+  --diff-remove-text: #9b1f17;
+  --diff-context-bg: #f6f4f0;
+  --diff-context-gutter: #ebe8e1;
+  --diff-hunk-bg: #e8eefa;
+  --diff-hunk-text: #27508f;
+  /* A line a revision changed (`~`, M51): the item as it is now, with what each changed part was and is under it. */
+  --diff-change-bg: #fdf3dc;
+  --diff-change-gutter: #f6e4b9;
+  --diff-change-text: #6a4506;
+  /* A quiet wash over a line that opens a dialog when the pointer is on it (it stays readable on every line colour). */
+  --diff-hover: rgb(28 27 25 / 6%);
   --grid-line: #f0eee9;
   --grid-weekend: #f9f8f5;
   --shadow: 0 1px 2px rgb(28 27 25 / 8%), 0 1px 1px rgb(28 27 25 / 4%);
@@ -118,6 +136,20 @@
   --danger: #ff8a80;
   --danger-soft: #45221f;
   --neutral-soft: #2d3035;
+  --diff-add-bg: #1c3327;
+  --diff-add-gutter: #25472f;
+  --diff-add-text: #7fdcaa;
+  --diff-remove-bg: #3b1f1d;
+  --diff-remove-gutter: #512826;
+  --diff-remove-text: #ff9d94;
+  --diff-context-bg: #25282c;
+  --diff-context-gutter: #2d3035;
+  --diff-hunk-bg: #1f2b45;
+  --diff-hunk-text: #a2c1ff;
+  --diff-change-bg: #33291a;
+  --diff-change-gutter: #46391c;
+  --diff-change-text: #f0c36a;
+  --diff-hover: rgb(255 255 255 / 7%);
   --grid-line: #292c30;
   --grid-weekend: #24272b;
   --shadow: 0 1px 2px rgb(0 0 0 / 40%);

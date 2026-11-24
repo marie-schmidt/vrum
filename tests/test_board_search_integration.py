@@ -5,10 +5,11 @@ back is the search as it was left. What the page lists is compared with what `se
 (order, how each matched, the words it gives for why, which carry the scores, and where each item
 stands), its counts with the server's own counts, and its paging with the server's.
 Every result names itself by its reference (`story:12`, `note:7`): the page carries it as
-`data-ref`, the record's address as `item=`, and the words show a code (S-12) for work and #7 for
-the rest. Titles carry a unique word, and each test looks only at what it made, since all tests
-share one database."""
+`data-ref`, the record's address as `item=`, and the words show a code and the name (S-12 and the
+title for work, AC-3 for a criterion and N-7 for a note), never #7. Titles carry a unique word,
+and each test looks only at what it made, since all tests share one database."""
 
+import re
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from tests.board_helpers import (
     made,
     no_panel_or_drawer,
     on_page,
+    open_search,
     view_crumb,
 )
 from tests.board_search import (
@@ -65,8 +67,11 @@ def board(server_url: str) -> str:
 
 
 def code_shown(item: dict[str, Any]) -> str:
-    """What the page writes before a result's title: S-12 for work, #7 for the others."""
-    return code_of(item["ref"]) if item["item_type"] in WORK else f"#{item['id']}"
+    """What the page writes before a result's title: S-12 for work, AC-3 for an acceptance
+    criterion, N-7 for a note."""
+    if item["item_type"] in WORK:
+        return code_of(item["ref"])
+    return f"{'AC' if item['item_type'] == 'rule' else 'N'}-{item['id']}"
 
 
 def same_as_server(rows: list[dict[str, Any]], items: list[dict[str, Any]]) -> None:
@@ -145,7 +150,7 @@ async def test_exact_words_are_found_from_every_page_with_the_service_stopped_an
                     "1 item waiting to be indexed"
                 )
                 await expect(page.locator("#index-state")).to_contain_text("1 waiting")
-                assert (await crumbs(page))[2:] == ["Search"], await crumbs(page)
+                assert await crumbs(page) == ["Search"], await crumbs(page)
                 # The search is always for words and meaning together. Meaning cannot be used now,
                 # so the page says so, in the server's words, and lists what the words found.
                 assert on_the_server["index"]["meaning"] == "service_unreachable"
@@ -185,7 +190,7 @@ async def test_exact_words_are_found_from_every_page_with_the_service_stopped_an
                 name, choices = await address(page)
                 assert (name, choices["item"], choices["from"]) == ("item", wanted, "search")
                 await expect(page.locator("#item-title")).to_contain_text(titles[wanted])
-                assert (await crumbs(page))[2] == "Search"
+                assert (await crumbs(page))[0] == "Search"
                 await no_panel_or_drawer(page)
                 await view_crumb(page).click()
                 await on_page(page, "search")
@@ -242,8 +247,13 @@ async def test_meaning_results_equal_mcps_with_scores_statuses_counts_paging_and
     async with browser_page(board, token=the_token()) as w:
         page = w.page
         await w.open("#/roadmap")
-        await page.locator("#global-search-go").click()
+        # There is no Search button in the top bar or on the page: Enter in the box asks, and
+        # with nothing typed it goes to the Search page to ask there.
+        await expect(page.locator("#global-search-go")).to_have_count(0)
+        await page.locator("#global-search").press("Enter")
         await on_page(page, "search")
+        await expect(page.locator("#search-box")).to_be_visible()
+        await expect(page.locator("#search-go")).to_have_count(0)
         await expect(page.locator("#search-waiting")).to_have_attribute("data-waiting", "0")
 
         # In other words than the ones written: the same items, in the same order, with the
@@ -339,7 +349,7 @@ async def test_meaning_results_equal_mcps_with_scores_statuses_counts_paging_and
             f"{code_of(story)} Send the invoice", timeout=SLOW
         )
         assert (await current_address(page))[1]["from"] == "search"
-        assert (await crumbs(page))[2] == "Search"
+        assert (await crumbs(page))[0] == "Search"
         await view_crumb(page).click()
         await on_page(page, "search")
         choices = (await address(page))[1]
@@ -356,4 +366,55 @@ async def test_meaning_results_equal_mcps_with_scores_statuses_counts_paging_and
         await w.go(f"#/search?search={word}&search_mode=meaning")
         await expect(page.locator("#search-count")).to_have_text("63 results", timeout=SLOW)
         same_as_server(await whole_list(page, 63), big["items"])
+        assert w.problems == []
+
+
+# -- names: a result's parent, the epic facet and a written reference -----------------------------
+
+
+async def test_a_result_names_its_parent_and_the_epic_and_a_written_reference_is_read_as_a_name(
+    client: Client, board: str
+) -> None:
+    word, inside = unique_word(), unique_word()
+    epic = await made(client, "epic", f"Naming epic {word}")
+    story = await made(client, "story", f"Naming story {word}", epic)
+    note = await make_note(client, f"The headline of the note {word}\n\nMore words", nodes=[story])
+    task = await made(
+        client,
+        "task",
+        f"Naming task {word}",
+        story,
+        body=f"See [[note:{note['id']}]] and [[story:99999]] for {inside}",
+    )
+    await reindexed(client)
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/board")
+        await open_search(page, inside)
+        row = page.locator(f"#search-results tr.result[data-ref='{task}']")
+        await expect(row).to_be_visible(timeout=SLOW)
+        # The item is its code and its name, and what it sits under is the kind, code and name.
+        assert await row.locator("a.result-title").inner_text() == (
+            f"{code_of(task)} Naming task {word}"
+        )
+        assert await row.locator(".result-parent").inner_text() == (
+            f"in Story {code_of(story)} Naming story {word}"
+        )
+        # A reference written in the text is read as the code and headline of what it names (an
+        # item the board does not know is "an item"), never as the reference itself.
+        snippet = await row.locator(".snippet").inner_text()
+        assert f"N-{note['id']} The headline of the note {word}" in snippet, snippet
+        assert "an item" in snippet and "[[" not in snippet, snippet
+        # The epic facet is its code and name, with its count.
+        await open_search(page, word)
+        await expect(page.locator("#search-count")).to_contain_text("results", timeout=SLOW)
+        facet_button = page.locator(
+            f"#search-facets [data-facet=epic] button[data-value='{number(epic)}']"
+        )
+        await expect(facet_button.locator(".facet-label")).to_have_text(
+            f"{code_of(epic)} Naming epic {word}"
+        )
+        # No `#3` anywhere on the page.
+        text = await page.locator("#page").inner_text()
+        assert not re.search(r"(?<![\w&])#\d+\b", text), text
         assert w.problems == []

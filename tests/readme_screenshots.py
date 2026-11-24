@@ -196,18 +196,21 @@ async def populate(url: str, key: str, person: Person, project_id: int) -> dict[
                     "title": "Menu list endpoint",
                     "body": "Return the day's bakes with prices and photo links.",
                     "parent": "menu",
+                    "size": "s",
                 },
                 {
                     "key": "page",
                     "kind": "task",
                     "title": "Menu page with photos",
                     "parent": "menu",
+                    "size": "m",
                 },
                 {
                     "key": "allergens",
                     "kind": "task",
                     "title": "Allergen labels on each bake",
                     "parent": "menu",
+                    "size": "xs",
                 },
                 {
                     "key": "capacity",
@@ -217,12 +220,14 @@ async def populate(url: str, key: str, person: Person, project_id: int) -> dict[
                     "parent": "slots",
                     "priority": "high",
                     "target_on": in_days(3),
+                    "size": "m",
                 },
                 {
                     "key": "picker",
                     "kind": "task",
                     "title": "Slot picker on the order page",
                     "parent": "slots",
+                    "size": "l",
                 },
                 {
                     "key": "totals",
@@ -232,12 +237,14 @@ async def populate(url: str, key: str, person: Person, project_id: int) -> dict[
                     "parent": "basket",
                     "priority": "high",
                     "target_on": in_days(5),
+                    "size": "s",
                 },
                 {
                     "key": "redirect",
                     "kind": "task",
                     "title": "Redirect to the hosted checkout page",
                     "parent": "pay",
+                    "size": "m",
                 },
             ],
             links=[
@@ -371,7 +378,7 @@ async def populate(url: str, key: str, person: Person, project_id: int) -> dict[
 async def settle(page: Page) -> None:
     """Waits until the board has drawn the project and the news about it has been read."""
     await page.wait_for_selector("#sidebar:not([hidden])")
-    await page.wait_for_selector("[data-page=graph] .nav-count:not([hidden])")
+    await page.wait_for_selector("#epic-list li[role=treeitem]")
     await page.wait_for_load_state("networkidle")
     await page.evaluate("document.fonts.ready")
 

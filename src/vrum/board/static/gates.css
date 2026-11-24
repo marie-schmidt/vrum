@@ -1,0 +1,41 @@
+/* Gates and holds (gates.js) and "Where could it go?" (suggestions.js): the Gates section of an item's page, the small clock of work
+   that is held, and the suggestions shown in place under an item's links. One entry under the other at every width, so nothing is
+   wider than the window. Colours are only ever a token (tokens.css). */
+
+/* The Gates section: one entry for each gate, the ones still in the way first. */
+.gates { display: grid; gap: var(--space-3); margin: 0; padding: 0; }
+.gate-item { display: grid; gap: var(--space-1); min-width: 0; padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); }
+.gate-item > p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.gate-head { display: flex; align-items: baseline; gap: var(--space-2); font-weight: 600; }
+.gate-code { font-family: var(--font-mono); font-weight: 600; letter-spacing: 0.02em; color: var(--text-2); white-space: nowrap; }
+.gate-words { min-width: 0; }
+.gate-item.open .gate-words, .gate-item.removed .gate-words { font-weight: 400; color: var(--text-2); }
+.gate-actions { margin-top: var(--space-1); }
+.gate-fields { display: grid; gap: var(--space-3); min-width: 0; }
+.gate-fields[hidden] { display: none; }
+dialog.modal .lift-words { margin: 0 0 var(--space-3); overflow-wrap: anywhere; }
+
+/* Work that is held: the one small clock of the strip, and the lines of its hover card, one for each hold. */
+.held-chip { cursor: default; }
+.holds-list .hold-code { font-family: var(--font-mono); font-weight: 600; }
+
+/* Where could it go?: the button, and under it the suggestions, best first. */
+.part.suggest { display: grid; gap: var(--space-3); justify-items: start; min-width: 0; }
+.suggest-body { display: grid; gap: var(--space-3); min-width: 0; width: 100%; }
+.suggest-body[hidden] { display: none; }
+.suggest-body > p { margin: 0; overflow-wrap: anywhere; }
+.suggestions { display: grid; gap: var(--space-3); margin: 0; padding: 0; min-width: 0; }
+.suggestion { display: grid; gap: var(--space-1); min-width: 0; padding: var(--space-3) var(--space-4); background: var(--surface); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); justify-items: start; }
+.suggestion > p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.suggestion-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); font-weight: 600; }
+.suggestion-head .item-link { color: var(--text); text-decoration-color: var(--border-strong); }
+.suggestion-head .item-link:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.suggestion-head .icon, .suggestion-because .icon { margin-right: var(--space-1); color: var(--text-2); }
+.suggestion .score { margin: 0; }
+.suggestion-because a { color: var(--text); text-decoration-color: var(--border-strong); }
+.suggestion-problem { margin: 0; }
+.suggestion-problem:empty { display: none; }
+.suggestion-problem:not(:empty) { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); }
+@media (pointer: coarse) {
+  .suggest-parent, .suggestion-move, .add-gate, .lift-gate { min-height: 2.75rem; }
+}

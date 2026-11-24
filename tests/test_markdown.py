@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tests.documents import WHEN, a_file, check, definition, link, node, note, rule
+from tests.documents import WHEN, a_file, check, definition, event, link, node, note, rule
 from vrum.definition_of_done import item_key as item_key_of
 from vrum.markdown import DEFINITION_FILE, FOLDERS, render
 
@@ -367,6 +367,55 @@ def test_a_node_says_its_size_and_a_story_or_task_lists_its_checks_as_a_task_lis
         definition_of_done=[definition(body="Words only.")],
     )
     assert "Definition of done" not in stems(render(plain))["story-1-story-1"]
+
+
+def test_a_story_or_task_says_where_its_latest_claim_or_handoff_said_the_work_is() -> None:
+    graph = a_file(
+        nodes=[node("epic", 1), node("story", 1, "epic:1"), node("task", 1, "story:1")],
+        events=[
+            event(
+                1,
+                node="task:1",
+                action="claimed",
+                at="2026-11-20T09:00:00Z",
+                after={"branch": "old-branch", "run_label": "run-a"},
+            ),
+            event(
+                2,
+                node="task:1",
+                action="handoff",
+                actor="ann",
+                at="2026-11-22T17:30:00Z",
+                after={
+                    "outcome": "blocked",
+                    "note": "Ready.",
+                    "repository": "https://github.com/acme/widgets",
+                    "branch": "feature/x",
+                    "commit": "0123456789abcdef",
+                    "pull_request": "https://github.com/acme/widgets/pull/12",
+                    "run_label": "run-b",
+                    "client_name": "claude-code",
+                },
+            ),
+            # A release says its words in `before`, which the copy does not read: the handoff does.
+            event(3, node="task:1", action="claim_released", before={"branch": "feature/x"}),
+        ],
+    )
+    files = stems(render(graph))
+    assert (
+        "## Where the work is\n\n"
+        "- Repository: https://github.com/acme/widgets\n"
+        "- Branch: feature/x\n"
+        "- Commit: 0123456789abcdef\n"
+        "- Pull request: https://github.com/acme/widgets/pull/12\n"
+        "- Run: run-b (claude-code)\n"
+        "- Said by: ann, 2026-11-22\n"
+    ) in files["task-1-task-1"]
+    assert "old-branch" not in files["task-1-task-1"]
+    assert "Where the work is" not in files["story-1-story-1"]
+    assert "Where the work is" not in files["epic-1-epic-1"]
+    # The same events give the same files.
+    assert render(graph) == render(graph)
 
 
 def test_an_empty_graph_has_only_the_definition_file_and_odd_names_do_not_break_it() -> None:

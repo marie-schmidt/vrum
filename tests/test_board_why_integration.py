@@ -60,7 +60,7 @@ async def test_the_status_menu_asks_why_for_blocked_and_dropped(server_url: str)
             # The dialog says what it does in its title and has one field and two buttons.
             await pick(page, "blocked")
             box = dialog(page)
-            await expect(box.locator("h2")).to_have_text(f"Mark {code_of(first)} as blocked")
+            await expect(box.locator("h2")).to_have_text("Mark “First task” as blocked")
             await expect(box.get_by_label("Why")).to_be_focused()
             assert await box.locator("textarea").count() == 1
             assert await box.locator("form > p:not(.problem)").count() == 0
@@ -104,9 +104,7 @@ async def test_the_status_menu_asks_why_for_blocked_and_dropped(server_url: str)
             # Left empty, the status changes and no note is made.
             await go(page, board, f"#/item?item={second}")
             await pick(page, "dropped")
-            await expect(dialog(page).locator("h2")).to_have_text(
-                f"Mark {code_of(second)} as dropped"
-            )
+            await expect(dialog(page).locator("h2")).to_have_text("Mark “Second task” as dropped")
             await dialog(page).get_by_role("button", name="Mark as dropped").click()
             await settle(page)
             await expect(chip).to_have_attribute("data-status", "dropped", timeout=SLOW)
@@ -117,7 +115,9 @@ async def test_the_status_menu_asks_why_for_blocked_and_dropped(server_url: str)
             # person is listed as having left a handoff note.
             await go(page, board, "#/activity")
             row = page.locator(f"li.event[data-action=handoff][data-event='{note['id']}']")
-            await expect(row).to_contain_text(f"{ADA} marked task {code_of(first)}", timeout=SLOW)
+            await expect(row).to_contain_text(
+                f"{ADA} marked task {code_of(first)} “First task”", timeout=SLOW
+            )
             await expect(row).to_contain_text("as blocked and left this handoff note")
             assert spoken(await row.locator(".handoff-note").inner_text()) == reason
             await open_working(page)
@@ -178,7 +178,7 @@ async def test_dropping_a_card_into_blocked_or_dropped_asks_why(server_url: str)
                 f".card[data-ref='{blocked}']", f"{lane_of}[data-status='blocked']"
             )
             await expect(dialog(page).locator("h2")).to_have_text(
-                f"Mark {code_of(blocked)} as blocked"
+                "Mark “Will be blocked” as blocked"
             )
             # The card is where it was while the question is open.
             await expect(
@@ -203,7 +203,7 @@ async def test_dropping_a_card_into_blocked_or_dropped_asks_why(server_url: str)
                 f".card[data-ref='{kept}']", f"{lane_of}[data-status='dropped']"
             )
             await expect(dialog(page).locator("h2")).to_have_text(
-                f"Mark {code_of(kept)} as dropped"
+                "Mark “Stays where it is” as dropped"
             )
             await dialog(page).get_by_role("button", name="Cancel").click()
             await settle(page)

@@ -1,16 +1,18 @@
 """The Graph page against the running containers, as M21 built it, M27 changed it (decisions and
 facts are notes), M30 simplified it (three tabs, Structure, Around and Order, under a box that finds
-what to look at) and M34 took the side panels away: no tab has a card or a list beside its picture,
-and an item clicked in a picture opens its own page. Driven in a real headless browser and checked
-against a real MCP client (see ./check.sh). What the page draws is compared with what the tools say:
-Structure draws every epic, story and task once and joins them by the hierarchy alone, its links are
-the links the tools list, Around is the very `recall` an agent gets (what comes down from the story
-and epic above marked "via"), Order starts on the first epic when nothing is chosen, and notes are
-never dots of the map. What an agent receives for an item is the Agent view of the item's page
-(test_board_agent_view_integration.py). The tests that need the whole of a project in a known state
-work in a project of their own; the "above the limit" test needs a graph of a known size, so it runs
-on a second, empty copy of Vrum (tests/second_stack.py) that is made for the test and removed
-after it."""
+what to look at), M34 took the side panels away (no tab has a card or a list beside its picture,
+and an item clicked in a picture opens its own page) and M38 made the Structure map alive and made
+Around fit the tab. Driven in a real headless browser and checked against a real MCP client (see
+./check.sh). What the page draws is compared with what the tools say: Structure draws every epic,
+story and task once and joins them by the hierarchy alone, its links are the links the tools list,
+Around is the very `recall` an agent gets (what comes down from the story and epic above marked
+"via") and fits the tab, Order asks for an epic, story or task when nothing is chosen, and notes
+are never dots of the map. What an agent receives for an item is the Agent view of the item's page
+(test_board_agent_view_integration.py), and how the Structure map moves (it rests, is dragged, is
+zoomed, is tuned with the Forces and tidied) is test_board_graph_map_integration.py. The tests that
+need the whole of a project in a known state work in a project of their own; the "above the limit"
+test needs a graph of a known size, so it runs on a second, empty copy of Vrum
+(tests/second_stack.py) that is made for the test and removed after it."""
 
 import re
 from collections.abc import Iterator
@@ -23,9 +25,11 @@ from playwright.async_api import Locator, Page, expect
 
 from tests.board_context import context_world, fresh_project
 from tests.board_helpers import SLOW, Watched, board_url, browser_page, go, made
+from tests.board_theme import rgb_of, token, transitions_done
 from tests.helpers import (
     all_nodes,
     code_of,
+    day,
     make_decision,
     make_note,
     ok,
@@ -46,11 +50,24 @@ def stack() -> Iterator[SecondStack]:
         second.close()
 
 
+async def says_via(via: Locator, client: Client, source: str) -> None:
+    """What came down from a story or an epic says through what: `via` and its code and its name
+    (the name is cut by the page when there is no room, so only its start is compared)."""
+    title = (await ok(client, "get_node", node=source))["title"]
+    await expect(via).to_have_text(
+        re.compile(rf"^via {re.escape(code_of(source))} {re.escape(title[:8])}")
+    )
+
+
 async def structure_open(w: Watched, address: str = "#/graph") -> None:
     """Open the Graph at an address of its Structure tab, loaded afresh (a hash that only changes
-    is handled a moment later), and wait until its map is drawn."""
+    is handled a moment later), and wait until its map is drawn and has stopped being drawn again
+    (the project's name and the references in the texts arrive a moment after the first picture,
+    and the map is drawn anew when they do)."""
     await go(w.page, w.board, address)
     await expect(w.page.locator(MAP)).to_be_visible(timeout=SLOW)
+    await w.page.wait_for_load_state("networkidle")
+    await expect(w.page.locator(MAP)).to_have_attribute("data-resting", "true", timeout=SLOW)
 
 
 async def press_to_open(page: Page, node: Locator, key: str, opened: Locator) -> None:
@@ -221,7 +238,7 @@ async def test_everything_shows_every_item_and_link_and_a_big_project_starts_at_
             requirement = around.locator(
                 f"section[data-group=reqs] button.graph-node[data-ref='rule:{rule}']"
             )
-            await expect(requirement.locator(".n-via")).to_have_text(f"via {code_of(story)}")
+            await says_via(requirement.locator(".n-via"), client, story)
             # The decided note's own Around draws the note about it among its notes.
             await w.open(f"#/graph?tab=around&focus=note:{decision['id']}")
             await expect(
@@ -267,6 +284,11 @@ async def test_everything_shows_every_item_and_link_and_a_big_project_starts_at_
             assert "level=tasks" in page.url
             await expect(page.locator(f"{MAP} g.graph-st-node")).to_have_count(
                 everything, timeout=SLOW
+            )
+            # More than about 400 dots are painted before they have settled and settle on the
+            # screen; the map comes to rest all the same, and stays there.
+            await expect(page.locator(MAP)).to_have_attribute(
+                "data-resting", "true", timeout=6 * SLOW
             )
             assert w.problems == [], w.problems
 
@@ -336,7 +358,7 @@ async def test_the_look_at_box_enters_one_epic_and_its_centre_and_leaves_open_th
             page = w.page
             await structure_open(w)
             select = page.locator("#graph-st-scope")
-            await expect(page.locator("label[for=graph-st-scope]")).to_have_text("Look at")
+            await expect(page.locator("label[for=graph-st-scope]")).to_have_text("Scope")
             await expect(select).to_have_value("")
             options: list[list[str]] = await select.locator("option").evaluate_all(
                 "els => els.map(e => [e.value, e.textContent])"
@@ -361,6 +383,13 @@ async def test_the_look_at_box_enters_one_epic_and_its_centre_and_leaves_open_th
                 "els => els.map(e => e.dataset.ref)"
             )
             assert set(leaves) == {epic, *inside}, leaves
+            # The name of each story is written beside its circle (a circle holding only its code
+            # would name nothing); it is for the eye, and the circle is what the keyboard and a
+            # screen reader reach, with the whole name in its tooltip.
+            story_names: list[str] = await page.locator(
+                "svg.graph-rd-svg .graph-rd-story-name"
+            ).evaluate_all("els => els.map(e => e.textContent.replace(/\\s+/g, ''))")
+            assert sorted(story_names) == ["s1lookat", "s2lookat"], story_names
             # The centre and the leaves open their pages, and the way back is the radial view.
             radial = await page.evaluate("location.hash")
             for ref in (epic, world["t3"], world["s1"]):
@@ -439,9 +468,23 @@ async def test_around_draws_the_notes_recall_returns_for_every_kind_of_item_and_
                 recalled = await ok(client, "recall", limit=50, **target)
                 where = (name, focus)
                 # The notes in force, in recall's order (the ones someone decided come first);
-                # the earlier ones are in the same box, under "Earlier, kept for the reason".
+                # the earlier ones are in the same box, under "Earlier, kept for the reason". The
+                # box shows its first few and a "Show N more" that makes the group grow to hold the
+                # whole list, so it is opened first.
                 entries = recalled["notes"]["items"]
                 box = "section[data-group=notes]"
+                more = page.locator(f"{box} button.graph-more")
+                if await more.count():
+                    await more.click()
+                    await expect(more).to_have_text("Show fewer")
+                    await expect(more).to_have_attribute("aria-expanded", "true")
+                    # The same button closes the box again (there is no other way by pointer),
+                    # whether or not what is left out is more than a list that scrolls, and opens
+                    # it once more.
+                    await more.click()
+                    await expect(more).to_have_text(re.compile(r"^Show \d+ more$"))
+                    await more.click()
+                    await expect(more).to_have_text("Show fewer")
                 earlier = await refs_in(
                     page, f"{box} p.graph-gbox-sub + ul button.graph-node.n-note"
                 )
@@ -466,7 +509,7 @@ async def test_around_draws_the_notes_recall_returns_for_every_kind_of_item_and_
                     via = one["inherited_from"]
                     await expect(node.locator(".n-via")).to_have_count(int(bool(via)))
                     if via:
-                        await expect(node.locator(".n-via")).to_have_text(f"via {code_of(via)}")
+                        await says_via(node.locator(".n-via"), client, via)
                         assert "is-via" in (await node.get_attribute("class") or ""), where
                 # The picture has the whole width: one panel, and no list, card or toggle beside it.
                 await expect(page.locator(".graph-around > *")).to_have_count(1)
@@ -490,7 +533,7 @@ async def test_around_draws_the_notes_recall_returns_for_every_kind_of_item_and_
                 assert (
                     await refs_in(
                         page,
-                        "ul[aria-label='Project-wide notes. It scrolls.'] button.graph-node.n-note",
+                        "ul[aria-label='Project-wide notes'] button.graph-node.n-note",
                     )
                     == wide
                 )
@@ -549,8 +592,10 @@ async def test_around_a_work_neighbour_is_looked_around_and_a_note_or_a_criterio
                 neighbour = page.locator(
                     f"{around} section[data-group={group}] button.graph-node[data-ref='{ref}']"
                 )
+                # Named by its short code, N-7 or AC-3, in its words for a screen reader.
+                short = ("N-" if ref.startswith("note:") else "AC-") + ref.split(":")[1]
                 await expect(neighbour).to_have_attribute(
-                    "aria-label", re.compile(r"Press Enter to open it\.$")
+                    "aria-label", re.compile(rf"^{short} .*Press Enter to open it\.$")
                 )
                 assert await neighbour.get_attribute("aria-pressed") is None
                 await neighbour.click()
@@ -599,6 +644,228 @@ async def test_around_draws_an_item_with_no_notes_and_nothing_under_it(server_ur
             assert w.problems == [], w.problems
 
 
+async def busy_world(client: Client, word: str) -> dict[str, Any]:
+    """The busiest item the demo has: an epic with six stories under it, sixteen stories of another
+    epic linked to it as related, two epics it needs first, two that need it, nine notes about it
+    and a few that apply to the whole project, all with long names that wrap."""
+    long = "with a name long enough to run on to a second line where there is room for it"
+    epic = await made(client, "epic", f"Busy {word} {long}")
+    elsewhere = await made(client, "epic", f"Elsewhere {word}")
+    for number in range(6):
+        await made(client, "story", f"Child {number} {word} {long}", epic)
+    related = []
+    for number in range(16):
+        ref = await made(client, "story", f"Related {number} {word} {long}", elsewhere)
+        await ok(client, "add_link", source=epic, target=ref, link_type="relates_to")
+        related.append(ref)
+    for number in range(4):
+        other = await made(client, "epic", f"Neighbour {number} {word} {long}")
+        source, target = (epic, other) if number < 2 else (other, epic)
+        await ok(client, "add_link", source=source, target=target, link_type="needs_first")
+    notes = [
+        (await make_note(client, f"Note {number} {word} {long}", f"Why {number}", nodes=[epic]))[
+            "id"
+        ]
+        for number in range(9)
+    ]
+    for number in range(4):
+        await make_decision(client, f"Everywhere {number} {word}", project_wide=True)
+    return {"epic": epic, "related": related, "notes": notes}
+
+
+# What the figure of Around measures: whether it is inside the window and the page does not scroll,
+# and the smallest text as it is drawn (the figure is scaled with a transform, which the computed
+# font size does not know about).
+AROUND_FITS = """() => {
+  const ego = document.querySelector('.graph-around .graph-ego');
+  const box = ego.getBoundingClientRect();
+  const scale = box.width / ego.offsetWidth;
+  let smallest = Infinity;
+  for (const el of ego.querySelectorAll('*')) {
+    if (el.closest('svg, .sr-only')) continue;
+    if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    smallest = Math.min(smallest, parseFloat(style.fontSize) * scale);
+  }
+  const root = document.documentElement;
+  return { scale, smallest, bottom: box.bottom, right: box.right, scroll: root.scrollHeight,
+    sideways: root.scrollWidth, height: innerHeight, width: innerWidth };
+}"""
+
+
+# How many pairs of the cards of the figure (the item in the middle and its groups) cover each
+# other: none, at any time, because a group that opens grows where it is.
+CARDS_OVERLAPPING = """() => {
+  const cards = [document.querySelector('#graph-hub'),
+    ...document.querySelectorAll('section.graph-gbox[data-group]')];
+  const rects = cards.map((el) => el.getBoundingClientRect());
+  let count = 0;
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      const a = rects[i];
+      const b = rects[j];
+      if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1
+        && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) count += 1;
+    }
+  }
+  return count;
+}"""
+
+
+async def around_measured(page: Page) -> dict[str, float]:
+    """What AROUND_FITS says, once the figure has been fitted to the window (it is fitted a frame
+    after the window or the tab changed size)."""
+    found: dict[str, float] = {}
+    for _ in range(25):
+        found = await page.evaluate(AROUND_FITS)
+        if found["scroll"] <= found["height"] and found["bottom"] <= found["height"]:
+            return found
+        await page.wait_for_timeout(200)
+    return found
+
+
+async def test_around_fits_the_tab_without_the_page_scrolling_and_its_text_stays_readable(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        world = await busy_world(client, "fits")
+        epic = world["epic"]
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            for width, height in ((1280, 720), (1440, 900), (1920, 1080)):
+                await page.set_viewport_size({"width": width, "height": height})
+                await around_open(w, epic)
+                await page.wait_for_load_state("networkidle")
+                await expect(page.locator(".graph-ego-panel.is-fit")).to_be_visible()
+                found = await around_measured(page)
+                where = (width, height, found)
+                # The panel goes down to the bottom of the window (a margin under it, as the
+                # Roadmap's box has), so there is no band of unused space under the figure.
+                panel = await page.locator(".graph-ego-panel").bounding_box()
+                assert panel is not None
+                assert 0 <= height - (panel["y"] + panel["height"]) <= 24, (where, panel)
+                # The whole figure is inside the window and the page has nothing to scroll, down
+                # or sideways, and the smallest text is at least 11 px as it is drawn.
+                assert found["scroll"] <= height, where
+                assert found["bottom"] <= height and found["right"] <= width, where
+                assert found["sideways"] <= width, where
+                assert found["smallest"] >= 11, where
+                assert 0.9 <= found["scale"] <= 1, where
+                # Every group is drawn, each with a few entries and the rest behind "Show N more".
+                for group in ("down", "sim", "notes"):
+                    shown = await page.locator(
+                        f"section[data-group={group}] button.graph-node:not(.n-wide)"
+                    ).count()
+                    assert 1 <= shown <= 4, (group, shown, where)
+            assert w.problems == [], w.problems
+
+
+async def test_around_shows_a_few_entries_and_show_more_opens_the_rest_and_fit_and_zoom_work(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        world = await busy_world(client, "more")
+        epic = world["epic"]
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await page.set_viewport_size({"width": 1280, "height": 720})
+            await around_open(w, epic)
+            await page.wait_for_load_state("networkidle")
+            await around_measured(page)
+            recalled = await ok(client, "recall", node=epic, limit=50)
+            noted = [f"note:{item['note']['id']}" for item in recalled["notes"]["items"]]
+            assert sorted(noted) == sorted(f"note:{one}" for one in world["notes"])
+            for group, entry, wanted in (
+                ("sim", "button.graph-node", world["related"]),
+                ("notes", "button.graph-node.n-note", noted),
+            ):
+                box = f"section[data-group={group}]"
+                # The notes group also holds the line for the project-wide notes, which is no
+                # entry of the list that "Show N more" opens.
+                total = (
+                    int(await page.locator(f"{box} .graph-gbox-count").inner_text())
+                    if group == "sim"
+                    else len(noted)
+                )
+                assert total >= len(wanted), (group, total)
+                closed = await refs_in(page, f"{box} {entry}")
+                assert 1 <= len(closed) < total, (group, closed)
+                # The button says how many are left out. Opening them makes the group grow where it
+                # is: one section in its own place, every entry on show, nothing drawn over anything
+                # (no two cards overlap), the page not scrolling, and the whole figure fitted again,
+                # so the scale does not rise; closing puts the scale back.
+                more = page.locator(f"{box} button.graph-more")
+                await expect(more).to_have_text(f"Show {total - len(closed)} more")
+                await expect(more).to_have_attribute("aria-expanded", "false")
+                fit = await page.evaluate(AROUND_FITS)
+                assert await page.evaluate(CARDS_OVERLAPPING) == 0
+                await more.click()
+                opened = page.locator(f"section.graph-gbox.is-open[data-group={group}]")
+                await expect(opened).to_be_visible()
+                await expect(page.locator(f"section[data-group={group}]")).to_have_count(1)
+                await expect(page.locator("section.graph-gbox.is-pop")).to_have_count(0)
+                await expect(more).to_have_text("Show fewer")
+                await expect(more).to_have_attribute("aria-expanded", "true")
+                await expect(more).to_be_focused()
+                everything = await refs_in(page, f"{box} {entry}")
+                assert len(everything) == total and set(wanted) <= set(everything), (
+                    group,
+                    everything,
+                )
+                assert closed == everything[: len(closed)], group
+                await page.wait_for_timeout(400)
+                assert await page.evaluate(CARDS_OVERLAPPING) == 0
+                found = await page.evaluate(AROUND_FITS)
+                assert found["scroll"] <= found["height"], found
+                assert found["scale"] <= fit["scale"] + 0.01, (found["scale"], fit["scale"])
+                await more.click()
+                await expect(more).to_have_attribute("aria-expanded", "false")
+                await expect(more).to_have_text(f"Show {total - len(closed)} more")
+                assert await refs_in(page, f"{box} {entry}") == closed
+                await page.wait_for_timeout(400)
+                back = await page.evaluate(AROUND_FITS)
+                assert back["scale"] == pytest.approx(fit["scale"], rel=0.02), (back, fit)
+                # Escape closes an opened group too.
+                await more.click()
+                await expect(opened).to_be_visible()
+                await opened.locator(entry).first.focus()
+                await page.keyboard.press("Escape")
+                await expect(more).to_have_attribute("aria-expanded", "false")
+                await page.wait_for_timeout(400)  # the figure eases back to its fit
+
+            # Fit, + and - : the figure starts at its fit, where "-" has nowhere to go; + makes it
+            # bigger by one step and scrollable inside its own tab, the page still does not scroll,
+            # and Fit puts it back.
+            view = page.locator(".graph-ego-view")
+            zoom_in, zoom_out = (
+                page.locator("#graph-ego-zoom-in"),
+                page.locator("#graph-ego-zoom-out"),
+            )
+            await expect(page.locator("#graph-ego-fit")).to_be_visible()
+            await expect(zoom_out).to_be_disabled()
+            await expect(view).not_to_have_class(re.compile(r"is-zoomed"))
+            fitted = await page.evaluate(AROUND_FITS)
+            await zoom_in.click()
+            await expect(view).to_have_class(re.compile(r"is-zoomed"))
+            await expect(zoom_out).to_be_enabled()
+            bigger = await page.evaluate(AROUND_FITS)
+            assert bigger["scale"] == pytest.approx(fitted["scale"] * 1.25, rel=0.02), bigger
+            assert bigger["scroll"] <= bigger["height"], bigger
+            assert await view.evaluate("el => el.scrollWidth > el.clientWidth") is True
+            await zoom_out.click()
+            await expect(view).not_to_have_class(re.compile(r"is-zoomed"))
+            await zoom_in.click()
+            await zoom_in.click()
+            await expect(view).to_have_class(re.compile(r"is-zoomed"))
+            await page.locator("#graph-ego-fit").click()
+            await expect(view).not_to_have_class(re.compile(r"is-zoomed"))
+            again = await page.evaluate(AROUND_FITS)
+            assert again["scale"] == pytest.approx(fitted["scale"], rel=0.01), again
+            assert await view.evaluate("el => [el.scrollLeft, el.scrollTop]") == [0, 0]
+            assert w.problems == [], w.problems
+
+
 # -- the box at the top: what to look at ----------------------------------------------------------
 
 
@@ -640,15 +907,34 @@ async def test_the_box_finds_an_item_by_a_word_or_a_code_and_shows_what_is_chose
                 (f"story {world['s2'].split(':')[1]}", [world["s2"]]),
                 (f"criterion {world['r1']}", [f"rule:{world['r1']}"]),
                 (f"note {world['d1']}", [f"note:{world['d1']}"]),
+                (f"AC-{world['r1']}", [f"rule:{world['r1']}"]),
+                (f"n {world['d1']}", [f"note:{world['d1']}"]),
             ):
                 await box.fill(typed)
                 await expect(page.locator("#graph-find-popup .graph-find-option")).to_have_count(
                     len(found)
                 )
                 assert await options(page) == found, typed
+            # A criterion and a note are named by their short codes, AC-3 and N-7, in the list and
+            # once chosen, never as "Acceptance criterion #3".
+            for typed, ref, short in (
+                (f"AC-{world['r1']}", f"rule:{world['r1']}", f"AC-{world['r1']}"),
+                (f"N-{world['d1']}", f"note:{world['d1']}", f"N-{world['d1']}"),
+            ):
+                await box.fill(typed)
+                option = page.locator(f"#graph-find-popup .graph-find-option[data-ref='{ref}']")
+                await expect(option).to_contain_text(short)
+                await expect(option).not_to_contain_text(re.compile(r"Acceptance criterion|Note #"))
+                await option.click()
+                await expect(chosen).to_have_attribute("data-ref", ref, timeout=SLOW)
+                await expect(chosen).to_contain_text(short)
+                await page.locator("#graph-focus-clear").click()
+                await expect(chosen).to_be_hidden()
+                await box.click()
             # No filter syntax: field:value is only words, and nothing has them.
             await box.fill("kind:task")
             await expect(page.locator("#graph-find-none")).to_contain_text("Nothing matches")
+            await expect(page.locator("#graph-find-none")).to_contain_text("S-12, AC-3 or N-7")
             await expect(page.locator("#graph-find-popup .graph-find-option")).to_have_count(0)
             # Arrow keys move through the list (and wrap round), Enter chooses; the choice is in the
             # address and in the box (its sign, code and title).
@@ -683,6 +969,63 @@ async def test_the_box_finds_an_item_by_a_word_or_a_code_and_shows_what_is_chose
             where = await popup.bounding_box()
             assert where and where["x"] >= 0 and where["x"] + where["width"] <= 390
             assert where["y"] + where["height"] <= 700
+            assert w.problems == [], w.problems
+
+
+async def test_the_look_at_box_opens_its_list_only_when_asked_and_the_page_has_no_title_to_see(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        world = await context_world(client, "quiet", project)
+        epics = [one["ref"] for one in await all_nodes(client) if one["kind"] == "epic"]
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            box = page.locator("#graph-find-input")
+            popup = page.locator("#graph-find-popup")
+            # The top bar names the page, so the page's own title is for a screen reader only and
+            # nothing on the page repeats it; the row under the bar is the box and New item.
+            await structure_open(w)
+            title = page.locator("#page h1")
+            await expect(title).to_have_text("Graph")
+            await expect(title).to_have_class(re.compile(r"\bsr-only\b"))
+            await expect(page.locator(".graph-title")).to_have_count(0)
+            shape = await title.bounding_box()
+            assert shape is not None and shape["width"] <= 1 and shape["height"] <= 1, shape
+            await expect(page.locator("#top")).to_contain_text("Graph")
+            # Whatever the Graph opens on, its list of choices is shut until the person asks.
+            for address in (
+                "#/graph",
+                f"#/graph?tab=around&focus={world['s1']}",
+                f"#/graph?tab=order&focus={world['E']}",
+            ):
+                await go(page, board, address)
+                await expect(page.locator("#graph-find")).to_be_visible(timeout=SLOW)
+                await page.wait_for_load_state("networkidle")
+                await expect(popup).to_have_count(0)
+                await expect(box).to_have_attribute("aria-expanded", "false")
+            # Giving the box the keyboard (a focus, or a Tab into it) shows nothing either.
+            await structure_open(w)
+            await box.focus()
+            await expect(box).to_be_focused()
+            await page.keyboard.press("Shift+Tab")
+            await page.keyboard.press("Tab")
+            await expect(box).to_be_focused()
+            await expect(popup).to_have_count(0)
+            await expect(box).to_have_attribute("aria-expanded", "false")
+            # A click opens it on the epics, Escape shuts it, Down opens it again, a word narrows
+            # it, and the focus leaving shuts it.
+            await box.click()
+            await expect(box).to_have_attribute("aria-expanded", "true")
+            assert await options(page) == epics
+            await page.keyboard.press("Escape")
+            await expect(popup).to_have_count(0)
+            await page.keyboard.press("ArrowDown")
+            await expect(popup).to_be_visible()
+            await page.keyboard.press("Escape")
+            await box.fill("t3 quiet")
+            assert await options(page) == [world["t3"]]
+            await box.blur()
+            await expect(popup).to_have_count(0)
             assert w.problems == [], w.problems
 
 
@@ -781,7 +1124,7 @@ async def phases_from_the_tools(client: Client) -> list[list[str]]:
     ]
 
 
-async def test_order_with_nothing_chosen_is_the_first_epic_in_phases_and_says_so(
+async def test_order_with_nothing_chosen_asks_for_an_item_and_with_one_chosen_shows_its_plan(
     server_url: str,
 ) -> None:
     word = "ordered"
@@ -797,14 +1140,39 @@ async def test_order_with_nothing_chosen_is_the_first_epic_in_phases_and_says_so
         first, second = world["E"], world["E2"]
         async with browser_page(board, token=project.key) as w:
             page = w.page
+            sentence = "Choose an epic, story or task above to see its order."
+            empty = page.locator("#graph-or-empty")
+            # Nothing chosen: only the sentence, in the place of the plan. There is no hidden first
+            # epic, no heading, no stepper, no summary line and no tooltip that explains one.
             await go(page, board, "#/graph?tab=order")
-            lead = page.locator("#graph-or-lead")
-            await expect(lead).to_contain_text("This is the first epic.", timeout=SLOW)
+            await expect(empty).to_have_text(sentence, timeout=SLOW)
+            await expect(empty).not_to_have_attribute("title", re.compile(r"."))
+            await expect(empty.locator("[title]")).to_have_count(0)
+            await expect(page.locator("#graph-view .graph-or")).to_have_count(0)
+            for hook in (
+                "#graph-or-lead",
+                "#graph-or-title",
+                "#graph-or-step",
+                "#graph-or-phase",
+                "p.graph-or-summary",
+                ".graph-or-scope",
+                ".graph-or-node",
+                ".graph-x-side",
+            ):
+                await expect(page.locator(hook)).to_have_count(0)
+            await expect(page.locator("#graph-view")).not_to_contain_text("first epic")
+            assert "focus=" not in page.url, page.url
+            # An item that is not there is the same sentence, and nothing else.
+            await go(page, board, "#/graph?tab=order&focus=epic:99999")
+            await expect(empty).to_have_text(sentence, timeout=SLOW)
+            await expect(page.locator("#graph-view .graph-or")).to_have_count(0)
+            # Choosing an epic shows its plan: every open task of it, the loose one too. Phase 1
+            # is the two that need nothing, phase 2 the one that waits for t1.
+            await go(page, board, f"#/graph?tab=order&focus={first}")
             await expect(page.locator("#graph-or-title")).to_contain_text(
-                f"Order of work in {code_of(first)} E {word}"
+                f"Order of work in {code_of(first)} E {word}", timeout=SLOW
             )
-            # Every open task of the first epic is there, the loose one too: phase 1 is the two
-            # that need nothing, phase 2 the one that waits for t1.
+            await expect(empty).to_have_count(0)
             await expect(page.locator("#graph-or-step")).to_have_text("Phase 1 of 2")
             assert await refs_in(page, "#graph-or-phase li.graph-or-item") == [
                 world["t1"],
@@ -832,9 +1200,11 @@ async def test_order_with_nothing_chosen_is_the_first_epic_in_phases_and_says_so
             await expect(page.locator("button[data-choice='only']")).to_have_count(0)
             await expect(page.locator("button[data-choice='blocked']")).to_be_visible()
             await expect(page.locator(".graph-x-side")).to_have_count(0)
-            # Clearing the choice goes back to the first epic.
+            # Clearing the choice goes back to the sentence, not to an epic of its own choosing.
             await page.locator("#graph-focus-clear").click()
-            await expect(lead).to_contain_text("the first epic", timeout=SLOW)
+            await expect(empty).to_have_text(sentence, timeout=SLOW)
+            await expect(page.locator("#graph-view .graph-or")).to_have_count(0)
+            assert "focus=" not in page.url, page.url
             assert w.problems == [], w.problems
 
 
@@ -852,10 +1222,12 @@ async def test_order_lists_every_open_task_in_phases_that_match_the_links_one_ph
         async with browser_page(board, token=project.key) as w:
             page = w.page
             await order_open(w, f"#/graph?tab=order&focus={ids['E']}")
-            summary = page.locator(".graph-or-summary")
-            await expect(summary).to_contain_text("7 to do")
-            await expect(summary).to_contain_text("1 done")
-            await expect(summary).to_contain_text("1 dropped not shown")
+            # One quiet line, no chips: what is left to do, and what is left out. The done work is
+            # counted by the fold that holds it, not by the line.
+            summary = page.locator("p.graph-or-summary")
+            await expect(summary).to_have_text("7 to do, 1 dropped not shown")
+            await expect(page.locator(".graph-or-summary .chip")).to_have_count(0)
+            await expect(page.locator("#graph-or-done-toggle")).to_have_text("Done (1)")
             # No size anywhere: no budget, no batch, only the items and the stories they are in.
             await expect(page.locator("#graph-or-budget")).to_have_count(0)
             await expect(page.locator(".graph-or-batch")).to_have_count(0)
@@ -867,6 +1239,13 @@ async def test_order_lists_every_open_task_in_phases_that_match_the_links_one_ph
                     "data-phase", str(step)
                 )
                 assert await refs_in(page, "#graph-or-phase li.graph-or-item") == refs
+                # The heading says "Phase N" to a screen reader only (the stepper above says it
+                # to the eye), and what is seen is how much is in the phase.
+                heading = page.locator("#graph-or-phase-title")
+                await expect(heading.locator(".sr-only")).to_have_text(f"Phase {step} ")
+                await expect(heading.locator(".graph-or-phase-words")).to_contain_text(
+                    f"{len(refs)} item{'s' if len(refs) > 1 else ''}"
+                )
                 await expect(page.locator("#graph-or-phase-title")).to_contain_text(
                     f"Phase {step} {len(refs)} item{'s' if len(refs) > 1 else ''}"
                 )
@@ -876,10 +1255,18 @@ async def test_order_lists_every_open_task_in_phases_that_match_the_links_one_ph
                     if step == 1:
                         await expect(waits).to_have_count(0)
                     else:
-                        shown = " ".join((await waits.inner_text()).split())
-                        assert shown == "Waits for " + ", ".join(
-                            code_of(r) for r in sorted(node["waiting_on"])
-                        ), (shown, node["waiting_on"])
+                        # Each thing it waits for is a chip with its code and then its name.
+                        chips = waits.locator(".graph-or-wait")
+                        wanted_chips = sorted(node["waiting_on"])
+                        await expect(chips).to_have_count(len(wanted_chips))
+                        assert await waits.locator(".graph-or-waits-label").inner_text() == (
+                            "Waits for"
+                        )
+                        for chip, waited in zip(await chips.all(), wanted_chips, strict=True):
+                            title = (await ok(client, "get_node", node=waited))["title"]
+                            assert (await chip.get_attribute("data-fk")) == f"w:{ref}:{waited}"
+                            shown = " ".join((await chip.inner_text()).split())
+                            assert shown == f"{code_of(waited)} {title}", (shown, waited)
                 assert (f"phase={step}" in page.url) == (step > 1), page.url
                 if step < len(want):
                     await page.locator("#graph-or-next").click()
@@ -1109,6 +1496,205 @@ async def test_with_sizes_a_phase_is_cut_into_batches_that_fit_the_budget(
             assert w.problems == [], w.problems
 
 
+# -- Order and Structure say what is late in red, and Order says what is left in one line ------
+
+
+async def lateness_world(client: Client, word: str) -> dict[str, str]:
+    """One epic whose work is late in one place. `late` is three days past its target and
+    `after` needs it and is blocked, due in four days; `plain` has no day; `finished` is done and
+    was due five days ago, which the server never calls late."""
+    ids: dict[str, str] = {"E": await made(client, "epic", f"Late {word}")}
+    ids["S"] = await made(client, "story", f"Story {word}", ids["E"])
+    for name, more in (
+        ("late", {"target_on": day(-3)}),
+        ("after", {"target_on": day(4)}),
+        ("plain", {}),
+        ("finished", {"target_on": day(-5)}),
+    ):
+        ids[name] = await made(client, "task", f"Task {name} {word}", ids["S"], **more)
+    await ok(client, "add_link", source=ids["after"], target=ids["late"], link_type="needs_first")
+    for name, status in (("after", "blocked"), ("finished", "done")):
+        node = await ok(client, "get_node", node=ids[name])
+        await ok(
+            client,
+            "update_node",
+            node=ids[name],
+            expected_version=node["version"],
+            status=status,
+        )
+    assert (await ok(client, "get_node", node=ids["late"]))["overdue"]
+    assert not (await ok(client, "get_node", node=ids["finished"]))["overdue"]
+    return ids
+
+
+async def look_of(chip: Locator) -> dict[str, str]:
+    """The text and tint a chip is painted with."""
+    painted: dict[str, str] = await chip.evaluate(
+        "el => ({ color: getComputedStyle(el).color,"
+        " background: getComputedStyle(el).backgroundColor })"
+    )
+    return painted
+
+
+async def test_order_says_late_work_once_in_red_and_the_rest_in_one_plain_line(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        ids = await lateness_world(client, "lateorder")
+        epic, late, after, plain_task, finished = (
+            ids[name] for name in ("E", "late", "after", "plain", "finished")
+        )
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            # Phases: one chip says it is late, in the danger colours, with the days; a day not yet
+            # reached is the plain chip, and a task with no day has none.
+            await order_open(w, f"#/graph?tab=order&focus={epic}")
+            await expect(page.locator("p.graph-or-summary")).to_have_text("3 to do")
+            chip = page.locator(f"#graph-or-phase li[data-ref='{late}'] .chip.due")
+            await expect(chip).to_have_count(1)
+            await expect(chip).to_have_class(re.compile(r"\bdanger\b"))
+            await expect(chip).to_have_class(re.compile(r"\boverdue\b"))
+            await expect(chip).not_to_have_class(re.compile(r"\bwarn\b"))
+            await expect(chip).to_have_attribute("data-late", "3")
+            await expect(chip).to_have_text("3 days late")
+            await expect(chip).to_have_attribute("title", f"Due {day(-3)}, 3 days late")
+            await transitions_done(page)
+            look = await look_of(chip)
+            assert rgb_of(look["color"]) == token("light", "--danger"), look
+            assert rgb_of(look["background"]) == token("light", "--danger-soft"), look
+            await expect(
+                page.locator(f"#graph-or-phase li[data-ref='{plain_task}'] .chip.due")
+            ).to_have_count(0)
+            await page.locator("#graph-or-next").click()
+            soon = page.locator(f"#graph-or-phase li[data-ref='{after}'] .chip.due")
+            await expect(soon).to_have_text(f"Due {day(4)}")
+            await expect(soon).not_to_have_class(re.compile(r"\bdanger\b"))
+            # Done work, in its fold, is not late and carries neither a due chip nor a status chip:
+            # the fold's own name says it is done.
+            toggle = page.locator("#graph-or-done-toggle")
+            await expect(toggle).to_have_text("Done (1)")
+            await toggle.click()
+            done_row = page.locator(f"#graph-or-done li[data-ref='{finished}']")
+            await expect(done_row).to_be_visible()
+            await expect(done_row.locator(".chip.due, .chip.status")).to_have_count(0)
+
+            # Chains: the same chip is on the box, the line says what the chain holds in a few
+            # words, and the old "3 d late" mark is gone.
+            await order_open(w, f"#/graph?tab=order&focus={epic}&mode=chains")
+            await expect(page.locator("p.graph-or-summary")).to_have_text(
+                "2 items in this chain, 1 blocked, 1 overdue, 0 done"
+            )
+            box = page.locator(f".graph-or-node[data-ref='{late}']")
+            box_chip = box.locator(".graph-or-node-top .chip.due.danger.overdue")
+            await expect(box_chip).to_have_text("3 days late")
+            await expect(box).to_have_attribute("aria-label", re.compile(r"overdue 3 days"))
+            await expect(
+                page.locator(f".graph-or-node[data-ref='{after}'] .chip.due")
+            ).to_have_count(0)
+            await expect(page.locator(".graph-or-late")).to_have_count(0)
+            # Loose items have no sentence of their own: the stepper says how many there are.
+            await page.locator("#graph-or-next").click()
+            await expect(page.locator("#graph-or-step")).to_have_text("Loose items (2)")
+            await expect(page.locator("p.graph-or-summary")).to_have_count(0)
+
+            # The epic is named in the line when the Graph is looking at one of its stories, and
+            # not when it is looking at the epic itself. With nothing chosen there is no line.
+            await order_open(w, f"#/graph?tab=order&focus={ids['S']}")
+            scope = page.locator("p.graph-or-summary .graph-or-scope")
+            await expect(scope).to_contain_text(code_of(epic))
+            await expect(scope).to_have_attribute("title", re.compile(rf"^{code_of(epic)} "))
+            await expect(scope).not_to_have_attribute("title", re.compile(r"first epic"))
+            await order_open(w, f"#/graph?tab=order&focus={epic}")
+            await expect(page.locator(".graph-or-scope")).to_have_count(0)
+            await go(page, board, "#/graph?tab=order")
+            await expect(page.locator("#graph-or-empty")).to_be_visible(timeout=SLOW)
+            await expect(page.locator("p.graph-or-summary")).to_have_count(0)
+            assert w.problems == [], w.problems
+
+
+async def test_structure_rings_late_work_in_dashed_red_and_blocked_work_in_solid_red(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        ids = await lateness_world(client, "latering")
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await structure_open(w)
+            # Every dot has a flag ring and only late and blocked work shows it; the ring carries
+            # no class of its own, the dot's does (is-late, and the blocked status).
+            for name in ("late", "after", "plain", "finished"):
+                node = page.locator(f"{MAP} g.graph-st-node[data-ref='{ids[name]}']")
+                await expect(node.locator(".graph-st-flag")).to_have_attribute(
+                    "class", "graph-st-flag"
+                )
+            await expect(
+                page.locator(f"{MAP} g.graph-st-node[data-ref='{ids['late']}']")
+            ).to_have_class(re.compile(r"\bis-late\b"))
+            await expect(
+                page.locator(f"{MAP} g.graph-st-node[data-ref='{ids['after']}']")
+            ).to_have_class(re.compile(r"\bs-blocked\b"))
+            await transitions_done(page)
+            shown: dict[str, str] = {}
+            for name in ("late", "after", "plain", "finished"):
+                flag = page.locator(f"{MAP} g[data-ref='{ids[name]}'] .graph-st-flag")
+                shown[name] = await flag.evaluate("el => getComputedStyle(el).display")
+            assert shown == {
+                "late": "inline",
+                "after": "inline",
+                "plain": "none",
+                "finished": "none",
+            }
+            # Both are the danger colour; only the dash tells late from blocked, so colour is not
+            # the only clue.
+            strokes = {}
+            for name in ("late", "after"):
+                flag = page.locator(f"{MAP} g[data-ref='{ids[name]}'] .graph-st-flag")
+                strokes[name] = await flag.evaluate(
+                    "el => [getComputedStyle(el).stroke, getComputedStyle(el).strokeDasharray]"
+                )
+            assert rgb_of(strokes["late"][0]) == token("light", "--danger"), strokes
+            assert rgb_of(strokes["after"][0]) == token("light", "--danger"), strokes
+            assert strokes["late"][1] != "none" and strokes["after"][1] == "none", strokes
+            # One epic on its own, as a radial view: a late leaf has a red dot.
+            await go(page, board, f"#/graph?scope={ids['E']}")
+            await expect(page.locator("#graph-view svg.graph-rd-svg")).to_be_visible(timeout=SLOW)
+            dot = page.locator(f"svg.graph-rd-svg g[data-ref='{ids['late']}'] .graph-rd-late")
+            await expect(dot).to_have_count(1)
+            await transitions_done(page)
+            assert rgb_of(await dot.evaluate("el => getComputedStyle(el).fill")) == token(
+                "light", "--danger"
+            )
+            await expect(
+                page.locator(f"svg.graph-rd-svg g[data-ref='{ids['finished']}'] .graph-rd-late")
+            ).to_have_count(0)
+            assert w.problems == [], w.problems
+
+
+async def test_the_tabs_are_an_icon_and_a_name_and_the_question_each_answers_is_its_tooltip(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        await made(client, "epic", "A tab to look at")
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await structure_open(w)
+            await expect(page.locator("#graph-tabs button.graph-tab")).to_have_text(
+                ["Structure", "Around", "Order"]
+            )
+            for tab, question in (
+                ("structure", "How does it all fit together?"),
+                ("around", "What do we know and what was decided about this?"),
+                ("order", "What must come first, and what does this block?"),
+            ):
+                button = page.locator(f"#graph-tab-{tab}")
+                await expect(button).to_have_attribute("title", question)
+                await expect(button.locator("svg")).to_have_count(1)
+            # The questions are not drawn on the page as words, and no tab has a second line.
+            await expect(page.locator("#graph-tabs")).not_to_contain_text("How does it all fit")
+            await expect(page.locator(".graph-tab-text, .graph-tab-ask")).to_have_count(0)
+            assert w.problems == [], w.problems
+
+
 # -- the Structure map's key and the keys of the tabs ----------------------------------------------
 
 STATUS_WORDS = {
@@ -1155,7 +1741,13 @@ async def test_the_structure_key_draws_the_maps_own_marks_and_nothing_sits_besid
                     await page.locator(f"{MAP} g.graph-st-node.is-task.s-{status}").count()
                     == number
                 )
-            for words in ("Epic, with a green arc", "Story", "Task", "Amber ring", "Red ring"):
+            for words in (
+                "Epic, with a green arc",
+                "Story",
+                "Task",
+                "Dashed red ring: overdue",
+                "Solid red ring: blocked",
+            ):
                 await expect(card).to_contain_text(words)
             # It says nothing about choosing a dot or about a card: a dot opens its page.
             await expect(card).not_to_contain_text(re.compile(r"choos|card|Press Enter", re.I))

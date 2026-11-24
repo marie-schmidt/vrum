@@ -1,5 +1,6 @@
 /* Signing in with another provider: the buttons under the sign-in and create-account forms, the
-   Sign-in methods setting of the Users page, and the Sign-in section of the Status page. They exist only
+   Sign-in methods setting of the Account page, and the Sign-in group of the Status page's technical
+   details. They exist only
    when the server is set up for a provider. Colours, sizes and spacing come from tokens.css. */
 
 /* Under the form: a quiet "or", and one button for each provider. */
@@ -20,7 +21,7 @@ button.sso-button { width: 100%; }
 .sso-form .field { margin: var(--space-2) 0 0; }
 .sso-form .field > .hint { margin-top: var(--space-1); }
 
-/* The Users page: the password and each provider, one line each. The buttons sit under the words, in
+/* The Account page: the password and each provider, one line each. The buttons sit under the words, in
    their column, and go to the right of them when the setting is wide enough to hold both. */
 .methods-control { container-type: inline-size; display: grid; gap: var(--space-2); width: 100%; min-width: 0; }
 .methods { display: grid; width: 100%; margin: 0; }
@@ -39,7 +40,6 @@ button.sso-button { width: 100%; }
   .method-actions { grid-column: 3; grid-row: 1; justify-content: flex-end; }
 }
 
-/* The Status page: the Sign-in section is as wide as the sections above it, and says in quiet words
-   under each way who may use it. */
-.status-grid > #sign-in { grid-column: 1 / -1; }
+/* The Status page: the Sign-in group of the technical details says in quiet words under each way who may
+   use it. */
 #sign-in .value-note { display: block; margin-top: 2px; color: var(--text-2); font-size: var(--text-sm); font-weight: 400; }

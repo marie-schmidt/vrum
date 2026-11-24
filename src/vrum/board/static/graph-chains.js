@@ -7,7 +7,7 @@
 
 import { h, plural } from './dom.js';
 import { icon } from './icons.js';
-import { KIND, STATUS, statusIcon } from './labels.js';
+import { KIND, STATUS, dueChip, statusIcon } from './labels.js';
 import { code, codeOf, s } from './graph-shared.js';
 
 // The box of one piece of work, and the room between boxes.
@@ -17,7 +17,8 @@ const XG = 58;
 const YG = 14;
 const DUMMY = 10;
 
-export const byCode = (model) => (a, b) => {
+// Epics, then stories, then tasks, each in the order it was made.
+export const byCreation = (model) => (a, b) => {
   const x = model.node(a);
   const y = model.node(b);
   return ['epic', 'story', 'task'].indexOf(x.kind) - ['epic', 'story', 'task'].indexOf(y.kind) || x.number - y.number;
@@ -56,7 +57,7 @@ export function chainsOf(model, links) {
     groups.get(r).refs.push(x);
   }
   for (const edge of edges) groups.get(find(edge.dep)).edges.push(edge);
-  const order = byCode(model);
+  const order = byCreation(model);
   return [...groups.values()].map((chain) => ({ ...chain, refs: chain.refs.sort(order) }));
 }
 
@@ -214,7 +215,7 @@ export function orderSample(extra) {
 //   open    opens the page of an item
 // Returns { element, edges, path, outside, stop } (`stop` undoes what the drawing watches).
 export function chainPicture(model, chain, { scope, pick, blocked, open }) {
-  const L = layoutChain(chain.refs, chain.edges, byCode(model));
+  const L = layoutChain(chain.refs, chain.edges, byCreation(model));
   const edges = chain.edges;
   const wide = L.width;
   const total = Math.max(L.height, 80);
@@ -291,8 +292,8 @@ export function chainPicture(model, chain, { scope, pick, blocked, open }) {
   return { element: h('div', { class: 'graph-or-picture' }, hint, region), edges, path, outside, stop: () => observer.disconnect() };
 }
 
-// One box of the chain: its sign, code and title, how late it is, and which epic it is in when that is
-// outside what was chosen.
+// One box of the chain: its status sign, code and title, how late it is, and which epic it is in (its code
+// and title) when that is outside what was chosen.
 function nodeBox(model, canvas, box, { pick, hot, path, blocked, outside, grid, open, hooks }) {
   const node = model.node(box.ref);
   const late = model.late(box.ref);
@@ -313,7 +314,7 @@ function nodeBox(model, canvas, box, { pick, hot, path, blocked, outside, grid, 
       css: { left: `${box.x}px`, top: `${box.y}px` },
       title: node.title,
       'aria-current': pick === box.ref ? 'true' : null,
-      'aria-label': `${KIND[node.kind].label} ${codeOf(node)}: ${node.title}. ${STATUS[node.status].label}${late > 0 ? `, overdue ${plural(late, 'day')}` : ''}${waits.length ? `, waiting for ${waits.map((r) => codeOf(model.node(r))).join(', ')}` : ''}${outside ? ', outside the chosen epic' : ''}. Press Enter to open it.`,
+      'aria-label': `${KIND[node.kind].label} ${codeOf(node)}: ${node.title}. ${STATUS[node.status].label}${late > 0 ? `, overdue ${plural(late, 'day')}` : ''}${waits.length ? `, waiting for ${waits.map((r) => `${codeOf(model.node(r))} ${model.node(r).title}`).join(', ')}` : ''}${outside ? `, outside the chosen epic${epic ? `, in ${codeOf(epic)} ${epic.title}` : ''}` : ''}. Press Enter to open it.`,
       onclick: () => open(box.ref),
       onpointerenter: () => hooks.point(box.ref),
       onpointerleave: () => hooks.point(null),
@@ -333,7 +334,7 @@ function nodeBox(model, canvas, box, { pick, hot, path, blocked, outside, grid, 
         }
       },
     },
-    h('span', { class: 'graph-or-node-top' }, statusIcon(node.status, 15), code(codeOf(node)), outside && epic ? h('span', { class: 'graph-or-epic' }, codeOf(epic)) : null, late > 0 ? h('span', { class: 'graph-or-late' }, icon('clock', { size: 12 }), `${late} d late`) : null),
+    h('span', { class: 'graph-or-node-top' }, statusIcon(node.status, 15), code(codeOf(node)), outside && epic ? h('span', { class: 'graph-or-epic', title: `${codeOf(epic)} ${epic.title}` }, `${codeOf(epic)} ${epic.title}`) : null, late > 0 ? dueChip(node, { size: 12, days: true }) : null),
     h('span', { class: 'graph-or-node-title' }, node.title),
   );
 }

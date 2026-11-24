@@ -33,6 +33,7 @@ from tests.board_helpers import (
     sidebar_current,
     timeline,
 )
+from tests.board_m14 import open_free, open_working, show_tab
 from tests.helpers import (
     code_of,
     connect,
@@ -120,8 +121,8 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         ).to_be_visible(timeout=SLOW)
         await page.locator("#item-page button.add-requirement").click()
         dialog = page.locator("dialog.modal")
-        await expect(dialog.locator("#requirement-on")).to_contain_text(
-            f"It goes on {code_of(story)}"
+        await expect(dialog.locator("#requirement-on")).to_have_text(
+            f"It goes on “Invoices {word}”."
         )
         await dialog.locator("#requirement-title").fill(f"Every invoice shows its VAT {word}")
         await dialog.get_by_role("button", name="Add the acceptance criterion").click()
@@ -133,23 +134,29 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         rule = await ok(agent, "get_rule", rule_id=rule_id)
         assert (rule["node"], rule["title"]) == (story, f"Every invoice shows its VAT {word}")
         assert (await ok(agent, "rule_history", rule_id=rule_id))["items"][0]["actor"] == ACTOR
-        await expect(page.locator("#item-page .criteria-met")).to_have_text("0 of 1 met")
+        await expect(
+            page.locator("#item-page [data-part=requirements] .heading-count")
+        ).to_have_text("0 of 1 met")
         # Its own page is a click away, in the Board, and says where it is.
         await requirement.locator("a.record-title").click()
         await expect(page.locator("#item-page[data-kind=rule]")).to_be_visible(timeout=SLOW)
         await expect(page.locator("#item-title")).to_contain_text(
-            f"Acceptance criterion #{rule_id} Every invoice shows its VAT {word}"
+            f"AC-{rule_id} Every invoice shows its VAT {word}"
         )
-        # The path names the epic, the story and the acceptance criterion by their codes alone;
-        # the titles are in each step's tooltip.
-        assert (await crumbs(page))[2:] == [
-            "Board", code_of(epic), code_of(story), f"AC-{rule_id}",
-        ]  # fmt: skip
+        # The path names the epic, the story and the acceptance criterion by their codes and
+        # names; the whole of each is its tooltip.
+        assert await crumbs(page) == [
+            "Board",
+            f"{code_of(epic)} Billing {word}",
+            f"{code_of(story)} Invoices {word}",
+            f"AC-{rule_id} Every invoice shows its VAT {word}",
+        ]
         assert await page.locator("#crumb-page").get_attribute("title") == (
             f"AC-{rule_id} Every invoice shows its VAT {word}"
         )
-        # The story's page lists it in its table of acceptance criteria, which opens it again.
-        await page.locator("#item-page .state-strip .in-story a").click()
+        # The story in the path leads back to the story's page, which lists the criterion in its
+        # table of acceptance criteria and opens it again.
+        await page.locator("nav.crumbs li.crumb-item a", has_text=code_of(story)).click()
         await expect(page.locator("#item-page")).to_have_attribute("data-ref", story, timeout=SLOW)
         await expect(requirement).to_have_count(1, timeout=SLOW)
         assert int(await requirement.get_attribute("data-rule") or 0) == rule_id
@@ -186,9 +193,13 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         briefing = taken["context"]
         assert [r["id"] for r in briefing["acceptance_criteria"]] == [rule_id]
 
-        # The claim is on the task's page, which was open and has not been reloaded.
-        await expect(page.locator("#item-page .card-summary")).to_contain_text(
-            "Held by agent-keyed", timeout=SLOW
+        # The claim is on the task's page, which was open and has not been reloaded: the strip's
+        # "Held by" says who, and until when.
+        claim_cell = page.locator("#item-page .card-summary dd.claim")
+        await expect(claim_cell).to_contain_text("agent-keyed", timeout=SLOW)
+        await expect(claim_cell).to_contain_text("until")
+        await expect(page.locator("#item-page .card-summary dt", has_text="Held by")).to_have_count(
+            1
         )
         # The page holds the very context the agent was briefed with, and the recall for the item:
         # the notes that are linked, the decided one first, and the ones that apply to everything.
@@ -219,21 +230,29 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         # The Board, one click back in the path, shows the claim on the card.
         await page.locator("nav.crumbs .crumb-view a").click()
         board_card = page.locator(f".card[data-ref='{task}']")
-        await expect(board_card).to_contain_text("Held by agent-keyed", timeout=SLOW)
+        await expect(board_card.locator(".chip.held")).to_have_attribute(
+            "data-held-by", "agent-keyed", timeout=SLOW
+        )
 
         # -- the Activity page: the claim, who holds it, and the feed ------------------------------
         await page.locator("#activity-open").click()
         await on_page(page, "activity")
         assert await sidebar_current(page) == ["activity"]
-        claim = page.locator(f"#claims-live .claim[data-node='{task}']")
-        await expect(claim).to_have_attribute("data-actor", "agent-keyed", timeout=SLOW)
-        await expect(claim).to_have_attribute("data-live", "1")
+        # The page is a toggle of three views; the changes are the first. Taking the work is a line
+        # of the feed, which names the item by its code and its name.
+        await show_tab(page, "changes")
         taking = page.locator(
             "#feed li.event[data-action=claimed]", has=page.locator(f"a[data-ref='{task}']")
         )
         await expect(taking.first).to_contain_text("agent-keyed", timeout=SLOW)
-        # The item is named by its code and its title, as everywhere a person reads it.
         await expect(taking.first).to_contain_text(f"task {code_of(task)} “Template {word}”")
+        # The claim is listed under the one who holds it, in the one list of who is working.
+        await open_working(page)
+        claim = page.locator(
+            f"#agents li.agent[data-actor=agent-keyed] li.claim[data-node='{task}']"
+        )
+        await expect(claim).to_have_attribute("data-actor", "agent-keyed", timeout=SLOW)
+        await expect(claim).to_have_attribute("data-live", "1")
         working = await ok(agent, "who_is_working")
         mine = next(a for a in working["agents"] if a["actor"] == "agent-keyed")
         assert [held_["node"] for held_ in mine["holding"]] == [task]
@@ -249,12 +268,13 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
             outcome="done",
             note=f"Built the template; VAT is a field, not a constant {word}.",
         )
+        await expect(claim).to_have_count(0, timeout=SLOW)
+        await show_tab(page, "changes")
         handoff = page.locator(
             "#feed li.event[data-action=handoff]", has=page.locator(f"a[data-ref='{task}']")
         )
         await expect(handoff.first).to_contain_text("agent-keyed", timeout=SLOW)
         await expect(handoff.first).to_contain_text(f"VAT is a field, not a constant {word}")
-        await expect(claim).to_have_count(0, timeout=SLOW)
         await page.locator("#main-nav a[data-page=board]").click()
         await expect(cell(page, epic, "done").locator(f".card[data-ref='{task}']")).to_be_visible(
             timeout=SLOW
@@ -266,7 +286,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         await handoff.first.locator(f"a[data-ref='{task}']").click()
         await expect(page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
         assert "from=activity" in page.url
-        assert (await crumbs(page))[2] == "Activity"
+        assert (await crumbs(page))[0] == "Activity"
         assert await sidebar_current(page) == ["activity"]
         last = page.locator("#item-page [data-part=handoff]")
         await expect(last).to_contain_text("agent-keyed", timeout=SLOW)
@@ -296,7 +316,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         await page.locator("#graph-hub-open").click()
         await expect(page.locator("#item-page")).to_have_attribute("data-ref", task, timeout=SLOW)
         assert page.url.endswith(f"#/item?item={task}&from=graph")
-        assert (await crumbs(page))[2] == "Graph" and await sidebar_current(page) == ["graph"]
+        assert (await crumbs(page))[0] == "Graph" and await sidebar_current(page) == ["graph"]
         await page.locator("nav.crumbs .crumb-view a").click()
         await expect(page.locator("#graph-explore")).to_be_visible(timeout=SLOW)
         assert page.url.endswith(f"#/graph?tab=around&focus={task}")
@@ -305,12 +325,15 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         await ok(agent, "add_link", source=later, target=task, link_type="needs_first")
         said = await refused(agent, "add_link", source=task, target=later, link_type="needs_first")
         await open_item(w, task)
-        await page.locator("#link-relation").select_option("needs_first:out")
-        await page.locator("#link-target").fill(code_of(later))
-        await page.get_by_role("button", name="Add", exact=True).click()
-        problem = page.locator("#item-page form.add-link .problem")
+        await page.locator("#add-link").click()
+        dialog = page.locator("dialog.modal")
+        await dialog.locator("#link-relation").select_option("needs_first:out")
+        await dialog.locator("#link-target").fill(code_of(later))
+        await dialog.get_by_role("button", name="Add the link").click()
+        problem = dialog.locator("p.problem")
         await expect(problem).not_to_be_empty(timeout=SLOW)
         plain(await problem.inner_text(), said)
+        await dialog.get_by_role("button", name="Cancel").click()
 
         await open_item(w, later)
         title = page.locator("#edit-title")
@@ -334,6 +357,7 @@ async def test_a_day_of_work_through_the_board_the_graph_and_the_roadmap() -> No
         said = await refused(agent, "claim_node", node=later)
         await page.locator("#activity-open").click()
         await on_page(page, "activity")
+        await open_free(page)
         await page.locator("#claim-id").fill(code_of(later))
         await page.locator("#claim-by-id-go").click()
         refusal = page.locator(".notice.refusal .notice-text").first

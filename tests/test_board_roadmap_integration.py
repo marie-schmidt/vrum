@@ -13,8 +13,9 @@ from typing import Any
 
 import pytest
 from mcp import Client
-from playwright.async_api import Page, expect
+from playwright.async_api import Locator, Page, expect
 
+from tests.board_context import fresh_project
 from tests.board_helpers import (
     SLOW,
     api_path,
@@ -25,6 +26,7 @@ from tests.board_helpers import (
     crumbs,
     database_footprint,
     hold_back_news,
+    item_name,
     item_page,
     made,
     no_panel_or_drawer,
@@ -38,6 +40,17 @@ from tests.board_helpers import (
 )
 from tests.board_helpers import drag_bar as drag
 from tests.board_helpers import roadmap_ids as shown
+from tests.board_roadmap import (
+    box_of,
+    close,
+    colours_in,
+    cursor_over,
+    middle,
+    probe,
+    show_today,
+    status_words,
+)
+from tests.board_theme import token
 from tests.helpers import (
     all_nodes,
     day,
@@ -50,6 +63,7 @@ from tests.helpers import (
 )
 from tests.helpers import code_of as code
 from tests.helpers import number_of as number
+from tests.world import join_project
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -134,6 +148,19 @@ async def test_the_roadmap_draws_only_dated_work_spans_arrows_marks_and_filters_
         for undated in (ids["u1"], ids["u2"]):
             assert await page.locator(f"#rm-scroll [data-ref='{undated}']").count() == 0
         assert await page.locator("#tray").count() == 0
+        # The top bar names the page, so the page's own title is there for a screen reader only,
+        # and nothing but the page's actions would have a row of its own (the Roadmap has none).
+        heading = page.locator("#page h1")
+        await expect(heading).to_have_text("Roadmap")
+        await expect(heading).to_have_class(re.compile(r"\bsr-only\b"))
+        assert await page.locator("#page .page-title, #page header.page-header").count() == 0
+        # A row is the item's code and its name; the bar says the same.
+        label = page.locator(f".rm-label[data-ref='{ids['a']}'] a.rm-open")
+        await expect(label.locator(".id")).to_have_text(code(ids["a"]))
+        await expect(label).to_have_text(f"{code(ids['a'])} Task a {word}")
+        await expect(bar_of(page, ids["a"]).locator(".rm-text")).to_have_text(
+            f"{code(ids['a'])} Task a {word}"
+        )
         count = " ".join((await page.locator("#count").inner_text()).split())
         assert count.endswith("2 have no dates and are not drawn: see them in Lists."), count
         await page.locator("#rm-undated").click()
@@ -175,18 +202,15 @@ async def test_the_roadmap_draws_only_dated_work_spans_arrows_marks_and_filters_
         assert await arrow.get_attribute("data-to") == ids["b"]
         assert "conflict" in (await arrow.get_attribute("class") or "")
 
-        # The schedule conflict is on the item that starts too early, and only there; the overdue
-        # mark is on the past item, and only there. Both are in words.
+        # The schedule conflict is on the item that starts too early, and only there. Late work has
+        # no mark in its label any more: its lateness is the tail behind its bar and the words
+        # beside it, which are checked below, and only the past item has them.
         conflict = page.locator(".rm-label .chip.conflict")
         assert await conflict.count() == 1
         await expect(
             page.locator(f".rm-label[data-ref='{ids['b']}'] .chip.conflict")
         ).to_contain_text("Schedule conflict")
-        overdue = page.locator(".rm-label .chip.overdue")
-        assert await overdue.count() == 1
-        await expect(
-            page.locator(f".rm-label[data-ref='{ids['c']}'] .chip.overdue")
-        ).to_contain_text("Overdue")
+        assert await page.locator(".rm-label .chip.overdue").count() == 0
         assert "Schedule conflict" in (
             await bar_of(page, ids["b"]).get_attribute("aria-label") or ""
         )
@@ -204,6 +228,7 @@ async def test_the_roadmap_draws_only_dated_work_spans_arrows_marks_and_filters_
         todays_left = (on(day(0)) - line["origin"]).days * line["ppd"]
         assert c_end + tail_width == todays_left + line["ppd"]  # through the end of today's cell
         await expect(page.locator(".rm-note.overdue")).to_have_text("10 days late")
+        await expect(page.locator(f".rm-note.overdue[data-ref='{ids['c']}']")).to_have_count(1)
         # What the page marks is what the graph says.
         graph = {n["ref"]: n for n in await all_nodes(client, query=f"epic:{number(epic)}")}
         assert graph[ids["b"]]["schedule_conflicts"] == [ids["a"]]
@@ -251,7 +276,9 @@ async def test_dragging_a_bar_or_an_end_changes_the_dates_as_a_versioned_change_
             {"start_on": day(3), "target_on": day(12), "version": 1},
             {"start_on": day(8), "target_on": day(17), "version": 2},
         )
-        await expect(page.locator(".notice.done").last).to_contain_text(f"Moved {code(moved)}")
+        # The notice speaks of the task by its name, in quotes, with no code.
+        title = (await ok(client, "get_node", node=moved))["title"]
+        await expect(page.locator(".notice.done").last).to_contain_text(f"Moved “{title}”:")
 
         # The right end moves the target date alone, and the left end the start date alone.
         await drag(page, ended, -3, "end")
@@ -317,6 +344,10 @@ async def test_a_bar_an_agent_changed_meanwhile_is_refused_and_a_start_after_the
         refusal = page.locator(".notice.refusal .notice-text").first
         await expect(refusal).to_be_visible(timeout=SLOW)
         plain(await refusal.inner_text(), said)
+        # It names the task in the server's words by what it is called, never by its reference.
+        title = (await ok(client, "get_node", node=stale))["title"]
+        assert (await refusal.inner_text()).startswith(f"“{title}” is at version 2, but you sent")
+        assert not re.search(r"\btask:\d+", await refusal.inner_text())
         await expect(bar_of(page, stale)).to_have_attribute("data-start", day(1), timeout=SLOW)
         assert await dates(client, stale) == (day(1), day(2))
         assert [e["actor"] for e in await updates(client, stale)] == [AGENT]
@@ -447,6 +478,38 @@ async def test_the_roadmap_zooms_groups_and_marks_today(client: Client, board: s
         assert w.problems == [], w.problems
 
 
+async def test_grouped_by_epic_the_epics_own_row_heads_its_group_with_no_extra_group_row(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Heads {word}")
+    story = await made(client, "story", f"Part {word}", epic)
+    task = await made(client, "task", f"Dated {word}", story, start_on=day(1), target_on=day(4))
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{number(epic)}")
+        await shown(page, 3)
+        # By epic (the default) there is no group heading row and no band for one: the epic's row,
+        # first in the list of labels, is the head, and it is drawn as one.
+        assert "group=" not in page.url
+        assert await page.locator(".rm-group").count() == 0
+        labels = page.locator(".rm-labels .rm-label")
+        await expect(labels.first).to_have_attribute("data-ref", epic)
+        await expect(labels.first).to_have_class(re.compile(r"\bheads\b"))
+        assert await page.locator(".rm-label.heads").count() == 1
+        assert await labels.evaluate_all("els => els.map(e => e.dataset.ref)") == [
+            epic,
+            story,
+            task,
+        ]
+
+        # Any other grouping keeps its heading rows (and no row is a head of its own).
+        await page.locator("#group").select_option("status")
+        await expect(page.locator(".rm-group").first).to_be_visible(timeout=SLOW)
+        assert await page.locator(".rm-label.heads").count() == 0
+        assert w.problems == [], w.problems
+
+
 # -- the ruler, the grid and late work ------------------------------------------------------------
 
 
@@ -513,7 +576,7 @@ async def test_the_ruler_has_a_cell_for_each_day_and_a_bar_fills_whole_cells(
         left, _ = await across(page, cell_of(5))
         assert abs(left - (await across(page, f".rm-bar[data-ref='{one}']"))[0]) < 1
         assert await one_bar.get_attribute("title") == (
-            f"Task {number(one)}: One day {word}. 1 day: {said_day(5)}. Ready."
+            f"Task {code(one)}: One day {word}. 1 day: {said_day(5)}. Ready."
         )
         five_bar = f".rm-bar[data-ref='{five}']"
         assert abs((await across(page, cell_of(3)))[0] - (await across(page, five_bar))[0]) < 1
@@ -636,6 +699,10 @@ async def test_the_key_opens_from_the_shared_key_button_and_says_what_the_ruler_
         assert "Overdue" not in await card.inner_text()
         # The tail in the card is the real one, so the key cannot drift from the timeline.
         assert await card.locator(".rm-late").count() == 1
+        # Each status carries its own meaning in its row (a card cannot open from inside a card).
+        for label, hint in status_words().values():
+            row = card.locator(".rm-key-group.is-status li", has_text=hint)
+            await expect(row.locator("strong")).to_have_text(label)
         await page.keyboard.press("Escape")
         await expect(page.locator(".hovercard:visible")).to_have_count(0)
         # The keyboard reaches it too.
@@ -709,8 +776,8 @@ async def test_a_label_a_bar_or_a_key_opens_the_records_page_and_the_way_back_is
         await page.locator(f".rm-label[data-ref='{story}'] a.rm-open").click()
         await expect(page.locator("#item-title")).to_contain_text(f"{code(story)} ", timeout=SLOW)
         assert (await hash_of(page)).startswith(f"#/item?item={story}&from=roadmap")
-        assert (await crumbs(page))[2] == "Roadmap"
-        assert (await crumbs(page))[-1] == code(story)
+        assert (await crumbs(page))[0] == "Roadmap"
+        assert (await crumbs(page))[-1] == await item_name(client, story)
         await expect(page.locator("#main-nav a[data-page=roadmap]")).to_have_attribute(
             "aria-current", "page"
         )
@@ -728,7 +795,7 @@ async def test_a_label_a_bar_or_a_key_opens_the_records_page_and_the_way_back_is
         await expect(page.locator("#item-title")).to_contain_text(f"Planned with care {word}")
         # A note reached from the Roadmap is still in the Roadmap, and the way back is the same.
         assert (await hash_of(page)).endswith("from=roadmap")
-        assert (await crumbs(page))[2] == "Roadmap"
+        assert (await crumbs(page))[0] == "Roadmap"
         await back_on_the_roadmap()
 
         # A plain click on a bar opens its page too.
@@ -830,7 +897,7 @@ async def test_a_roadmaps_address_opens_the_same_state_in_a_second_browser_and_s
         record = await hash_of(first.page)
         assert record.startswith(f"#/item?item={task}&from=roadmap")
         await first.page.locator("#global-search").fill(f"kept task {word}")
-        await first.page.locator("#global-search-go").click()
+        await first.page.locator("#global-search").press("Enter")
         await expect(first.page.locator("#search-results tr.result").first).to_be_visible(
             timeout=SLOW
         )
@@ -857,7 +924,7 @@ async def test_a_roadmaps_address_opens_the_same_state_in_a_second_browser_and_s
             await expect(second.page.locator("#item-title")).to_contain_text(
                 f"{code(task)} ", timeout=SLOW
             )
-            assert (await crumbs(second.page))[2] == "Roadmap"
+            assert (await crumbs(second.page))[0] == "Roadmap"
             await expect(second.page.locator("#main-nav a[data-page=roadmap]")).to_have_attribute(
                 "aria-current", "page"
             )
@@ -872,3 +939,409 @@ async def test_a_roadmaps_address_opens_the_same_state_in_a_second_browser_and_s
             ) == sorted(results)
             assert second.problems == [], second.problems
         assert database_footprint() == before
+
+
+# -- M38: the box fills the window, the hand is only on what can be dragged, a status has a card --
+
+SIZES = ((1280, 720), (1440, 900))
+ZOOMS = ("month", "quarter", "year")
+# What an arrow looks like to the browser, whether the style sheet says it or leaves it as it was.
+ARROW = ("auto", "default")
+
+
+async def crowded_world(client: Client) -> str:
+    """An epic with a story and 24 dated tasks, more rows than a window shows, and another epic
+    whose story and task a filter can leave as the only two rows. Gives the second epic."""
+    word = unique_word()
+    crowd = await made(client, "epic", f"Crowded {word}")
+    crowd_story = await made(client, "story", f"Crowd {word}", crowd)
+    for each in range(24):
+        await made(
+            client,
+            "task",
+            f"Crowd {each} {word}",
+            crowd_story,
+            start_on=day(1 + each % 9),
+            target_on=day(8 + each % 9),
+        )
+    sparse = await made(client, "epic", f"Sparse {word}")
+    sparse_story = await made(client, "story", f"Sparse story {word}", sparse)
+    await made(
+        client, "task", f"Sparse task {word}", sparse_story, start_on=day(2), target_on=day(9)
+    )
+    return sparse
+
+
+async def test_the_timeline_box_fills_the_window_to_its_bottom_and_the_page_never_scrolls(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        sparse = await crowded_world(client)
+        two_rows = f"epic:{number(sparse)} -kind:epic"
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await w.open("#/roadmap")
+            for width, height in SIZES:
+                # The same page is made taller and wider, as a person drags a window's corner: the
+                # box follows with no script, so it is checked in place.
+                await page.set_viewport_size({"width": width, "height": height})
+                for query, count in (("", 29), (two_rows, 2)):
+                    await apply_filter(page, query)
+                    await shown(page, count)
+                    for zoom in ZOOMS:
+                        await page.locator(f"button[data-zoom={zoom}]").click()
+                        await expect(page.locator(".rm-track")).to_have_attribute("data-zoom", zoom)
+                        where = f"{width}x{height}, {zoom}, {count} items"
+                        found = await box_of(page)
+                        # The page is exactly the window: nothing scrolls but the box itself.
+                        assert found["page"] <= found["window"], (where, found)
+                        assert found["pageWide"] <= found["windowWide"], (where, found)
+                        assert found["window"] - 20 <= found["bottom"] <= found["window"], (
+                            where,
+                            found,
+                        )
+                        if count > 4:
+                            # More rows than the box holds: it scrolls inside itself, and at its
+                            # end the rows and the labels stop at its bottom edge.
+                            assert found["scrolls"], (where, found)
+                            await page.locator("#rm-scroll").evaluate(
+                                "e => { e.scrollTop = e.scrollHeight; }"
+                            )
+                            found = await box_of(page)
+                        else:
+                            assert not found["scrolls"], (where, found)
+                        assert abs(found["rowsBottom"] - found["inner"]) <= 1.5, (where, found)
+                        assert abs(found["labelsBottom"] - found["inner"]) <= 1.5, (where, found)
+                        if count > 4:
+                            await page.locator("#rm-scroll").evaluate("e => { e.scrollTop = 0; }")
+        assert w.problems == [], w.problems
+
+
+async def test_the_grid_the_weekends_and_today_go_on_below_the_last_row_to_the_bottom_of_the_box(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        sparse = await crowded_world(client)
+        two_rows = f"epic:{number(sparse)}+-kind:epic"
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await w.open(f"#/roadmap?q={two_rows}")
+            await shown(page, 2)
+            today = (await timeline(page))["today"].isoformat()
+            for theme in ("light", "dark"):
+                await page.emulate_media(color_scheme=theme)
+                await expect(page.locator("html")).to_have_attribute("data-theme", theme)
+                for width, height in SIZES:
+                    await page.set_viewport_size({"width": width, "height": height})
+                    for zoom in ZOOMS:
+                        await page.locator(f"button[data-zoom={zoom}]").click()
+                        await expect(page.locator(".rm-track")).to_have_attribute("data-zoom", zoom)
+                        await show_today(page)
+                        await page.mouse.move(2, 2)
+                        found = await box_of(page)
+                        where = f"{theme}, {width}x{height}, {zoom}"
+                        inner = int(found["inner"])
+                        assert inner - 40 > found["rowsTop"] + 4 * 38, (where, found)
+
+                        # A row's faint line shows in the last pixels of the box, well below the two
+                        # rows with items, wherever the column of today is not.
+                        x = int(found["labelsRight"]) + 60
+                        if abs(x - found["todayLeft"]) < 40:
+                            x += 100
+                        strip = await colours_in(
+                            page, [(x, y) for y in range(inner - 40, inner - 1)]
+                        )
+                        line = token(theme, "--grid-line")
+                        assert any(close(colour, line) for colour in strip), (where, strip)
+
+                        # Today's column reaches the bottom too, as the line of its own colour does.
+                        middle_of_today = found["todayLeft"] + found["todayWidth"] / 2
+                        element, _ = await probe(page, middle_of_today, inner - 5)
+                        assert "rm-today" in element, (where, element)
+
+                        if zoom != "month":
+                            continue
+                        # Month: the weekend's tint and today's column are the colours the tokens
+                        # give, at the bottom edge, and a weekday has the colour of the box.
+                        cells = await page.locator(".rm-day").evaluate_all(
+                            "els => els.map(e => { const b = e.getBoundingClientRect();"
+                            " return [e.dataset.day, b.left + b.width / 2]; })"
+                        )
+                        seen = [
+                            (when, at)
+                            for when, at in cells
+                            if found["labelsRight"] + 4 < at < found["innerRight"] - 20
+                        ]
+                        saturday = next(at for when, at in seen if on(when).weekday() == 5)
+                        wednesday = next(
+                            at for when, at in seen if on(when).weekday() == 2 and when != today
+                        )
+                        sampled = [inner - 6, inner - 5, inner - 4, inner - 3]
+                        left = int(found["todayLeft"])
+                        points = (
+                            [(int(saturday), y) for y in sampled]
+                            + [(int(wednesday), y) for y in sampled]
+                            + [(left + 3, y) for y in sampled]
+                            + [(left + 11, y) for y in sampled]
+                        )
+                        colours = await colours_in(page, points)
+                        for index, (name, wanted) in enumerate(
+                            (
+                                ("a Saturday", token(theme, "--grid-weekend")),
+                                ("a Wednesday", token(theme, "--surface")),
+                                ("today's column", token(theme, "--accent-soft")),
+                                ("the line through today", token(theme, "--accent")),
+                            )
+                        ):
+                            part = colours[index * 4 : index * 4 + 4]
+                            assert sum(close(colour, wanted) for colour in part) >= 3, (
+                                where,
+                                name,
+                                wanted,
+                                part,
+                            )
+        assert w.problems == [], w.problems
+
+
+async def hands_world(client: Client) -> dict[str, str]:
+    """An epic and a story (their bars are worked out, so nobody drags them), a task that starts too
+    early (a chip in its label), the task it waits for, and a late task (a tail and a note)."""
+    word = unique_word()
+    epic = await made(client, "epic", f"Hands {word}")
+    story = await made(client, "story", f"Hands story {word}", epic)
+    first = await made(
+        client, "task", f"Hands first {word}", story, start_on=day(5), target_on=day(12)
+    )
+    second = await made(
+        client, "task", f"Hands second {word}", story, start_on=day(8), target_on=day(15)
+    )
+    late = await made(
+        client, "task", f"Hands late {word}", story, start_on=day(-8), target_on=day(-4)
+    )
+    await ok(client, "add_link", actor="a", source=second, target=first, link_type="needs_first")
+    return {"epic": epic, "story": story, "first": first, "second": second, "late": late}
+
+
+async def an_empty_place_of_the_grid(page: Page) -> tuple[float, float]:
+    """A point of the timeline below its last row, away from every bar, in the middle of the box."""
+    found = await box_of(page)
+    assert found["inner"] - found["rowsTop"] > 6 * 38, found
+    return (found["labelsRight"] + found["innerRight"]) / 2, found["inner"] - 12
+
+
+async def test_the_hand_is_only_on_what_can_be_dragged_and_the_arrow_is_everywhere_else(
+    server_url: str,
+) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        world = await hands_world(client)
+        async with browser_page(board, token=project.key) as w:
+            page = w.page
+            await page.set_viewport_size({"width": 1280, "height": 720})
+            await w.open("#/roadmap")
+            await shown(page, 5)
+            first = bar_of(page, world["first"])
+            label = f".rm-label[data-ref='{world['first']}']"
+
+            async def has(place: Locator, cursor: str | tuple[str, ...], what: str) -> None:
+                element, found = await cursor_over(page, place)
+                assert found in ((cursor,) if isinstance(cursor, str) else cursor), (
+                    what,
+                    element,
+                    found,
+                )
+
+            # A bar this person may move has the open hand, and its ends the sideways arrows; a bar
+            # worked out from what is under it opens its page, so it has the pointer.
+            await has(first, "grab", "a bar that can be moved")
+            await has(first.locator(".rm-handle.end"), "ew-resize", "the end of a bar")
+            await has(first.locator(".rm-handle.start"), "ew-resize", "the start of a bar")
+            await has(bar_of(page, world["epic"]), "pointer", "a bar worked out from its stories")
+            await has(bar_of(page, world["story"]), "pointer", "a bar worked out from its tasks")
+            assert await page.locator(".rm-bar.movable").count() == 3
+            assert await page.locator(".rm-bar.worked-out.movable").count() == 0
+
+            # Everything else keeps the arrow, or the pointer where it is a link: the label, its
+            # icon and its chip, the status symbol in a bar, the marks beside a late bar, the ruler,
+            # the corner and the column below the last label.
+            await has(page.locator(f"{label} a.rm-open"), "pointer", "a label's link")
+            await has(page.locator(f"{label} .rm-kind"), ARROW, "a label's icon")
+            await has(
+                page.locator(f".rm-label[data-ref='{world['second']}'] .chip.conflict"),
+                ARROW,
+                "a chip in a label",
+            )
+            await has(first.locator(".rm-icon"), ARROW, "the status symbol in a bar")
+            await has(page.locator(f".rm-late[data-ref='{world['late']}']"), ARROW, "a late tail")
+            await has(page.locator(f".rm-note[data-ref='{world['late']}']"), ARROW, "a note")
+            await has(page.locator(".rm-day.today"), ARROW, "the ruler")
+            await has(page.locator(".rm-corner"), ARROW, "the corner")
+            await has(page.locator(".rm-fill"), ARROW, "the column under the labels")
+            await has(page.locator("#rm-key-button"), "pointer", "the Key button")
+
+            # The empty grid has the open hand while the timeline can be dragged along, and the
+            # closed one while it is.
+            x, y = await an_empty_place_of_the_grid(page)
+            assert (await probe(page, x, y))[1] == "grab"
+            scroll = page.locator("#rm-scroll")
+            before = await scroll.evaluate("e => e.scrollLeft")
+            await page.mouse.move(x, y)
+            await page.mouse.down()
+            await page.mouse.move(x - 80, y, steps=4)
+            assert (await probe(page, x - 80, y))[1] == "grabbing"
+            assert await scroll.evaluate("e => e.scrollLeft") > before
+            await page.mouse.up()
+            assert (await probe(page, x - 80, y))[1] == "grab"
+
+            # A bar being dragged has the closed hand, and put back where it was it changes nothing.
+            at_x, at_y = await middle(first)
+            await page.mouse.move(at_x, at_y)
+            await page.mouse.down()
+            await page.mouse.move(at_x + 30, at_y, steps=4)
+            assert (await probe(page, at_x + 30, at_y))[1] == "grabbing"
+            await page.mouse.move(at_x, at_y, steps=4)
+            await page.mouse.up()
+            await expect(page.locator(".rm-scroll.moving")).to_have_count(0, timeout=SLOW)
+            assert await dates(client, world["first"]) == (day(5), day(12))
+        assert w.problems == [], w.problems
+
+
+async def test_a_view_only_person_has_no_hand_on_a_bar_and_nothing_to_drag(server_url: str) -> None:
+    async with fresh_project(server_url) as (client, board, project):
+        world = await hands_world(client)
+        viewer = join_project(project, "viewer")
+        async with browser_page(board, token=None, person=viewer) as w:
+            page = w.page
+            await page.set_viewport_size({"width": 1280, "height": 720})
+            await w.open("#/roadmap")
+            await shown(page, 5)
+            await expect(page.locator("#view-only")).to_be_visible()
+            assert await page.locator(".rm-bar.movable, .rm-handle").count() == 0
+            for ref in world.values():
+                element, found = await cursor_over(page, bar_of(page, ref))
+                assert found == "pointer", (ref, element, found)
+            # The timeline can still be dragged along, by anyone.
+            x, y = await an_empty_place_of_the_grid(page)
+            assert (await probe(page, x, y))[1] == "grab"
+            # A drag that would move a bar opens the page of nothing and changes nothing.
+            at_x, at_y = await middle(bar_of(page, world["first"]))
+            await page.mouse.move(at_x, at_y)
+            await page.mouse.down()
+            await page.mouse.move(at_x + 60, at_y, steps=4)
+            await page.mouse.up()
+            await page.wait_for_load_state("networkidle")
+            assert await dates(client, world["first"]) == (day(5), day(12))
+            assert await updates(client, world["first"]) == []
+        assert w.problems == [], w.problems
+
+
+async def test_a_status_symbol_in_a_bar_and_beside_a_short_bar_has_a_card_saying_what_it_means(
+    client: Client, board: str
+) -> None:
+    words = status_words()
+    word = unique_word()
+    epic = await made(client, "epic", f"Symbols {word}")
+    story = await made(client, "story", f"Symbols story {word}", epic)
+    wide_ready = await made(
+        client, "task", f"Wide {word}", story, start_on=day(2), target_on=day(7)
+    )
+    wide_busy = await made(client, "task", f"Busy {word}", story, start_on=day(3), target_on=day(8))
+    short_done = await made(
+        client, "task", f"Done {word}", story, start_on=day(5), target_on=day(5)
+    )
+    short_blocked = await made(
+        client, "task", f"Stuck {word}", story, start_on=day(6), target_on=day(6)
+    )
+    short_ready = await made(
+        client, "task", f"Next {word}", story, start_on=day(4), target_on=day(4)
+    )
+    await ok(client, "claim_node", actor="ann", node=wide_busy)
+    for node, status in (
+        (wide_busy, "in_progress"),
+        (short_done, "done"),
+        (short_blocked, "blocked"),
+    ):
+        await ok(client, "update_node", actor="a", node=node, expected_version=1, status=status)
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{number(epic)}")
+        await shown(page, 7)
+        cards = page.locator(".hovercard:visible")
+
+        async def says(symbol: Locator, status: str, what: str) -> None:
+            await symbol.hover()
+            await expect(cards).to_have_count(1, timeout=SLOW)
+            label, hint = words[status]
+            text = await cards.inner_text()
+            assert label in text and hint in text, (what, text)
+            for other, (_, other_hint) in words.items():
+                assert other == status or other_hint not in text, (what, other, text)
+            # The symbol names its card, the one a screen reader reads with it.
+            assert await symbol.get_attribute("aria-describedby") == await cards.get_attribute("id")
+            await page.mouse.move(2, 2)
+            await expect(cards).to_have_count(0, timeout=SLOW)
+
+        # Inside a bar that is wide enough for its words, the symbol has the card; its own empty
+        # title keeps the bar's tooltip from showing over it.
+        for ref, status in ((wide_ready, "ready"), (wide_busy, "in_progress")):
+            symbol = bar_of(page, ref).locator(".rm-icon")
+            assert await symbol.get_attribute("title") == ""
+            await says(symbol, status, f"{status} in a bar")
+        # A bar too short for a symbol has it beside it, and the card hangs from there.
+        for ref, status in (
+            (short_done, "done"),
+            (short_blocked, "blocked"),
+            (short_ready, "ready"),
+        ):
+            assert await bar_of(page, ref).locator(".rm-icon").count() == 0
+            await says(
+                page.locator(f".rm-note-status[data-ref='{ref}']"), status, f"{status} beside"
+            )
+            # What stands beside a short bar still says only its own words, if it has any.
+            await expect(page.locator(f".rm-note[data-ref='{ref}']")).to_have_text("")
+        # The keyboard reaches the card through the bar's own words, not a new stop: the symbols
+        # are not focusable.
+        assert await page.locator(".rm-icon[tabindex], .rm-note-status[tabindex]").count() == 0
+        assert w.problems == [], w.problems
+
+
+async def test_a_drag_from_a_status_symbol_moves_the_bar_and_a_card_never_shows_during_it(
+    client: Client, board: str
+) -> None:
+    word = unique_word()
+    epic = await made(client, "epic", f"Drag {word}")
+    story = await made(client, "story", f"Drag story {word}", epic)
+    task = await made(client, "task", f"Dragged {word}", story, start_on=day(3), target_on=day(9))
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open(f"#/roadmap?q=epic:{number(epic)}")
+        await shown(page, 3)
+        cards = page.locator(".hovercard:visible")
+        symbol = bar_of(page, task).locator(".rm-icon")
+
+        # A card that is open when the press comes goes, and none comes while the bar is carried.
+        await symbol.hover()
+        await expect(cards).to_have_count(1, timeout=SLOW)
+        x, y = await middle(symbol)
+        await page.mouse.down()
+        await page.mouse.move(x + 22, y, steps=4)
+        await expect(cards).to_have_count(0, timeout=SLOW)
+        await page.mouse.move(x + 44, y, steps=4)
+        await page.mouse.up()
+        await expect(bar_of(page, task)).to_have_attribute("data-start", day(5), timeout=SLOW)
+        assert await dates(client, task) == (day(5), day(11))
+
+        # Pressed before the pointer has rested long enough to open one, and held, none opens.
+        await page.mouse.move(2, 2)
+        await expect(cards).to_have_count(0, timeout=SLOW)
+        symbol = bar_of(page, task).locator(".rm-icon")
+        x, y = await middle(symbol)
+        await page.mouse.move(x, y)
+        await page.mouse.down()
+        await page.wait_for_timeout(450)
+        await expect(cards).to_have_count(0)
+        await page.mouse.move(x - 22, y, steps=4)
+        await page.mouse.move(x - 44, y, steps=4)
+        await page.mouse.up()
+        await expect(bar_of(page, task)).to_have_attribute("data-start", day(3), timeout=SLOW)
+        assert await dates(client, task) == (day(3), day(9))
+        assert w.problems == [], w.problems

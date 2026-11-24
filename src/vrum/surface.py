@@ -11,7 +11,12 @@ this.
 
 Every tool the server has is either in this list or is reached from the board, and a test checks
 that this list names only tools that exist, holds at most `MOST_AGENT_TOOLS`, holds nothing only a
-person may use, and that no tool in it tells an agent to use one that is not."""
+person may use, and that no tool in it tells an agent to use one that is not.
+
+A key can also call Vrum by running code (`CODE_TOOLS`): it is then shown two tools, and the tools
+of its allowance become the functions of a script."""
+
+from collections.abc import Iterable
 
 # The work loop first, then reading and changing work, links, acceptance criteria, notes, search.
 AGENT_TOOLS: tuple[str, ...] = (
@@ -47,3 +52,17 @@ AGENT_TOOLS: tuple[str, ...] = (
 MOST_AGENT_TOOLS = 25
 
 AGENT_SURFACE = frozenset(AGENT_TOOLS)
+
+# What a key that calls Vrum by running code is shown instead of its tools: `explore` (what the
+# key's functions are) and `run` (a script that calls them). The key's allowance, the standard
+# tools or its own list, decides which functions a script has. Neither is in any allowance, so a
+# key that calls one tool at a time can never use them.
+CODE_TOOLS: tuple[str, ...] = ("explore", "run")
+
+
+def in_order(names: Iterable[str]) -> list[str]:
+    """Function names in the order an agent should read them: the work loop and the rest of the
+    tools Vrum offers agents as listed above, then any others by name."""
+    chosen = set(names)
+    first = [name for name in AGENT_TOOLS if name in chosen]
+    return first + sorted(chosen.difference(AGENT_SURFACE))

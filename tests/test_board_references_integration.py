@@ -28,6 +28,7 @@ from tests.board_helpers import (
     go,
     item_address,
     item_loaded,
+    item_name,
     links_of,
     made,
     no_panel_or_drawer,
@@ -242,6 +243,8 @@ async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_
             await expect(gone).to_have_class(re.compile(r"\bmissing\b"))
             await expect(gone).to_have_text(f"[[{missing}]] (missing)")
             assert await gone.get_attribute("href") is None
+            # What a missing reference says is named by its code, as every page names it.
+            assert await gone.get_attribute("title") == f"There is no {code_of(missing)}"
             # [[decision:N]], [[fact:N]], [[belief:3]] and [[node:N]] are not references: each stays
             # the text it is.
             shown = await text.inner_text()
@@ -284,7 +287,7 @@ async def test_a_reference_shows_the_current_title_follows_a_rename_and_creates_
                 f"Renamed {word}", timeout=SLOW
             )
             assert (await current_address(page))[1]["from"] == "roadmap"
-            assert (await crumbs(page))[2] == "Roadmap"
+            assert (await crumbs(page))[0] == "Roadmap"
             await no_panel_or_drawer(page)
             await page.go_back()
             await item_loaded(page, mentioner)
@@ -345,16 +348,27 @@ async def test_mentioned_in_equals_find_mentions_on_every_page_and_in_the_list_a
         )
 
         async def mentions_say(page: Page, key: str, want: dict[str, Any]) -> None:
-            """The page's "Mentioned in" for this record says what find_mentions says."""
+            """The page's "Mentioned in" for this record says what find_mentions says: the number
+            beside its heading and one line for each; with nothing to say there is no section."""
             section = part(page, "mentions")
-            await expect(section.locator("h3")).to_have_text(
-                f"Mentioned in ({len(want['items'])})", timeout=SLOW
+            if not want["items"]:
+                await expect(section).to_have_count(0)
+                return
+            await expect(section.locator("h3")).to_contain_text("Mentioned in", timeout=SLOW)
+            await expect(section.locator("h3 .heading-count")).to_have_text(
+                str(len(want["items"])), timeout=SLOW
             )
             await expect(section.locator("li.mention")).to_have_count(len(want["items"]))
             shown = await section.locator("li.mention").evaluate_all(
                 "els => els.map(e => e.dataset.source)"
             )
             assert sorted(shown) == sorted(sources(want)), key
+            # Each line is a link whose words are the source's code and its name.
+            words = [
+                " ".join(text.split())
+                for text in await section.locator("li.mention a.mention-link").all_inner_texts()
+            ]
+            assert words == [await item_name(client, ref) for ref in shown], key
 
         async with _browser(board, project) as w:
             page = w.page
@@ -393,10 +407,10 @@ async def test_mentioned_in_equals_find_mentions_on_every_page_and_in_the_list_a
             assert f"note:{decision['id']}" in sources(by_rule)
             by_note = await ok(client, "find_mentions", note_id=known["id"])
             assert {f"rule:{rule['id']}", f"note:{decision['id']}"} <= sources(by_note)
-            # Nothing mentions the decision: its page says so, in the section's one line.
-            await expect(part(page, "mentions").locator(".none")).to_have_text(
-                "None yet.", timeout=SLOW
-            )
+            # Nothing mentions the decision: its page has no "Mentioned in" section at all.
+            assert (await ok(client, "find_mentions", note_id=decision["id"]))["items"] == []
+            await expect(part(page, "history")).to_be_visible(timeout=SLOW)
+            await expect(part(page, "mentions")).to_have_count(0)
 
             # In the criteria of Lists, a row's "Mentioned in" is closed until it is opened,
             # and then the same.
@@ -453,6 +467,16 @@ async def test_the_editor_offers_a_pick_list_after_two_brackets_and_writes_only_
                 await expect(picker.locator(f"[data-ref='{ref}']")).to_have_count(1, timeout=SLOW)
             for never in ("[[belief", "[[node:", "[[decision:", "[[fact:"):
                 assert await picker.locator(f"[data-ref^='{never}']").count() == 0
+            # An entry is its code and then its name, as every list of items writes them; the
+            # reference it writes is the text in the field, and no code stands alone.
+            for ref, code, title in (
+                (target, code_of(target), f"Pickable {word}"),
+                (f"rule:{rule['id']}", f"AC-{rule['id']}", f"Pickable rule {word}"),
+                (f"note:{known['id']}", f"N-{known['id']}", f"Pickable note {word}"),
+            ):
+                option = picker.locator(f"[data-ref='[[{ref}]]']")
+                assert await option.locator(".item-code").inner_text() == code
+                assert await option.locator(".ref-title").inner_text() == title
             # Nothing is written to the server by choosing.
             await picker.locator(f"[data-ref='[[{target}]]']").hover()
             for _ in range(4):
@@ -570,7 +594,7 @@ async def test_the_quick_switcher_jumps_by_a_title_word_by_code_and_to_a_page(
             await item_loaded(page, story)
             await expect(card(page)).to_contain_text(f"Findable {word}", timeout=SLOW)
             assert (await current_address(page))[1] == {"item": story, "from": "roadmap"}
-            assert (await crumbs(page))[2] == "Roadmap"
+            assert (await crumbs(page))[0] == "Roadmap"
             await no_panel_or_drawer(page)
 
             # By code, as the page writes it.
@@ -605,21 +629,26 @@ async def test_the_quick_switcher_jumps_by_a_title_word_by_code_and_to_a_page(
             await page.keyboard.press("Escape")
             await expect(page.locator("#switcher")).to_have_count(0)
 
-            # By kind and number: a criterion, a note. Each opens its own page, in the view the
+            # By kind and number, or by the code a page writes (AC-1, N-1): a criterion, a note.
+            # Each is told by its code and its title, and opens its own page, in the view the
             # person was on.
-            for typed, key in (
-                (f"criterion {rule['id']}", f"rule:{rule['id']}"),
-                (f"note {decision['id']}", f"note:{decision['id']}"),
-                (f"note {known['id']}", f"note:{known['id']}"),
+            for typed, key, said in (
+                (f"criterion {rule['id']}", f"rule:{rule['id']}", f"AC-{rule['id']}"),
+                (f"AC-{rule['id']}", f"rule:{rule['id']}", f"AC-{rule['id']}"),
+                (f"note {decision['id']}", f"note:{decision['id']}", f"N-{decision['id']}"),
+                (f"n {known['id']}", f"note:{known['id']}", f"N-{known['id']}"),
+                (f"N-{known['id']}", f"note:{known['id']}", f"N-{known['id']}"),
             ):
                 await w.go("#/lists?view=notes")
                 await page.keyboard.press("Control+k")
                 await page.keyboard.type(typed)
-                await expect(page.locator("#switcher [role=option]")).to_have_count(1, timeout=SLOW)
+                option = page.locator("#switcher [role=option]")
+                await expect(option).to_have_count(1, timeout=SLOW)
+                await expect(option).to_contain_text(said)
                 await page.keyboard.press("Enter")
                 await item_loaded(page, key)
                 assert (await current_address(page))[1] == {"item": key, "from": "lists"}
-                assert (await crumbs(page))[2] == "Lists"
+                assert (await crumbs(page))[0] == "Lists"
                 await no_panel_or_drawer(page)
 
             # To a view and to the pages of Search, Activity and the coverage report, with the

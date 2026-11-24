@@ -8,17 +8,20 @@ import { Refusal, call } from './api.js';
 import { account, notify, openItem } from './ctx.js';
 import { dateField } from './datepicker.js';
 import { h, plural } from './dom.js';
-import { clip, dialogForm, field, fieldRow, openDialog, pickedRef, picker, refuse } from './forms.js';
+import { clip, dialogForm, field, fieldRow, openDialog, pickedKind, pickedRef, picker, refuse, wordsOfRef } from './forms.js';
 import { holderPicker } from './holder-picker.js';
-import { REQUIREMENT_STATUS, REQUIREMENT_STATUSES, STATUS, codeOf, kindIcon, nodeCode, nodeWords, parseNodeRef } from './labels.js';
+import { REQUIREMENT_STATUS, REQUIREMENT_STATUSES, STATUS, kindIcon, noteCode, ruleCode } from './labels.js';
 import { withReferences } from './reference-picker.js';
 import { loadTargets } from './references.js';
-import { headlineOf, store, sync, titleOf } from './store.js';
+import { headlineOf, sync, titleOf } from './store.js';
 
 const named = (control, id) => {
   control.id = id;
   return control;
 };
+// A note or an acceptance criterion in a sentence or a heading: its name in quotes, cut when long.
+const quoted = (text, size = 80) => `“${clip(text, size)}”`;
+const noteName = (record, size) => quoted(headlineOf(record), size);
 // The titles the pickers offer come from the store; a dialog still opens when they cannot be read.
 const titlesIfPossible = () => loadTargets().catch(() => {});
 const text = (id, name, value = '') => named(h('input', { type: 'text', name, value, autocomplete: 'off' }), id);
@@ -42,9 +45,9 @@ function saidBy(records, prefix) {
     element: h(
       'details',
       { class: 'said-by', open: needed },
-      h('summary', {}, needed ? 'A person confirmed this: who now says it should change, and their words' : 'Needed only to change a note a person has confirmed'),
+      h('summary', {}, needed ? 'Confirming person and their words' : 'A person\u2019s word (confirmed notes)'),
       field('Who says it should change', by),
-      field('What they said, or where', quote),
+      field('Their words, or where', quote),
     ),
     value: () => ({ ...(by.value.trim() ? { said_by: by.value } : {}), ...(quote.value.trim() ? { quote: quote.value } : {}) }),
   };
@@ -82,7 +85,7 @@ const replacingBlock = (records) =>
     'div',
     { class: 'replacing' },
     h('p', {}, h('strong', {}, `Replacing ${plural(records.length, 'note')}.`), ` ${records.length === 1 ? 'It is' : 'They are'} kept and marked replaced.`),
-    h('ul', { class: 'plain' }, records.map((record) => h('li', { dataset: { replacing: record.id } }, `#${record.id}: ${clip(headlineOf(record), 120)}`))),
+    h('ul', { class: 'plain' }, records.map((record) => h('li', { dataset: { replacing: record.id } }, `${noteCode(record.id)}: ${clip(headlineOf(record), 120)}`))),
   );
 
 // -- adding a note -----------------------------------------------------------------------------------
@@ -108,7 +111,7 @@ export async function addNoteDialog(prefill = {}) {
     work: async () => {
       const made = madeNote(await call('add_note', { text: body.value, why: why.value, ...decided.value(), project_wide: wide.box.checked, ...links.value() }));
       box.close();
-      notify(`Added note #${made.id}. It is unconfirmed until a person confirms it.`);
+      notify(`Added the note ${noteName(made)}. It is unconfirmed until a person confirms it.`);
       await sync();
       prefill.onDone?.(made);
     },
@@ -160,7 +163,7 @@ export async function supersedeDialog(record, { onDone = null } = {}) {
         }),
       );
       box.close();
-      notify(`Added note #${made.id}, which replaces ${records.map((item) => `#${item.id}`).join(', ')}. It is unconfirmed until a person confirms it.`);
+      notify(`Added the note ${noteName(made)}, which replaces ${records.map((item) => noteName(item, 60)).join(', ')}. It is unconfirmed until a person confirms it.`);
       await sync();
       onDone?.(made);
     },
@@ -179,8 +182,7 @@ export async function withdrawDialog(record, { onDone = null } = {}) {
   const said = saidBy(records, 'withdraw');
   const { form } = dialogForm({
     fields: [
-      h('p', {}, `${records.length === 1 ? 'It stays' : 'They stay'}, marked withdrawn, with this reason.`),
-      h('ul', { class: 'plain' }, records.map((item) => h('li', { dataset: { withdrawing: item.id } }, `#${item.id}: ${clip(headlineOf(item), 120)}`))),
+      h('ul', { class: 'plain' }, records.map((item) => h('li', { dataset: { withdrawing: item.id, words: 'theirs' } }, `${noteCode(item.id)}: ${clip(headlineOf(item), 120)}`))),
       field('Why it is withdrawn', reason),
       said.element,
     ],
@@ -188,7 +190,7 @@ export async function withdrawDialog(record, { onDone = null } = {}) {
     work: async () => {
       const result = await call('withdraw_note', { note_ids: records.map((item) => item.id), reason: reason.value, ...said.value() });
       box.close();
-      notify(`Withdrew note ${records.map((item) => `#${item.id}`).join(', ')}.`);
+      notify(`Withdrew ${records.map((item) => noteName(item, 60)).join(', ')}.`);
       await sync();
       onDone?.(result);
     },
@@ -208,16 +210,7 @@ export async function linkDialog(record) {
   const links = picker({ label: 'Add what it applies to', kinds: ['node', 'rule', 'note'] });
   const shown = h('ul', { class: 'plain concerns-list' });
   const problem = h('p', { class: 'problem', role: 'alert' });
-  const name = (ref) => {
-    if (ref.type === 'node') return `${codeOf(ref.id)} ${titleOf(ref.id)}`;
-    if (ref.type === 'rule') {
-      const rule = (store.rules || []).find((entry) => entry.id === ref.id);
-      return `Criterion #${ref.id}${rule ? ` ${clip(rule.title, 60)}` : ''}`;
-    }
-    const note = (store.notes || []).find((entry) => entry.id === ref.id);
-    return `Note #${ref.id}${note ? ` ${clip(headlineOf(note), 60)}` : ''}`;
-  };
-  const kindOf = (ref) => (ref.type === 'node' ? parseNodeRef(ref.id)?.kind || 'story' : ref.type);
+  const name = (ref) => wordsOfRef(ref.type, ref.id);
   const LISTS = { node: 'nodes', rule: 'rule_ids', note: 'note_ids' };
   const draw = () => {
     const refs = refsOf(current);
@@ -227,8 +220,8 @@ export async function linkDialog(record) {
             h(
               'li',
               { dataset: { ref: pickedRef(ref) } },
-              kindIcon(kindOf(ref), 16),
-              h('span', { class: 'concern-name' }, name(ref)),
+              kindIcon(pickedKind(ref), 16),
+              h('span', { class: 'concern-name', title: name(ref) }, clip(name(ref), 90)),
               h('button', { type: 'button', class: 'unlink small', 'aria-label': `Remove ${name(ref)}`, onclick: () => change('unlink_note', { [LISTS[ref.type]]: [ref.id] }) }, 'Remove'),
             ),
           )
@@ -254,7 +247,7 @@ export async function linkDialog(record) {
     }
   };
   draw();
-  const box = openDialog(`What note #${record.id} applies to`, [
+  const box = openDialog(`What ${noteName(record)} applies to`, [
     shown,
     links.element,
     problem,
@@ -274,15 +267,11 @@ export function confirmDialog(record, confirmation, { onDone = null, onClose = n
   const confirming = confirmation === 'confirmed';
   const person = text('confirm-person', 'person', account.name);
   const quote = area('confirm-quote', 'quote', 3);
-  const label = 'Note';
   const { form } = dialogForm({
     fields: [
-      h('p', {}, h('strong', {}, `${label} #${record.id}: ${clip(headlineOf(record), 140)}`)),
-      confirming
-        ? h('p', { class: 'quiet' }, 'Confirming says a named person reviewed this note. It does not mean Vrum checked that it is true.')
-        : h('p', { class: 'quiet' }, `Un-confirming says that ${record.confirmed_by || 'the person who confirmed it'} no longer stands behind it. Name the person who says so, and what they said.`),
+      h('p', { dataset: { words: 'theirs' } }, h('strong', {}, `${noteCode(record.id)}: ${clip(headlineOf(record), 140)}`)),
       field(confirming ? 'The person who reviewed it' : 'The person who says so', person),
-      field(confirming ? 'What they said, or where (optional)' : 'What they said, in their words', quote),
+      field(confirming ? 'Their words (optional)' : 'Their words', quote),
     ],
     submit: confirming ? 'Confirm' : 'Un-confirm',
     work: async () => {
@@ -293,12 +282,12 @@ export function confirmDialog(record, confirmation, { onDone = null, onClose = n
         ...(confirming && !quote.value.trim() ? {} : { quote: quote.value }),
       });
       box.close();
-      notify(confirming ? `${label} #${record.id} is confirmed by ${person.value}.` : `${label} #${record.id} is unconfirmed again.`);
+      notify(confirming ? `${noteName(record)} is confirmed by ${person.value}.` : `${noteName(record)} is unconfirmed again.`);
       await sync();
       onDone?.(made);
     },
   });
-  const box = openDialog(`${confirming ? 'Confirm' : 'Un-confirm'} ${label.toLowerCase()} #${record.id}`, [form]);
+  const box = openDialog([`${confirming ? 'Confirm' : 'Un-confirm'} `, h('span', { dataset: { words: 'theirs' } }, noteName(record))], [form]);
   if (onClose) box.addEventListener('close', onClose);
   person.focus();
   return box;
@@ -317,7 +306,7 @@ export function requirementDialog({ rule = null, node = null, onDone = null } = 
   const where = rule || node ? null : holderPicker({ label: 'Story or task (optional)' });
   const { form } = dialogForm({
     fields: [
-      !rule && node ? h('p', { class: 'quiet', id: 'requirement-on' }, `It goes on ${codeOf(node)} ${titleOf(node)}.`) : null,
+      !rule && node ? h('p', { class: 'quiet', id: 'requirement-on' }, `It goes on ${quoted(titleOf(node))}.`) : null,
       field('Title', title),
       field('Details', body),
       fieldRow(field('Status', status)),
@@ -328,7 +317,7 @@ export function requirementDialog({ rule = null, node = null, onDone = null } = 
       let made;
       if (!rule) {
         made = await call('create_rule', { title: title.value, body: body.value, status: status.value, node: node ?? where.value() });
-        notify(`Added acceptance criterion #${made.id}, “${made.title}”.`);
+        notify(`Added the acceptance criterion ${quoted(made.title)}.`);
       } else {
         const args = { rule_id: rule.id, expected_version: rule.version };
         if (title.value !== rule.title) args.title = title.value;
@@ -336,7 +325,7 @@ export function requirementDialog({ rule = null, node = null, onDone = null } = 
         if (status.value !== rule.status) args.status = status.value;
         if (Object.keys(args).length === 2) throw new Refusal('Nothing has been changed yet, so there is nothing to save.');
         made = await call('update_rule', args);
-        notify(`Saved acceptance criterion #${rule.id}.`);
+        notify(`Saved ${quoted(made.title)}.`);
       }
       box.close();
       await sync();
@@ -344,7 +333,7 @@ export function requirementDialog({ rule = null, node = null, onDone = null } = 
       onDone?.(made);
     },
   });
-  const box = openDialog(rule ? `Edit acceptance criterion #${rule.id}` : 'Add an acceptance criterion', [form], { wide: Boolean(where) });
+  const box = openDialog(rule ? `Edit ${quoted(rule.title)}` : 'Add an acceptance criterion', [form], { wide: Boolean(where) });
   title.focus();
   return box;
 }
@@ -354,10 +343,10 @@ export function requirementDialog({ rule = null, node = null, onDone = null } = 
 export function placeRequirementDialog(rule, { onDone = null } = {}) {
   const placing = rule.node === null || rule.node === undefined;
   const where = holderPicker({ label: 'Story or task' });
-  const here = placing ? 'It is not placed yet.' : `It is on ${codeOf(rule.node)} ${titleOf(rule.node)}.`;
+  const here = placing ? 'It is not placed yet.' : `It is on ${quoted(titleOf(rule.node))}.`;
   const { form } = dialogForm({
     fields: [
-      h('p', {}, h('strong', {}, `Acceptance criterion #${rule.id}: ${rule.title}`)),
+      h('p', {}, h('strong', {}, `${ruleCode(rule.id)}: ${rule.title}`)),
       h('p', { class: 'quiet' }, here),
       where.element,
     ],
@@ -367,12 +356,12 @@ export function placeRequirementDialog(rule, { onDone = null } = {}) {
       if (!target) throw new Refusal('Choose the story or task first.');
       const made = await call('place_rule', { rule_id: rule.id, expected_version: rule.version, node: target });
       box.close();
-      notify(`${placing ? 'Put' : 'Moved'} acceptance criterion #${rule.id} ${placing ? 'on' : 'to'} ${nodeWords(target)}.`);
+      notify(`${placing ? 'Put' : 'Moved'} ${quoted(rule.title)} ${placing ? 'on' : 'to'} ${quoted(titleOf(target))}.`);
       await sync();
       onDone?.(made);
     },
   });
-  const box = openDialog(placing ? `Put acceptance criterion #${rule.id} on a story or task` : `Move acceptance criterion #${rule.id} to another story or task`, [form], { wide: true });
+  const box = openDialog(placing ? `Put ${quoted(rule.title)} on a story or task` : `Move ${quoted(rule.title)} to another story or task`, [form], { wide: true });
   where.focus();
   return box;
 }
@@ -397,7 +386,7 @@ export function whyDialog(node, status, { save, onDone = null, onCancel = null }
       await onDone?.();
     },
   });
-  const box = openDialog(`Mark ${nodeCode(node.kind, node.number)} as ${word}`, [form]);
+  const box = openDialog(`Mark ${quoted(node.title)} as ${word}`, [form]);
   box.addEventListener('close', () => {
     if (!saved) onCancel?.();
   });

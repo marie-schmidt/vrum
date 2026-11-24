@@ -14,14 +14,25 @@
 // the tools that are not offered by default. A tool only people may use (the server says which) is
 // shown but cannot be ticked, and is never counted.
 //
-//   keyTools({ list, tools, prefix, open })  the picker: { element, value(), reset(), choice() }. `list` is
+//   keyTools({ list, tools, prefix, open, blank })  the picker: { element, value(), chosen(), reset(), choice() }. `list` is
 //                                            what the server says about its tools, `tools` is what the
 //                                            key may use now (null, the default, is the standard tools).
 //                                            value() is null (the standard tools) or the sorted names ticked.
+//                                            `blank` starts a NEW key with nothing chosen: no quick choice is
+//                                            lit and chosen() is false until the person chooses or ticks.
 //   allowance(list, tools)                   what a key may use, in words: { choice, label, count, total }.
+//   keyCalls({ prefix, codeMode })           how a key calls Vrum, by running code or one tool at a time: { element, chosen(), value() }.
+//                                            `codeMode` is null for a new key, which starts with neither chosen.
+//   callingWords(codeMode)                   how a key's row says it.
+//   keyVerifier({ prefix, verifier })        the box that marks a key a verifier's: { element, value() }.
+//   keyExpiry({ prefix, expiresOn, expired }) the last day a key works, empty for a key that never expires: { element, value(), changed() }.
 //   toolListing()                            the server's tool list, asked for once.
+//
+// The two tools of a key that runs code (the server marks them `code_mode`) are not in the picker or in any count: they
+// are how a key calls Vrum, and a key is never allowed them by name.
 
 import { get } from './api.js';
+import { dateField } from './datepicker.js';
 import { h, plural, put } from './dom.js';
 import { uid } from './forms.js';
 import { icon } from './icons.js';
@@ -42,7 +53,7 @@ const CHOICES = [
     key: 'standard',
     label: 'Standard',
     name: 'Standard',
-    says: (sets) => `The ${sets.standard.size} tools Vrum offers agents: the work loop, items, links, acceptance criteria, notes, recall and search. New agent tools are included. Histories, moving data and confirming are done on the board.`,
+    says: () => 'The tools Vrum offers agents: the work loop, items, links, acceptance criteria, notes, recall and search. New agent tools are included. Histories, moving data and confirming are done on the board.',
     allows: offered,
   },
   { key: 'read', label: 'Read only', name: 'Read only', says: () => `Looks at everything an agent is offered and changes nothing.${LATER}`, allows: (tool) => offered(tool) && !tool.changes_something },
@@ -91,7 +102,8 @@ export function forgetToolListing() {
 
 // -- what a choice means --------------------------------------------------------------------------------------
 
-const grantable = (tool) => !tool.people_only;
+// The two tools of a key that runs code are how it calls Vrum, not something it may do: they are never in what a key is allowed.
+const grantable = (tool) => !tool.people_only && !tool.code_mode;
 const same = (a, b) => a.size === b.size && [...a].every((name) => b.has(name));
 
 // The names of the tools each quick choice allows. Only tools a key can be given are in them.
@@ -122,14 +134,101 @@ export function allowance(list, tools) {
   return { choice, label: `${name}, ${plural(have.size, 'tool')}`, count: have.size, total: sets.everything.size };
 }
 
+// -- how a key calls Vrum ---------------------------------------------------------------------------------------
+
+// Every key has one way of calling Vrum. A key that calls it one tool at a time is given the tools it may use. A key that
+// runs code is given two tools, one to look up what it may do and one to run a short script that does it, so that a
+// whole job is one request. What the key may do (below) is the same either way.
+const CALLS = [
+  {
+    value: 'code',
+    label: 'By running code',
+    says: () => ['It gets two tools, ', h('code', {}, 'explore'), ' and ', h('code', {}, 'run'), ', and writes a short script that does a whole job in one request.'],
+  },
+  { value: 'tools', label: 'One tool at a time', says: () => ['It gets each tool it may use as a tool of its own and calls them one at a time.'] },
+];
+
+// What a key's row says about how it calls Vrum.
+export const callingWords = (codeMode) => (codeMode ? 'Runs code' : 'One tool at a time');
+
+// Whether the key belongs to an agent that checks other agents' work: one box and one quiet line. Unchecked is what every key
+// is unless the owner says otherwise, so a new key starts unchecked and says nothing more. value() is whether it is checked.
+export function keyVerifier({ prefix = 'key-verifier', verifier = false }) {
+  const box = h('input', { type: 'checkbox', id: prefix, name: prefix, checked: Boolean(verifier), 'aria-describedby': `${prefix}-help` });
+  return {
+    element: h(
+      'div',
+      { class: 'key-step key-verifier' },
+      h('label', { class: 'check', for: prefix }, box, 'Verifies other agents’ work'),
+      h('p', { class: 'quiet', id: `${prefix}-help` }, 'May tick the checks marked [verifier] or [github] on work it did not do itself.'),
+    ),
+    value: () => box.checked,
+  };
+}
+
+// The last day a key works: a date field (YYYY-MM-DD, or chosen from the calendar) and one quiet line. Empty, which is what a new key
+// starts with, is a key that never expires. `expiresOn` is the day the key has now, or null; a key that has one also gets a Clear
+// button, and `expired` (the server's own answer) adds one sentence saying what to do about a key that has run out. value() is
+// the day typed, or null when the field is empty; changed() is whether that differs from `expiresOn`. The server checks the day.
+export function keyExpiry({ prefix = 'key-expires', expiresOn = null, expired = false }) {
+  const input = h('input', { type: 'text', id: prefix, name: prefix, value: expiresOn || '', 'aria-describedby': `${prefix}-help` });
+  const clear = expiresOn
+    ? h(
+        'button',
+        {
+          type: 'button',
+          class: 'small key-expiry-clear',
+          onclick: () => {
+            input.value = '';
+            input.focus();
+          },
+        },
+        'Clear',
+      )
+    : null;
+  const value = () => input.value.trim() || null;
+  return {
+    element: h(
+      'div',
+      { class: 'key-step key-expiry' },
+      h('label', { for: prefix }, 'Expires'),
+      h('div', { class: 'key-expiry-row' }, dateField(input, 'the last day the key works'), clear),
+      h('p', { class: 'quiet', id: `${prefix}-help` }, 'The last day the key works, in UTC. Leave it empty for a key that never expires.'),
+      expired ? h('p', { class: 'quiet key-expired-note', role: 'note' }, 'This key has expired, so the agent using it is refused. Choose a later day to extend it, or make a new key.') : null,
+    ),
+    value,
+    changed: () => value() !== expiresOn,
+  };
+}
+
+// The two ways, as radio buttons with a quiet line each. `codeMode` is null for a new key, which starts with neither chosen (how
+// it calls is a decision, so nothing is lit when the dialog opens), or what an existing key has. value() is true for code and
+// false for one tool at a time; chosen() is false until the person chooses.
+export function keyCalls({ prefix = 'key-call', codeMode = null }) {
+  const title = h('h3', { id: `${prefix}-title` }, 'How it calls Vrum');
+  const inputs = CALLS.map(({ value }) => h('input', { type: 'radio', name: prefix, value, id: `${prefix}-${value}`, checked: codeMode === null ? false : (value === 'code') === codeMode }));
+  const choices = CALLS.map(({ value, label, says }, at) =>
+    h('label', { class: 'call-choice', for: inputs[at].id }, inputs[at], h('span', { class: 'call-choice-text' }, h('strong', {}, label), h('span', { class: 'quiet' }, says()))),
+  );
+  const picked = () => inputs.find((input) => input.checked);
+  return {
+    element: h('div', { class: 'key-step key-call', id: prefix, role: 'radiogroup', 'aria-labelledby': title.id }, title, h('div', { class: 'call-choices' }, choices)),
+    chosen: () => Boolean(picked()),
+    value: () => picked()?.value === 'code',
+  };
+}
+
 // -- the picker --------------------------------------------------------------------------------------------------
 
 const firstParagraph = (text) => String(text).split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
 
-export function keyTools({ list, tools = null, prefix = 'key-tools', open = false }) {
+export function keyTools({ list, tools = null, prefix = 'key-tools', open = false, blank = false }) {
   const sets = setsOf(list);
   const total = sets.everything.size;
-  let picked = new Set(tools === null ? sets.standard : tools.filter((name) => sets.everything.has(name)));
+  // A new key starts with nothing chosen (`blank`): what an agent may do is a decision, so no quick choice is lit
+  // until the person makes one. A key that already exists starts as what it has.
+  let chosen = !blank;
+  let picked = new Set(blank ? [] : tools === null ? sets.standard : tools.filter((name) => sets.everything.has(name)));
   let searching = false;
   const folded = new Set(); // the areas a person folded away
   const rows = []; // { tool, box, item, words }
@@ -170,6 +269,7 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
 
   function choose(key) {
     if (key === 'custom') return;
+    chosen = true;
     picked = new Set(sets[key]);
     for (const row of rows) row.box.checked = picked.has(row.tool.name);
     refresh();
@@ -206,6 +306,7 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
       'aria-describedby': `${markId} ${descId}`,
     });
     box.addEventListener('change', () => {
+      chosen = true;
       if (box.checked) picked.add(tool.name);
       else picked.delete(tool.name);
       refresh();
@@ -257,6 +358,7 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
     );
     const group = { area, rows: mine, element, body, box, count: countNote, fold };
     box?.addEventListener('change', () => {
+      chosen = true;
       for (const row of inScope(group)) {
         if (box.checked) picked.add(row.tool.name);
         else picked.delete(row.tool.name);
@@ -310,27 +412,32 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
       }
       group.count.textContent = `${mine.filter((row) => picked.has(row.tool.name)).length} of ${mine.length} allowed`;
     }
-    const choice = choiceOf(sets, picked);
+    const choice = chosen ? choiceOf(sets, picked) : 'none';
     element.dataset.choice = choice;
     buttons.get('custom').hidden = choice !== 'custom';
+    const shown = order.map(({ key }) => key).filter((key) => !buttons.get(key).hidden);
     for (const [key, button] of buttons) {
       button.setAttribute('aria-checked', String(key === choice));
-      button.tabIndex = key === choice ? 0 : -1;
+      // One button is a tab stop: the lit one, or with nothing chosen yet the first.
+      button.tabIndex = key === choice || (choice === 'none' && key === shown[0]) ? 0 : -1;
     }
-    says.textContent = (choice === 'custom' ? CUSTOM : CHOICES.find((item) => item.key === choice)).says(sets);
-    count.dataset.empty = String(picked.size === 0);
+    says.textContent = choice === 'none' ? 'Choose what this key may do.' : (choice === 'custom' ? CUSTOM : CHOICES.find((item) => item.key === choice)).says(sets);
+    count.dataset.empty = String(chosen && picked.size === 0);
     count.textContent =
-      picked.size === 0
-        ? 'No tool is ticked. Tick at least one tool, or leave the key with the standard tools.'
-        : choice === 'standard'
-          ? `${plural(picked.size, 'tool')} (standard)`
-          : choice === 'everything'
-            ? `All ${plural(total, 'tool')}`
-            : `${picked.size} of ${plural(total, 'tool')}`;
+      choice === 'none'
+        ? ''
+        : picked.size === 0
+          ? 'No tool is ticked. Tick at least one tool, or leave the key with the standard tools.'
+          : choice === 'standard'
+            ? `${plural(picked.size, 'tool')} (standard)`
+            : choice === 'everything'
+              ? `All ${plural(total, 'tool')}`
+              : `${picked.size} of ${plural(total, 'tool')}`;
   }
 
   const byName = (a, b) => Number(Boolean(a.changes_something)) - Number(Boolean(b.changes_something)) || a.name.localeCompare(b.name);
-  const areas = [...list.areas, ...new Set(list.tools.map((tool) => tool.area || NOT_PLACED).filter((area) => !list.areas.includes(area)))];
+  const usable = list.tools.filter((tool) => !tool.code_mode);
+  const areas = [...list.areas, ...new Set(usable.map((tool) => tool.area || NOT_PLACED).filter((area) => !list.areas.includes(area)))];
   const rank = (tool) => Math.max(0, areas.indexOf(tool.area || NOT_PLACED));
   const element = h(
     'div',
@@ -347,8 +454,8 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
     h('div', { class: 'kt-summary' }, count, toggle),
     panel,
   );
-  const mainGroups = areas.map((area) => addGroup(area, list.tools.filter((tool) => offered(tool) && (tool.area || NOT_PLACED) === area).sort(byName)));
-  const otherGroup = addGroup(OTHER, list.tools.filter((tool) => !offered(tool)).sort((a, b) => rank(a) - rank(b) || byName(a, b)), true);
+  const mainGroups = areas.map((area) => addGroup(area, usable.filter((tool) => offered(tool) && (tool.area || NOT_PLACED) === area).sort(byName)));
+  const otherGroup = addGroup(OTHER, usable.filter((tool) => !offered(tool)).sort((a, b) => rank(a) - rank(b) || byName(a, b)), true);
   put(panel, h('div', { class: 'kt-search-field' }, icon('search', { size: 16 }), search, clear), h('div', { class: 'kt-list' }, mainGroups, otherGroup), none);
   closeOther();
   show(open);
@@ -358,15 +465,18 @@ export function keyTools({ list, tools = null, prefix = 'key-tools', open = fals
     element,
     // What to send: null for the standard tools, or the sorted names of the tools ticked.
     value: () => (same(picked, sets.standard) ? null : [...picked].sort()),
-    // Back to what a new key starts with: the standard tools, no search, the list closed again.
+    // Whether the person has chosen anything yet (always, for a key that exists).
+    chosen: () => chosen,
+    // Back to what a new key starts with: nothing chosen (or the standard tools for a key that exists), no search, the list closed again.
     reset() {
-      picked = new Set(sets.standard);
+      chosen = !blank;
+      picked = new Set(blank ? [] : sets.standard);
       for (const row of rows) row.box.checked = picked.has(row.tool.name);
       search.value = '';
       closeOther();
       show(open);
       filter();
     },
-    choice: () => choiceOf(sets, picked),
+    choice: () => (chosen ? choiceOf(sets, picked) : 'none'),
   };
 }

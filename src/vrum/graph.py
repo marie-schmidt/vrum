@@ -7,6 +7,7 @@ from typing import Any
 from psycopg import AsyncConnection
 from pydantic import BaseModel, Field
 
+from vrum.asks import AskState, asks_of, raise_ask
 from vrum.checks import Check, checks_of, refuse_while_unticked
 from vrum.common import (
     Refusal,
@@ -25,7 +26,9 @@ from vrum.common import (
     stale_version,
 )
 from vrum.db import Database
+from vrum.gate_reads import GateState, gates_of
 from vrum.query import compile_query
+from vrum.whereabouts import WHERE_FIELDS, Whereabouts, whereabouts_in
 
 KINDS = ("epic", "story", "task")
 # What a person or agent may set. `ready` is not here on purpose: it is worked out, never set.
@@ -48,7 +51,7 @@ _STORED_COLUMNS = (
 )
 STATE_COLUMNS = (
     _STORED_COLUMNS
-    + ", body_chars, waiting_on, schedule_conflicts, overdue, span_start, span_end, "
+    + ", body_chars, waiting_on, held_by, schedule_conflicts, overdue, span_start, span_end, "
     "span_worked_out, claimed_by, claimed_by_kind, claim_expires_at, lapsed_claim_by, "
     "lapsed_claim_by_kind, lapsed_claim_at, progress_done, progress_total, criteria_total, "
     "criteria_met, points, points_total, points_done, unsized, checks_total, checks_ticked"
@@ -141,6 +144,12 @@ class Node(BaseModel):
         description="The references of the nodes it needs first (needs_first links) that are not "
         "done yet, such as ['task:4']. While there are any, it cannot be started."
     )
+    held_by: list[str] = Field(
+        description="What holds it back that is not another node: gate:5 (a gate that is waiting "
+        "or whose approval was refused) and plan:2 (a plan that a person has not approved yet). "
+        "While there are any it is never ready and cannot be claimed; get_node says what each "
+        "waits for."
+    )
     schedule_conflicts: list[str] = Field(
         description="The references of the nodes it needs first, still not done, whose target date "
         "is later than this node's own start date: it is planned to start before what it needs is "
@@ -215,7 +224,7 @@ class Node(BaseModel):
     )
 
 
-class Handoff(BaseModel):
+class Handoff(Whereabouts):
     id: int = Field(description="The id of the event that recorded it.")
     actor: str = Field(description="Who left the work: a person's or an agent's name.")
     actor_kind: str = Field(description="person or agent (unknown in history from an old export).")
@@ -228,6 +237,22 @@ class NodeDetail(Node):
     handoff_count: int = Field(description="How many handoff notes the node has in its history.")
     last_handoff: Handoff | None = Field(
         description="The latest handoff note, in full. The node's history, on the board, has all."
+    )
+    where: Whereabouts | None = Field(
+        default=None,
+        description="Where the work is, as its holder said: the claim in force's repository, "
+        "branch, commit, pull request and run, or, with no claim, the same words from the latest "
+        "handoff note that has any. Empty when nobody said. What the holder says is not checked "
+        "against a checkout or GitHub.",
+    )
+    gates: list[GateState] = Field(
+        description="What holds this story or task until something outside the graph happens: "
+        "gates that are waiting or refused first, each saying in words what it waits for. Empty "
+        "when it has none."
+    )
+    asks: list[AskState] = Field(
+        description="The asks about this story or task, the open ones first and then the latest "
+        "answered: what was asked, by whom, and the person's answer. Empty when there are none."
     )
     checks: list[Check] = Field(
         description="The checks of a story or task: each item of the definition of done, in its "
@@ -273,9 +298,11 @@ class Event(BaseModel):
         description="create, update, move, link_added, link_removed, claimed, claim_renewed, "
         "claim_released, handoff, rule_created, rule_updated, rule_placed, rule_moved, "
         "definition_of_done_changed, check_ticked, check_unticked, note_recorded, "
-        "note_superseded, note_withdrawn, note_linked, note_unlinked, note_confirmed or "
-        "note_unconfirmed. A check event names the story or task, and its before and after hold "
-        "the item (its key), its text and the evidence."
+        "note_superseded, note_withdrawn, note_linked, note_unlinked, note_confirmed, "
+        "note_unconfirmed, ask_raised or ask_answered. A check event names the story or task, "
+        "and its before and after hold the item (its key), its text and the evidence. An ask "
+        "event names the story or task: ask_raised holds the question, kind, choices and effect "
+        "(its id is the ask's number), ask_answered the ask's number, the answer and a comment."
     )
     actor: str = Field(description="The name of the person or agent that made the change.")
     actor_kind: str = Field(
@@ -354,8 +381,9 @@ async def handoffs_of(
     """Every handoff note a node has, oldest first (or newest first)."""
     rows = await fetch_all(
         conn,
-        "SELECT id, actor, actor_kind, at, after->>'outcome' AS outcome, after->>'note' AS note "
-        "FROM events "
+        "SELECT id, actor, actor_kind, at, after->>'outcome' AS outcome, after->>'note' AS note, "
+        + ", ".join(f"after->>'{field}' AS {field}" for field in WHERE_FIELDS)
+        + " FROM events "
         "WHERE node = %s AND action = 'handoff' "
         f"ORDER BY id {'DESC' if newest_first else 'ASC'}",
         (node,),
@@ -394,6 +422,23 @@ async def change_status(
     return row
 
 
+async def apply_node_changes(
+    conn: AsyncConnection, actor: str, current: dict[str, Any], changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Save changes to the fields of a node the caller has locked and read (they have checked what
+    is allowed), and record them as an update in the history. Returns the stored row."""
+    row = await save_changes(conn, "nodes", current["ref"], changes, _STORED_COLUMNS, key="ref")
+    await record_event(
+        conn,
+        node=current["ref"],
+        action="update",
+        actor=actor,
+        before={**snapshot(current, tuple(changes)), "version": current["version"]},
+        after={**snapshot(row, tuple(changes)), "version": row["version"]},
+    )
+    return row
+
+
 async def _require_parent(conn: AsyncConnection, kind: str, parent: str | None) -> None:
     """Refuse a parent that would break the hierarchy, in words that say how to fix it."""
     if kind == "epic":
@@ -419,6 +464,37 @@ async def _require_parent(conn: AsyncConnection, kind: str, parent: str | None) 
             f"There is no {wanted} {split_node_ref(parent)[1]} in this project, so it cannot be "
             f"the parent. Use list_nodes with kind={wanted} to find the one you want."
         )
+
+
+async def move_in(
+    conn: AsyncConnection,
+    *,
+    actor: str,
+    node: str,
+    new_parent: str,
+    expected_version: int | None = None,
+) -> None:
+    """Move a story or task under another parent inside the caller's transaction and record it.
+    With `expected_version` a node that has changed since is refused."""
+    current = await require_node(conn, node, lock=True)
+    if expected_version is not None and current["version"] != expected_version:
+        raise stale_version("Node", "get_node", node, current["version"], expected_version)
+    if current["kind"] == "epic":
+        raise Refusal(f"{node} is an epic. An epic has no parent, so it cannot be moved.")
+    await _require_parent(conn, current["kind"], new_parent)
+    if new_parent == current["parent"]:
+        raise Refusal(f"{node} is already under {new_parent}, so nothing moved.")
+    row = await save_changes(
+        conn, "nodes", node, {"parent": new_parent}, _STORED_COLUMNS, key="ref"
+    )
+    await record_event(
+        conn,
+        node=node,
+        action="move",
+        actor=actor,
+        before={"parent": current["parent"], "version": current["version"]},
+        after={"parent": new_parent, "version": row["version"]},
+    )
 
 
 async def insert_node(
@@ -543,10 +619,23 @@ class Graph:
             found = await node_state(conn, node)
             notes = await handoffs_of(conn, node, newest_first=True)
             checks = await checks_of(conn, node)
+            asks = await asks_of(conn, node)
+            gates = await gates_of(conn, node)
+            claim = await fetch_one(
+                conn,
+                f"SELECT {', '.join(WHERE_FIELDS)} FROM claims WHERE node = %s",
+                (node,),
+            )
+        said = whereabouts_in(claim or {})
+        if not said:
+            said = next((w for w in (whereabouts_in(n.model_dump()) for n in notes) if w), {})
         return NodeDetail(
             **found.model_dump(),
             handoff_count=len(notes),
             last_handoff=notes[0] if notes else None,
+            where=Whereabouts(**said) if said else None,
+            gates=gates,
+            asks=asks,
             checks=checks,
         )
 
@@ -636,7 +725,13 @@ class Graph:
         clear_target_on: bool,
         clear_size: bool,
         why: str | None = None,
+        ask: dict[str, Any] | None = None,
     ) -> Node:
+        if ask is not None and status != "blocked":
+            raise Refusal(
+                "An ask goes with marking the work blocked: give status blocked as well, or leave "
+                "ask out. Nothing was changed."
+            )
         if title is not None:
             title = clean_title(title)
         if status is not None:
@@ -711,6 +806,16 @@ class Graph:
                     f"{node} is already {status}, so there is no change of status for why to go "
                     "with. Leave why out. Nothing was changed."
                 )
+            if ask is not None and current["kind"] == "epic":
+                raise Refusal(
+                    f"{node} is an epic. An ask is about a story or task: put it on the one under "
+                    "the epic that is blocked. Nothing was changed."
+                )
+            if ask is not None and "status" not in changes:
+                raise Refusal(
+                    f"{node} is already blocked, so there is no change of status for the ask to "
+                    "go with. Leave ask out. Nothing was changed."
+                )
             if not changes:
                 raise Refusal(
                     f"Nothing to change: {node} already has the values you gave, or you "
@@ -727,19 +832,9 @@ class Graph:
                     conn,
                     node,
                     instead="leave its status as it is",
-                    person_instead="set its status to blocked with update_node, giving why to say "
-                    "what the person should look at; a person then judges it on the board and "
-                    "marks it done",
+                    block="set its status to blocked with update_node, giving why to say",
                 )
-            row = await save_changes(conn, "nodes", node, changes, _STORED_COLUMNS, key="ref")
-            await record_event(
-                conn,
-                node=node,
-                action="update",
-                actor=actor,
-                before={**snapshot(current, tuple(changes)), "version": current["version"]},
-                after={**snapshot(row, tuple(changes)), "version": row["version"]},
-            )
+            row = await apply_node_changes(conn, actor, current, changes)
             if why is not None:
                 await record_event(
                     conn,
@@ -749,30 +844,20 @@ class Graph:
                     before=None,
                     after={"outcome": row["status"], "note": why},
                 )
+            if ask is not None:
+                await raise_ask(conn, actor=actor, node=node, ask=ask, effect="blocks")
             return await node_state(conn, node)
 
     async def move_node(
         self, *, actor: str, node: str, expected_version: int, new_parent: str
     ) -> Node:
         async with self._database.transaction() as conn:
-            current = await require_node(conn, node, lock=True)
-            if current["version"] != expected_version:
-                raise stale_version("Node", "get_node", node, current["version"], expected_version)
-            if current["kind"] == "epic":
-                raise Refusal(f"{node} is an epic. An epic has no parent, so it cannot be moved.")
-            await _require_parent(conn, current["kind"], new_parent)
-            if new_parent == current["parent"]:
-                raise Refusal(f"{node} is already under {new_parent}, so nothing moved.")
-            row = await save_changes(
-                conn, "nodes", node, {"parent": new_parent}, _STORED_COLUMNS, key="ref"
-            )
-            await record_event(
+            await move_in(
                 conn,
-                node=node,
-                action="move",
                 actor=actor,
-                before={"parent": current["parent"], "version": current["version"]},
-                after={"parent": new_parent, "version": row["version"]},
+                node=node,
+                new_parent=new_parent,
+                expected_version=expected_version,
             )
             return await node_state(conn, node)
 

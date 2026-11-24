@@ -1,5 +1,5 @@
-/* Email: choosing a new password, confirming an address, and the parts of the sign-in, Users and
-   Status pages that exist only when the server can send email. Colours, sizes and spacing come from
+/* Email: choosing a new password, confirming an address, and the parts of the sign-in, Account and
+   Users pages that exist only when the server can send email. Colours, sizes and spacing come from
    tokens.css. */
 
 /* Sign-in: "Forgot your password?" sits under the password, on the right. */
@@ -23,7 +23,7 @@
 .mail-ways { display: grid; gap: var(--space-2); }
 .mail-ways > * { width: 100%; }
 
-/* The Users page: the Email setting, and the invitations that were emailed. */
+/* The Account and Users pages: the Email setting, and the invitations that were emailed. */
 .email-line { flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
 .mail-note { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-size: var(--text-sm); color: var(--text); }
 .mail-note:empty { display: none; }
@@ -35,9 +35,6 @@
 .invite-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 #new-invite > h3 { display: flex; align-items: flex-start; gap: var(--space-2); overflow-wrap: anywhere; font-size: var(--text-md); }
 #new-invite > h3 .icon { margin-top: 0.15em; }
-
-/* The Status page: the Email section is as wide as the search section above it. */
-.status-grid > #email { grid-column: 1 / -1; }
 
 /* The invitation page, for an account that is not the address the invitation was sent to. */
 .entry.invite #invite-other-account.primary { width: 100%; margin-top: var(--space-3); }

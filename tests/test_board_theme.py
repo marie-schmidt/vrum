@@ -113,6 +113,204 @@ def test_text_and_signals_on_every_surface_reach_four_and_a_half_to_one(theme: s
     assert ratio("--ok", "--surface-3") >= 3
 
 
+DIFF_LINES = {
+    "add": ("--diff-add-bg", "--diff-add-gutter", "--diff-add-text"),
+    "remove": ("--diff-remove-bg", "--diff-remove-gutter", "--diff-remove-text"),
+    # A line a revision changed (`~`, M51).
+    "change": ("--diff-change-bg", "--diff-change-gutter", "--diff-change-text"),
+}
+DIFF_BACKS = [
+    "--diff-add-bg",
+    "--diff-add-gutter",
+    "--diff-remove-bg",
+    "--diff-remove-gutter",
+    "--diff-change-bg",
+    "--diff-change-gutter",
+    "--diff-context-bg",
+    "--diff-context-gutter",
+    "--diff-hunk-bg",
+]
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_a_diff_reach_the_same_contrast_and_are_never_the_only_cue(
+    theme: str,
+) -> None:
+    # The page of what needs a person draws a change as a diff (M49): added lines, removed lines,
+    # lines that stay and a plain row that says what a part is (M52 took the squares and letters
+    # away). The `+`, the `-` and the words carry the meaning; the colours only help, and must read
+    # in both themes.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for name, (back, gutter, text) in DIFF_LINES.items():
+        for fore, on in (
+            ("--text", back),
+            ("--text", gutter),
+            ("--text-2", back),
+            (text, back),
+            (text, gutter),
+            (text, "--surface"),
+            (text, "--surface-2"),
+        ):
+            if ratio(fore, on) < 4.5:
+                low.append(f"{name}: {fore} on {on}: {ratio(fore, on):.2f}")
+    for fore, on in (
+        ("--text", "--diff-context-bg"),
+        ("--text-2", "--diff-context-bg"),
+        ("--text-2", "--diff-context-gutter"),
+        ("--diff-hunk-text", "--diff-hunk-bg"),
+        ("--diff-hunk-text", "--surface"),
+        ("--diff-hunk-text", "--surface-2"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # The edge of a marked card and the signs of a line are not text: three to one against
+    # the card they are on.
+    for square in ("--diff-add-text", "--diff-remove-text", "--border-strong"):
+        assert ratio(square, "--surface") >= 3 and ratio(square, "--surface-2") >= 3, square
+    # Every part of a diff is its own colour in each theme, not the light one turned over.
+    light, dark = colour_tokens("light"), colour_tokens("dark")
+    for name in [*DIFF_BACKS, *(text for *_, text in DIFF_LINES.values()), "--diff-hunk-text"]:
+        assert light[name] != dark[name], name
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_review_assistance_read_in_both_themes_and_never_alone(theme: str) -> None:
+    # M50: a warning chip and a failed chip (on their own soft back), the words of a check on the
+    # card, the score and its lowest marker, the sentence under a score, and the group of routine
+    # moves (on the card's own backs and on a hover). Every word is also said in text and the
+    # chips carry an icon, so colour is never the only cue; these pairs only make them readable.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for fore, on in (
+        ("--warn", "--warn-soft"),
+        ("--danger", "--danger-soft"),
+        ("--text", "--neutral-soft"),
+        ("--warn", "--surface"),
+        ("--warn", "--surface-2"),
+        ("--danger", "--surface"),
+        ("--danger", "--surface-2"),
+        ("--text", "--surface"),
+        ("--text-2", "--surface"),
+        ("--text-2", "--surface-2"),
+        ("--text-2", "--surface-3"),
+        ("--text", "--surface-2"),
+        ("--accent-text", "--surface"),
+        ("--text-2", "--diff-add-bg"),
+        ("--text-2", "--diff-remove-bg"),
+        ("--text-2", "--diff-context-bg"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # The edge of a check line, and the sign beside an item in the rail, are not text: three to one.
+    for edge in ("--warn", "--danger"):
+        for back in ("--surface", "--surface-2"):
+            assert ratio(edge, back) >= 3, (edge, back)
+    # The two states of a flag are told apart by more than a colour: they are different colours
+    # in each theme, and the page also writes the state in words.
+    assert token(theme, "--warn") != token(theme, "--danger")
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_the_review_conversation_read_in_both_themes_and_never_alone(
+    theme: str,
+) -> None:
+    # M51: the `~` line of a changed item (its sign and the words of each part carry the meaning),
+    # what was said under a line (an earlier comment on the card's own surface, a comment not sent
+    # yet and the box to write one on the second surface), the notice of comments that were not
+    # kept, a plan changed outside a revision, and the state of a plan on its page. Each says its
+    # words as text beside any colour; these pairs only make them readable.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for fore, on in (
+        ("--text", "--surface"),
+        ("--text-2", "--surface"),
+        ("--text", "--surface-2"),
+        ("--text-2", "--surface-2"),
+        ("--text-2", "--diff-context-gutter"),
+        ("--accent-text", "--surface"),
+        ("--text", "--neutral-soft"),
+        ("--text", "--warn-soft"),
+        ("--text", "--danger-soft"),
+        ("--warn", "--warn-soft"),
+        ("--ok", "--ok-soft"),
+        ("--danger", "--danger-soft"),
+        ("--diff-change-text", "--surface"),
+        ("--diff-change-text", "--surface-2"),
+        ("--text", "--diff-change-bg"),
+        ("--text-2", "--diff-change-bg"),
+        ("--text", "--diff-change-gutter"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # The edge of a thread or a comment, the sign of a notice and the gutter's sign are not text:
+    # three to one against what they sit on.
+    for edge, back in (
+        ("--border-strong", "--surface"),
+        ("--border-strong", "--surface-2"),
+        ("--danger", "--danger-soft"),
+        ("--warn", "--warn-soft"),
+        ("--diff-change-text", "--diff-change-gutter"),
+    ):
+        assert ratio(edge, back) >= 3, (edge, back)
+    # The changed line is its own colour in each theme, not that of an addition or a removal.
+    assert token(theme, "--diff-change-bg") not in {
+        token(theme, "--diff-add-bg"),
+        token(theme, "--diff-remove-bg"),
+    }
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_the_standard_review_read_in_both_themes_and_never_alone(
+    theme: str,
+) -> None:
+    # M52: the kind and level chips of a card (words and an icon beside every colour), the verbs
+    # of the bar (a primary verb on the accent, the others on the surface), the sticky bar of the
+    # review page over the page, the comment box, the fact chips, the facts of a note, and the
+    # group titles. Each says its words as text; these pairs only make them readable.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for fore, on in (
+        ("--on-accent", "--accent"),
+        ("--on-accent", "--accent-hover"),
+        ("--text", "--surface"),
+        ("--text-2", "--surface"),
+        ("--text-2", "--surface-2"),
+        ("--text-2", "--surface-3"),
+        ("--text-2", "--neutral-soft"),
+        ("--text", "--neutral-soft"),
+        ("--accent-text", "--surface"),
+        ("--accent-text", "--accent-soft"),
+        ("--warn", "--warn-soft"),
+        ("--danger", "--danger-soft"),
+        ("--ok", "--ok-soft"),
+        ("--danger", "--surface"),
+        ("--warn", "--surface"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # The edge of a level chip, of the sticky bar and of the comment box is not text: three to one
+    # against what the bar sits on.
+    for edge, back in (
+        ("--border-strong", "--surface"),
+        ("--border-strong", "--surface-2"),
+        ("--accent", "--surface"),
+    ):
+        assert ratio(edge, back) >= 3, (edge, back)
+
+
 STATUS_COLOURS = {
     "ready": {"--info", "--info-soft"},
     "in_progress": {"--progress", "--progress-soft"},

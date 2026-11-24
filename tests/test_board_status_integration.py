@@ -42,8 +42,18 @@ def board(server_url: str) -> str:
 
 
 async def shown(page: Page, name: str) -> str:
-    """The value on one row of the Status page."""
-    return (await page.locator(f"#status-body tr[data-name={name}] .value").inner_text()).strip()
+    """The value on one row of the Status page, in its face or in the technical details (the
+    details are folded: open them first with `open_technical`)."""
+    return (await page.locator(f"#page tr[data-name={name}] .value").inner_text()).strip()
+
+
+async def open_technical(page: Page) -> None:
+    """Open the closed "Technical details" of the Status page, as a person does, and wait."""
+    details = page.locator("details#technical")
+    await expect(details).to_be_visible(timeout=SLOW)
+    if not await details.evaluate("e => e.open"):
+        await details.locator("summary").click()
+    await expect(page.locator("#versions")).to_be_visible(timeout=SLOW)
 
 
 # -- what the page shows is what the server says -------------------------------------------------
@@ -62,10 +72,21 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         page = w.page
         await w.open("#/graph")
         await open_settings(page, "status")
-        await expect(page.locator("#versions")).to_be_visible(timeout=SLOW)
+        await expect(page.locator("#status-summary")).to_be_visible(timeout=SLOW)
         status = await ok(client, "server_status")
         said = (await ok(client, "search", query=word, limit=1))["index"]
 
+        # The face says whether search by meaning is in use, as the server and a search say it.
+        index = status["index"]
+        assert (index["meaning"], index["waiting_to_index"]) == (
+            said["meaning"],
+            said["waiting_to_index"],
+        )
+        assert await shown(page, "meaning") == "In use"
+        assert index["waiting_to_index"] == 0
+
+        # The rest is in the technical details, which a person opens.
+        await open_technical(page)
         assert await shown(page, "vrum_version") == status["vrum_version"]
         assert await shown(page, "postgres_version") == status["postgres_version"]
         assert await shown(page, "pgvector_version") == status["pgvector_version"]
@@ -77,14 +98,7 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert await page.locator("#sizes tr[data-name]").evaluate_all(
             "els => els.map(e => e.dataset.name)"
         ) == list(COUNTS)
-        # The index, as the server and a search both say it.
-        index = status["index"]
-        assert (index["meaning"], index["waiting_to_index"]) == (
-            said["meaning"],
-            said["waiting_to_index"],
-        )
-        assert await shown(page, "meaning") == "In use"
-        assert await shown(page, "waiting") == str(said["waiting_to_index"]) == "0"
+        # The index, as the server says it.
         assert await shown(page, "indexed") == str(index["indexed"])
         assert await shown(page, "service") == "Answering"
         assert await shown(page, "model") == index["embedding_model"] == "scripted-embedding"
@@ -106,6 +120,43 @@ async def test_status_equals_server_status_and_the_index_state_through_mcp(
         assert w.problems == []
 
 
+async def test_status_says_one_plain_sentence_and_keeps_the_technical_details_folded(
+    board: str,
+) -> None:
+    info = board_call(board, "GET", "/board/api/info").body
+    async with browser_page(board, token=the_token()) as w:
+        page = w.page
+        await w.open("#/status")
+        face = page.locator("#status-summary")
+        await expect(face).to_contain_text(
+            "The server is running and can reach its database.", timeout=SLOW
+        )
+        # The face is that sentence and two rows: whether search by meaning is in use, and whether
+        # the server can send email. Nothing else the server knows is on it.
+        names = await page.locator("#status-body tr[data-name]").evaluate_all(
+            "els => els.map(e => e.dataset.name)"
+        )
+        assert names == ["meaning", "mail"]
+        mail = await shown(page, "mail")
+        assert (mail == "Set up") if info["mail"]["enabled"] else mail.startswith("Not set up")
+        text = await face.inner_text()
+        for left_out in ("PostgreSQL", "pgvector", "Embedding", "Stories", "vector"):
+            assert left_out not in text, left_out
+        # The technical details are one fold, closed, and what they hold is out of sight until it
+        # is opened.
+        details = page.locator("details#technical")
+        assert await details.locator("summary").inner_text() == "Technical details"
+        assert await details.evaluate("e => e.open") is False
+        assert await page.locator("details").count() == 1
+        for group in ("versions", "index", "sizes"):
+            await expect(page.locator(f"#{group}")).to_be_hidden()
+        await details.locator("summary").click()
+        assert await details.evaluate("e => e.open") is True
+        for group in ("versions", "index", "sizes"):
+            await expect(page.locator(f"#{group}")).to_be_visible()
+        assert w.problems == []
+
+
 async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_page(
     client: Client, board: str
 ) -> None:
@@ -116,15 +167,21 @@ async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_pag
         page = w.page
         await w.open("#/roadmap")
         await open_settings(page, "status")
-        service = page.locator("#status-body tr[data-name=service] .value")
+        await open_technical(page)
+        service = page.locator("#technical-body tr[data-name=service] .value")
         await expect(service).to_have_text("Answering", timeout=SLOW)
-        before = int(await shown(page, "waiting"))
+        await expect(page.locator("#status-body tr[data-name=meaning] .value")).to_have_text(
+            "In use", timeout=SLOW
+        )
+        before = (await ok(client, "server_status"))["index"]["waiting_to_index"]
         with embeddings_stopped():
             await made(client, "story", f"Not indexed {word}", epic)
-            # The page says so as soon as the board hears that something waits.
+            # The page says so as soon as the board hears that something waits: in the face, in
+            # the technical details and in the top bar, which says how many.
             await expect(service).to_have_text("Not answering", timeout=SLOW)
-            await expect(page.locator("#status-body tr[data-name=waiting] .value")).to_have_text(
-                str(before + 1), timeout=SLOW
+            await expect(page.locator("#status-body tr[data-name=meaning] .value")).to_have_text(
+                "Not answering: the last try to index could not reach the embedding service",
+                timeout=SLOW,
             )
             await expect(page.locator("#index-state")).to_have_text(
                 f"Search by meaning is not answering: {before + 1} waiting", timeout=SLOW
@@ -135,10 +192,11 @@ async def test_a_stopped_embedding_service_and_waiting_items_are_seen_on_the_pag
             assert w.problems == []
         await reindexed(client)
         await expect(service).to_have_text("Answering", timeout=SLOW)
-        await expect(page.locator("#status-body tr[data-name=waiting] .value")).to_have_text(
-            "0", timeout=SLOW
+        await expect(page.locator("#status-body tr[data-name=meaning] .value")).to_have_text(
+            "In use", timeout=SLOW
         )
         await expect(page.locator("#index-state")).to_be_hidden(timeout=SLOW)
+        assert (await ok(client, "server_status"))["index"]["waiting_to_index"] == 0
         assert w.problems == []
 
 

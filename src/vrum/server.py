@@ -12,15 +12,26 @@ from urllib.parse import urlparse
 import psycopg
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrum.accounts import Accounts
+from vrum.ask_book import AskBook, AskPage
+from vrum.asks import AskInput, AskState, clean_ask
 from vrum.board import add_board
 from vrum.checks import Checks, NodeChecks
 from vrum.claims import DEFAULT_LEASE_SECONDS, Claim, Claims, WhoIsWorking
+from vrum.code_mode import (
+    DEFAULT_TIMEOUT,
+    MOST_TIMEOUT,
+    CodeMode,
+    Explored,
+    RunResult,
+    failure_words,
+)
+from vrum.code_mode import explore as describe_functions
 from vrum.common import (
     Ref,
     Refusal,
@@ -33,20 +44,38 @@ from vrum.db import Database, current_project
 from vrum.definition_of_done import DefinitionOfDone, DefinitionOfDoneBook
 from vrum.embeddings import EmbeddingUnavailable
 from vrum.exchange import Exchange, ExportPage, ImportResult
+from vrum.gate_reads import GateState
+from vrum.gates import GateBook, PlanBook, PlanPage, PlanState
 from vrum.graph import EventPage, Graph, Node, NodeDetail, NodePage
-from vrum.guard import GuardedServer
+from vrum.guard import GuardedServer, current_caller
 from vrum.identity import current_identity
 from vrum.indexing import Indexer, IndexReport
 from vrum.links import Link, LinkPage, Links
 from vrum.logs import event
 from vrum.mail import Mailer
+from vrum.needs import Needs, NeedsAPerson
+from vrum.needs_app import needs_apps, summary, view_meta
 from vrum.notes import Note, NoteChange, NotePage, Notes
-from vrum.recall import Recall, Recaller
+from vrum.placement import (
+    DEFAULT_SUGGESTIONS,
+    NewEpic,
+    ParentSuggestions,
+    Placement,
+    PlacementBook,
+    PlacementPage,
+    PlacementState,
+)
+from vrum.plan_revise import PlanRevised, PlanReviser, RevisionItem, RevisionRule
+from vrum.plan_revisions import PlanCommentInput
+from vrum.plan_templates import PlanTemplateInfo, PlanTemplatePage
+from vrum.recall import DEFAULT_RECALL_CHARS, Recall, Recaller
 from vrum.references import MentionPage, References
 from vrum.rules import CoverageReport, Rule, RulePage, Rules
 from vrum.search import OverlapPage, Searcher, SearchPage
 from vrum.sso import Sso
 from vrum.status import ServerStatus, Status
+from vrum.webhooks import Dispatcher, WebhookBook
+from vrum.whereabouts import clean_whereabouts
 from vrum.workflow import (
     DEFAULT_CONTEXT_CHARS,
     ChangesPage,
@@ -71,27 +100,27 @@ INSTRUCTIONS = """\
 Vrum is a project graph. Epics hold stories and stories hold tasks; acceptance criteria and notes \
 belong to or concern them. An epic, story or task is named by its kind and number: `epic:3`, \
 `story:12`, `task:40`. Tools take that reference, never a bare number. A note records what is \
-known or decided, with why. Unconfirmed and confirmed (a person reviewed it) notes are in force; \
-superseded and withdrawn ones are not: check its status before relying on it. Your agent key \
-names you: never send a name.
+known or decided, with why; only unconfirmed and confirmed (a person reviewed it) ones are in \
+force: check its status before relying on it. Your agent key names you: never send a name.
 
 The working loop:
 1. `next_work` takes the most urgent free story or task and returns it with its acceptance \
 criteria, the definition of done and its checks, notes and handoffs. Keep the claim with \
-`renew_claim`.
+`renew_claim`; say where the work is (branch, pull_request) when you finish.
 2. Before deciding something that matters, `recall` what is known, or `search`.
 3. Record what is decided or learned with `add_note`: say why, and name the person in decided_by \
-when someone decided it. It starts unconfirmed; only a person confirms it.
+when someone decided it. Only a person confirms it.
 4. Before finishing, meet the acceptance criteria, do what each check says (run the tests) and \
 `set_check` it, saying how you checked: done is refused while one is unticked. Leave a check \
 marked person_only for a person: finish as blocked, saying what to look at. End with \
 `finish_work`: done, blocked, dropped or released, and a handoff note.
 
 Also: `create_plan` makes a whole plan at once or nothing; give every story and task a size, xs to \
-xl (the effort and context it will take; split anything bigger). `changes_since` shows only what \
+xl (split anything bigger). `changes_since` shows only what \
 is new, and `list_nodes` takes a filter as its query, such as `kind:task status:ready -claimed OR \
 is:overdue`. `[[story:12]]` in any text refers to an item (also `[[epic:3]]`, `[[task:40]]`, \
-`[[rule:3]]`, `[[note:7]]`). A person does what is not offered to you on the board.
+`[[rule:3]]`, `[[note:7]]`). A person does the rest on the board. With only \
+`explore` and `run`, call each tool as `vrum.<name>(...)` inside `run`.
 """
 
 _Detail = Annotated[
@@ -111,6 +140,25 @@ _Lease = Annotated[
         description="How long the claim lasts before it lapses on its own, in seconds, from 1 to "
         "86400 (24 hours). Renew it to keep it longer."
     ),
+]
+_Repository = Annotated[
+    str | None, Field(description="Optional: the repository's https address, not checked.")
+]
+_Branch = Annotated[str | None, Field(description="Optional: the branch the work is on.")]
+_Commit = Annotated[str | None, Field(description="Optional: the commit reached, by its hash.")]
+_PullRequest = Annotated[
+    str | None, Field(description="Optional: the pull request's https address.")
+]
+_RunLabel = Annotated[
+    str | None,
+    Field(description="Optional: a label for this run. A label only, never who you are."),
+]
+_ClientName = Annotated[
+    str | None, Field(description="Optional: what you run in, such as claude-code. A label only.")
+]
+_Ask = Annotated[
+    AskInput | None,
+    Field(description="Optional: a question for a person. With blocked, it blocks until answered."),
 ]
 _Node = Annotated[
     Ref,
@@ -244,7 +292,16 @@ def create_server(settings: Settings) -> GuardedServer:
     recaller = Recaller(database, searcher)
     status = Status(database, indexer, searcher)
     references = References(database)
-    workflow = Workflow(database, graph, searcher)
+    workflow = Workflow(database, graph, searcher, settings.board_poll_seconds)
+    ask_book = AskBook(database)
+    gates = GateBook(database)
+    plans = PlanBook(database, searcher)
+    revisions = PlanReviser(database)
+    webhook_book = WebhookBook(database, accounts, settings.webhooks, mailer)
+    dispatcher = Dispatcher(database, settings.webhooks, mailer, settings.public_url)
+    placement = Placement(database, searcher)
+    placements = PlacementBook(database, placement)
+    needs = Needs(database)
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[Database]) -> AsyncIterator[Database]:
@@ -252,19 +309,28 @@ def create_server(settings: Settings) -> GuardedServer:
         # The reindex job keeps the semantic index up to date. It only runs when an embedding
         # service is set up.
         job = asyncio.create_task(indexer.run_forever()) if embedding else None
+        # The webhook job sends the signed messages and the nudge emails that people asked for.
+        # Nothing waits for it: a tool call only writes its event.
+        news = asyncio.create_task(dispatcher.run_forever())
         try:
             yield database
         finally:
-            if job is not None:
-                job.cancel()
-                with suppress(asyncio.CancelledError):
-                    await job
+            for running in (job, news):
+                if running is not None:
+                    running.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await running
             await database.close()
 
     mcp = GuardedServer(
-        "vrum", version=version("vrum"), lifespan=lifespan, instructions=INSTRUCTIONS
+        "vrum",
+        version=version("vrum"),
+        lifespan=lifespan,
+        instructions=INSTRUCTIONS,
+        extensions=[needs_apps()],
     )
     mcp.accounts = accounts
+    code_mode = CodeMode(settings.sandbox_socket, mcp)
 
     @mcp.tool(annotations=_READS)
     async def server_status() -> ServerStatus:
@@ -384,7 +450,9 @@ def create_server(settings: Settings) -> GuardedServer:
                 "everything under it), story (story:12 is story 12 and its tasks), parent "
                 "(parent:epic:3, a reference), number (number:7, with kind:), start "
                 "and target (a day, a range such as 2026-11-01..2026-12-31, or none), is "
-                "(overdue, conflict, waiting, claimed, lapsed) and no (start, target, claimed, "
+                "(overdue, conflict, waiting, held: by a gate or an unapproved plan, claimed, "
+                "lapsed, unverified: blocked work nobody "
+                "holds that has a check only a verifier may tick) and no (start, target, claimed, "
                 "parent, body, waiting, criteria, size). claimed and waiting on their own find "
                 "the items that have one, and -claimed those that have none. Combines with the "
                 "other filters."
@@ -452,6 +520,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 "Only with status blocked or dropped."
             ),
         ] = None,
+        ask: _Ask = None,
     ) -> Node:
         """Change a node's title, body, status, priority, size or dates. Leave out what should
         stay.
@@ -464,7 +533,9 @@ def create_server(settings: Settings) -> GuardedServer:
         and a start date after the target date is refused. An epic has no size. As an agent you
         cannot set the status done while a check of the definition of done is unticked on the
         item: tick them first with set_check. When you set the status to blocked or dropped you
-        can say why: it is saved as a handoff note on the item, in the same step.
+        can say why: it is saved as a handoff note on the item, in the same step. Blocked because
+        you need a person? Add an ask: it is recorded for a person to answer, and the answer
+        comes back in get_node and next_work.
         """
         with _database_errors():
             return await graph.update_node(
@@ -483,6 +554,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 clear_target_on=clear_target_on,
                 clear_size=clear_size,
                 why=why,
+                ask=None if ask is None else clean_ask(ask),
             )
 
     @mcp.tool()
@@ -536,7 +608,8 @@ def create_server(settings: Settings) -> GuardedServer:
             Field(
                 description="needs_first: the source cannot start before the target is done. "
                 "supersedes: the source replaces the target. duplicates: the two are the same "
-                "work. relates_to: the two are connected."
+                "work. relates_to: the two are connected. discovered_from: the source was found "
+                "while doing the target (it never makes anything wait)."
             ),
         ],
     ) -> Link:
@@ -545,7 +618,8 @@ def create_server(settings: Settings) -> GuardedServer:
         needs_first is how order is expressed: while the target is not done, the source is not
         ready and cannot be claimed. A needs_first link that would make nodes wait on each other in
         a circle is refused. A node cannot be linked to itself. duplicates and relates_to work in
-        both directions.
+        both directions. Found something while working? Create it and link it discovered_from the
+        work you were on.
         """
         with _database_errors():
             return await links.add_link(
@@ -565,7 +639,10 @@ def create_server(settings: Settings) -> GuardedServer:
             Ref, Field(description="The node the link points to (its reference, such as task:4).")
         ],
         link_type: Annotated[
-            str, Field(description="needs_first, supersedes, duplicates or relates_to.")
+            str,
+            Field(
+                description="needs_first, supersedes, duplicates, relates_to or discovered_from."
+            ),
         ],
     ) -> Link:
         """Remove one link, for example when what it said no longer applies. The removal is
@@ -582,7 +659,11 @@ def create_server(settings: Settings) -> GuardedServer:
     async def list_links(
         node: _Node,
         link_type: Annotated[
-            str | None, Field(description="Only needs_first, supersedes, duplicates or relates_to.")
+            str | None,
+            Field(
+                description="Only needs_first, supersedes, duplicates, relates_to or "
+                "discovered_from."
+            ),
         ] = None,
         limit: _Limit = 50,
         after_id: _After = None,
@@ -623,27 +704,64 @@ def create_server(settings: Settings) -> GuardedServer:
             )
 
     @mcp.tool()
-    async def claim_node(node: _Node, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS) -> Claim:
+    async def claim_node(
+        node: _Node,
+        lease_seconds: _Lease = DEFAULT_LEASE_SECONDS,
+        run_label: _RunLabel = None,
+        client_name: _ClientName = None,
+        repository: _Repository = None,
+        branch: _Branch = None,
+        commit: _Commit = None,
+        pull_request: _PullRequest = None,
+    ) -> Claim:
         """Say you are working on a story or task, so that nobody else picks it up.
 
         Only one person or agent can hold a claim at a time, and exactly one wins if several ask
         together. The claim is held by you, as the agent your key names, and only you can renew or
         release it. It lapses on its own after lease_seconds, so work that is abandoned becomes
         free again; renew it with renew_claim to keep it. Work that is not ready, done, dropped or
-        blocked cannot be claimed.
+        blocked cannot be claimed. You may say where the work is (repository, branch, commit,
+        pull_request) and which run you are (run_label, client_name): what you say is kept with
+        the claim and your handoff note, and is not checked.
         """
         with _database_errors():
             return await claims.claim_node(
-                actor=_me(), node=parse_node_ref(node, "node"), lease_seconds=lease_seconds
+                actor=_me(),
+                node=parse_node_ref(node, "node"),
+                lease_seconds=lease_seconds,
+                where=clean_whereabouts(
+                    repository=repository,
+                    branch=branch,
+                    commit=commit,
+                    pull_request=pull_request,
+                    run_label=run_label,
+                    client_name=client_name,
+                ),
             )
 
     @mcp.tool()
-    async def renew_claim(node: _Node, lease_seconds: _Lease = DEFAULT_LEASE_SECONDS) -> Claim:
+    async def renew_claim(
+        node: _Node,
+        lease_seconds: _Lease = DEFAULT_LEASE_SECONDS,
+        repository: _Repository = None,
+        branch: _Branch = None,
+        commit: _Commit = None,
+        pull_request: _PullRequest = None,
+    ) -> Claim:
         """Keep your claim: it now lasts lease_seconds from now. Only the holder can renew, and
-        only while the claim has not lapsed."""
+        only while the claim has not lapsed. Say where the work is now (branch, commit,
+        pull_request) to change what the claim shows; what you leave out stays as it was."""
         with _database_errors():
             return await claims.renew_claim(
-                actor=_me(), node=parse_node_ref(node, "node"), lease_seconds=lease_seconds
+                actor=_me(),
+                node=parse_node_ref(node, "node"),
+                lease_seconds=lease_seconds,
+                where=clean_whereabouts(
+                    repository=repository,
+                    branch=branch,
+                    commit=commit,
+                    pull_request=pull_request,
+                ),
             )
 
     @mcp.tool()
@@ -656,15 +774,28 @@ def create_server(settings: Settings) -> GuardedServer:
                 "you found. A blank note is refused."
             ),
         ],
+        repository: _Repository = None,
+        branch: _Branch = None,
+        commit: _Commit = None,
+        pull_request: _PullRequest = None,
     ) -> Claim:
         """Give up your claim so someone else can take the work, and leave a handoff note.
 
         Only the holder can release. Work that was in progress goes back to not started, so it is
-        free again; use finish_work to mark it done, blocked or dropped instead.
+        free again; use finish_work to mark it done, blocked or dropped instead. Say where the
+        work is (branch, commit, pull_request) and it is kept with the note for whoever takes it.
         """
         with _database_errors():
             return await claims.release_claim(
-                actor=_me(), node=parse_node_ref(node, "node"), note=note
+                actor=_me(),
+                node=parse_node_ref(node, "node"),
+                note=note,
+                where=clean_whereabouts(
+                    repository=repository,
+                    branch=branch,
+                    commit=commit,
+                    pull_request=pull_request,
+                ),
             )
 
     @mcp.tool(annotations=_READS)
@@ -697,6 +828,12 @@ def create_server(settings: Settings) -> GuardedServer:
                 "1000000. What does not fit is counted in left_out, never silently dropped."
             ),
         ] = DEFAULT_CONTEXT_CHARS,
+        run_label: _RunLabel = None,
+        client_name: _ClientName = None,
+        repository: _Repository = None,
+        branch: _Branch = None,
+        commit: _Commit = None,
+        pull_request: _PullRequest = None,
     ) -> NextWork:
         """Take the most urgent free story or task, and get everything you need to do it.
 
@@ -727,6 +864,14 @@ def create_server(settings: Settings) -> GuardedServer:
                 peek=peek,
                 lease_seconds=lease_seconds,
                 context_chars=context_chars,
+                where=clean_whereabouts(
+                    repository=repository,
+                    branch=branch,
+                    commit=commit,
+                    pull_request=pull_request,
+                    run_label=run_label,
+                    client_name=client_name,
+                ),
             )
 
     @mcp.tool()
@@ -746,6 +891,11 @@ def create_server(settings: Settings) -> GuardedServer:
                 "know. A blank note is refused."
             ),
         ],
+        repository: _Repository = None,
+        branch: _Branch = None,
+        commit: _Commit = None,
+        pull_request: _PullRequest = None,
+        ask: _Ask = None,
     ) -> FinishResult:
         """End your work on a story or task: set where it stands and leave a handoff note.
 
@@ -753,26 +903,42 @@ def create_server(settings: Settings) -> GuardedServer:
         holds: do what each of its checks says (run the tests, and so on), then tick each one with
         set_check, saying how you checked. Saying done while a check is unticked is refused, and
         the refusal names them. A check marked person_only is for a person to judge and you cannot
-        tick it: finish as blocked and say in the note what the person should look at. Only the
+        tick it: finish as blocked and say in the note what the person should look at. One marked
+        verifier_only is for a verifier that did not do the work (you cannot tick it if you did
+        or are not one): finish as blocked and say in the note that it is ready for a verifier.
+        Only the
         holder of the claim can finish. The claim is released and
         the note is kept with the item, and shown to whoever works on it, or on what waited for
-        it, next. unblocked lists the work that became ready because of this.
+        it, next. unblocked lists the work that became ready because of this. Say where the work
+        is (branch, commit, pull_request): it is kept with the handoff note, and a verifier
+        checks the pull request. Need a person to decide something? Add an ask with outcome
+        blocked (the work waits) or released (it stays free): the answer comes back in next_work.
         """
         with _database_errors():
             return await workflow.finish_work(
-                actor=_me(), node=parse_node_ref(node, "node"), outcome=outcome, note=note
+                actor=_me(),
+                node=parse_node_ref(node, "node"),
+                outcome=outcome,
+                note=note,
+                where=clean_whereabouts(
+                    repository=repository,
+                    branch=branch,
+                    commit=commit,
+                    pull_request=pull_request,
+                ),
+                ask=None if ask is None else clean_ask(ask),
             )
 
     @mcp.tool()
     async def create_plan(
         items: Annotated[
-            list[PlanItem],
+            list[PlanItem] | None,
             Field(
                 description="The epics, stories and tasks to create. Each has a key (a name only "
                 "this plan uses, never written like a reference) so that parents, links and "
                 "acceptance criteria can refer to it."
             ),
-        ],
+        ] = None,
         links: Annotated[
             list[PlanLink] | None,
             Field(
@@ -786,6 +952,21 @@ def create_server(settings: Settings) -> GuardedServer:
                 "the reference of an existing one."
             ),
         ] = None,
+        draft: Annotated[
+            bool,
+            Field(
+                description="True: propose it. Its work is held until a person approves the plan."
+            ),
+        ] = False,
+        title: Annotated[
+            str | None, Field(description="A draft's name, as a person sees it when deciding.")
+        ] = None,
+        template: Annotated[
+            str | None, Field(description="Make the plan from this saved template, not items.")
+        ] = None,
+        values: Annotated[
+            dict[str, str] | None, Field(description="The template's variables, by name.")
+        ] = None,
     ) -> PlanResult:
         """Create a whole plan at once: epics, stories, tasks, links and acceptance criteria, or
         nothing.
@@ -795,12 +976,311 @@ def create_server(settings: Settings) -> GuardedServer:
         story and task a size (xs to xl) as you plan it. Each kind is
         numbered in the order the plan lists it, and every item created is returned with its key and
         its reference (such as story:12). For each new epic or story that looks like something
-        that already exists, similar says so; it was created anyway.
+        that already exists, similar says so; it was created anyway. With draft the plan is only
+        proposed: nothing in it can be claimed until a person approves it (one decision for the
+        whole plan), and if they reject it all of it is dropped with their reason. With template
+        (and values) the plan is made from a saved template instead of items.
         """
         with _database_errors():
             return await workflow.create_plan(
-                actor=_me(), items=items, links=links or [], rules=rules or []
+                actor=_me(),
+                items=items or [],
+                links=links or [],
+                rules=rules or [],
+                draft=draft,
+                title=title,
+                template=template,
+                values=values,
             )
+
+    @mcp.tool()
+    async def add_gate(
+        node: _Node,
+        kind: Annotated[
+            str, Field(description="timer (opens at not_before) or approval (a person says yes).")
+        ],
+        not_before: Annotated[
+            str | None, Field(description="For a timer: YYYY-MM-DD or YYYY-MM-DDTHH:MM, UTC.")
+        ] = None,
+        question: Annotated[
+            str | None, Field(description="For an approval: what the person is asked to approve.")
+        ] = None,
+    ) -> GateState:
+        """Hold a story or task until something outside the graph happens.
+
+        A held item is never ready, next_work does not hand it out and it cannot be claimed. A
+        timer opens by itself at its time. An approval opens only when a person answers yes (it
+        is an ask: it shows on the Needs a person page); no agent can open a gate except a
+        timer, and a person can lift any gate. get_node lists an item's gates.
+        """
+        with _database_errors():
+            return await gates.add_gate(
+                actor=_me(),
+                node=parse_node_ref(node, "node"),
+                kind=kind,
+                question=question,
+                not_before=not_before,
+            )
+
+    @mcp.tool()
+    async def remove_gate(
+        gate: Annotated[int, Field(description="The gate's number, from get_node.")],
+        reason: Annotated[str | None, Field(description="Why it is lifted. Optional.")] = None,
+    ) -> GateState:
+        """Lift a gate so that the work is free again. Only a person can: the board calls this for
+        the person who is signed in, and an agent's call is refused."""
+        with _database_errors():
+            return await gates.remove_gate(actor=_me(), gate=gate, reason=reason)
+
+    @mcp.tool(annotations=_READS)
+    async def list_plans(
+        status: Annotated[
+            str | None,
+            Field(
+                description="proposed (waits for a person), changes_requested (waits for the "
+                "agent to revise it), approved or rejected. Leave out for all."
+            ),
+        ] = None,
+        plan: Annotated[
+            int | None,
+            Field(description="One plan's number: read only it, whole, with every item it made."),
+        ] = None,
+        revision: Annotated[
+            int | None,
+            Field(description="With plan: an earlier revision to read as it was submitted."),
+        ] = None,
+        limit: _Limit = 100,
+        after_id: _After = None,
+    ) -> PlanPage:
+        """List the plans that were proposed with draft, oldest first, a page at a time: who
+        proposed each, what it made and where it stands. With plan, read that one whole: every
+        item with its details, links and criteria, its revisions and the feedback on them."""
+        with _database_errors():
+            return await plans.list_plans(
+                status=status, limit=limit, after_id=after_id or 0, plan=plan, revision=revision
+            )
+
+    @mcp.tool()
+    async def approve_plan(
+        plan: Annotated[int, Field(description="The plan's number, from list_plans.")],
+        approved: Annotated[
+            bool, Field(description="True to approve it, false to reject it and drop its work.")
+        ],
+        reason: Annotated[
+            str | None, Field(description="Why. Needed to reject; optional to approve.")
+        ] = None,
+        revision: Annotated[
+            int | None,
+            Field(
+                description="The revision you reviewed. A plan that has a newer one is refused, "
+                "not decided."
+            ),
+        ] = None,
+    ) -> PlanState:
+        """Approve or reject a proposed plan as one decision. Only a person can: the board calls
+        this for the person who is signed in, and an agent's call is refused. Approving frees all
+        its work to be taken; rejecting drops all of it, with the reason on each item."""
+        with _database_errors():
+            return await plans.decide(
+                actor=_me(), plan=plan, approved=approved, reason=reason, revision=revision
+            )
+
+    @mcp.tool()
+    async def request_plan_changes(
+        plan: Annotated[int, Field(description="The plan's number, from list_plans.")],
+        revision: Annotated[int, Field(description="The revision you reviewed.")],
+        summary: Annotated[str, Field(description="What you want changed, in a few words.")],
+        comments: Annotated[
+            list[PlanCommentInput] | None,
+            Field(description="Comments on items of that revision, each on the item or a part."),
+        ] = None,
+    ) -> PlanState:
+        """Ask for changes to a plan, with a summary and comments on its lines. Only a person can:
+        the board calls this for the person who is signed in, and an agent's call is refused. The
+        plan stays held, nothing is dropped, and the agent revises it for another review."""
+        with _database_errors():
+            return await plans.request_changes(
+                actor=_me(), plan=plan, revision=revision, summary=summary, comments=comments
+            )
+
+    @mcp.tool()
+    async def revise_plan(
+        plan: Annotated[int, Field(description="The plan's number, from list_plans.")],
+        items: Annotated[
+            list[RevisionItem],
+            Field(
+                description="The whole plan as it should be now. An item that continues one the "
+                "plan has gives its ref; one without a ref is new; one the plan has that no entry "
+                "continues is removed (dropped)."
+            ),
+        ],
+        links: Annotated[
+            list[PlanLink] | None,
+            Field(
+                description="All the links of these items, by key or reference. Leave out to keep "
+                "the links the kept items have."
+            ),
+        ] = None,
+        rules: Annotated[
+            list[RevisionRule] | None,
+            Field(
+                description="All the acceptance criteria, each with the id of the one it "
+                "continues, or none for a new one. Leave out to keep the ones the kept items have."
+            ),
+        ] = None,
+        note: Annotated[
+            str | None, Field(description="What changed since the revision a person read.")
+        ] = None,
+    ) -> PlanRevised:
+        """Revise a drafted plan that a person has read: send the whole plan as it should be now.
+        It is checked as a whole and changes nothing if it is refused. The plan stays held, with
+        the same number, and a person reads the new revision before any of its work can be
+        taken."""
+        with _database_errors():
+            return await revisions.revise(
+                actor=_me(), plan=plan, items=items, links=links, rules=rules, note=note
+            )
+
+    @mcp.tool(annotations=_READS)
+    async def suggest_parent(
+        node: Annotated[
+            Ref | None,
+            Field(description="A story or task that is saved: where else might it belong?"),
+        ] = None,
+        kind: Annotated[
+            str | None,
+            Field(description="For work that is not saved yet (title): story or task."),
+        ] = None,
+        title: Annotated[
+            str | None, Field(description="The title of work that is not saved yet.")
+        ] = None,
+        body: Annotated[
+            str | None, Field(description="The details of work that is not saved yet.")
+        ] = None,
+        limit: Annotated[
+            int, Field(description="How many parents to give, from 1 to 10.")
+        ] = DEFAULT_SUGGESTIONS,
+    ) -> ParentSuggestions:
+        """Say which epic a story, or which story a task, most likely belongs under, by meaning.
+
+        Give node (saved work) or title with kind (work not saved yet). It ranks the epics (or
+        stories) nearest first, each with a score and the items under it that the work most
+        resembles, which is the reason. sure is true when the best is ahead of the second by at
+        least 0.05. Every answer is a suggestion; to act on one, move_node, or
+        propose_placement to ask a person. Needs search by meaning. An epic called Inbox is where
+        unsorted work waits and is never offered.
+        """
+        with _database_errors():
+            return await placement.suggest_parent(
+                node=node, kind=kind, title=title, body=body, limit=limit
+            )
+
+    @mcp.tool()
+    async def propose_placement(
+        items: Annotated[
+            list[Ref], Field(description="The stories or tasks (all of one kind), 1 to 20.")
+        ],
+        reason: Annotated[
+            str, Field(description="Why they belong there, in words: a person reads it.")
+        ],
+        parent: Annotated[
+            Ref | None,
+            Field(description="The epic (for stories) or story (for tasks) that exists."),
+        ] = None,
+        new_epic: Annotated[
+            NewEpic | None,
+            Field(description="Or a new epic to group these stories under: title, and its body."),
+        ] = None,
+    ) -> PlacementState:
+        """Propose moving stories or tasks under another parent, or grouping stories under a new
+        epic. Nothing moves: a person accepts or rejects it on the board (the new epic is made only
+        then). Give parent or new_epic, not both. Use suggest_parent to choose a parent. You may
+        have at most 25 proposals waiting."""
+        with _database_errors():
+            return await placements.propose(
+                actor=_me(),
+                items=items,
+                parent=parent,
+                new_epic=new_epic,
+                reason=reason,
+            )
+
+    @mcp.tool(annotations=_READS)
+    async def list_placements(
+        status: Annotated[
+            str | None, Field(description="proposed, accepted or rejected. Leave out for all.")
+        ] = None,
+        limit: _Limit = 100,
+        after_id: _After = None,
+    ) -> PlacementPage:
+        """List the proposals to move or group work, oldest first, a page at a time: who made
+        each, what it would move and where it stands."""
+        with _database_errors():
+            return await placements.list_placements(
+                status=status, limit=limit, after_id=after_id or 0
+            )
+
+    @mcp.tool()
+    async def decide_placement(
+        placement: Annotated[
+            int, Field(description="The proposal's number, from list_placements.")
+        ],
+        accepted: Annotated[
+            bool, Field(description="True to make the moves, false to reject the proposal.")
+        ],
+        reason: Annotated[
+            str | None, Field(description="Why. Needed to reject; optional to accept.")
+        ] = None,
+    ) -> PlacementState:
+        """Accept or reject a proposal to move work, as one decision. Only a person can: the board
+        calls this for the person who is signed in, and an agent's call is refused. Accepting makes
+        the moves as that person and leaves out an item that has moved or finished since."""
+        with _database_errors():
+            return await placements.decide(
+                actor=_me(), placement=placement, accepted=accepted, reason=reason
+            )
+
+    @mcp.tool()
+    async def save_plan_template(
+        name: Annotated[str, Field(description="Lower case words, such as release-checklist.")],
+        template: Annotated[
+            dict[str, Any],
+            Field(
+                description="description, variables (each: description, type text or ref, kind, "
+                "required, default, choices, pattern, max_length), items, links and rules written "
+                "as create_plan takes them, with {{variable}} wherever a value goes."
+            ),
+        ],
+    ) -> PlanTemplateInfo:
+        """Save a plan template: a plan with variables, to make again with create_plan.
+
+        A template is data, never code. It is checked whole (its shape, its variables and the plan
+        it makes) and every problem is listed. Saving a name again replaces the template; every
+        version stays in the history.
+        """
+        with _database_errors():
+            return await workflow.save_template(actor=_me(), name=name, template=template)
+
+    @mcp.tool(annotations=_READS)
+    async def list_plan_templates(
+        name: Annotated[
+            str | None, Field(description="One template, with its whole text. Leave out for all.")
+        ] = None,
+        detail: Annotated[bool, Field(description="True: include each whole template.")] = False,
+    ) -> PlanTemplatePage:
+        """List the project's plan templates: each with its variables and how big the plan it
+        makes is. Name one to read it whole."""
+        with _database_errors():
+            return await workflow.list_templates(name=name, detail=detail)
+
+    @mcp.tool()
+    async def delete_plan_template(
+        name: Annotated[str, Field(description="The template's name.")],
+    ) -> PlanTemplateInfo:
+        """Delete a plan template (what was made from it stays). Its versions stay in the
+        history."""
+        with _database_errors():
+            return await workflow.delete_template(actor=_me(), name=name)
 
     @mcp.tool()
     async def update_nodes(
@@ -856,10 +1336,17 @@ def create_server(settings: Settings) -> GuardedServer:
                 "newest). Pass the next_before_id of the last answer."
             ),
         ] = None,
+        cursor: Annotated[
+            str | None,
+            Field(
+                description="Instead of after_event_id: the cursor of the last answer, unchanged."
+            ),
+        ] = None,
     ) -> ChangesPage:
         """Show what changed after an event, oldest first, so you read only what is new.
 
-        Keep latest_event_id and pass it next time (page with next_after_id until it is empty).
+        Keep the cursor of the answer (or latest_event_id) and pass it next time; while truncated
+        is true ask again at once, and when it is false wait poll_after_seconds.
         Every event after the one you give is shown, in order, and none is skipped even when
         another change was still being written. Events are ordered by when their change began,
         which for two changes at the very same moment can differ from their ids. Give at most
@@ -876,6 +1363,7 @@ def create_server(settings: Settings) -> GuardedServer:
                 limit=limit,
                 newest=newest,
                 before_event_id=before_event_id,
+                cursor=cursor,
             )
 
     @mcp.tool()
@@ -1054,7 +1542,9 @@ def create_server(settings: Settings) -> GuardedServer:
         story or task must satisfy to be done, on top of its own acceptance criteria. Empty
         until someone sets it. Its list lines (starting with a dash or an asterisk) are its
         checks, which can be ticked on each story and task: items lists them, each with its key,
-        whether only a person may tick it (person_only, for a line marked [person]) and on how
+        whether only a person may tick it (person_only, for a line marked [person]), whether
+        only a verifier may (verifier_only, for [verifier] or [github]), whether its evidence
+        starts with a GitHub pull request address (github) and on how
         many items it is ticked. The answer holds the version you need to change it,
         and who changed it last and when. `next_work` already returns it to an agent."""
         with _database_errors():
@@ -1068,8 +1558,11 @@ def create_server(settings: Settings) -> GuardedServer:
                 description="The whole definition of done, as plain text or Markdown. Write one "
                 "line starting with a dash for each check, such as '- All tests pass'; start the "
                 "words with [person] for a check only a person can tick, such as '- [person] "
-                "Looks right on a phone'. Other lines are context and cannot be ticked. Leave it "
-                "empty to clear it."
+                "Looks right on a phone', with [verifier] for one a verifier that did not do the "
+                "work (or a person) ticks, or with [github] for the same with a GitHub pull "
+                "request address as the start of its evidence, such as '- [github] The pull "
+                "request is merged and its checks passed'. Other lines are context and cannot be "
+                "ticked. Leave it empty to clear it."
             ),
         ],
         expected_version: Annotated[
@@ -1127,8 +1620,13 @@ def create_server(settings: Settings) -> GuardedServer:
         Ticking a check that is already ticked with the same evidence, or unticking one that is
         not ticked, is refused as nothing to change. A check marked person_only is for a person to
         judge: you may neither tick nor untick it, so leave it, finish the item as blocked, and
-        say in the handoff note what the person should look at. The answer lists all the item's
-        checks.
+        say in the handoff note what the person should look at. A check marked verifier_only is
+        for a person or a verifier (an agent whose key the owner marked as one) that did not
+        do the work on the item, meaning it never claimed or handed it off: any other agent may
+        neither tick nor untick it. A verifier's tick of a check marked github starts its
+        evidence with the address of the GitHub pull request, then says what was seen there;
+        Vrum does not ask GitHub, so look with gh on your own machine (scripts/verify_pr.py
+        does it). The answer lists all the item's checks.
         """
         with _database_errors():
             return await checks.set_check(
@@ -1418,6 +1916,13 @@ def create_server(settings: Settings) -> GuardedServer:
                 "as suggestions in a section of their own."
             ),
         ] = False,
+        max_chars: Annotated[
+            int,
+            Field(
+                description="The most characters of entries one answer holds, from 1000 to "
+                "1000000. Entries that do not fit are left out: read on with show and after_id."
+            ),
+        ] = DEFAULT_RECALL_CHARS,
     ) -> Recall:
         """Recall everything known that matters for one node or acceptance criterion, in separate
         sections.
@@ -1443,7 +1948,68 @@ def create_server(settings: Settings) -> GuardedServer:
                 limit=limit,
                 after_id=after_id,
                 with_similar=with_similar,
+                max_chars=max_chars,
             )
+
+    @mcp.tool(annotations=_READS)
+    async def list_asks(
+        status: Annotated[
+            str | None,
+            Field(description="open (not yet answered) or answered. Leave out for all of them."),
+        ] = None,
+        node: Annotated[
+            Ref | None, Field(description="Only the asks about this story or task.")
+        ] = None,
+        limit: _Limit = 100,
+        after_id: _After = None,
+    ) -> AskPage:
+        """List the questions and approvals that were put to a person, oldest first, a page at a
+        time: what was asked, by whom, and the answer when there is one. An agent that put an ask
+        reads the answer in get_node and next_work; this lists them across the project."""
+        with _database_errors():
+            return await ask_book.list_asks(
+                status=status,
+                node=None if node is None else parse_node_ref(node, "node"),
+                limit=limit,
+                after_id=after_id or 0,
+            )
+
+    @mcp.tool()
+    async def answer_ask(
+        ask: Annotated[int, Field(description="The ask's number (Q-12 is 12).")],
+        answer: Annotated[
+            str,
+            Field(
+                description="Yes or no for an approval, one of the choices for a question that "
+                "offers some, otherwise your answer in words."
+            ),
+        ],
+        comment: Annotated[
+            str | None, Field(description="Anything to add to the answer. Optional.")
+        ] = None,
+    ) -> AskState:
+        """Answer an ask. Only a person can: the board calls this for the person who is signed
+        in, and an agent's call is refused. The answer is final and is never edited. If the ask
+        blocked the work, the work is free to take again once no other ask blocks it."""
+        with _database_errors():
+            return await ask_book.answer_ask(actor=_me(), ask=ask, answer=answer, comment=comment)
+
+    @mcp.tool(annotations=_READS, meta=view_meta())
+    async def needs_a_person() -> Annotated[CallToolResult, NeedsAPerson]:
+        """Everything that is waiting for a person, in one list by story: open asks, checks that
+        only a person can tick on work that is otherwise finished, notes waiting for confirmation
+        on work in progress, and work whose claim ran out twice. Each row says why it is here,
+        how long it has waited and who is waiting. A host that draws interactive views shows it
+        as a list; it only reads, and a person answers on the board."""
+        with _database_errors():
+            found = await needs.needs_a_person()
+        project = current_project()
+        if project is not None:
+            found.board_address = f"{settings.public_url}/board/p/{project}"
+        return CallToolResult(
+            content=[TextContent(text=summary(found))],
+            structured_content=found.model_dump(mode="json", by_alias=True),
+        )
 
     @mcp.tool()
     async def set_confirmation(
@@ -1548,8 +2114,7 @@ def create_server(settings: Settings) -> GuardedServer:
         status says whether it is unconfirmed or confirmed (in force) or superseded or withdrawn
         (not). The answer counts the matches by type and by status. Exact words are found the
         moment something is saved, and keep working when the
-        embedding service is down; the answer says when meaning could not be used. Tasks are
-        found by exact words only.
+        embedding service is down; the answer says when meaning could not be used.
         """
         with _database_errors():
             return await searcher.search(
@@ -1609,8 +2174,8 @@ def create_server(settings: Settings) -> GuardedServer:
         item_type: Annotated[
             str,
             Field(
-                description="story (the default), epic or rule (acceptance criteria): what to "
-                "compare."
+                description="story (the default), epic, task or rule (acceptance criteria): what "
+                "to compare."
             ),
         ] = "story",
         epics: Annotated[
@@ -1629,15 +2194,18 @@ def create_server(settings: Settings) -> GuardedServer:
         ] = None,
         include_dropped: Annotated[
             bool,
-            Field(description="True: also compare dropped stories, epics and acceptance criteria."),
+            Field(
+                description="True: also compare dropped stories, epics, tasks and acceptance "
+                "criteria."
+            ),
         ] = False,
         limit: Annotated[int, Field(description="How many pairs to return, from 1 to 200.")] = 20,
         offset: Annotated[
             int, Field(description="How many pairs to skip. Pass next_offset for the next page.")
         ] = 0,
     ) -> OverlapPage:
-        """Find pairs of stories, epics or acceptance criteria in different epics that look like
-        the same thing.
+        """Find pairs of stories, epics, tasks or acceptance criteria in different epics that look
+        like the same thing.
 
         Pairs are listed most alike first, with their scores, and say which links already exist
         between them. This only reports: it never merges, links or changes anything. A person or
@@ -1777,6 +2345,66 @@ def create_server(settings: Settings) -> GuardedServer:
         event(log, logging.INFO, "import_finished", actor=_me()[:100], counts=result.counts)
         return result
 
+    @mcp.tool(annotations=_READS)
+    async def explore(
+        names: Annotated[
+            list[str] | None,
+            Field(
+                description="The functions to describe, such as the ones you are about to use. "
+                "Leave empty to list every function."
+            ),
+        ] = None,
+        query: Annotated[
+            str | None,
+            Field(
+                description="Words to look for in the functions' names and descriptions, such as "
+                "note or claim. It gives the ten that fit best."
+            ),
+        ] = None,
+    ) -> Explored:
+        """See what `vrum` can do inside `run`, for a key that calls Vrum by running code.
+
+        With nothing asked it lists the functions this key's scripts have, with a line on each and
+        whether it only reads. With names, or with words to look for, it also gives the TypeScript
+        of those functions in full: their descriptions and the exact types of their arguments and
+        results, which is what a script is checked against before it runs. It changes nothing.
+        """
+        caller = current_caller()
+        return describe_functions(mcp.sdk, mcp.functions_for(caller.tools), names, query)
+
+    @mcp.tool()
+    async def run(
+        code: Annotated[
+            str,
+            Field(
+                description="The body of an async function, written in TypeScript: `vrum` and "
+                "`console` are in scope and `await` works. Return a JSON value to get it back."
+            ),
+        ],
+        timeout_seconds: Annotated[
+            int,
+            Field(
+                description=f"How long the script may run, in seconds, from 1 to {MOST_TIMEOUT}."
+            ),
+        ] = DEFAULT_TIMEOUT,
+    ) -> RunResult:
+        """Run a TypeScript script that calls Vrum's functions, for a key that calls Vrum by
+        running code.
+
+        Each function of `vrum` is the tool of that name: the same arguments, results and checks,
+        recorded under this key's name, so one script can do what many calls would. The script is
+        type checked first, then run in a sandbox with no network, files or imports. A call Vrum
+        refuses throws a VrumError with the tool's own sentence. Every call is its own step and
+        nothing is rolled back, so a script that stops half way says which calls ran and whether
+        anything changed. It gives back what the script returned, what it wrote with console.log
+        and the calls it made. This key's own functions are listed where this tool is described to
+        it, and `explore` gives their types.
+        """
+        outcome = await code_mode.run(current_caller(), code, timeout_seconds)
+        if not outcome.ok:
+            raise Refusal(failure_words(outcome))
+        return RunResult(result=outcome.result, logs=outcome.logs, calls=outcome.calls)
+
     @mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> Response:
         try:
@@ -1785,5 +2413,12 @@ def create_server(settings: Settings) -> GuardedServer:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
-    add_board(mcp, settings=settings, searcher=searcher, accounts=accounts, sso=sso)
+    add_board(
+        mcp,
+        settings=settings,
+        searcher=searcher,
+        accounts=accounts,
+        sso=sso,
+        webhook_book=webhook_book,
+    )
     return mcp

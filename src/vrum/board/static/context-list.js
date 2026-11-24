@@ -1,7 +1,7 @@
-// The Lists page's context lists: the acceptance criteria and the notes of the scope the page shows, as two
-// sections, so that context can be read and managed without finding dots. The notes are one table. Each
-// section has filters that work over everything the board holds (status, words), a count, and the
-// button to add something. Each row says what the record is, where it stands (a note has one status:
+// The Lists page's context lists: the acceptance criteria and the notes of the scope the page shows, each as a
+// section, so that context can be read and managed without finding dots. The notes are one table. Each
+// section has a bar of filters that work over everything the board holds (status, words), how many rows they
+// keep, and the button to add something. Each row says what the record is, where it stands (a note has one status:
 // Unconfirmed, Confirmed, Replaced or Withdrawn), links to its own page, and has the operations
 // (confirm, link, replace, withdraw) that page has, in the menu of its status chip. The lists keep no
 // data of their own: they draw the same dots and lines the work list draws.

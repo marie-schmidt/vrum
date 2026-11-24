@@ -9,10 +9,9 @@ import { Refusal, call } from './api.js';
 import { checkItems, contextOf } from './checks.js';
 import { can, notify } from './ctx.js';
 import { h, moment, plural, put } from './dom.js';
-import { refuse } from './forms.js';
 import { icon } from './icons.js';
 import { keyButton } from './key-button.js';
-import { actorLabel, personOnlyChip } from './labels.js';
+import { actorLabel, checkChip, githubChip, personOnlyChip, verifierChip } from './labels.js';
 import { renderMarkdown } from './markdown.js';
 import { pageHeader } from './page.js';
 import { withReferences } from './reference-picker.js';
@@ -34,8 +33,8 @@ const lastChanged = (definition) =>
 // "6 checks", "1 check".
 const checksWords = (count) => plural(count, 'check');
 
-// On how many stories and tasks a check is ticked.
-const ticksWords = (count) => (count ? `ticked on ${plural(count, 'story or task', 'stories and tasks')}` : 'not ticked yet');
+// On how many stories and tasks a check is ticked. A check that is ticked nowhere says nothing: that is what a new one is.
+const ticksWords = (count) => (count ? `ticked on ${plural(count, 'story or task', 'stories and tasks')}` : null);
 
 // What the text being typed holds: how many checks, and what changing it would cost. A line that is reworded or
 // taken out is a check that no longer exists, and the ticks it had stop counting.
@@ -111,16 +110,24 @@ function reading(definition) {
       ? h(
           'section',
           { class: 'definition-checks', 'aria-labelledby': 'definition-checks-title' },
-          h('h2', { id: 'definition-checks-title' }, checksWords(items.length)),
+          h('h2', { id: 'definition-checks-title', class: context ? null : 'sr-only' }, checksWords(items.length)),
           h(
             'ul',
             { class: 'plain check-ticks' },
             items.map((one) =>
               h(
                 'li',
-                { dataset: { item: one.item, ticks: String(one.ticks), personOnly: String(Boolean(one.person_only)) } },
-                h('span', { class: 'check-ticks-main' }, h('span', { class: 'check-ticks-text' }, one.text), one.person_only ? personOnlyChip() : null),
-                h('span', { class: 'quiet check-ticks-count' }, ticksWords(one.ticks)),
+                {
+                  dataset: {
+                    item: one.item,
+                    ticks: String(one.ticks),
+                    personOnly: String(Boolean(one.person_only)),
+                    verifierOnly: String(Boolean(one.verifier_only)),
+                    github: String(Boolean(one.github)),
+                  },
+                },
+                h('span', { class: 'check-ticks-main' }, h('span', { class: 'check-ticks-text' }, one.text), checkChip(one)),
+                one.ticks ? h('span', { class: 'quiet check-ticks-count' }, ticksWords(one.ticks)) : null,
               ),
             ),
           ),
@@ -129,14 +136,22 @@ function reading(definition) {
   ];
 }
 
-// What the Key button opens: how a line is written, and what the one that only a person can judge looks like.
+// What the Key button opens: how a line is written, and what the tags that say who may tick it look like and mean.
 function keyContent() {
   const row = (example, ...words) => h('li', {}, h('code', { class: 'dk-example' }, example), h('span', { class: 'dk-words' }, ...words));
   return h(
     'div',
     { class: 'dk-card' },
     h('p', { class: 'hovercard-title' }, 'Checks'),
-    h('ul', { class: 'plain dk-list' }, row('- Tests pass', 'A check on every story and task'), row('- [person] Looks right on a phone', personOnlyChip(), 'Only a person can tick it')),
+    h(
+      'ul',
+      { class: 'plain dk-list' },
+      row('- Tests pass', 'A check on every story and task'),
+      row('- [person] Looks right on a phone', personOnlyChip(), 'Only a person can tick it'),
+      row('- [verifier] Reviewed by an agent that did not write it', verifierChip(), 'A person, or an agent whose key is a verifier’s and that did not do the work'),
+      row('- [github] The pull request is merged and its checks passed', githubChip(), 'The same, and the agent’s evidence starts with the pull request’s address. Vrum does not ask GitHub: it records what the verifier reported.'),
+    ),
+    h('p', { class: 'quiet' }, 'A tag is not part of the check’s words, so adding or removing one keeps every tick.'),
   );
 }
 

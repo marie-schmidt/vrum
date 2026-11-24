@@ -77,9 +77,17 @@ def main() -> int:
     )
     for name, words in settings.sso.warnings():
         event(logging.getLogger("vrum"), logging.WARNING, name, message=words)
-    # The server writes its own log lines (see logs.py), so the web server's are off.
+    # The server writes its own log lines (see logs.py), so the web server's are off. An idle
+    # connection is kept for a minute and a quarter, not for uvicorn's five seconds: an agent that
+    # thinks for about that long between two calls would otherwise send its next request just as the
+    # server closes the connection, and be told "Server disconnected without sending a response".
     config = uvicorn.Config(
-        app, host=settings.host, port=settings.port, log_config=None, access_log=False
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_config=None,
+        access_log=False,
+        timeout_keep_alive=75,
     )
     asyncio.run(uvicorn.Server(config).serve())
     return 0

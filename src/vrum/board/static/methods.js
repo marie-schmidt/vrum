@@ -1,4 +1,4 @@
-// How the signed-in person can sign in: the Sign-in methods setting of the Users page. It is drawn only
+// How the signed-in person can sign in: the Sign-in methods setting of the Account page. It is drawn only
 // when the server offers another way to sign in (or when the account has no password), and lists the
 // password and each provider the server is set up for. The page keeps no rule about which way may be
 // taken away: the server refuses to remove the last one, in its own words, and the dialog shows them.
@@ -15,12 +15,12 @@ import { icon } from './icons.js';
 import { DIRECTORY_WORDS, goToProvider, ssoIcon } from './sso.js';
 
 let generation = 0;
-let holder = null; // the element that holds the methods, while the Users page is open
+let holder = null; // the element that holds the methods, while the Account page is open
 let known = null; // what the server said: { has_password, identities }
 let changePassword = null; // opens the dialog that changes an existing password
 const problem = () => holder?.querySelector('#methods-problem');
 
-// Whether the Users page draws this at all: not when the server offers only the password and the
+// Whether the Account page draws this at all: not when the server offers only the password and the
 // account has one, which is the page as it has always been.
 export const showsMethods = () => providersOn().length > 0 || account.has_password === false;
 
@@ -34,20 +34,21 @@ export function forgetMethods() {
 // "a", "a or b", "a, b or c".
 const orList = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}`);
 
-// One way to sign in: what it is, where it stands, and what can be done about it.
+// One way to sign in: what it is, what can be done about it, and, quietly, where it stands when that is
+// not the usual. A way that is not connected, or a password that is set, says nothing: its button does.
 function method(id, iconName, title, state, quiet, ...actions) {
   return h(
     'li',
     { class: 'method', id: `method-${id}`, dataset: { method: id } },
     h('span', { class: 'method-icon', 'aria-hidden': 'true' }, icon(iconName, { size: 18 })),
-    h('div', { class: 'method-main' }, h('p', { class: 'method-title' }, title), h('p', { class: 'method-state', id: `method-${id}-state` }, state), quiet ? h('p', { class: 'method-quiet' }, quiet) : null),
+    h('div', { class: 'method-main' }, h('p', { class: 'method-title' }, title), state ? h('p', { class: 'method-state', id: `method-${id}-state` }, state) : null, quiet ? h('p', { class: 'method-quiet' }, quiet) : null),
     h('div', { class: 'method-actions' }, actions),
   );
 }
 
 function passwordMethod() {
   if (known.has_password) {
-    return method('password', 'lock', 'Password', 'You can sign in with your email and password', null, h('button', { type: 'button', id: 'change-password', onclick: () => changePassword() }, 'Change password…'));
+    return method('password', 'lock', 'Password', null, null, h('button', { type: 'button', id: 'change-password', onclick: () => changePassword() }, 'Change password…'));
   }
   const ways = known.identities.map((identity) => identity.name);
   const state = `You have no password. ${ways.length ? `Sign in with ${orList(ways)}. ` : ''}Set a password to also sign in with email.`;
@@ -58,8 +59,12 @@ function providerMethod(provider) {
   const found = known.identities.find((identity) => identity.provider === provider.id);
   const iconName = ssoIcon(provider.id);
   if (!found) {
-    const connect = h('button', { type: 'button', id: `connect-${provider.id}`, onclick: () => (provider.id === 'ldap' ? directoryDialog(provider) : goToProvider(provider, 'link', connect, problem())) }, `Connect ${provider.name}${provider.id === 'ldap' ? '…' : ''}`);
-    return method(provider.id, iconName, provider.name, 'Not connected', null, connect);
+    const connect = h(
+      'button',
+      { type: 'button', id: `connect-${provider.id}`, 'aria-label': `Connect ${provider.name}`, onclick: () => (provider.id === 'ldap' ? directoryDialog(provider) : goToProvider(provider, 'link', connect, problem())) },
+      provider.id === 'ldap' ? 'Connect…' : 'Connect',
+    );
+    return method(provider.id, iconName, provider.name, null, null, connect);
   }
   const who = found.display_name || found.email;
   const extra = [found.email && found.email !== found.display_name ? found.email : null, found.linked_at ? `Connected ${moment(found.linked_at)}` : null].filter(Boolean).join(' · ');
@@ -69,7 +74,7 @@ function providerMethod(provider) {
     provider.name,
     who ? `Connected as ${who}` : 'Connected',
     extra,
-    h('button', { type: 'button', id: `disconnect-${provider.id}`, onclick: () => disconnectDialog(provider) }, 'Disconnect…'),
+    h('button', { type: 'button', id: `disconnect-${provider.id}`, 'aria-label': `Disconnect ${provider.name}`, onclick: () => disconnectDialog(provider) }, 'Disconnect…'),
   );
 }
 

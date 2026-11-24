@@ -48,7 +48,7 @@ STATUSES = (
     "withdrawn",
 )
 SEARCH_MODES = ("both", "words", "meaning")
-OVERLAP_TYPES = ("story", "epic", "rule")
+OVERLAP_TYPES = ("story", "epic", "task", "rule")
 # Rank fusion: an item's score is the sum of 1 / (K + its rank) over the lists it is in.
 _FUSION_K = 60
 _HIGHLIGHT = "StartSel=«, StopSel=», MaxWords=28, MinWords=10, MaxFragments=1, ShortWord=2"
@@ -268,6 +268,15 @@ class Searcher:
         if len(vector) != state.dimensions:
             return None, "index_not_ready", None
         return vector_literal(vector), "used", None
+
+    async def vector_of(self, text: str) -> str | None:
+        """The vector the index would hold for a text, or None when the embedding service cannot
+        be used just now."""
+        model = self._indexer.client.model if self._indexer.client else None
+        async with self._database.transaction() as conn:
+            state = await snapshot(conn, model)
+        vector, _, _ = await self._vector(state, text, wanted=True)
+        return vector
 
     # -- searching ----------------------------------------------------------------------------
 
@@ -912,8 +921,8 @@ async def _stored_vector(conn: AsyncConnection, item: tuple[str, int]) -> str | 
 
 
 # Pairs of items of one type in different epics that are alike, from the index. An item changed
-# since it was indexed is left out until it is indexed again. `id` is the number of an epic or
-# story within its kind, or a rule's id; `epic` is the ref of the item's epic.
+# since it was indexed is left out until it is indexed again. `id` is the number of an epic,
+# story or task within its kind, or a rule's id; `epic` is the ref of the item's epic.
 _OVERLAP_ITEMS = {
     "epic": (
         "SELECT i.item_id AS id, i.embedding, n.ref AS epic FROM semantic_index i "
@@ -930,6 +939,15 @@ _OVERLAP_ITEMS = {
         "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
         "AND n.kind = 'story' AND n.number = i.item_id "
         "WHERE i.item_type = 'story' AND (%(dropped)s OR n.status <> 'dropped')"
+    ),
+    "task": (
+        "SELECT i.item_id AS id, i.embedding, st.parent AS epic FROM semantic_index i "
+        "JOIN index_source s ON s.project_id = i.project_id AND s.item_type = i.item_type "
+        "AND s.id = i.item_id "
+        "AND s.content_hash = i.content_hash JOIN nodes n ON n.project_id = i.project_id "
+        "AND n.kind = 'task' AND n.number = i.item_id "
+        "JOIN nodes st ON st.project_id = n.project_id AND st.ref = n.parent "
+        "WHERE i.item_type = 'task' AND (%(dropped)s OR n.status <> 'dropped')"
     ),
     "rule": (
         "SELECT i.item_id AS id, i.embedding, "
@@ -980,8 +998,10 @@ async def _overlap_items(
     else:
         sql = (
             "SELECT s.number AS id, s.title, s.status, e.ref AS epic, e.title AS epic_title "
-            "FROM node_state s JOIN nodes e ON e.ref = CASE s.kind WHEN 'epic' THEN s.ref "
-            "ELSE s.parent END WHERE s.kind = %(item_type)s AND s.number = ANY(%(numbers)s)"
+            "FROM node_state s LEFT JOIN nodes p ON p.ref = s.parent "
+            "JOIN nodes e ON e.ref = CASE s.kind WHEN 'epic' THEN s.ref "
+            "WHEN 'story' THEN s.parent ELSE p.parent END "
+            "WHERE s.kind = %(item_type)s AND s.number = ANY(%(numbers)s)"
         )
     return {
         row["id"]: OverlapItem(

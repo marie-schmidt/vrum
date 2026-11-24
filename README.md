@@ -65,9 +65,9 @@ command works too.)
 3. Create a project. It opens on the Board.
 4. Choose **New item** to make an epic, then another to make a story in it, then a task in the
    story. A task with nothing to wait for is Ready.
-5. To let an agent in, open **Settings and tools**, then **Agent access**, in the sidebar. Create a
-   key and copy it. It is shown once, and it reaches this project and no other. Then give it to the
-   agent. For Claude Code:
+5. To let an agent in, open **Settings and tools**, then **Users**, in the sidebar. Create a
+   key (choose **One tool at a time**, the simplest way) and copy it. It is shown once, and it
+   reaches this project and no other. Then give it to the agent. For Claude Code:
 
    ```
    export VRUM_AGENT_KEY=<the key you copied>
@@ -101,8 +101,8 @@ every item opens its own page.*
 
 ## How it is built
 
-A Python 3.12 server, using the official MCP SDK, in front of PostgreSQL 17 with pgvector. Two
-containers.
+A Python 3.12 server, using the official MCP SDK, in front of PostgreSQL 17 with pgvector. Four
+containers: the server, the database, a small embedding model and a sandbox for scripts.
 
 - **The database enforces the rules.** The epic, story and task hierarchy, one claim at a time on an
   item, no circle of items waiting on each other, notes that are never edited and an
@@ -119,6 +119,11 @@ containers.
   container next to Vrum, built into its image, so it needs no internet once built and nothing
   leaves your machine. It only turns text into numbers. You can point Vrum at an embedding service
   of your own, or at none. Search by exact words needs nothing.
+- **An agent can work by writing code.** A key can be set to run code: the agent gets two tools and
+  writes a short TypeScript script in which every tool it may use is a function, so one request can
+  do what many calls would. Each call the script makes goes through the same checks as any call.
+  The script runs in a container of its own with no network and no secrets, and the key's owner
+  chooses this for each key (see [connecting an agent](docs/agents.md#calling-by-running-code)).
 - **Nothing is generated on the server.** Vrum never calls a language model. Confirmation is a named
   person's review, recorded with the time.
 - **Secrets are kept out.** Text that holds a well-known secret format is refused on every write,

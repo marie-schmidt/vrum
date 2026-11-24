@@ -1,13 +1,15 @@
-/* The Lists page: the toolbar (what to list, which epic, the filter), and the lists themselves (the
-   work as an outline that opens and closes, then the requirements and the notes). Every colour,
-   size and space is a token (tokens.css); light and dark follow from them. Nothing here is told by
-   colour alone: the kind is an icon and a word, the state is an icon and a word, an unconfirmed
+/* The Lists page: the toolbar (what to list, with how many of each, which epic, the filter), and the lists
+   themselves (the work as an outline that opens and closes, then the acceptance criteria and the notes).
+   Every colour, size and space is a token (tokens.css); light and dark follow from them. Nothing here is
+   told by colour alone: the kind is an icon, the state is an icon and a word, an unconfirmed
    record has a dashed outline and an ended one is struck through. The rows of the context lists
    (.gv-record and the like) are drawn by records.css; what is here for them is only a baseline, kept
    at no specificity so that records.css wins. */
 
 .lists-page { display: grid; gap: var(--space-3); min-width: 0; max-width: 100%; }
 .lists-page > * { min-width: 0; }
+/* The header row of Lists holds only its action (the h1 is for assistive technology); the grid's gap spaces it. */
+.lists-page > .page-header { margin: 0; }
 .lists-page select { min-width: 0; max-width: 100%; }
 
 /* The toolbar: what to list, which epic, and the filter with Apply and Clear, on one line where there is room
@@ -15,6 +17,10 @@
    is in scope. */
 .lists-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding-bottom: var(--space-3); border-bottom: var(--border-w) solid var(--border); }
 .lists-toolbar .segmented button { padding: 0 var(--space-2); }
+/* How many of a kind the scope holds, on its button: as quiet as a count in a menu. */
+.lists-count { margin-left: var(--space-1); color: var(--text-2); font-size: var(--text-xs); font-weight: 500; font-variant-numeric: tabular-nums; }
+.lists-count[hidden] { display: none; }
+.segmented button[aria-pressed="true"] .lists-count { color: var(--text); }
 .lists-field { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .lists-field label { margin: 0; white-space: nowrap; font-size: var(--text-sm); }
 .lists-epic label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -44,11 +50,15 @@
 /* The lists: the work tree, then the context sections */
 .lists-body { display: grid; gap: var(--space-5); min-width: 0; container-type: inline-size; }
 :where(.gv-section) { min-width: 0; }
-:where(.gv-section-head) { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
-:where(.gv-section-head h2) { font-size: var(--text-lg); }
-:where(.gv-section-head .spacer) { flex: 1 1 auto; }
-:where(.gv-count) { color: var(--text-2); font-size: var(--text-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
 :where(.gv-context) { display: grid; gap: var(--space-5); min-width: 0; }
+
+/* A context list's bar: its filters, how many rows they keep (only while that is fewer than the scope holds) and
+   its button, on one line where there is room. */
+.ctx-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-4); padding: var(--space-3) 0; border-bottom: var(--border-w) solid var(--border); }
+.ctx-bar > .ctx-filters { margin-right: auto; padding: 0; border: 0; }
+.ctx-bar > .ctx-count, .ctx-bar > button { align-self: flex-end; }
+.ctx-bar > .ctx-count { display: inline-flex; align-items: center; min-height: var(--control-h-sm); }
+.ctx-bar > .ctx-count[hidden] { display: none; }
 :where(.gv-record) { list-style: none; padding: var(--space-3) var(--space-4); border: var(--border-w) solid var(--border); border-radius: var(--radius-md); background: var(--surface); overflow-wrap: anywhere; }
 :where(.gv-record.selected) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 :where(.gv-connections, .mentioned-in) { margin: var(--space-2) 0; font-size: var(--text-sm); }
@@ -63,7 +73,7 @@
 .gv-tree li[role="treeitem"]:focus { outline: none; }
 .gv-tree li[role="treeitem"]:focus-visible > .gv-row { outline: 2px solid var(--focus); outline-offset: 1px; }
 html[data-input="pointer"] .gv-tree li[role="treeitem"]:focus-visible > .gv-row { outline: none; }
-.gv-row { display: grid; grid-template-columns: var(--control-h-sm) 4.75rem minmax(0, 1fr) 4.5rem 7.75rem 11rem; align-items: center; column-gap: var(--space-3); padding: var(--space-1) var(--space-3); border: var(--border-w) solid transparent; border-radius: var(--radius-md); cursor: pointer; }
+.gv-row { display: grid; grid-template-columns: var(--control-h-sm) 1.25rem minmax(0, 1fr) 4.5rem 7.75rem 11rem; align-items: center; column-gap: var(--space-3); padding: var(--space-1) var(--space-3); border: var(--border-w) solid transparent; border-radius: var(--radius-md); cursor: pointer; }
 .gv-row:hover { background: var(--surface-2); }
 .gv-tree li.selected > .gv-row { border-color: var(--accent); background: var(--accent-soft); }
 .gv-tree li.outside > .gv-row .gv-label { color: var(--text-2); }
@@ -72,8 +82,8 @@ html[data-input="pointer"] .gv-tree li[role="treeitem"]:focus-visible > .gv-row 
 .gv-node.type-epic.selected > .gv-row { background: var(--accent-soft); border-color: var(--accent); }
 .gv-twisty { grid-column: 1; flex: none; width: var(--control-h-sm); min-height: var(--control-h-sm); padding: 0; border: 0; background: none; color: var(--text-2); }
 .gv-twisty.none { display: inline-block; }
-.gv-kind { grid-column: 2; display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-2); font: 600 var(--text-xs) / 1 var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; }
-.gv-kind .icon { color: var(--text-2); }
+/* The kind is only its sign: the code says it (E-, S-, T-), and a screen reader has the word. */
+.gv-kind { grid-column: 2; position: relative; display: inline-flex; align-items: center; color: var(--text-2); }
 .gv-label { grid-column: 3; min-width: 0; padding: var(--space-1) 0; overflow-wrap: anywhere; }
 .gv-label .id { color: var(--text-2); font: 400 var(--text-xs) var(--font-mono); margin-right: var(--space-1); }
 .gv-label .gv-title { color: inherit; text-decoration: none; text-underline-offset: 0.18em; }
@@ -83,9 +93,11 @@ html[data-input="pointer"] .gv-tree li[role="treeitem"]:focus-visible > .gv-row 
 .gv-row > .chip.status { grid-column: 5; justify-self: end; }
 .gv-progress { grid-column: 6; display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-2); color: var(--text-2); font-size: var(--text-xs); font-weight: 400; white-space: nowrap; }
 .gv-progress .meter { width: 3.5rem; }
-.gv-claim { color: var(--text-2); font-size: var(--text-xs); font-weight: 400; }
-.gv-claim.lapsed { color: var(--warn); font-weight: 600; }
-.gv-ties-line { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 0 var(--space-4); padding-bottom: var(--space-1); color: var(--text-2); font-size: var(--text-sm); font-weight: 400; }
+.gv-ties-line { grid-column: 3 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); padding-bottom: var(--space-1); color: var(--text-2); font-size: var(--text-sm); font-weight: 400; }
+/* The quiet signs of a row (progress, due day, holder) are plain, like the Board's: only a late day or a claim that ran out is coloured. */
+.gv-ties-line :is(.chip.due, .chip.progress-sign, .chip.held):not(.danger, .ok, .warn) { padding-inline: 0; background: transparent; color: var(--text-2); font-weight: 500; }
+.gv-ties-line .chip.progress-sign.ok { padding-inline: 0; background: transparent; font-weight: 500; }
+.gv-ties-line .chip.held { min-width: 0; max-width: 100%; }
 .gv-ties-line:empty { display: none; }
 .gv-row > .gv-connections { grid-column: 3 / -1; margin: 0 0 var(--space-1); font-weight: 400; }
 .gv-tree .gv-empty { padding: var(--space-5); color: var(--text-2); text-align: center; border: var(--border-w) dashed var(--border-strong); border-radius: var(--radius-md); }
@@ -93,20 +105,22 @@ html[data-input="pointer"] .gv-tree li[role="treeitem"]:focus-visible > .gv-row 
 
 @container (max-width: 44rem) {
   .gv-tree ul { margin-left: var(--space-2); padding-left: var(--space-2); }
-  .gv-row { grid-template-columns: var(--control-h-sm) minmax(0, 1fr) auto; }
-  .gv-twisty { grid-row: 1 / span 2; align-self: start; }
-  .gv-kind { grid-column: 2; grid-row: 1; padding-top: var(--space-1); }
-  .gv-label { grid-column: 2; grid-row: 2; }
-  .gv-row > .chip.status { grid-column: 3; grid-row: 1; }
-  .gv-row > .gv-size { grid-column: 3; grid-row: 2; }
-  .gv-progress { grid-column: 2 / -1; grid-row: 3; justify-content: flex-start; }
-  .gv-ties-line, .gv-row > .gv-connections { grid-column: 2 / -1; }
+  /* The title has the whole width of the first line; the size and the status, the progress and the signs go under it. */
+  .gv-row { grid-template-columns: var(--control-h-sm) 1.25rem auto auto minmax(0, 1fr); }
+  .gv-twisty { grid-row: 1; }
+  .gv-kind { grid-column: 2; grid-row: 1; }
+  .gv-label { grid-column: 3 / -1; grid-row: 1; }
+  .gv-row > .gv-size { grid-column: 3; grid-row: 2; justify-self: start; }
+  .gv-row > .chip.status { grid-column: 4; grid-row: 2; justify-self: start; }
+  .gv-progress { grid-column: 3 / -1; grid-row: 3; justify-content: flex-start; }
+  .gv-ties-line { grid-column: 3 / -1; grid-row: 4; }
+  .gv-row > .gv-connections { grid-column: 3 / -1; grid-row: 5; }
 }
 
 @media (max-width: 40rem) {
   .lists-toolbar { align-items: stretch; }
   .lists-toolbar > .segmented { flex: 1 1 100%; }
-  .lists-toolbar .segmented button { flex: 1 1 0; padding: 0 var(--space-1); }
+  .lists-toolbar .segmented button { flex: 1 1 auto; padding: 0 var(--space-1); white-space: nowrap; }
   .lists-epic { flex: 1 1 100%; max-width: none; }
   .lists-epic select { max-width: 100%; }
 }

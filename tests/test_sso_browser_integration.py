@@ -1,7 +1,8 @@
 """Signing in with another provider (M25) in a real browser: the buttons on the sign-in page, the
 redirect out to a provider and back, the one plain problem a person is told when it does not work,
-connecting a provider from the Users page, the directory's form, and, against a real OpenID provider
-(Dex) with a second copy of the server set up for it, one whole sign-in in Chromium and in WebKit.
+connecting a provider from the Account page, the directory's form, and, against a real OpenID
+provider (Dex) with a second copy of the server set up for it, one whole sign-in in Chromium and in
+WebKit.
 
 What the server decides is proven in tests/test_sso_integration.py; what is looked at here is what a
 person sees and what a browser does with cookies and redirects across two sites. The page is only
@@ -253,7 +254,9 @@ def test_the_directory_asks_for_a_name_and_password_in_place_and_says_what_goes_
         assert seen.errors == [] and seen.dialogs == []
 
 
-def test_a_signed_in_person_connects_and_sees_who_they_are_connected_as_on_the_users_page() -> None:
+def test_a_signed_in_person_connects_and_sees_who_they_are_connected_as_on_the_account_page() -> (
+    None
+):
     person = register()
     project = make_project(person)
     who = new_openid_person(name="Connected Name")
@@ -269,19 +272,27 @@ def test_a_signed_in_person_connects_and_sees_who_they_are_connected_as_on_the_u
                 }
             ]
         )
-        page.goto(f"{board_base()}/board/p/{project.id}#/users")
-        expect(page.locator("#method-oidc-state")).to_have_text("Not connected")
-        expect(page.locator("#method-password-state")).to_contain_text("sign in with your email")
+        page.goto(f"{board_base()}/board/p/{project.id}#/account")
+        # A way that is not connected says nothing but its button, and so does a password that is
+        # set: the state is only said when it is something to know.
+        expect(page.locator("#connect-oidc")).to_be_visible()
+        expect(page.locator("#method-oidc-state")).to_have_count(0)
+        expect(page.locator("#method-password-state")).to_have_count(0)
+        expect(page.locator("#change-password")).to_be_visible()
         page.locator("#connect-oidc").click()
         page.wait_for_url(re.compile(r"/authorize\?"))
         press_person(page, who)
         page.wait_for_url(re.compile(re.escape(f"{board_base()}/board/p/{project.id}")))
-        # Connected as whoever the provider says the person is: their address or their name.
+        # The person comes back to the Account page, where the way is now connected, as whoever
+        # the provider says the person is: their address or their name.
+        expect(page.locator("main#page h1")).to_have_text("Account")
+        assert page.url.endswith("#/account"), page.url
         expect(page.locator("#method-oidc-state")).to_have_text(
             re.compile(rf"^Connected as ({re.escape(str(who.email))}|Connected Name)$")
         )
         assert "sso=" not in page.url and "sso_error" not in page.url
         expect(page.locator("#disconnect-oidc")).to_be_visible()
+        expect(page.locator("#connect-oidc")).to_have_count(0)
         assert seen.errors == [] and seen.dialogs == []
     reply = api(server_base(), "GET", "/board/api/account/identities", cookie=person.cookie)
     assert [one["provider"] for one in reply.body["identities"]] == ["oidc"]
@@ -298,7 +309,7 @@ def test_a_person_with_no_password_is_told_how_they_sign_in_and_can_set_one() ->
         person = person_of(page)
         assert person.email == who.email
         project = make_project(person, "Browser project")
-        page.goto(f"{board_base()}/board/p/{project.id}#/users")
+        page.goto(f"{board_base()}/board/p/{project.id}#/account")
         expect(page.locator("#method-password-state")).to_contain_text("You have no password")
         expect(page.locator("#method-password-state")).to_contain_text("Scripted OpenID")
         expect(page.locator("#set-password")).to_be_visible()

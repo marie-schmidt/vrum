@@ -1,0 +1,123 @@
+/* The lines of a change on the page of what needs a person and on the review page (needs-diffs.js, diff.js): hunk rows (a quiet label in plain
+   words), lines with a sign in a gutter (`+` added, `-` removed, `.` there already, for context), the raw text of a body, and the folds. The
+   sign carries the meaning and the colour only helps. A line wraps with a hanging indent, so a long title reads as one item, and nothing is
+   wider than the window. Colours are only ever a token (tokens.css). */
+
+.change-diff { display: block; min-width: 0; border-top: var(--border-w) solid var(--border); }
+.diff-loading, .diff-problem { margin: 0; padding: var(--space-3) var(--space-4); }
+.diff-problem { display: flex; align-items: flex-start; gap: var(--space-2); background: var(--danger-soft); color: var(--danger); overflow-wrap: anywhere; }
+
+/* The proposer's reason, as the message of a commit. */
+.diff-message { display: grid; gap: var(--space-1); padding: var(--space-3) var(--space-4); background: var(--diff-context-bg); border-bottom: var(--border-w) solid var(--border); }
+.diff-message-label { font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
+.diff-message p { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+
+.diff-hunk, .diff-foldrow { --hang: 0rem; }
+.diff-hunk { padding: var(--space-1) var(--space-3) var(--space-1) 2.25rem; background: var(--diff-hunk-bg); color: var(--diff-hunk-text); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+.diff-hunk a { color: inherit; text-decoration-color: currentColor; }
+
+.diff-line, .diff-foldrow, .diff-action, .diff-annot { --step: 1.25rem; --hang: 1.25rem; --indent: 0rem; display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); min-width: 0; }
+.diff-line[data-depth="1"], .diff-foldrow[data-depth="1"], .diff-action[data-depth="1"], .diff-annot[data-depth="1"] { --indent: var(--step); }
+.diff-line[data-depth="2"], .diff-foldrow[data-depth="2"], .diff-action[data-depth="2"], .diff-annot[data-depth="2"] { --indent: calc(var(--step) * 2); }
+.diff-line[data-depth="3"], .diff-foldrow[data-depth="3"], .diff-action[data-depth="3"], .diff-annot[data-depth="3"] { --indent: calc(var(--step) * 3); }
+.diff-line[data-depth="4"], .diff-foldrow[data-depth="4"], .diff-action[data-depth="4"], .diff-annot[data-depth="4"] { --indent: calc(var(--step) * 4); }
+.diff-line[data-depth="5"], .diff-foldrow[data-depth="5"], .diff-action[data-depth="5"], .diff-annot[data-depth="5"] { --indent: calc(var(--step) * 5); }
+@media (max-width: 699.98px) {
+  .diff-line, .diff-foldrow, .diff-action, .diff-annot { --step: 0.75rem; --hang: 1rem; grid-template-columns: 1.75rem minmax(0, 1fr); }
+  .diff-hunk { padding-left: 1.75rem; }
+}
+
+.diff-sign { display: flex; align-items: flex-start; justify-content: center; padding-top: 0.3rem; background: var(--diff-context-gutter); color: var(--text-2); font-family: var(--font-mono); font-weight: 700; user-select: none; }
+.diff-code { min-width: 0; min-height: 1.75rem; padding: 0.3rem var(--space-3) 0.3rem calc(var(--space-2) + var(--indent) + var(--hang)); background: var(--diff-context-bg); color: var(--text-2); line-height: 1.45; text-indent: calc(-1 * var(--hang)); overflow-wrap: anywhere; }
+.diff-code a { color: inherit; text-decoration-color: var(--border-strong); }
+.diff-code a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.diff-code .icon { margin-right: var(--space-1); vertical-align: -0.15em; color: var(--text-2); }
+.diff-code .chip .icon { margin-right: 0; vertical-align: baseline; }
+.diff-code :is(.diff-meta, .actor, .chip) { text-indent: 0; }
+.diff-line[data-sign="+"] .diff-sign { background: var(--diff-add-gutter); color: var(--diff-add-text); }
+.diff-line[data-sign="+"] .diff-code { background: var(--diff-add-bg); color: var(--text); }
+.diff-line[data-sign="-"] .diff-sign { background: var(--diff-remove-gutter); color: var(--diff-remove-text); }
+.diff-line[data-sign="-"] .diff-code { background: var(--diff-remove-bg); color: var(--text); }
+.diff-line[data-sign="~"] .diff-sign { background: var(--diff-change-gutter); color: var(--diff-change-text); }
+.diff-line[data-sign="~"] .diff-code { background: var(--diff-change-bg); color: var(--text); }
+.diff-line[data-sign="."] .diff-code { color: var(--text-2); }
+
+/* The raw text of a body: as written, in the manner of a file, never as Markdown. */
+.diff-text .diff-code { font-family: var(--font-mono); font-size: var(--text-sm); white-space: pre-wrap; text-indent: 0; padding-left: calc(var(--space-2) + var(--indent) + var(--hang)); }
+.diff-item-line .diff-code, .diff-about .diff-code, .diff-context .diff-code, .diff-criterion .diff-code, .diff-gate .diff-code, .diff-check .diff-code, .diff-note .diff-code { font-size: var(--text-md); }
+.diff-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-left: var(--space-2); text-indent: 0; vertical-align: middle; }
+.diff-link, .diff-count, .diff-from, .diff-why, .diff-evidence { color: var(--text-2); font-family: var(--font-mono); font-size: var(--text-xs); }
+.diff-link a, .diff-from a { color: inherit; }
+.diff-from, .diff-why, .diff-evidence { margin-left: var(--space-2); font-family: var(--font-sans); font-size: var(--text-sm); }
+.diff-subject { font-weight: 650; }
+.diff-new-epic { font-weight: 650; }
+.diff-check-words.waiting { font-weight: 650; color: var(--text); }
+.diff-check[data-waiting="true"] .diff-code { color: var(--text); }
+.diff-gate .needs-gate-words { overflow-wrap: anywhere; }
+.diff-note-meta .diff-code { font-size: var(--text-sm); }
+
+/* A fold: what is behind it, and one press opens all of it. What is folded is in the page and hidden. */
+.diff-line[data-closed], .diff-foldrow[data-closed], .diff-line[data-clipped], .diff-annot[data-closed] { display: none; }
+.diff-foldrow .diff-sign { align-items: center; padding-top: 0; background: var(--diff-hunk-bg); color: var(--diff-hunk-text); }
+.diff-foldrow .diff-sign .icon { color: inherit; }
+.diff-foldrow .diff-code { background: var(--diff-hunk-bg); color: var(--diff-hunk-text); padding-block: 0; text-indent: 0; }
+.diff-fold { min-height: 1.75rem; padding: 0 var(--space-1); border: 0; background: transparent; color: var(--diff-hunk-text); font-size: var(--text-sm); font-weight: 600; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.diff-fold:hover { background: transparent; color: var(--diff-hunk-text); text-decoration-thickness: 2px; }
+@media (pointer: coarse) {
+  .diff-fold { min-height: 2.75rem; }
+}
+
+/* -- M50 ------------------------------------------------------------------------------------------------------------- */
+
+/* A flag beside an item that a check is about (no size, may repeat S-38, in a circle) or a warning on a moved item. The words are in it
+   and in its label: colour is never the only cue. It never takes the place of what the line says. */
+.diff-code .diff-flag { display: inline-flex; align-items: center; gap: var(--space-1); min-height: 1.5rem; padding: 0 var(--space-2); border-radius: var(--radius-sm); background: var(--warn-soft); color: var(--warn); font-family: var(--font-sans); font-size: var(--text-xs); font-weight: 650; line-height: 1.2; white-space: nowrap; text-indent: 0; }
+.diff-code .diff-flag[data-state="failed"] { background: var(--danger-soft); color: var(--danger); }
+.diff-code .diff-flag .icon { margin: 0; vertical-align: baseline; color: inherit; }
+.diff-flag-words { margin-left: var(--space-2); font-size: var(--text-sm); color: var(--text); }
+
+/* The score of a moved item (git's similarity index, as a percent), where the parent ranks when it is not first, and the lowest. */
+.diff-code .diff-score { background: var(--neutral-soft); color: var(--text); font-family: var(--font-mono); font-weight: 700; }
+.diff-code .diff-lowest { background: var(--warn-soft); color: var(--warn); }
+.diff-rank, .diff-score-note { margin-left: var(--space-2); font-size: var(--text-sm); color: var(--text-2); }
+.diff-rank a { color: inherit; }
+.change-routine-why, .change-scores-note { margin: 0; }
+
+/* The split view: the old state and the new side by side, the same lines each on its side. */
+.diff-sides { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-width: 0; }
+.diff-side { min-width: 0; }
+.diff-side[data-side="old"] { border-right: var(--border-w) solid var(--border-strong); }
+.diff-side-head { margin: 0; padding: var(--space-1) var(--space-3); background: var(--surface-2); border-bottom: var(--border-w) solid var(--border); color: var(--text-2); font-size: var(--text-xs); font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
+.diff-empty { margin: 0; padding: var(--space-3) var(--space-4); background: var(--diff-context-bg); }
+@media (max-width: 899.98px) {
+  .diff-sides { grid-template-columns: minmax(0, 1fr); }
+  .diff-side[data-side="old"] { border-right: 0; }
+}
+
+/* What a person can do on the card of a note or a check, in place: confirm a note, tick a check, say how it was checked. */
+.diff-action .diff-sign { background: var(--diff-context-gutter); }
+.diff-action .diff-code { padding: 0.3rem var(--space-3) 0.3rem calc(var(--space-2) + var(--indent) + var(--hang)); background: var(--diff-context-bg); color: var(--text-2); text-indent: 0; }
+/* What is said under a line (plan-notes.js): it sits under the line it is about, one step in. */
+.diff-annot .diff-code { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3) var(--space-2) calc(var(--space-3) + var(--indent)); background: var(--surface); color: var(--text); font-size: var(--text-sm); text-indent: 0; }
+.diff-action:has(.change-problem:empty:only-child) { display: none; }
+.change-tick-label { display: inline-flex; align-items: center; gap: var(--space-2); text-indent: 0; cursor: pointer; }
+.change-how { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.change-how-field { width: min(100%, 30rem); }
+.change-problem { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); }
+.change-problem:not(:empty) { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.change-how-open { font-size: var(--text-sm); margin-left: var(--space-2); }
+@media (pointer: coarse) {
+  .change-confirm, .change-how-open { min-height: 2.75rem; }
+}
+
+/* A red, green or changed line is a button that shows the work as the screen a person would use for it (change-dialog.js). The words in it are
+   underlined as the thing that can be pressed, and the line is washed quietly while the pointer is on it. */
+.diff-openable { cursor: pointer; }
+.diff-line.diff-openable:hover .diff-code { background-image: linear-gradient(var(--diff-hover), var(--diff-hover)); }
+.diff-openable:focus-visible { outline-offset: -2px; }
+.diff-openable .diff-item { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.diff-openable:hover .diff-item { text-decoration-color: currentColor; }
+.diff-openable .diff-code :is(.diff-link, .diff-from) .item-link { color: inherit; }
+.preview-note-line.diff-openable { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); }
+.preview-note-line.diff-openable:hover { background-image: linear-gradient(var(--diff-hover), var(--diff-hover)); }
+.preview-note-line.diff-openable .item-link { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }

@@ -49,8 +49,9 @@ export VRUM_TEST_OIDC_URL="http://127.0.0.1:${VRUM_OIDC_PORT}"
 export VRUM_TEST_GITHUB_URL="http://127.0.0.1:${VRUM_GITHUB_PORT}"
 export VRUM_TEST_DEX_URL="http://dex.localhost:${VRUM_DEX_PORT}"
 export VRUM_TEST_DEX_APP_URL="http://localhost:${VRUM_DEX_APP_PORT}"
-# The graph chapter makes a second, empty copy of Vrum (compose project vrum-restore) for the one
-# proof that needs a graph of a known size. It removes it itself; the trap below does too.
+# The numbering, quickstart and moving chapters make a second, empty copy of Vrum (compose project
+# vrum-restore) for the proofs that need a database of their own. Each removes it itself; the trap
+# below does too.
 export VRUM_RESTORE_TEST_PORT=$((port + 1))
 # The demo chapter runs ./demo.sh, which is a separate stack of its own (its own compose project,
 # which has to say demo, and its own port): nothing of the walk's stack is used by it or touched.
@@ -73,5 +74,8 @@ docker compose up --detach --build --wait --wait-timeout 240
 echo "   healthy: the database, the server, the scripted embedding service and mail server, the scripted OpenID provider and GitHub, Dex, the real directory and the second server"
 
 echo "== the scenario"
+# The walk imports the server's own code (vrum.surface). Some machines mark files in .venv as hidden,
+# and Python skips a hidden .pth file, so `import vrum` would fail: name the source folder instead.
 VRUM_TEST_URL="http://127.0.0.1:${port}/mcp" \
+  PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" \
   uv run python -m tests.acceptance "$@"
