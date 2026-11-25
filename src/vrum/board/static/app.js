@@ -47,7 +47,6 @@ import * as review from './review.js';
 import { refreshReferences } from './references.js';
 import * as roadmap from './roadmap.js';
 import * as search from './search.js';
-import { keepLayout } from './shell.js';
 import { hideSidebar, showSidebar, updateSidebar } from './sidebar.js';
 import { problemWords, providerName, takeSsoResult } from './sso.js';
 import * as status from './status.js';
@@ -83,6 +82,23 @@ const TITLES = Object.fromEntries(Object.entries(PAGES).map(([name, page]) => [n
 const app = document.getElementById('app');
 const main = document.getElementById('page');
 const dialogs = document.getElementById('dialogs');
+
+// Publishes the sticky top bar height to CSS (`--top-now`) and marks pointer vs keyboard input
+// so focus rings show only for keyboard navigation (base.css).
+function keepLayout() {
+  const top = document.getElementById('top');
+  const publish = () => {
+    const sticks = getComputedStyle(top).position === 'sticky';
+    document.documentElement.style.setProperty('--top-now', `${sticks ? Math.round(top.getBoundingClientRect().height) : 0}px`);
+  };
+  new ResizeObserver(publish).observe(top);
+  matchMedia('(min-width: 700px)').addEventListener('change', publish);
+  publish();
+  const root = document.documentElement;
+  const KEYS = new Set(['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End']);
+  addEventListener('pointerdown', () => { root.dataset.input = 'pointer'; }, true);
+  addEventListener('keydown', (event) => { if (KEYS.has(event.key)) delete root.dataset.input; }, true);
+}
 // The skip link goes to the page without changing the address (which would make the Board of it).
 document.querySelector('.skip').addEventListener('click', (event) => {
   event.preventDefault();

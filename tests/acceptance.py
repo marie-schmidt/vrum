@@ -52,6 +52,7 @@ from tests.acceptance_standard import standard
 from tests.acceptance_utilities import utilities
 from tests.acceptance_ways_in import ways_in
 from tests.board_helpers import SLOW
+from tests.browser_pool import browser_pool_session
 
 
 async def working() -> None:
@@ -104,9 +105,10 @@ async def main(only: list[str]) -> None:
     # five seconds a browser check waits by default.
     expect.set_options(timeout=SLOW)
     started = time.monotonic()
-    for name, run in CHAPTERS.items():
-        if not only or name in only:
-            await run()
+    async with browser_pool_session():
+        for name, run in CHAPTERS.items():
+            if not only or name in only:
+                await run()
     by_milestone = Counter(milestone for milestone, _ in PROOFS)
 
     def order(milestone: str) -> tuple[int, str]:

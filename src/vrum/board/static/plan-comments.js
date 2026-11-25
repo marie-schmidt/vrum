@@ -5,7 +5,13 @@
 // refuses a request for another: when a newer revision arrives, the unsent ones of the old one are not kept and the plan says so once.
 // An item cannot be both approved and commented on in one request (the server refuses it), so the page never holds both.
 //
-// Nothing here draws anything or asks the server for anything: needs.js, the plan's card and the plan's page read and change it.
+// Nothing here draws anything or asks the server for anything except `changesDialog`, which sends
+// pending review comments with a request for changes.
+
+import { Refusal, call } from './api.js';
+import { h } from './dom.js';
+import { dialogForm, field, openDialog } from './forms.js';
+import { codeOf } from './labels.js';
 
 // The parts of an item a comment can be about, and what the person calls each. The first is the whole item (no field).
 export const COMMENT_FIELDS = [
@@ -175,4 +181,69 @@ export function threadsOf(feedback) {
     });
   }
   return found;
+}
+
+// -- request changes dialog -----------------------------------------------------------------------------------
+
+const sendable = (comments) => comments.map(({ item, field: part, text }) => ({ item, ...(part ? { field: part } : {}), text }));
+
+function commentsList(comments) {
+  if (!comments.length) return h('p', { class: 'changes-no-comments quiet' }, 'No comments');
+  return h(
+    'div',
+    { class: 'changes-comments-box' },
+    h('p', { class: 'quiet' }, `Comments: ${comments.length}`),
+    h(
+      'ul',
+      { class: 'plain changes-comments' },
+      comments.map((one) =>
+        h(
+          'li',
+          { dataset: { comment: one.id, ref: one.item, field: one.field } },
+          h('strong', { class: 'changes-comment-item' }, codeOf(one.item)),
+          h('span', { class: 'quiet' }, ` · ${one.field ? `the ${FIELD_WORDS[one.field].toLowerCase()}` : 'the whole item'}`),
+          h('blockquote', { class: 'comment-quote', dataset: { words: 'theirs' } }, one.quoted),
+          h('p', { class: 'comment-body', dataset: { words: 'theirs' } }, one.text),
+        ),
+      ),
+    ),
+  );
+}
+
+// The items approved as they are and not sent yet, as a labelled list: their codes and titles. Nothing is said about them: the label and the list
+// are all (an item that was taken out and is agreed to go is in the list too).
+function approvedList(approved) {
+  if (!approved.length) return null;
+  return h(
+    'div',
+    { class: 'changes-approved-box' },
+    h('p', { class: 'quiet' }, `Approved: ${approved.length}`),
+    h(
+      'ul',
+      { class: 'plain changes-approved' },
+      approved.map((one) => h('li', { dataset: { ref: one.ref } }, h('strong', { class: 'changes-approved-item' }, codeOf(one.ref)), ' ', h('span', { dataset: { words: 'theirs' } }, one.title))),
+    ),
+  );
+}
+
+export function changesDialog({ plan, code, revision, comments, approved = [], onSent, onRefused }) {
+  const summary = h('textarea', { id: 'changes-summary', rows: 4, autocomplete: 'off' });
+  const { form } = dialogForm({
+    fields: [field('What should change', summary), approvedList(approved), commentsList(comments)],
+    submit: 'Ask for changes',
+    work: async () => {
+      try {
+        await call('request_plan_changes', { plan, revision, summary: summary.value, comments: sendable(comments), ...(approved.length ? { approved: approved.map((one) => one.ref) } : {}) });
+      } catch (error) {
+        if (error instanceof Refusal) onRefused();
+        throw error;
+      }
+      box.close();
+      onSent();
+    },
+  });
+  const box = openDialog(`Request changes to ${code}`, [form]);
+  box.id = 'changes-dialog';
+  summary.focus();
+  return box;
 }

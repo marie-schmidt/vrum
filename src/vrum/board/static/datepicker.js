@@ -23,6 +23,7 @@
 import { addMonths, dayOfMonth, fromDay, longMonthName, monthStart, parseDay, todayDay, weekday, weekdayName, yearOf } from './dates.js';
 import { h, put } from './dom.js';
 import { icon } from './icons.js';
+import { placePopover, popoverHost, trackAnchor } from './popover.js';
 
 const EDGE = 8; // What is kept free between the calendar and the edge of the window, in pixels.
 const GAP = 4; // What is left between the calendar and its button, in pixels.
@@ -84,26 +85,7 @@ const focusDay = (state) => state.weeks.querySelector('.dp-day[tabindex="0"]')?.
 // the window allows when there is not enough room on either side. It is inside the window on every side; a
 // window too low for the whole calendar scrolls it inside itself.
 function place(state) {
-  const { anchor, box } = state;
-  const rect = anchor.getBoundingClientRect();
-  const width = document.documentElement.clientWidth;
-  const height = window.innerHeight;
-  box.style.maxHeight = '';
-  box.style.left = '0px';
-  box.style.top = '0px';
-  const room = Math.max(0, height - 2 * EDGE);
-  const natural = box.offsetHeight;
-  const shown = Math.min(natural, room);
-  if (natural > room) box.style.maxHeight = `${room}px`;
-  let top = rect.bottom + GAP;
-  if (top + shown > height - EDGE) {
-    const above = rect.top - GAP - shown;
-    top = above >= EDGE ? above : height - EDGE - shown;
-  }
-  box.style.top = `${Math.round(top)}px`;
-  box.style.left = `${Math.round(Math.min(Math.max(rect.left, EDGE), Math.max(EDGE, width - box.offsetWidth - EDGE)))}px`;
-  box.dataset.placement = top >= rect.bottom ? 'below' : 'above';
-  state.rect = [rect.left, rect.top, rect.width, rect.height].join();
+  state.rect = placePopover(state.box, state.anchor, { gap: GAP, edge: EDGE, resetOrigin: true, clampToViewport: true });
 }
 
 function open(trigger, { value = '', label = '', anchor = trigger, onPick, onClear = null }) {
@@ -148,7 +130,7 @@ function open(trigger, { value = '', label = '', anchor = trigger, onPick, onCle
   draw(state);
   listen(state);
   // While a dialog is open the rest of the page cannot be reached, so the calendar goes inside it.
-  (trigger.closest('dialog[open]') || document.body).append(state.box);
+  popoverHost(trigger).append(state.box);
   current = state;
   trigger.setAttribute('aria-expanded', 'true');
   trigger.setAttribute('aria-controls', id);
@@ -157,36 +139,36 @@ function open(trigger, { value = '', label = '', anchor = trigger, onPick, onCle
   // The calendar goes with its button: it follows it when the page moves it. When the page draws the button
   // again (news of a change redraws the header of an item's page) it goes on from the new one, if it is the
   // same control, as the page names it (`data-focus-key`); otherwise it closes.
-  const follow = () => {
-    if (current !== state) return;
-    if (!state.trigger.isConnected) {
-      const same = state.key && document.querySelector(`[data-focus-key="${CSS.escape(state.key)}"]`);
-      if (!same) {
-        close();
-        return;
+  state.track = trackAnchor(
+    () => {
+      if (!state.trigger.isConnected) {
+        const same = state.key && document.querySelector(`[data-focus-key="${CSS.escape(state.key)}"]`);
+        if (!same) return null;
+        state.trigger = same;
+        state.anchor = same;
+        same.setAttribute('aria-expanded', 'true');
+        same.setAttribute('aria-controls', id);
+        place(state);
       }
-      state.trigger = same;
-      state.anchor = same;
-      same.setAttribute('aria-expanded', 'true');
-      same.setAttribute('aria-controls', id);
-      place(state);
-    }
-    if (!state.trigger.getClientRects().length) {
-      close();
-      return;
-    }
-    const rect = state.anchor.getBoundingClientRect();
-    if ([rect.left, rect.top, rect.width, rect.height].join() !== state.rect) place(state);
-    state.frame = requestAnimationFrame(follow);
-  };
-  state.frame = requestAnimationFrame(follow);
+      return state.anchor;
+    },
+    {
+      ignore: state.box,
+      onMove: () => {
+        if (current === state) place(state);
+      },
+      onGone: () => {
+        if (current === state) close();
+      },
+    },
+  );
 }
 
 function close({ refocus = false } = {}) {
   const state = current;
   if (!state) return;
   current = null;
-  cancelAnimationFrame(state.frame);
+  state.track?.stop();
   state.box.remove();
   const { trigger } = state;
   trigger.setAttribute('aria-expanded', 'false');

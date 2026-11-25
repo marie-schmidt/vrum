@@ -1,29 +1,25 @@
 """How the values of an export file are written, and how a problem with one is told.
 
-Shared by the current file format (exchange.py) and by the reader of older files
-(exchange_legacy.py). A file is read strictly: every value has one written form, a day is
-YYYY-MM-DD, a time says its time zone, a reference to an epic, story or task is lower case with no
-spaces, and nothing may be left over that the format does not know."""
+A file is read strictly: every value has one written form, a day is YYYY-MM-DD, a time says its
+time zone, a reference to an epic, story or task is lower case with no spaces, and nothing may be
+left over that the format does not know."""
 
-import re
 from collections.abc import Iterable
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
-from vrum.common import Refusal, parse_node_ref
+from vrum.common import Refusal, parse_iso_day, parse_node_ref
 
 # How many problems in a file are listed before "and N more".
 MOST_PROBLEMS = 20
 
 
 def _day(value: Any) -> date:
-    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            pass
+    parsed = parse_iso_day(value)
+    if parsed is not None:
+        return parsed
     raise ValueError("must be a real day written as YYYY-MM-DD")
 
 
@@ -57,10 +53,8 @@ def _a_node_ref(value: Any) -> str:
 NodeRef = Annotated[str, BeforeValidator(_a_node_ref)]
 
 Status = Literal["unconfirmed", "confirmed", "superseded", "withdrawn"]
-# The status of a decision, fact or note in a file of version 3 or earlier.
-LegacyStatus = Literal["active", "superseded", "withdrawn"]
-# Who made something, and as what. `unknown` is only what a file written before this was recorded
-# loads as: nothing that is made now has it.
+# Who made something, and as what. `unknown` is only for historical imports that carried no kind:
+# nothing that is made now has it.
 ActorKind = Literal["person", "agent", "unknown"]
 
 

@@ -36,7 +36,7 @@ export function plainHttps(address, { pullRequest = false } = {}) {
 }
 
 // What was said: an object with only the words that are there, or null when there are none.
-export function saidOf(source) {
+function saidOf(source) {
   if (!source) return null;
   const said = {};
   for (const field of WHERE_FIELDS) {
@@ -46,7 +46,7 @@ export function saidOf(source) {
   return Object.keys(said).length ? said : null;
 }
 
-export const shortCommit = (commit) => String(commit).slice(0, 7);
+const shortCommit = (commit) => String(commit).slice(0, 7);
 
 const link = (href, children, props = {}) => h('a', { class: 'external where-link', href, target: '_blank', rel: 'noopener noreferrer', ...props }, children);
 
@@ -63,7 +63,7 @@ function pullRequestOf(address) {
 }
 
 // What the run is called: "run-2026-11-22-a (claude-code)", or whichever of the two was said.
-export function runWords(source) {
+function runWords(source) {
   const said = saidOf(source);
   if (!said || (!said.run_label && !said.client_name)) return '';
   if (said.run_label && said.client_name) return `${said.run_label} (${said.client_name})`;

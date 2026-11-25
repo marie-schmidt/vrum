@@ -5,15 +5,23 @@
 // new tab. `[[story:12]]` and the other references become links with the item's current title.
 
 import { h } from './dom.js';
-import { REFERENCE_PATTERN, renderReference } from './references.js';
 
 // -- inline: code, references, links, emphasis ------------------------------------------------------
 
-// Built on first use, because references.js (which gives the pattern) and this file need each other.
+let refPattern = null;
+let formatReference = (kind, number) => `[[${kind}:${number}]]`;
 let rules = null;
+
+// Registered once by references.js so markdown.js does not import references.js in a cycle.
+export function useReferences(pattern, render) {
+  refPattern = pattern;
+  formatReference = render;
+  rules = null;
+}
+
 const inlineRules = () => (rules ??= [
   { name: 'code', re: /`([^`\n]+)`/g },
-  { name: 'reference', re: new RegExp(REFERENCE_PATTERN, 'g') },
+  ...(refPattern ? [{ name: 'reference', re: new RegExp(refPattern, 'g') }] : []),
   { name: 'image', re: /!\[([^\]\n]*)\]\(([^)\s]*)\)/g },
   { name: 'link', re: /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g },
   { name: 'url', re: /https?:\/\/[^\s<>()[\]]+/g },
@@ -48,7 +56,7 @@ export function inline(text, links = true) {
         out.push(h('code', {}, found[1]));
         break;
       case 'reference':
-        out.push(renderReference(found[1], found[2]));
+        out.push(formatReference(found[1], found[2]));
         break;
       case 'image':
         out.push(found[0]); // shown as the characters it is, and never loaded

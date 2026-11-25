@@ -27,10 +27,10 @@ from playwright.async_api import (
     Request,
     Response,
     Route,
-    async_playwright,
     expect,
 )
 
+from tests.browser_pool import shared_browser
 from tests.helpers import all_nodes, ok, ref_from_code, ref_of, reindexed, run_sql, unique_word
 from tests.world import SESSION_COOKIE, Person, Project, Reply, project_at, the_project
 
@@ -189,10 +189,9 @@ async def browser_page(
     `person` (an editor or a viewer who joined the project) it starts signed in as them instead;
     with neither it is signed out and shows the sign-in. `name` is what the board records changes
     with. `keep_bodies` keeps the text of every response, for a test that searches them all."""
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
+    async with shared_browser() as browser:
+        context = await browser.new_context(viewport=VIEWPORT)  # type: ignore[arg-type]
         try:
-            context = await browser.new_context(viewport=VIEWPORT)  # type: ignore[arg-type]
             if token is not None or person is not None:
                 signed = (person or project_at(board).owner).sign_in_again()
                 await context.add_cookies(
@@ -207,10 +206,7 @@ async def browser_page(
                         }
                     ]
                 )
-            if name is not None:
-                await context.add_init_script(
-                    f"localStorage.setItem('vrum.actor', {json.dumps(name)});"
-                )
+            _ = name
             page = await context.new_page()
             watched = Watched(page=page, board=board)
 
@@ -243,7 +239,7 @@ async def browser_page(
             )
             yield watched
         finally:
-            await browser.close()
+            await context.close()
 
 
 async def hold_back_news(page: Page) -> None:

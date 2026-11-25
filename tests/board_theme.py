@@ -7,7 +7,6 @@ through the public `window.vrumTheme` and the controls a person would use."""
 import asyncio
 import base64
 import contextlib
-import json
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -22,10 +21,10 @@ from playwright.async_api import (
     Page,
     Response,
     Route,
-    async_playwright,
 )
 
 from tests.board_helpers import SLOW, VIEWPORT, Watched, open_account_menu
+from tests.browser_pool import shared_browser
 from tests.world import SESSION_COOKIE, Project, project_at
 from vrum.board import STATIC
 
@@ -215,13 +214,12 @@ async def themed_page(
     every page of the context is kept in `requests`, so that a test can see that none of them
     left the server. `name` is what the board records changes with. `scripts` run before anything
     of each page of the context does."""
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
+    async with shared_browser() as browser:
+        context = await browser.new_context(
+            viewport=viewport or VIEWPORT,  # type: ignore[arg-type]
+            color_scheme=scheme,  # type: ignore[arg-type]
+        )
         try:
-            context = await browser.new_context(
-                viewport=viewport or VIEWPORT,  # type: ignore[arg-type]
-                color_scheme=scheme,  # type: ignore[arg-type]
-            )
             if signed_in:
                 person = project_at(board).owner.sign_in_again()
                 await context.add_cookies(
@@ -236,10 +234,7 @@ async def themed_page(
                         }
                     ]
                 )
-            if name is not None:
-                await context.add_init_script(
-                    f"localStorage.setItem('vrum.actor', {json.dumps(name)});"
-                )
+            _ = name
             for script in scripts:
                 await context.add_init_script(script)
             page = await context.new_page()
@@ -268,7 +263,7 @@ async def themed_page(
             )
             yield watched
         finally:
-            await browser.close()
+            await context.close()
 
 
 _LOOK = """() => {

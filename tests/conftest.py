@@ -1,15 +1,30 @@
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
+from anyio.pytest_plugin import get_runner
 from mcp import Client
 
+from tests.browser_pool import close_shared_browser, enable_browser_pool
 from tests.helpers import connect, the_token
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _shared_browser_session() -> Iterator[None]:
+    """Keep one session-scoped anyio loop and lazily shared Chromium process for browser tests.
+    Sync so non-anyio tests (including sync Playwright and unit tests) never trip pytest's
+    sync-depending-on-async-fixture guard."""
+    with get_runner("asyncio", {}) as runner:
+        runner.run_test(enable_browser_pool, {})
+        try:
+            yield
+        finally:
+            runner.run_test(close_shared_browser, {})
 
 
 @pytest.fixture

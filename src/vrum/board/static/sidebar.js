@@ -35,7 +35,7 @@ let opener = null; // what had the focus before it opened, to give it back
 
 // -- opening and closing on a narrow window -------------------------------------------------------------
 
-export const sidebarIsOpen = () => aside.classList.contains('open');
+const sidebarIsOpen = () => aside.classList.contains('open');
 
 export function openSidebar() {
   if (aside.hidden || sidebarIsOpen()) return;
@@ -47,7 +47,7 @@ export function openSidebar() {
   document.getElementById('sidebar-close')?.focus();
 }
 
-export function closeSidebar({ restore = true } = {}) {
+function closeSidebar({ restore = true } = {}) {
   if (!sidebarIsOpen()) return;
   aside.classList.remove('open');
   scrim.hidden = true;

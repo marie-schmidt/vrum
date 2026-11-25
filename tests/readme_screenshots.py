@@ -405,10 +405,7 @@ async def capture(base: str, person: Person, project_id: int, ids: dict[str, int
                     }
                 ]
             )
-            await context.add_init_script(
-                f"localStorage.setItem('vrum.actor', {OWNER!r});"
-                "localStorage.setItem('vrum.theme', 'light');"
-            )
+            await context.add_init_script("localStorage.setItem('vrum.theme', 'light');")
             page = await context.new_page()
             board = f"{base}/board/p/{project_id}"
 

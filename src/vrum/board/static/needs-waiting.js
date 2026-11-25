@@ -4,7 +4,7 @@
 // asked for changes and how long ago. It is not counted anywhere: not in the sidebar's number, not in "Reviewed N of M", not in the groups'
 // counts that add up to the list.
 
-import { Refusal, call, callAll } from './api.js';
+import { Refusal, callAll } from './api.js';
 import { waitedWords } from './asks.js';
 import { viewLink } from './ctx.js';
 import { h, plural } from './dom.js';
@@ -16,14 +16,14 @@ const MOST_NAMED = 10; // the plans that are named; there are rarely more than a
 // The plans in this state, each with when the changes were asked for and by whom: [{ id, title, revision, asked, by, by_kind }]. Oldest first.
 export async function readWaiting() {
   const found = await callAll('list_plans', { status: 'changes_requested' });
-  return Promise.all(
-    found.slice(0, MOST_NAMED).map(async (plan) => {
-      // The request is the plan's last feedback; a plan read whole says when it was given and by whom.
-      const whole = (await call('list_plans', { plan: plan.id })).items[0];
-      const last = whole.feedback && whole.feedback.length ? whole.feedback[whole.feedback.length - 1] : null;
-      return { id: plan.id, title: plan.title, revision: plan.revision, asked: last ? last.at : plan.revised_at, by: last ? last.by : null, by_kind: last ? last.by_kind : null };
-    }),
-  );
+  return found.slice(0, MOST_NAMED).map((plan) => ({
+    id: plan.id,
+    title: plan.title,
+    revision: plan.revision,
+    asked: plan.changes_requested_at || plan.revised_at,
+    by: plan.changes_requested_by || null,
+    by_kind: plan.changes_requested_by_kind || null,
+  }));
 }
 
 // The same, and nothing when the server will not say (the board says on its own when it cannot reach the server).

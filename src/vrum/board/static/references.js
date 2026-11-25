@@ -9,8 +9,8 @@ import { callPaged } from './api.js';
 import { itemLink } from './ctx.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
-import { plainText } from './forms.js';
 import { KIND, isNodeKind, itemCode, kindIcon, nodeRef, parseItemRef, statusLabel } from './labels.js';
+import { plainText, useReferences } from './markdown.js';
 import { ensure, headlineOf, store, titleOf } from './store.js';
 
 // The same pattern as the server's (src/vrum/references.py); a test keeps the two equal.
@@ -33,13 +33,6 @@ export const kindWords = (type) => KIND[type] || { label: type };
 // something needs them (a text that names one, the pick-list, the quick switcher).
 export function loadTargets() {
   return Promise.all([ensure('rules'), ensure('notes')]);
-}
-
-// Reads them, if any of these texts names something that is not held already (epics, stories and
-// tasks always are).
-export function needTargets(...texts) {
-  const names = new RegExp(REFERENCE_PATTERN.replace('(epic|story|task|rule|', '(rule|'));
-  return texts.some((text) => names.test(String(text ?? ''))) ? loadTargets() : Promise.resolve();
 }
 
 const maps = new WeakMap();
@@ -189,3 +182,6 @@ export function mentionedInDetails(kind, number) {
   });
   return details;
 }
+
+// Register reference rendering with markdown.js without a circular import.
+useReferences(REFERENCE_PATTERN, renderReference);

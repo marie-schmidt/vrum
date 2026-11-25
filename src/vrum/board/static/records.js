@@ -33,7 +33,7 @@ export function openRecord(kind, number) {
 // What a note says about its confirmation: who confirmed it and when (or who took it back) and what the person said. The status chip
 // beside the title is what changes it (status-menu.js): its menu opens the dialog that asks who reviewed it and, to
 // un-confirm, their words. `history` is the note's events, which hold those words.
-export function confirmationNote(record, history = []) {
+function confirmationNote(record, history = []) {
   const active = inForce(record);
   const last = [...history].reverse().find((event) => event.action === 'note_confirmed' || event.action === 'note_unconfirmed') || null;
   const words = last?.after?.quote;
@@ -239,7 +239,7 @@ export function releaseDialog(work, done = async () => {}) {
 }
 
 // "Add a note" about whatever is open: the dialog starts with it chosen.
-export function recordButtons(concern) {
+function recordButtons(concern) {
   if (!can('write')) return null;
   return h('div', { class: 'actions-row record-buttons' }, button('Add a note…', () => addNoteDialog(concern), 'add-note', 'plus'));
 }

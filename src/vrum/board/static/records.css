@@ -19,7 +19,6 @@
 .markdown hr { margin: var(--space-3) 0; }
 .markdown .md-heading { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-md); }
 .markdown del { color: var(--text-2); }
-.inline-markdown p { margin: 0; }
 
 .reference { font-weight: 600; }
 .reference .icon, .record-link .icon, .item-link .icon, .mention-link .icon { margin-right: 0.3em; }
@@ -51,8 +50,8 @@ select:has(> option.choose:checked) { color: var(--text-2); }
    pointed at: the accent is kept for what matters most. Lists of links have no line until then. */
 .card-page a, .ctx-section a { color: var(--text); text-decoration-color: var(--border-strong); }
 .card-page a:hover, .ctx-section a:hover { color: var(--accent-text); text-decoration-color: currentColor; }
-.mentions a, .similar-item a, .record-title, .record-heading a, .gv-connections a { text-decoration: none; }
-.mentions a:hover, .similar-item a:hover, .record-heading a:hover { text-decoration: underline; }
+.mentions a, .similar-item a, .record-title, .gv-connections a { text-decoration: none; }
+.mentions a:hover, .similar-item a:hover { text-decoration: underline; }
 
 /* -- Forms in a page ---------------------------------------------------------------------------------------- */
 
@@ -234,9 +233,6 @@ select:has(> option.choose:checked) { color: var(--text-2); }
 .record .record-chips { margin-bottom: var(--space-2); }
 .record-title { color: var(--text); font-weight: 600; text-decoration: none; }
 .record-title:hover { color: var(--accent-text); text-decoration: underline; }
-.record-heading { margin: var(--space-1) 0; font-size: var(--text-md); }
-.record-heading a { color: inherit; text-decoration: none; }
-.record-heading a:hover { color: var(--accent-text); text-decoration: underline; }
 .record .quiet, .record .who { font-size: var(--text-sm); }
 .record .concerns { color: var(--text-2); }
 
@@ -286,9 +282,6 @@ input[list]::-webkit-calendar-picker-indicator { display: none !important; }
 
 #context-list { display: grid; gap: var(--space-6); min-width: 0; }
 .ctx-section { min-width: 0; }
-.ctx-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
-.ctx-head > h2 { margin: 0; font-size: var(--text-lg); }
-.ctx-head .spacer { flex: 1; }
 .ctx-count { color: var(--text-2); font-size: var(--text-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
 .ctx-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2) var(--space-4); margin: 0; padding: var(--space-3) 0; border-top: var(--border-w) solid var(--border); border-bottom: var(--border-w) solid var(--border); }
 .ctx-field { display: grid; gap: 2px; min-width: 0; }
@@ -316,7 +309,6 @@ input[list]::-webkit-calendar-picker-indicator { display: none !important; }
 .ctx-row.requirement.status-dropped { color: var(--text-2); }
 .ctx-row .record-title, .ctx-row .gv-open { display: inline; color: var(--text); font-weight: 600; text-align: left; text-decoration: none; overflow-wrap: anywhere; }
 .ctx-row .gv-open:hover, .ctx-row .record-title:hover { color: var(--accent-text); text-decoration: underline; }
-.ctx-row .record-second { margin: var(--space-1) 0 0; color: var(--text-2); font-size: var(--text-sm); }
 .ctx-row .row-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; margin: var(--space-1) 0 0; color: var(--text-2); font-size: var(--text-sm); }
 .ctx-row .row-actions { margin: var(--space-2) 0 0; }
 
@@ -333,9 +325,7 @@ input[list]::-webkit-calendar-picker-indicator { display: none !important; }
   .ctx-row > .record-chips { grid-column: 1 / 4; grid-row: 1; margin: 0; }
   .ctx-row > .record-title { grid-column: 1 / 4; grid-row: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; justify-self: start; max-width: 100%; }
   .ctx-row > .gv-open { grid-column: 1 / 4; grid-row: 2; justify-self: start; max-width: 100%; }
-  .ctx-row > .record-second, .ctx-row > .row-text { grid-column: 1; grid-row: 3; margin: 0; min-width: 0; }
-  .ctx-row > .record-second { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ctx-row > .row-text { -webkit-line-clamp: 2; line-clamp: 2; }
+  .ctx-row > .row-text { grid-column: 1; grid-row: 3; margin: 0; min-width: 0; -webkit-line-clamp: 2; line-clamp: 2; }
   .ctx-row > .row-text > :first-child { margin-top: 0; }
   .ctx-row > .row-text > :last-child { margin-bottom: 0; }
   .ctx-row > .row-actions { grid-column: 4; grid-row: 1 / span 3; align-self: center; margin: 0 0 0 var(--space-5); display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }

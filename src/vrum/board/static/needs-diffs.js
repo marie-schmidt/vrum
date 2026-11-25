@@ -19,7 +19,7 @@ import { includeSlot, leftOut } from './placement-picks.js';
 import { store } from './store.js';
 
 // A plan with more items than this folds each story's tasks behind a line that says how many.
-export const FOLD_ABOVE = 40;
+const FOLD_ABOVE = 40;
 
 const titleOf = (ref, fallback = '') => store.nodes.get(ref)?.title ?? fallback;
 
@@ -71,7 +71,7 @@ function flagChip(flag) {
 
 // What a plan's item carries on its line: its size (or that it has none), a priority that is not Normal, its dates, what it needs
 // first and its other links, and how many acceptance criteria it has.
-export function planMeta(item, children, flags, { plain = false } = {}) {
+function planMeta(item, children, flags, { plain = false } = {}) {
   const node = { kind: item.kind, status: 'new', size: item.size, progress_total: children };
   // An item with no size says so once: the flag is the words, so the faint sign is left off.
   const unsized = flags.some((one) => one.check === 'unsized');
@@ -168,7 +168,7 @@ export function addsWords(tree) {
 
 // What exists already that the plan hangs under or points at: lines that stay. Made again each time it is asked for: the split layout
 // draws them on both sides.
-export const existingLines = (context) =>
+const existingLines = (context) =>
   context.map((one) =>
     diffLine('.', [link(one.ref, one.title), ' ', h('span', { class: 'diff-why quiet' }, one.why === 'parent' ? 'the plan hangs under it' : 'the plan points to it')], { ref: one.ref, depth: 0, className: 'diff-context', data: { context: one.why } }),
   );

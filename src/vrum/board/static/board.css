@@ -281,7 +281,6 @@ a.side-item:hover, button.side-item:hover { background: var(--surface-3); text-d
 .page-header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-3) var(--space-5); margin-bottom: var(--space-5); }
 .page-title { flex: 1 1 18rem; min-width: 0; }
 .page-title h1 { overflow-wrap: anywhere; }
-.page-sub { margin: var(--space-1) 0 0; color: var(--text-2); }
 .page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 /* A header with only the page's actions (its title is hidden, for screen readers: the top bar names the page): they sit on the right. */
 .page-header.actions-only { justify-content: flex-end; align-items: center; margin-bottom: 0; }

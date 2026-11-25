@@ -6,8 +6,10 @@
 import { itemLink, isMe } from './ctx.js';
 import { h, plural } from './dom.js';
 import { icon } from './icons.js';
-import { codeOf } from './labels.js';
+import { codeOf, kindIcon, parseNodeRef, statusLabel } from './labels.js';
+import { STATE_WORDS, nearPercent } from './needs-assist.js';
 import { FIELD_WORDS, isFeedbackOpen, rememberFeedbackOpen } from './plan-comments.js';
+import { store } from './store.js';
 
 // -- what was asked for before ----------------------------------------------------------------------------
 
@@ -140,5 +142,83 @@ export function lostBlock(lost, { onDismiss }) {
       ),
     ),
     h('button', { type: 'button', class: 'ghost icon-only small notice-close', onclick: onDismiss }, icon('close', { size: 14 }), h('span', { class: 'sr-only' }, 'Dismiss')),
+  );
+}
+
+// -- checks of a waiting plan (M50) ---------------------------------------------------------------------------
+
+const CHECK_LETTERS = { E: 'epic', S: 'story', T: 'task' };
+const CHECK_SIGNS = { warning: 'alert', failed: 'blocked', unavailable: 'info' };
+
+function linkedCodes(words) {
+  const out = [];
+  let from = 0;
+  for (const found of words.matchAll(/\b([EST])-([1-9][0-9]{0,17})\b/g)) {
+    const ref = `${CHECK_LETTERS[found[1]]}:${found[2]}`;
+    out.push(words.slice(from, found.index));
+    out.push(store.nodes.has(ref) ? itemLink(ref, { class: 'item-link', dataset: { ref } }, found[0]) : found[0]);
+    from = found.index + found[0].length;
+  }
+  out.push(words.slice(from));
+  return out;
+}
+
+function relatedItem(one) {
+  const found = parseNodeRef(one.ref);
+  return h(
+    'li',
+    { class: 'check-related-item', dataset: { ref: one.ref, similarity: one.similarity ?? null } },
+    itemLink(one.ref, { class: 'item-link', dataset: { ref: one.ref } }, found ? kindIcon(found.kind, 14) : null, h('span', { class: 'item-code' }, codeOf(one.ref)), ' ', h('span', { dataset: { words: 'theirs' } }, one.title)),
+    h('span', { class: 'check-related-status quiet' }, statusLabel(one.status)),
+    one.similarity === null || one.similarity === undefined ? null : h('span', { class: 'check-related-similarity' }, `${nearPercent(one.similarity)}% alike`),
+  );
+}
+
+function checkFinding(one) {
+  return h(
+    'li',
+    { class: 'check-finding', dataset: { items: one.items.join(' ') } },
+    h('p', { class: 'check-finding-words', dataset: { words: 'theirs' } }, linkedCodes(one.words)),
+    one.related.length ? h('ul', { class: 'plain check-related' }, one.related.map(relatedItem)) : null,
+  );
+}
+
+function checkLine(check) {
+  return h(
+    'li',
+    { class: 'check-line', dataset: { check: check.kind, state: check.state } },
+    h('p', { class: 'check-head' }, icon(CHECK_SIGNS[check.state] ?? 'info', { size: 16 }), h('span', { class: 'check-state' }, STATE_WORDS[check.state] ?? check.state), h('span', { class: 'check-words', dataset: { words: 'theirs' } }, linkedCodes(check.words))),
+    check.findings.length ? h('ul', { class: 'plain check-findings' }, check.findings.map(checkFinding)) : null,
+  );
+}
+
+export function checksBlock(change, assist) {
+  if (!assist.checks) return null;
+  return h(
+    'section',
+    { class: 'change-checks', 'aria-label': `Checks on ${change.code}`, dataset: { open: String(assist.open.length) } },
+    assist.open.length ? h('ul', { class: 'plain check-lines' }, assist.open.map(checkLine)) : null,
+    assist.ok ? h('p', { class: 'check-ok quiet' }, icon('check', { size: 14 }), assist.ok.map((part) => h('span', { class: 'check-ok-part', dataset: { check: part } }, part))) : null,
+  );
+}
+
+// A compact strip on a plan card right above Approve, so warnings are visible on the card itself before anyone presses Approve.
+export function cardChecksStrip(change, assist) {
+  if (!assist || !assist.open || !assist.open.length) return null;
+  return h(
+    'div',
+    { class: 'card-checks', 'aria-label': `Warnings on ${change.code}` },
+    h(
+      'ul',
+      { class: 'plain card-checks-list' },
+      assist.open.map((check) =>
+        h(
+          'li',
+          { class: 'card-check-row', dataset: { check: check.kind, state: check.state } },
+          icon(CHECK_SIGNS[check.state] ?? 'info', { size: 14 }),
+          h('span', { class: 'card-check-words', dataset: { words: 'theirs' } }, linkedCodes(check.words)),
+        ),
+      ),
+    ),
   );
 }

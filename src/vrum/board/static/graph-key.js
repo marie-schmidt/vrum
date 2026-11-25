@@ -81,7 +81,7 @@ export function startedChip() {
 }
 
 // A short line of the kind a link is drawn with, with an arrowhead where the order matters.
-export function lineChip(type, words, title = null) {
+function lineChip(type, words, title = null) {
   const arrow = type === 'needs_first' || type === 'supersedes';
   const svg = s('svg', { class: 'graph-x-sample', width: 40, height: 12, viewBox: '0 0 40 12', 'aria-hidden': 'true' });
   svg.append(s('line', { class: `graph-st-link t-${type} is-key`, x1: 2, y1: 6, x2: arrow ? 32 : 38, y2: 6 }));
@@ -90,7 +90,7 @@ export function lineChip(type, words, title = null) {
 }
 
 // The kinds of link of the Structure picture.
-export const LINK_KEY = [
+const LINK_KEY = [
   ['needs_first', 'Needs first (the arrow shows the order)'],
   ['relates_to', 'Related'],
   ['duplicates', 'Duplicate'],

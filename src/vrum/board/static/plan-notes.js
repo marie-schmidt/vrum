@@ -37,7 +37,7 @@ function row(kind, body, { depth, closed, dataset }) {
 }
 
 // One comment of earlier feedback: the words it was about, what was said, and by whom, on which revision and when.
-export function threadRow(thread, { depth, closed = null, asOf = null }) {
+function threadRow(thread, { depth, closed = null, asOf = null }) {
   const { comment } = thread;
   return row(
     'diff-thread',

@@ -58,22 +58,57 @@ class IndexSnapshot:
         return self.built and self.model == model
 
 
-async def snapshot(conn: AsyncConnection, model: str | None) -> IndexSnapshot:
-    """Read the state of the index. With no embedding service configured (`model` is None) the
-    index is not built and nothing is waiting, because nothing could be done about it."""
-    if model is None:
-        return IndexSnapshot(built=False, model=None, dimensions=None, waiting=0)
+async def _index_info(conn: AsyncConnection) -> dict[str, object] | None:
+    """The index table's model and dimensions when both index tables exist, else None."""
     exists = await fetch_one(
         conn,
         "SELECT to_regclass('semantic_index') IS NOT NULL "
         "AND to_regclass('semantic_index_info') IS NOT NULL AS built",
     )
     assert exists is not None
-    info = (
-        await fetch_one(conn, "SELECT model, dimensions FROM semantic_index_info")
-        if exists["built"]
-        else None
+    if not exists["built"]:
+        return None
+    return await fetch_one(conn, "SELECT model, dimensions FROM semantic_index_info")
+
+
+async def _watermark(
+    conn: AsyncConnection, model: str
+) -> tuple[str, int, int, int, int, int, int, int] | None:
+    """Cheap digest of whether any embeddable row or the index changed, avoiding full-body MD5
+    hashing across all projects on idle ticks. Every update to nodes/rules increments version (by
+    trigger) and notes are immutable."""
+    info = await _index_info(conn)
+    if info is None or info["model"] != model:
+        return None
+    row = await fetch_one(
+        conn,
+        "SELECT (SELECT count(*) FROM semantic_index) AS indexed_n, "
+        "(SELECT count(*) FROM nodes) AS nodes_n, "
+        "(SELECT coalesce(sum(version), 0) FROM nodes) AS nodes_v, "
+        "(SELECT count(*) FROM rules) AS rules_n, "
+        "(SELECT coalesce(sum(version), 0) FROM rules) AS rules_v, "
+        "(SELECT count(*) FROM notes) AS notes_n, "
+        "(SELECT coalesce(max(id), 0) FROM notes) AS notes_id",
     )
+    assert row is not None
+    return (
+        str(info["model"]),
+        int(row["indexed_n"]),
+        int(row["nodes_n"]),
+        int(row["nodes_v"]),
+        int(row["rules_n"]),
+        int(row["rules_v"]),
+        int(row["notes_n"]),
+        int(row["notes_id"]),
+    )
+
+
+async def snapshot(conn: AsyncConnection, model: str | None) -> IndexSnapshot:
+    """Read the state of the index. With no embedding service configured (`model` is None) the
+    index is not built and nothing is waiting, because nothing could be done about it."""
+    if model is None:
+        return IndexSnapshot(built=False, model=None, dimensions=None, waiting=0)
+    info = await _index_info(conn)
     if info is None or info["model"] != model:
         # Nothing built with this model yet, so every embeddable item is waiting.
         row = await fetch_one(conn, "SELECT count(*) AS waiting FROM index_source")
@@ -90,8 +125,8 @@ async def snapshot(conn: AsyncConnection, model: str | None) -> IndexSnapshot:
     assert row is not None
     return IndexSnapshot(
         built=built,
-        model=info["model"] if info else None,
-        dimensions=info["dimensions"] if info else None,
+        model=str(info["model"]) if info else None,
+        dimensions=int(str(info["dimensions"])) if info else None,
         waiting=int(row["waiting"]),
     )
 
@@ -151,6 +186,7 @@ class Indexer:
         # Passes run one at a time: a request for a reindex waits for the one already running.
         self._lock = asyncio.Lock()
         self._last_run: IndexRun | None = None
+        self._clean_mark: tuple[str, int, int, int, int, int, int, int] | None = None
 
     @property
     def client(self) -> EmbeddingClient | None:
@@ -233,6 +269,7 @@ class Indexer:
         client = self.require_client()
         assert self._settings is not None
         async with self._lock:
+            self._clean_mark = None
             probe = await client.embed(["dimension probe"])
             dimensions = len(probe[0])
             if dimensions > _MOST_DIMENSIONS:
@@ -265,17 +302,7 @@ class Indexer:
         """Make sure the index tables exist for this model and vector size, dropping and
         rebuilding them if they were built for another. Says why if it built them."""
         async with self._database.admin_transaction() as conn:
-            exists = await fetch_one(
-                conn,
-                "SELECT to_regclass('semantic_index') IS NOT NULL "
-                "AND to_regclass('semantic_index_info') IS NOT NULL AS built",
-            )
-            assert exists is not None
-            info = (
-                await fetch_one(conn, "SELECT model, dimensions FROM semantic_index_info")
-                if exists["built"]
-                else None
-            )
+            info = await _index_info(conn)
             if info is not None and (info["model"], info["dimensions"]) == (model, dimensions):
                 return None
             if info is None:
@@ -386,7 +413,12 @@ class Indexer:
             delay = interval
             try:
                 async with self._reading(None) as conn:
-                    waiting = (await snapshot(conn, self._client.model)).waiting
+                    mark = await _watermark(conn, self._client.model)
+                    if mark is not None and mark == self._clean_mark:
+                        waiting = 0
+                    else:
+                        waiting = (await snapshot(conn, self._client.model)).waiting
+                        self._clean_mark = mark if waiting == 0 else None
                 if waiting:
                     report = await self.reindex()
                     if report.error or report.failed_total:

@@ -19,9 +19,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from mcp import Client
-from playwright.async_api import BrowserContext, Page, async_playwright, expect
+from playwright.async_api import BrowserContext, Page, expect
 
 from tests.board_helpers import SLOW, Watched, board_url, item_address, made, tree_expand
+from tests.browser_pool import shared_browser
 from tests.helpers import (
     confirm_on_board,
     connect,
@@ -354,18 +355,17 @@ async def layout_context(
     """A headless browser of this size and theme on a project's board. The theme is the person's
     own saved choice (as the Appearance control keeps it), so the page is drawn in it from the
     first frame. Signed in, it is the project's owner with a session of its own."""
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
+    async with shared_browser() as browser:
+        context = await browser.new_context(
+            viewport={"width": screen.width, "height": screen.height},
+            device_scale_factor=screen.scale,
+            color_scheme="dark" if theme == "dark" else "light",
+            reduced_motion="reduce" if reduced_motion else "no-preference",
+            has_touch=touch,
+            # Times are written the way American English writes them.
+            locale="en-US",
+        )
         try:
-            context = await browser.new_context(
-                viewport={"width": screen.width, "height": screen.height},
-                device_scale_factor=screen.scale,
-                color_scheme="dark" if theme == "dark" else "light",
-                reduced_motion="reduce" if reduced_motion else "no-preference",
-                has_touch=touch,
-                # Times are written the way American English writes them.
-                locale="en-US",
-            )
             if signed_in:
                 person = project_at(board).owner.sign_in_again()
                 await context.add_cookies(
@@ -382,8 +382,8 @@ async def layout_context(
                 )
             await context.add_init_script(
                 f"localStorage.setItem('vrum.theme', {json.dumps(theme)});"
-                f"localStorage.setItem('vrum.actor', {json.dumps(name)});"
             )
+            _ = name
             page = await context.new_page()
             watched = Watched(page=page, board=board)
             page.on("request", lambda request: watched.requests.append(request.url))
@@ -402,7 +402,7 @@ async def layout_context(
             )
             yield watched, context
         finally:
-            await browser.close()
+            await context.close()
 
 
 @asynccontextmanager

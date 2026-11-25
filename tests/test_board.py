@@ -9,7 +9,17 @@ from typing import Any
 
 import pytest
 
-from vrum.board import BOARD_TOOLS, READ_TOOLS, SECURITY_HEADERS, STATIC, WRITE_TOOLS, open_paths
+from vrum.board import (
+    _FILES,
+    BOARD_TOOLS,
+    BUNDLE_CSS,
+    READ_TOOLS,
+    SECURITY_HEADERS,
+    STATIC,
+    WRITE_TOOLS,
+    _matches_etag,
+    open_paths,
+)
 from vrum.board.tools import AREAS, TOOL_PLACES, AgentsOnly, OnTheBoard, ToolPlace
 from vrum.config import ConfigError, Settings
 from vrum.server import create_server
@@ -285,3 +295,23 @@ def test_no_generation_tool_exists_and_the_board_neither_calls_nor_names_one() -
     # Notes are written, replaced, withdrawn and confirmed through the board's operations.
     assert {"add_note", "supersede_note", "withdraw_note", "link_note"} <= set(WRITE_TOOLS)
     assert "set_confirmation" in WRITE_TOOLS
+
+
+def test_static_files_carry_etags_and_match_if_none_match() -> None:
+    _, _, etag = _FILES["/board/app.js"]
+    assert etag.startswith('"') and etag.endswith('"')
+    assert _matches_etag(etag, etag)
+    assert _matches_etag(f"W/{etag}", etag)
+    assert _matches_etag(f'"other", {etag}', etag)
+    assert _matches_etag("*", etag)
+    assert not _matches_etag('"other"', etag)
+    assert not _matches_etag(None, etag)
+
+
+def test_board_bundle_css_includes_every_stylesheet_after_tokens() -> None:
+    on_disk = {path.name for path in STATIC.glob("*.css") if path.name != "tokens.css"}
+    assert set(BUNDLE_CSS) == on_disk
+    assert len(BUNDLE_CSS) == len(on_disk)
+    assert "/board/board-bundle.css" in open_paths()
+    body, content_type, _ = _FILES["/board/board-bundle.css"]
+    assert content_type == "text/css; charset=utf-8" and len(body) > 0

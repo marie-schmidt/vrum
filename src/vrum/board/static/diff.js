@@ -10,7 +10,7 @@ import { h, plural } from './dom.js';
 import { icon } from './icons.js';
 
 // How many lines of a body are shown before "Show N more lines".
-export const MOST_LINES = 6;
+const MOST_LINES = 6;
 
 const WORDS = { '+': 'added', '-': 'removed', '.': 'existing', changed: 'changed' };
 

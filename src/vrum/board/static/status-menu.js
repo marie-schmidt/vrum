@@ -24,6 +24,7 @@ import { calendarButton } from './datepicker.js';
 import { day, h } from './dom.js';
 import { icon } from './icons.js';
 import { PRIORITIES, PRIORITY, REQUIREMENT_STATUS, REQUIREMENT_STATUSES, SETTABLE, SIZES, SIZE_POINTS, SIZE_WORDS, STATUS, noteStatusLook, pointsWords, priorityIcon, requirementStatusLook, sizeWords, statusIcon } from './labels.js';
+import { placePopover, popoverHost, trackAnchor, typeAheadIndex, usableIndex } from './popover.js';
 import { store, sync } from './store.js';
 
 // What a message calls an epic, story or task: its name in curly quotes, never a code.
@@ -92,25 +93,7 @@ function setActive(state, index, { scroll = true } = {}) {
 // Where the menu goes: under its chip, as wide as that at least, and above it when there is not enough room
 // below. It never leaves the window; a long list scrolls inside itself.
 function place(state) {
-  const { trigger, list } = state;
-  const box = trigger.getBoundingClientRect();
-  const width = document.documentElement.clientWidth;
-  const height = window.innerHeight;
-  list.style.minWidth = `${Math.max(Math.ceil(box.width), MIN_WIDTH)}px`;
-  list.style.maxHeight = '';
-  list.style.left = '0px';
-  list.style.top = '0px';
-  const natural = list.offsetHeight;
-  const below = height - box.bottom - GAP - EDGE;
-  const above = box.top - GAP - EDGE;
-  const under = natural <= below || below >= above;
-  const room = Math.max(0, under ? below : above);
-  if (natural > room) list.style.maxHeight = `${room}px`;
-  const shown = Math.min(natural, room);
-  list.style.top = `${Math.round(under ? box.bottom + GAP : box.top - GAP - shown)}px`;
-  list.style.left = `${Math.round(Math.min(Math.max(box.left, EDGE), Math.max(EDGE, width - list.offsetWidth - EDGE)))}px`;
-  list.dataset.placement = under ? 'below' : 'above';
-  state.box = [box.left, box.top, box.width, box.height].join();
+  state.box = placePopover(state.list, state.trigger, { gap: GAP, edge: EDGE, minWidth: MIN_WIDTH, matchWidth: true, resetOrigin: true });
 }
 
 function open(trigger, options, onPick, label) {
@@ -121,7 +104,7 @@ function open(trigger, options, onPick, label) {
   draw(state, typeof options === 'function' ? options() : options);
   listen(state);
   // While a dialog is open the rest of the page cannot be reached, so the menu goes inside it.
-  (trigger.closest('dialog[open]') || document.body).append(list);
+  popoverHost(trigger).append(list);
   current = state;
   trigger.setAttribute('aria-expanded', 'true');
   trigger.setAttribute('aria-controls', list.id);
@@ -131,24 +114,22 @@ function open(trigger, options, onPick, label) {
   if (first >= 0) setActive(state, first);
   else list.focus({ preventScroll: true });
   // The menu goes with its chip: it follows it when the page moves it, and closes when the page draws it again.
-  const follow = () => {
-    if (current !== state) return;
-    if (!trigger.isConnected || !trigger.getClientRects().length) {
-      close();
-      return;
-    }
-    const box = trigger.getBoundingClientRect();
-    if ([box.left, box.top, box.width, box.height].join() !== state.box) place(state);
-    state.frame = requestAnimationFrame(follow);
-  };
-  state.frame = requestAnimationFrame(follow);
+  state.track = trackAnchor(() => trigger, {
+    ignore: list,
+    onMove: () => {
+      if (current === state) place(state);
+    },
+    onGone: () => {
+      if (current === state) close();
+    },
+  });
 }
 
 function close({ refocus = false } = {}) {
   const state = current;
   if (!state) return;
   current = null;
-  cancelAnimationFrame(state.frame);
+  state.track?.stop();
   state.list.remove();
   const { trigger } = state;
   trigger.setAttribute('aria-expanded', 'false');
@@ -186,11 +167,7 @@ async function refused(error) {
 
 // -- moving through it -------------------------------------------------------------------------------------
 
-// The first row that can be chosen from `from` on, going `step` ways, or -1.
-function usable(state, from, step) {
-  for (let at = from; at >= 0 && at < state.rows.length; at += step) if (!state.rows[at].disabled) return at;
-  return -1;
-}
+const usable = (state, from, step) => usableIndex(state.rows, from, step);
 
 function step(state, direction) {
   const count = state.rows.length;
@@ -205,21 +182,8 @@ function step(state, direction) {
 
 // Letters typed light the next row that starts with them; the same letter again goes on to the next one.
 function typeAhead(state, key) {
-  const now = Date.now();
-  state.typed = now - state.typedAt > TYPING_MS ? key : state.typed + key;
-  state.typedAt = now;
-  const typed = state.typed.toLowerCase();
-  const again = [...typed].every((letter) => letter === typed[0]);
-  const needle = again ? typed[0] : typed;
-  const from = again ? state.active + 1 : state.active;
-  const count = state.rows.length;
-  for (let moved = 0; moved < count; moved += 1) {
-    const at = (from + moved + count) % count;
-    if (!state.rows[at].disabled && state.rows[at].option.label.toLowerCase().startsWith(needle)) {
-      setActive(state, at);
-      return;
-    }
-  }
+  const at = typeAheadIndex(state, key, (row) => row.option.label, { typingMs: TYPING_MS });
+  if (at >= 0) setActive(state, at);
 }
 
 function onKeyDown(state, event) {
@@ -291,7 +255,7 @@ function listen(state) {
 // Makes `trigger` (a <button>) open a menu. `options` are the rows, or a function that makes them when the
 // menu opens, so that they say what is true then. `onPick(option)` runs after a row is chosen; a row of its
 // own `run` is called instead. `label` names the menu.
-export function menuButton(trigger, options, onPick, { label = '' } = {}) {
+function menuButton(trigger, options, onPick, { label = '' } = {}) {
   trigger.setAttribute('aria-haspopup', 'menu');
   trigger.setAttribute('aria-expanded', 'false');
   trigger.addEventListener('click', (event) => {

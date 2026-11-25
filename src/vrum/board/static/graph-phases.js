@@ -34,7 +34,7 @@ function waitsFor(ctx, node) {
 
 // One piece of work: its code and title (a link to its page), where it stands, its size and due date,
 // and what it waits for. Finished work in the Done fold says neither that it is done (the fold does) nor when it was due.
-export function itemRow(ctx, node) {
+function itemRow(ctx, node) {
   const picked = ctx.highlight === node.ref;
   const finished = ctx.finished && node.status === 'done';
   return h(

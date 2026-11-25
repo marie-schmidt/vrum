@@ -12,7 +12,7 @@ import { codeOf, noteCode, parseNodeRef, kindIcon, statusChip } from './labels.j
 import { barsPerLine, checkBar, noteBar, openChecks, notesOf } from './decision-bar.js';
 import { offeredList } from './asks.js';
 import { diffLine, foldOver, hunk, openable } from './diff.js';
-import { cardChecksStrip } from './needs-checks.js';
+import { cardChecksStrip } from './plan-blocks.js';
 import { addsWords, aboutLines, childrenOf, depthsOf, itemText, loading, planLines, problem } from './needs-diffs.js';
 import { itemSpec, lookupOf, moveSpec, newEpicSpec, noteSpec, opening } from './change-dialog.js';
 import { deltaPreview } from './plan-diffs.js';
@@ -22,7 +22,7 @@ import { whereLine } from './whereabouts.js';
 import { store } from './store.js';
 
 // The most lines of a diff a preview shows before its fold.
-export const PREVIEW_LINES = 6;
+const PREVIEW_LINES = 6;
 
 const NO_FOLD = { open: () => false, onOpen: () => {} };
 const titleOf = (ref, fallback = '') => store.nodes.get(ref)?.title ?? fallback;

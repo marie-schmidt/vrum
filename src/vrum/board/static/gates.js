@@ -27,7 +27,7 @@ const HOLD = /^(gate|plan):([1-9][0-9]*)$/;
 export const heldBy = (node) => (Array.isArray(node?.held_by) ? node.held_by : []);
 
 // "Gate 5" or "Plan 3", from a hold's reference.
-export function holdCode(ref) {
+function holdCode(ref) {
   const found = HOLD.exec(String(ref));
   if (!found) return String(ref);
   return found[1] === 'gate' ? gateCode(found[2]) : planCode(found[2]);

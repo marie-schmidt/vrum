@@ -16,8 +16,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from playwright.async_api import Page, Route, async_playwright
+from playwright.async_api import Page, Route
 
+from tests.browser_pool import shared_browser
 from vrum.board import STATIC
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -465,10 +466,10 @@ async def serve(route: Route) -> None:
 
 @asynccontextmanager
 async def sim_page() -> AsyncIterator[Page]:
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
+    async with shared_browser() as browser:
+        context = await browser.new_context()
         try:
-            page = await browser.new_page()
+            page = await context.new_page()
             problems: list[str] = []
             page.on("pageerror", lambda error: problems.append(str(error)))
             page.on(
@@ -481,7 +482,7 @@ async def sim_page() -> AsyncIterator[Page]:
             yield page
             assert problems == []
         finally:
-            await browser.close()
+            await context.close()
 
 
 async def ask(page: Page, call: str, *args: Any) -> dict[str, Any]:

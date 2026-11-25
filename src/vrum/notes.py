@@ -262,52 +262,32 @@ def _ends(
     return [("node", nodes), ("rule", rule_ids), ("note", note_ids)]
 
 
-async def _add_links(
+async def _change_links(
     conn: AsyncConnection,
     note_id: int,
     actor: str,
     nodes: list[str],
     rule_ids: list[int],
     note_ids: list[int],
+    *,
+    add: bool,
 ) -> None:
     for what, ends in _ends(nodes, rule_ids, note_ids):
         table, column, named = _LINK_TABLES[what]
+        sql = (
+            f"INSERT INTO {table} (note_id, {column}) VALUES (%s, %s)"
+            if add
+            else f"DELETE FROM {table} WHERE note_id = %s AND {column} = %s"
+        )
         for item in ends:
-            await conn.execute(
-                f"INSERT INTO {table} (note_id, {column}) VALUES (%s, %s)", (note_id, item)
-            )
+            await conn.execute(sql, (note_id, item))
             await record_event(
                 conn,
                 note_id=note_id,
-                action="note_linked",
+                action="note_linked" if add else "note_unlinked",
                 actor=actor,
-                before=None,
-                after={"note_id": note_id},
-                **{named: item},
-            )
-
-
-async def _remove_links(
-    conn: AsyncConnection,
-    note_id: int,
-    actor: str,
-    nodes: list[str],
-    rule_ids: list[int],
-    note_ids: list[int],
-) -> None:
-    for what, ends in _ends(nodes, rule_ids, note_ids):
-        table, column, named = _LINK_TABLES[what]
-        for item in ends:
-            await conn.execute(
-                f"DELETE FROM {table} WHERE note_id = %s AND {column} = %s", (note_id, item)
-            )
-            await record_event(
-                conn,
-                note_id=note_id,
-                action="note_unlinked",
-                actor=actor,
-                before={"note_id": note_id},
-                after={},
+                before=None if add else {"note_id": note_id},
+                after={"note_id": note_id} if add else {},
                 **{named: item},
             )
 
@@ -390,7 +370,7 @@ class Notes:
                 project_wide=project_wide,
                 supersedes=[],
             )
-            await _add_links(conn, note_id, actor, concerned, rules, notes)
+            await _change_links(conn, note_id, actor, concerned, rules, notes, add=True)
             return to_note(await require_note(conn, note_id))
 
     async def supersede_note(
@@ -442,13 +422,14 @@ class Notes:
                 else project_wide,
                 supersedes=old_ids,
             )
-            await _add_links(
+            await _change_links(
                 conn,
                 new_id,
                 actor,
                 list(dict.fromkeys(carried_nodes + extra_nodes)),
                 unique_ids(carried_rules + extra_rules),
                 unique_ids(carried_notes + extra_notes),
+                add=True,
             )
             await conn.execute(
                 "UPDATE notes SET status = 'superseded', superseded_by_id = %s WHERE id = ANY(%s)",
@@ -613,10 +594,7 @@ class Notes:
                         f"Note {note_id} is {'already' if add else 'not'} linked to "
                         f"{', '.join(wrong)}, so nothing was changed."
                     )
-            if add:
-                await _add_links(conn, note_id, actor, concerned, rules, notes)
-            else:
-                await _remove_links(conn, note_id, actor, concerned, rules, notes)
+            await _change_links(conn, note_id, actor, concerned, rules, notes, add=add)
             return to_note(await require_note(conn, note_id))
 
     async def get_note(self, note_id: int) -> Note:

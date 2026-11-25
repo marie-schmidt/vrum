@@ -27,12 +27,28 @@ import { Refusal } from './api.js';
 import { can } from './ctx.js';
 import { lateDaysOf } from './dates.js';
 import { h, plural, put, s } from './dom.js';
-import { GROUPS, attention, clip, ended, epicSummaries, fetchAround, groupsFor, isEmptyGroup, isEnded, isUnconfirmed, named, progressOf, resolve, upTitle, waitingFor } from './graph-model.js';
+import { GROUPS, attention, clip, ended, epicSummaries, fetchAround, groupsFor, isEmptyGroup, isEnded, isUnconfirmed, nameOf, named, progressOf, resolve, upTitle, waitingFor } from './graph-model.js';
 import { keyChip, viewKey } from './graph-key.js';
-import { chip, codeSpan, standingChips, vars } from './graph-parts.js';
 import { icon } from './icons.js';
-import { REQUIREMENT_STATUS, STATUS, actorLabel, decidedWords, dueChip, kindIcon, kindLabel, noteStatusWords, priorityChip, statusChip, statusIcon } from './labels.js';
+import { REQUIREMENT_STATUS, STATUS, actorLabel, decidedWords, dueChip, kindIcon, kindLabel, noteStatusWords, plainNoteStatus, plainRequirementStatus, priorityChip, statusChip, statusIcon } from './labels.js';
 import { plainText } from './markdown.js';
+
+function vars(element, values) {
+  for (const [name, value] of Object.entries(values)) element.style.setProperty(name, String(value));
+  return element;
+}
+const codeSpan = (text) => h('span', { class: 'graph-code' }, text);
+const chip = (className, ...children) => h('span', { class: `chip ${className}`.trim() }, ...children);
+function standingChips(item) {
+  const record = item.record;
+  if (item.work) return [statusChip(record.status), dueChip(record, { size: 14, days: true })];
+  if (item.kind === 'rule') return [plainRequirementStatus(record.status)];
+  const shown = plainNoteStatus(record.status);
+  if (record.status === 'unconfirmed') shown.classList.add('unconfirmed');
+  if (record.status === 'superseded' || record.status === 'withdrawn') shown.classList.add('ended');
+  if (record.status === 'superseded' && record.superseded_by_id) shown.title = `Replaced by ${nameOf(`note:${record.superseded_by_id}`)}`;
+  return [shown];
+}
 import { restOf } from './store.js';
 
 export const KEYS = ['reach', 'wide'];

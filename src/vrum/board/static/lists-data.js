@@ -28,7 +28,7 @@ const CONTEXT_OF = {
 const OLD_NAMES = { context: 'requirements' };
 
 // Where dots sort: epics, stories, tasks, then acceptance criteria and notes, each by number.
-export const TYPE_ORDER = { ...KIND_ORDER, rule: 3, note: 4 };
+const TYPE_ORDER = { ...KIND_ORDER, rule: 3, note: 4 };
 export const byDot = (a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.number - b.number;
 
 // How each kind of line reads from one end and from the other.

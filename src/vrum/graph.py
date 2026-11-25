@@ -54,7 +54,8 @@ STATE_COLUMNS = (
     + ", body_chars, waiting_on, held_by, schedule_conflicts, overdue, span_start, span_end, "
     "span_worked_out, claimed_by, claimed_by_kind, claim_expires_at, lapsed_claim_by, "
     "lapsed_claim_by_kind, lapsed_claim_at, progress_done, progress_total, criteria_total, "
-    "criteria_met, points, points_total, points_done, unsized, checks_total, checks_ticked"
+    "criteria_met, points, points_total, points_done, unsized, checks_total, checks_ticked, "
+    "has_handoff"
 )
 # How much of a body a compact list shows.
 BODY_PREVIEW_CHARS = 120
@@ -222,6 +223,7 @@ class Node(BaseModel):
     checks_ticked: int = Field(
         description="How many of those checks are ticked on this story or task."
     )
+    has_handoff: bool = False
 
 
 class Handoff(Whereabouts):
@@ -367,12 +369,50 @@ async def require_node(conn: AsyncConnection, ref: str, *, lock: bool = False) -
     return row
 
 
+async def require_nodes(
+    conn: AsyncConnection, refs: list[str], *, lock: bool = False
+) -> dict[str, dict[str, Any]]:
+    """Several stored nodes in one query, or a plain refusal naming the first missing one. With
+    `lock`, rows are locked in ref order so concurrent callers take turns without deadlocking."""
+    if not refs:
+        return {}
+    ordered = sorted(set(refs))
+    rows = await fetch_all(
+        conn,
+        f"SELECT {_STORED_COLUMNS} FROM nodes WHERE ref = ANY(%s) ORDER BY ref"
+        + (" FOR UPDATE" if lock else ""),
+        (ordered,),
+    )
+    found = {row["ref"]: row for row in rows}
+    for ref in refs:
+        if ref not in found:
+            raise missing_node(ref)
+    return found
+
+
 async def node_state(conn: AsyncConnection, ref: str) -> Node:
     """The node as it is read: with `ready` worked out, what it waits for, and who holds it."""
     row = await fetch_one(conn, f"SELECT {STATE_COLUMNS} FROM node_state WHERE ref = %s", (ref,))
     if row is None:
         raise missing_node(ref)
     return Node.model_validate(row)
+
+
+async def node_states(conn: AsyncConnection, refs: list[str]) -> dict[str, Node]:
+    """Several nodes as they are read, in one query, or a plain refusal naming the first missing."""
+    if not refs:
+        return {}
+    rows = await fetch_all(
+        conn, f"SELECT {STATE_COLUMNS} FROM node_state WHERE ref = ANY(%s)", (sorted(set(refs)),)
+    )
+    found = {row["ref"]: Node.model_validate(row) for row in rows}
+    for ref in refs:
+        if ref not in found:
+            raise missing_node(ref)
+    return found
+
+
+_HANDOFF_WHERE_SQL = ", ".join(f"after->>'{field}' AS {field}" for field in WHERE_FIELDS)
 
 
 async def handoffs_of(
@@ -382,13 +422,33 @@ async def handoffs_of(
     rows = await fetch_all(
         conn,
         "SELECT id, actor, actor_kind, at, after->>'outcome' AS outcome, after->>'note' AS note, "
-        + ", ".join(f"after->>'{field}' AS {field}" for field in WHERE_FIELDS)
+        + _HANDOFF_WHERE_SQL
         + " FROM events "
         "WHERE node = %s AND action = 'handoff' "
         f"ORDER BY id {'DESC' if newest_first else 'ASC'}",
         (node,),
     )
     return [Handoff.model_validate(row) for row in rows]
+
+
+async def handoffs_for(
+    conn: AsyncConnection, nodes: list[str], *, newest_first: bool = False
+) -> dict[str, list[Handoff]]:
+    """Every handoff note for each named node, in one query, oldest first (or newest first)."""
+    if not nodes:
+        return {}
+    rows = await fetch_all(
+        conn,
+        "SELECT node, id, actor, actor_kind, at, after->>'outcome' AS outcome, "
+        "after->>'note' AS note, " + _HANDOFF_WHERE_SQL + " FROM events "
+        "WHERE node = ANY(%s) AND action = 'handoff' "
+        f"ORDER BY id {'DESC' if newest_first else 'ASC'}",
+        (sorted(set(nodes)),),
+    )
+    found: dict[str, list[Handoff]] = {ref: [] for ref in nodes}
+    for row in rows:
+        found[row["node"]].append(Handoff.model_validate(row))
+    return found
 
 
 def bodies_left_out(nodes_or_rules: list[Any]) -> str | None:

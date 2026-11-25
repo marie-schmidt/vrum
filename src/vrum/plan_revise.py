@@ -43,6 +43,7 @@ from vrum.graph import (
     insert_node,
     move_in,
     require_node,
+    require_nodes,
 )
 from vrum.links import delete_link, insert_link
 from vrum.plan_revisions import MOST_NOTE_CHARS
@@ -148,16 +149,14 @@ class PlanReviser:
             )
             if found is None:
                 raise Refusal(f"There is no plan {plan} in this project. list_plans shows them.")
-            locked: dict[str, dict[str, Any]] = {}
-            for ref in sorted(found["items"] or []):
-                locked[ref] = await require_node(conn, ref, lock=True)
+            locked = await require_nodes(conn, sorted(found["items"] or []), lock=True)
             again = await fetch_one(
                 conn, f"SELECT {PLAN_COLUMNS} FROM plan_state WHERE id = %s", (plan,)
             )
             assert again is not None
-            for ref in sorted(again["items"] or []):
-                if ref not in locked:
-                    locked[ref] = await require_node(conn, ref, lock=True)
+            extra = sorted({ref for ref in (again["items"] or []) if ref not in locked})
+            if extra:
+                locked.update(await require_nodes(conn, extra, lock=True))
             if again["state"] in ("approved", "rejected"):
                 raise Refusal(
                     f"Plan {plan} was already {again['state']}, so it cannot be revised: a plan "
@@ -438,12 +437,17 @@ class PlanReviser:
                 created.append(row["ref"])
 
         # Items that continue one: where they hang, then what they say.
+        checked_by_key = {
+            entry.key: checked for entry, checked in zip(items, checked_items, strict=True)
+        }
         for ref, entry in kept.items():
-            checked = checked_items[items.index(entry)]
+            checked = checked_by_key[entry.key]
             parent = None if checked.parent is None else resolve(checked.parent)
             if parent is not None and parent != locked[ref]["parent"]:
                 await move_in(conn, actor=actor, node=ref, new_parent=parent)
-            now = await require_node(conn, ref, lock=True)
+                now = await require_node(conn, ref, lock=True)
+            else:
+                now = locked[ref]
             fields = {
                 "title": clean_title(entry.title),
                 "body": entry.body,
@@ -459,7 +463,7 @@ class PlanReviser:
         # Items that nothing continues are dropped, and say why.
         why = f"Removed in revision {revision} of Plan {plan}" + (f": {said}" if said else ".")
         for ref in removed:
-            now = await require_node(conn, ref, lock=True)
+            now = locked[ref]
             if now["status"] != "dropped":
                 await change_status(conn, actor, now, "dropped")
             await record_event(

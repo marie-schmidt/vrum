@@ -102,7 +102,7 @@ const NOTE_FIELDS = [
 
 // The values of an item as a plan lists them (`list_plans`: ref, kind, title, body, priority, size, start_on, target_on, parent, links,
 // criteria).
-export const shapeOfItem = (one) => ({
+const shapeOfItem = (one) => ({
   kind: one.kind,
   title: one.title,
   body: one.body ?? '',
@@ -186,7 +186,7 @@ export function noteSpec(note) {
 const codeFor = (spec) => (!spec.ref ? null : spec.ref.startsWith('note:') ? noteCode(Number(spec.ref.slice(5))) : codeOf(spec.ref));
 
 // The words an assistive technology hears for a line that opens this dialog: "Show T-17 as new".
-export function openLabel(spec) {
+function openLabel(spec) {
   const code = codeFor(spec) ?? 'the new epic';
   if (spec.mode === 'added') return spec.ref ? `Show ${code} as new` : 'Show the new epic';
   if (spec.mode === 'removed') return `Show ${code} as removed`;

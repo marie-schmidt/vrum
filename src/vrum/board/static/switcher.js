@@ -69,7 +69,7 @@ export function find(query, pages) {
   return [...pageHits(typed.split(/\s+/)), ...found].slice(0, SHOWN);
 }
 
-export function openSwitcher(pages) {
+function openSwitcher(pages) {
   if (document.getElementById('switcher')) return;
   let hits = [];
   let active = 0;

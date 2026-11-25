@@ -33,7 +33,7 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.gate_reads import GATE_COLUMNS, GateState, gate_from
-from vrum.graph import change_status, require_node
+from vrum.graph import change_status, require_node, require_nodes
 from vrum.plan_checks import PlanCheck, duplicate_check, local_checks, unindexed_elsewhere
 from vrum.plan_revisions import (
     PlanBlame,
@@ -75,7 +75,8 @@ MOST_ITEMS_SHOWN = 50
 
 PLAN_COLUMNS = (
     "id, title, state, items, revision, proposed_by, proposed_by_kind, proposed_at, revised_by, "
-    "revised_by_kind, revised_at, decided_by, decided_at, reason"
+    "revised_by_kind, revised_at, decided_by, decided_at, reason, "
+    "changes_requested_by, changes_requested_by_kind, changes_requested_at"
 )
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _MOMENT = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:Z|\+00:00)?")
@@ -109,6 +110,9 @@ class PlanState(BaseModel):
     decided_by: str | None = Field(description="The person who approved or rejected it.")
     decided_at: datetime | None
     reason: str | None = Field(description="Why it was rejected, or the person's comment.")
+    changes_requested_by: str | None = None
+    changes_requested_by_kind: str | None = None
+    changes_requested_at: datetime | None = None
     shown: int | None = Field(
         description="The revision that tree, context and changes are about. Only when one plan is "
         "asked for (list_plans with plan, and revision to read an earlier one); null in a list."
@@ -183,6 +187,9 @@ def plan_from(row: dict[str, Any]) -> PlanState:
         decided_by=row["decided_by"],
         decided_at=row["decided_at"],
         reason=row["reason"],
+        changes_requested_by=row.get("changes_requested_by"),
+        changes_requested_by_kind=row.get("changes_requested_by_kind"),
+        changes_requested_at=row.get("changes_requested_at"),
         shown=None,
         tree=[],
         context=[],
@@ -220,7 +227,7 @@ async def live_items(conn: Any, refs: list[str]) -> list[PlanItemRead]:
     nodes = await fetch_all(
         conn,
         "SELECT ref, kind, parent, title, body, priority, size, start_on, target_on "
-        "FROM node_state WHERE ref = ANY(%s)",
+        "FROM nodes WHERE ref = ANY(%s)",
         (refs,),
     )
     links = await fetch_all(
@@ -234,22 +241,22 @@ async def live_items(conn: Any, refs: list[str]) -> list[PlanItemRead]:
         "WHERE node = ANY(%s) AND status <> 'dropped' ORDER BY id",
         (refs,),
     )
+    links_by_ref: dict[str, list[PlanItemLink]] = {}
+    for one in links:
+        links_by_ref.setdefault(one["source"], []).append(
+            PlanItemLink(link_type=one["link_type"], target=one["target"])
+        )
+    rules_by_ref: dict[str, list[PlanCriterion]] = {}
+    for one in rules:
+        rules_by_ref.setdefault(one["node"], []).append(
+            PlanCriterion(id=one["id"], title=one["title"], body=one["body"], status=one["status"])
+        )
     return _depth_first(
         [
             PlanItemRead(
                 **row,
-                links=[
-                    PlanItemLink(link_type=one["link_type"], target=one["target"])
-                    for one in links
-                    if one["source"] == row["ref"]
-                ],
-                criteria=[
-                    PlanCriterion(
-                        id=one["id"], title=one["title"], body=one["body"], status=one["status"]
-                    )
-                    for one in rules
-                    if one["node"] == row["ref"]
-                ],
+                links=links_by_ref.get(row["ref"], []),
+                criteria=rules_by_ref.get(row["ref"], []),
             )
             for row in nodes
         ]
@@ -269,7 +276,7 @@ async def context_of(conn: Any, tree: list[PlanItemRead]) -> list[PlanContext]:
     named = (
         await fetch_all(
             conn,
-            "SELECT ref, kind, title FROM node_state WHERE ref = ANY(%s)",
+            "SELECT ref, kind, title FROM nodes WHERE ref = ANY(%s)",
             (list(outside),),
         )
         if outside
@@ -635,8 +642,8 @@ class PlanBook:
             refs = list(found["items"] or [])
             held = found["state"] in ("proposed", "changes_requested")
             live = shown == current and held
-            reviewed = await snapshot_of(conn, plan, shown)
-            previous = await snapshot_of(conn, plan, shown - 1) if shown > 1 else None
+            reviewed = snapshots[shown]
+            previous = snapshots[shown - 1] if shown > 1 else None
             drift: list[PlanDrift] | None = None
             if live:
                 tree, context = await _plan_tree(conn, refs)
@@ -673,9 +680,9 @@ class PlanBook:
     async def _lock(self, conn: Any, locked: dict[str, dict[str, Any]], refs: list[str]) -> None:
         """Hold the items' rows, in one order so that two people deciding one plan, or a decision
         and a revision, take turns. What is held already is not asked for again."""
-        for ref in sorted(refs):
-            if ref not in locked:
-                locked[ref] = await require_node(conn, ref, lock=True)
+        missing = sorted({ref for ref in refs if ref not in locked})
+        if missing:
+            locked.update(await require_nodes(conn, missing, lock=True))
 
     async def decide(
         self,

@@ -36,10 +36,10 @@ MOST_ROWS = 200
 _REASON_CHARS = 200
 _NODE = "s.ref, s.kind, s.title, s.parent, p.title AS parent_title"
 _NODE_GROUP = "s.ref, s.kind, s.title, s.parent, p.title"
-_FROM_NODE = "node_state s LEFT JOIN node_state p ON p.ref = s.parent"
+_FROM_NODE = "nodes s LEFT JOIN nodes p ON p.ref = s.parent"
 # How many times a claim ran out on a node: each time one was taken over, and the one that is
-# lapsed now.
-_LAPSES = "count(e.id) + CASE WHEN s.lapsed_claim_by IS NOT NULL THEN 1 ELSE 0 END"
+# lapsed now (live claims are excluded before grouping, so any remaining claim row is lapsed).
+_LAPSES = "count(e.id) + CASE WHEN cl.node IS NOT NULL THEN 1 ELSE 0 END"
 
 
 class NeedsItem(BaseModel):
@@ -177,8 +177,8 @@ class Needs:
         async with self._database.transaction() as conn:
             asks = await fetch_all(
                 conn,
-                f"SELECT {asks_sql}, {_NODE} FROM ask_state a JOIN node_state s ON s.ref = a.node "
-                "LEFT JOIN node_state p ON p.ref = s.parent "
+                f"SELECT {asks_sql}, {_NODE} FROM ask_state a JOIN nodes s ON s.ref = a.node "
+                "LEFT JOIN nodes p ON p.ref = s.parent "
                 "WHERE a.answer_event_id IS NULL AND s.status NOT IN ('done', 'dropped') "
                 "ORDER BY a.id",
             )
@@ -189,12 +189,14 @@ class Needs:
                 "(array_agg(i.text ORDER BY i.position) "
                 "FILTER (WHERE i.person_only AND c.item_key IS NULL))[1] AS first_text, "
                 "h.actor, h.actor_kind, coalesce(h.at, s.updated_at) AS since "
-                f"FROM {_FROM_NODE} CROSS JOIN definition_items i "
+                f"FROM {_FROM_NODE} "
+                "LEFT JOIN claims cl ON cl.node = s.ref AND cl.expires_at > clock_timestamp() "
+                "CROSS JOIN definition_items i "
                 "LEFT JOIN definition_checks c ON c.node = s.ref AND c.item_key = i.item_key "
                 "LEFT JOIN LATERAL (SELECT actor, actor_kind, at FROM events "
                 "WHERE node = s.ref AND action = 'handoff' ORDER BY id DESC LIMIT 1) h ON true "
                 "WHERE s.kind IN ('story', 'task') AND s.status = 'blocked' "
-                "AND s.claimed_by IS NULL "
+                "AND cl.node IS NULL "
                 f"GROUP BY {_NODE_GROUP}, h.actor, h.actor_kind, h.at, s.updated_at "
                 "HAVING count(*) FILTER (WHERE i.person_only AND c.item_key IS NULL) > 0 "
                 "AND count(*) FILTER (WHERE NOT i.person_only AND c.item_key IS NULL) = 0",
@@ -203,11 +205,12 @@ class Needs:
                 conn,
                 f"SELECT {_NODE}, count(*) AS waiting_notes, min(n.recorded_at) AS since, "
                 "array_agg(n.id ORDER BY n.id) AS ids "
-                "FROM note_state n JOIN note_nodes nn ON nn.note_id = n.id "
-                "JOIN node_state s ON s.ref = nn.node "
-                "LEFT JOIN node_state p ON p.ref = s.parent "
+                "FROM notes n JOIN note_nodes nn ON nn.note_id = n.id "
+                "JOIN nodes s ON s.ref = nn.node "
+                "LEFT JOIN nodes p ON p.ref = s.parent "
+                "LEFT JOIN claims cl ON cl.node = s.ref AND cl.expires_at > clock_timestamp() "
                 "WHERE n.status = 'unconfirmed' "
-                "AND (s.status = 'in_progress' OR s.claimed_by IS NOT NULL) "
+                "AND (s.status = 'in_progress' OR cl.node IS NOT NULL) "
                 "AND s.kind IN ('story', 'task') "
                 f"GROUP BY {_NODE_GROUP}",
             )
@@ -215,20 +218,21 @@ class Needs:
                 conn,
                 f"SELECT {_NODE}, "
                 f"{_LAPSES} AS lapses, "
-                "greatest(max(e.at), s.lapsed_claim_at) AS since, "
-                "coalesce(s.lapsed_claim_by, "
+                "greatest(max(e.at), cl.expires_at) AS since, "
+                "coalesce(cl.actor, "
                 "(array_agg(e.before->>'actor' ORDER BY e.id DESC))[1]) AS actor, "
-                "coalesce(s.lapsed_claim_by_kind, "
+                "coalesce(cl.actor_kind, "
                 "(array_agg(e.before->>'actor_kind' ORDER BY e.id DESC))[1]) AS actor_kind "
-                f"FROM {_FROM_NODE} LEFT JOIN events e ON e.node = s.ref "
+                f"FROM {_FROM_NODE} LEFT JOIN claims cl ON cl.node = s.ref "
+                "CROSS JOIN LATERAL (SELECT cl.expires_at > clock_timestamp() AS live) cl_state "
+                "LEFT JOIN events e ON e.node = s.ref "
                 "AND e.action = 'claimed' AND e.before IS NOT NULL "
                 "WHERE s.kind IN ('story', 'task') AND s.status NOT IN ('done', 'dropped') "
-                "AND s.claimed_by IS NULL "
-                f"GROUP BY {_NODE_GROUP}, s.lapsed_claim_by, s.lapsed_claim_by_kind, "
-                "s.lapsed_claim_at "
+                "AND NOT coalesce(cl_state.live, false) "
+                f"GROUP BY {_NODE_GROUP}, cl.node, cl.actor, cl.actor_kind, cl.expires_at "
                 f"HAVING {_LAPSES} >= 2 AND NOT EXISTS (SELECT 1 FROM events h "
                 "WHERE h.node = s.ref AND h.action = 'handoff' "
-                "AND h.at > greatest(max(e.at), s.lapsed_claim_at))",
+                "AND h.at > greatest(max(e.at), cl.expires_at))",
             )
             plans = await fetch_all(
                 conn,
@@ -252,159 +256,159 @@ class Needs:
                     for c in GATE_COLUMNS.split(",")
                 )
                 + f", {_NODE} "
-                "FROM gate_state g JOIN node_state s ON s.ref = g.node "
-                "LEFT JOIN node_state p ON p.ref = s.parent "
+                "FROM gate_state g JOIN nodes s ON s.ref = g.node "
+                "LEFT JOIN nodes p ON p.ref = s.parent "
                 "WHERE g.state = 'refused' AND s.status NOT IN ('done', 'dropped') ORDER BY g.id",
             )
             now = await fetch_all(conn, "SELECT clock_timestamp() AS now")
-        built: list[tuple[NeedsItem, str, str | None]] = []
-        for row in asks:
-            ask = ask_from({**row, "kind": row["ask_kind"]})
-            built.append(
-                _item(
-                    row,
-                    kind="ask",
-                    reason=_cut(
-                        f"Approval needed before it can start: {ask.question}"
-                        if ask.effect == "gates"
-                        else ask.question
-                    ),
-                    waiting_since=ask.asked_at,
-                    waiting=ask.asked_by,
-                    waiting_kind=ask.asked_by_kind,
-                    ask=ask,
+            built: list[tuple[NeedsItem, str, str | None]] = []
+            for row in asks:
+                ask = ask_from({**row, "kind": row["ask_kind"]})
+                built.append(
+                    _item(
+                        row,
+                        kind="ask",
+                        reason=_cut(
+                            f"Approval needed before it can start: {ask.question}"
+                            if ask.effect == "gates"
+                            else ask.question
+                        ),
+                        waiting_since=ask.asked_at,
+                        waiting=ask.asked_by,
+                        waiting_kind=ask.asked_by_kind,
+                        ask=ask,
+                    )
                 )
-            )
-        for row in checks:
-            built.append(
-                _item(
-                    row,
-                    kind="check",
-                    reason=_cut(
-                        f"Everything else on it is done. Waiting for a person to check: "
-                        f"{row['first_text']}"
-                        + (
-                            ""
-                            if row["person_open"] == 1
-                            else f" (and {row['person_open'] - 1} more)"
-                        )
-                    ),
-                    waiting_since=row["since"],
-                    waiting=row["actor"],
-                    waiting_kind=row["actor_kind"],
-                    count=row["person_open"],
+            for row in checks:
+                built.append(
+                    _item(
+                        row,
+                        kind="check",
+                        reason=_cut(
+                            f"Everything else on it is done. Waiting for a person to check: "
+                            f"{row['first_text']}"
+                            + (
+                                ""
+                                if row["person_open"] == 1
+                                else f" (and {row['person_open'] - 1} more)"
+                            )
+                        ),
+                        waiting_since=row["since"],
+                        waiting=row["actor"],
+                        waiting_kind=row["actor_kind"],
+                        count=row["person_open"],
+                    )
                 )
-            )
-        for row in notes:
-            built.append(
-                _item(
-                    row,
-                    kind="note",
-                    reason=(
-                        f"{_plural(row['waiting_notes'], 'note')} recorded on work that is in "
-                        "progress, not yet confirmed by a person."
-                    ),
-                    waiting_since=row["since"],
-                    count=row["waiting_notes"],
-                    notes=list(row["ids"]),
+            for row in notes:
+                built.append(
+                    _item(
+                        row,
+                        kind="note",
+                        reason=(
+                            f"{_plural(row['waiting_notes'], 'note')} recorded on work that is in "
+                            "progress, not yet confirmed by a person."
+                        ),
+                        waiting_since=row["since"],
+                        count=row["waiting_notes"],
+                        notes=list(row["ids"]),
+                    )
                 )
-            )
-        for row in lapses:
-            built.append(
-                _item(
-                    row,
-                    kind="lapse",
-                    reason=(
-                        f"Its claim ran out {row['lapses']} times with no handoff note: "
-                        "something may be wrong with it."
-                    ),
-                    waiting_since=row["since"],
-                    waiting=row["actor"],
-                    waiting_kind=row["actor_kind"],
-                    count=row["lapses"],
+            for row in lapses:
+                built.append(
+                    _item(
+                        row,
+                        kind="lapse",
+                        reason=(
+                            f"Its claim ran out {row['lapses']} times with no handoff note: "
+                            "something may be wrong with it."
+                        ),
+                        waiting_since=row["since"],
+                        waiting=row["actor"],
+                        waiting_kind=row["actor_kind"],
+                        count=row["lapses"],
+                    )
                 )
-            )
-        for row in refused:
-            built.append(
-                _item(
-                    row,
-                    kind="gate",
-                    reason=_cut(
-                        f"Its approval was refused by {row['answered_by']} ({row['answer']}). Lift "
-                        "the gate, or drop the work."
-                    ),
-                    waiting_since=row["added_at"],
-                    waiting=row["added_by"],
-                    waiting_kind=row["added_by_kind"],
-                    gate=gate_from({**row, "kind": row["gate_kind"]}),
+            for row in refused:
+                built.append(
+                    _item(
+                        row,
+                        kind="gate",
+                        reason=_cut(
+                            f"Its approval was refused by {row['answered_by']} "
+                            f"({row['answer']}). Lift the gate, or drop the work."
+                        ),
+                        waiting_since=row["added_at"],
+                        waiting=row["added_by"],
+                        waiting_kind=row["added_by_kind"],
+                        gate=gate_from({**row, "kind": row["gate_kind"]}),
+                    )
                 )
-            )
-        plan_rows: list[NeedsItem] = []
-        for plan_row in plans:
-            plan = plan_from(plan_row)
-            first = plan.items[0] if plan.items else "epic:0"
-            again = f" (revision {plan.revision})" if plan.revision > 1 else ""
-            plan_rows.append(
-                NeedsItem(
-                    kind="plan",
-                    node=first,
-                    title=plan.title,
-                    reason=_cut(
-                        f"A plan of {_plural(plan.epics, 'epic')}, "
-                        f"{_plural(plan.stories, 'story')} and {_plural(plan.tasks, 'task')} is "
-                        f"waiting for approval{again}. "
-                        "Nothing in it can be taken until a person decides."
-                    ),
-                    waiting_since=plan.revised_at,
-                    waiting=plan.revised_by,
-                    waiting_kind=plan.revised_by_kind,
-                    count=plan.epics + plan.stories + plan.tasks,
-                    ask=None,
-                    plan=plan,
-                    notes=[],
-                    level="plan",
-                    decision="approve",
+            plan_rows: list[NeedsItem] = []
+            for plan_row in plans:
+                plan = plan_from(plan_row)
+                first = plan.items[0] if plan.items else "epic:0"
+                again = f" (revision {plan.revision})" if plan.revision > 1 else ""
+                plan_rows.append(
+                    NeedsItem(
+                        kind="plan",
+                        node=first,
+                        title=plan.title,
+                        reason=_cut(
+                            f"A plan of {_plural(plan.epics, 'epic')}, "
+                            f"{_plural(plan.stories, 'story')} and {_plural(plan.tasks, 'task')} "
+                            f"is waiting for approval{again}. "
+                            "Nothing in it can be taken until a person decides."
+                        ),
+                        waiting_since=plan.revised_at,
+                        waiting=plan.revised_by,
+                        waiting_kind=plan.revised_by_kind,
+                        count=plan.epics + plan.stories + plan.tasks,
+                        ask=None,
+                        plan=plan,
+                        notes=[],
+                        level="plan",
+                        decision="approve",
+                    )
                 )
-            )
-        titles = {p["ref"]: p["title"] for p in parents}
-        move_rows: list[NeedsItem] = []
-        for move_row in moves:
-            move = placement_from(move_row, titles)
-            where = (
-                f"under {move.parent_title or move.parent}"
-                if move.parent
-                else f"under a new epic, {move.new_epic.title if move.new_epic else ''}"
-            )
-            move_rows.append(
-                NeedsItem(
-                    kind="placement",
-                    node=move.items[0].ref,
-                    title=move.items[0].title,
-                    reason=_cut(
-                        f"Proposed: move {_plural(len(move.items), 'item')} {where}. {move.reason}"
-                    ),
-                    waiting_since=move.proposed_at,
-                    waiting=move.proposed_by,
-                    waiting_kind=move.proposed_by_kind,
-                    count=len(move.items),
-                    ask=None,
-                    plan=None,
-                    notes=[],
-                    placement=move,
-                    level="story"
-                    if any(one.ref.startswith("story:") for one in move.items)
-                    else "task",
-                    decision="approve",
+            titles = {p["ref"]: p["title"] for p in parents}
+            move_rows: list[NeedsItem] = []
+            for move_row in moves:
+                move = placement_from(move_row, titles)
+                where = (
+                    f"under {move.parent_title or move.parent}"
+                    if move.parent
+                    else f"under a new epic, {move.new_epic.title if move.new_epic else ''}"
                 )
-            )
-        built.sort(key=lambda found: found[0].waiting_since)
-        # A plan or a proposal to move work is one row, listed in a group of its own and not under
-        # a story.
-        total_plans = len(plan_rows) + len(move_rows)
-        total = len(built) + total_plans
-        shown = built[: max(MOST_ROWS - total_plans, 0)]
-        everything = [found[0] for found in shown] + plan_rows + move_rows
-        async with self._database.transaction() as conn:
+                move_rows.append(
+                    NeedsItem(
+                        kind="placement",
+                        node=move.items[0].ref,
+                        title=move.items[0].title,
+                        reason=_cut(
+                            f"Proposed: move {_plural(len(move.items), 'item')} {where}. "
+                            f"{move.reason}"
+                        ),
+                        waiting_since=move.proposed_at,
+                        waiting=move.proposed_by,
+                        waiting_kind=move.proposed_by_kind,
+                        count=len(move.items),
+                        ask=None,
+                        plan=None,
+                        notes=[],
+                        placement=move,
+                        level="story"
+                        if any(one.ref.startswith("story:") for one in move.items)
+                        else "task",
+                        decision="approve",
+                    )
+                )
+            built.sort(key=lambda found: found[0].waiting_since)
+            # A plan or a proposal to move work is one row, listed in a group of its own and not
+            # under a story.
+            total_plans = len(plan_rows) + len(move_rows)
+            total = len(built) + total_plans
+            shown = built[: max(MOST_ROWS - total_plans, 0)]
+            everything = [found[0] for found in shown] + plan_rows + move_rows
             topics = await topics_of(conn, [_subject(item) for item in everything])
         by_id = {id(item): topic for item, topic in zip(everything, topics, strict=True)}
         shown = [(item.model_copy(update={"topic": by_id[id(item)]}), s, t) for item, s, t in shown]

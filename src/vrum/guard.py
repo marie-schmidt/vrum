@@ -23,6 +23,7 @@ from contextvars import ContextVar
 from functools import cached_property
 from typing import Any, NamedTuple
 
+import psycopg
 from mcp.server.context import ServerRequestContext
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
@@ -291,10 +292,19 @@ class GuardedServer(MCPServer[Database]):
                 raise Refusal(f"Error executing tool {name}: {words}")
             with working_for(project), working_as(who), calling_as(caller):
                 return await super().call_tool(name, arguments, context)
+        except (psycopg.errors.ProgramLimitExceeded, psycopg.OperationalError) as db_error:
+            outcome = "refused"
+            words = _database_error_message(db_error)
+            assert words is not None
+            raise ToolError(f"Error executing tool {name}: {words}") from db_error
         except ToolError as error:
             if isinstance(error.__cause__, ValidationError):
                 outcome = "invalid"
                 raise ToolError(plain_validation_message(name, error.__cause__)) from None
+            db_words = _database_error_message(error.__cause__)
+            if db_words is not None:
+                outcome = "refused"
+                raise ToolError(f"Error executing tool {name}: {db_words}") from error.__cause__
             outcome = "failed" if isinstance(error, UnexpectedToolError) else "refused"
             raise
         except BaseException:
@@ -353,12 +363,21 @@ class GuardedServer(MCPServer[Database]):
             with working_for(caller.project), working_as(now.who), calling_as(now):
                 result = await super().call_tool(name, arguments, None)
             return self._value_of(name, result)
+        except (psycopg.errors.ProgramLimitExceeded, psycopg.OperationalError) as db_error:
+            outcome = "refused"
+            words = _database_error_message(db_error)
+            assert words is not None
+            raise ToolError(f"Error executing tool {shown}: {words}") from db_error
         except ToolError as error:
             if isinstance(error, KeyStopped):
                 reason = "key_ended"
             if isinstance(error.__cause__, ValidationError):
                 outcome = "invalid"
                 raise ToolError(plain_validation_message(shown, error.__cause__)) from None
+            db_words = _database_error_message(error.__cause__)
+            if db_words is not None:
+                outcome = "refused"
+                raise ToolError(f"Error executing tool {shown}: {db_words}") from error.__cause__
             outcome = "failed" if isinstance(error, UnexpectedToolError) else "refused"
             raise
         except BaseException:
@@ -391,6 +410,30 @@ class GuardedServer(MCPServer[Database]):
         if tool is not None and tool.fn_metadata.wrap_output:
             return structured.get("result")
         return structured
+
+
+def _database_error_message(error: BaseException | None) -> str | None:
+    """Plain words when PostgreSQL cannot be reached or refuses what was sent, or None for any
+    other error."""
+    if isinstance(error, psycopg.errors.ProgramLimitExceeded):
+        # PostgreSQL keeps what can be searched in a text in at most about 1 MB: a huge text of
+        # mostly different words does not fit. Nothing was saved, as every write is one step.
+        return (
+            "A text in this request is too long to be searched: PostgreSQL cannot index more "
+            "than about 1 MB of different words in one item. Nothing was changed. Split the text "
+            "into several items, or shorten it."
+        )
+    if isinstance(error, psycopg.OperationalError):
+        if error.sqlstate is not None:
+            return (
+                "The database refused this request and nothing was changed. Try again; if it "
+                "keeps happening, look at the database container's log."
+            )
+        return (
+            "The server is running but cannot reach its database. "
+            "Check that the database container is healthy, then try again."
+        )
+    return None
 
 
 def _log_call(

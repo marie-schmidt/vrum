@@ -169,7 +169,7 @@ export function findChoice(text, choices) {
 
 // What was typed as a code or in words: S-12 or story 12 for an epic, story or task, AC-3 ("criterion 3" or "rule 3") for an
 // acceptance criterion and N-5 ("note 5") for a note. A bare number names nothing, since each kind is numbered on its own.
-export function parseRef(text, kinds) {
+function parseRef(text, kinds) {
   const typed = text.trim();
   let found = /^(?:rule|requirement|(?:acceptance\s+)?criterion|ac)\s*[:#-]?\s*#?(\d+)/i.exec(typed);
   if (found && kinds.includes('rule')) return { type: 'rule', id: Number(found[1]) };

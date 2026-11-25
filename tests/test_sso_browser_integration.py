@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import Browser, Page, Playwright, expect, sync_playwright
 
 from tests.sso_world import (
     SESSION_COOKIE,
@@ -60,28 +60,49 @@ class Seen:
         self.dialogs: list[str] = []
 
 
+_sync_pw: Playwright | None = None
+_sync_browsers: dict[str, Browser] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _sync_browser_pool() -> Iterator[None]:
+    """Share one sync Playwright driver and browser per engine across this module."""
+    global _sync_pw
+    yield
+    for browser in list(_sync_browsers.values()):
+        browser.close()
+    _sync_browsers.clear()
+    if _sync_pw is not None:
+        _sync_pw.stop()
+        _sync_pw = None
+
+
 @contextmanager
 def browser_page(engine: str = "chromium") -> Iterator[tuple[Page, Seen]]:
-    with sync_playwright() as playwright:
+    global _sync_pw
+    if _sync_pw is None:
+        _sync_pw = sync_playwright().start()
+    browser = _sync_browsers.get(engine)
+    if browser is None or not browser.is_connected():
         try:
-            browser = getattr(playwright, engine).launch()
+            browser = getattr(_sync_pw, engine).launch()
         except Exception as problem:  # noqa: BLE001
             pytest.skip(f"{engine} is not installed here: {str(problem).splitlines()[0]}")
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page()
-        seen = Seen()
-        page.on("pageerror", lambda error: seen.errors.append(str(error)))
+        _sync_browsers[engine] = browser
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = context.new_page()
+    seen = Seen()
+    page.on("pageerror", lambda error: seen.errors.append(str(error)))
 
-        def dialog(found: Any) -> None:
-            seen.dialogs.append(found.message)
-            found.dismiss()
+    def dialog(found: Any) -> None:
+        seen.dialogs.append(found.message)
+        found.dismiss()
 
-        page.on("dialog", dialog)
-        try:
-            yield page, seen
-        finally:
-            context.close()
-            browser.close()
+    page.on("dialog", dialog)
+    try:
+        yield page, seen
+    finally:
+        context.close()
 
 
 def session_cookie(page: Page) -> str | None:

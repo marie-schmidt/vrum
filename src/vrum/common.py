@@ -158,16 +158,24 @@ def when(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def parse_iso_day(value: Any) -> date | None:
+    """Parse a strict YYYY-MM-DD calendar day string, or return None when it is not one."""
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    return None
+
+
 def parse_day(label: str, value: str | None) -> date | None:
     """A day written as YYYY-MM-DD, or nothing. Anything else is refused in plain words, because
     an agent is as likely to write 'next tuesday' or a time as a proper date."""
     if value is None:
         return None
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            pass
+    parsed = parse_iso_day(value)
+    if parsed is not None:
+        return parsed
     raise Refusal(
         f"{label} must be a day written as YYYY-MM-DD, such as 2026-11-30 (no time of day), "
         f"but it is {value!r}."

@@ -7,7 +7,7 @@ has to hold: two keys named differently stamp their own names and kinds on claim
 notes, and cannot touch each other's claims; a name sent in an argument changes nothing; only a
 person can confirm; key names are unique among the keys in force; a revoked key stops at once; a
 person can rename their account and change their password; and an export keeps who did what, as
-what (an older export loading with the kind `unknown` is proved in test_import_old_export.py)."""
+what."""
 
 import copy
 from collections.abc import AsyncIterator
