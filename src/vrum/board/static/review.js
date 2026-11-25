@@ -21,7 +21,7 @@ import { changeOf, changesOf } from './changes.js';
 import { decisionBar } from './decision-bar.js';
 import { keyButton } from './key-button.js';
 import { moveDiff, planDiff, loading } from './needs-diffs.js';
-import { levelChip, kindChip, reviewChoices } from './needs-cards.js';
+import { levelChip, kindChip } from './needs-cards.js';
 import { aboutPlan, isPlanNews, newsAbout, rereadPlans, watchDetails } from './needs-details.js';
 import { factsOf } from './needs-facts.js';
 import { byOf } from './needs-groups.js';
@@ -37,6 +37,7 @@ import { deltaDiff } from './plan-diffs.js';
 import { driftBlock, feedbackSections, hasLine, lostBlock } from './plan-blocks.js';
 import { dismissLost, explainProblem, forgetLost, lostOf, noticeRevision, pendingOf, settleProblem } from './plan-comments.js';
 import { planNotes } from './plan-notes.js';
+import { approvedSummary } from './plan-verdicts.js';
 import { readPlanWhole } from './plan-read.js';
 import { loadingView, rememberFocus } from './records.js';
 import { contextSection } from './review-context.js';
@@ -385,6 +386,11 @@ function draw() {
   }
   const split = splitNow();
 
+  // What is approved, carried from earlier or waiting to be sent: the progress fact, Hide approved and the lines it folds.
+  const approvedNow = isPlan ? approvedSummary(plan, plan.id) : null;
+  if (isPlan) change.review = approvedNow;
+  const hideApproved = isPlan && approvedNow.refs.size > 0 && state.params.get('hide') === 'approved';
+
   // -- the change itself
   const fold = { open: (key) => state.opened.has(key), onOpen: (key) => state.opened.add(key) };
   let body;
@@ -392,8 +398,14 @@ function draw() {
   if (isPlan) {
     mode = modeOf();
     const feedback = current ? (plan.feedback ?? []) : (plan.feedback ?? []).filter((one) => one.revision === plan.shown);
-    const notes = planNotes({ plan: plan.id, revision: plan.shown, items: plan.tree, feedback, editable: decidable, asOf: state.list.as_of, hooks });
-    const lines = mode === 'delta' ? deltaDiff(plan, fold, assist, notes, () => choose({ mode: 'whole' }), split) : planDiff({ state: 'ready', data: plan }, fold, assist, split, notes);
+    // The items this revision took out, as they were: they can be agreed to go or asked for back.
+    const removedRefs = new Set((plan.changes ?? []).filter((one) => one.change === 'removed').map((one) => one.ref));
+    const gone = (plan.previous ?? []).filter((one) => removedRefs.has(one.ref));
+    // Pressing a revision beside a line reads the plan as of it; the current one reads what that revision changed.
+    const onBlame = (revision) => choose({ revision: revision === plan.revision ? null : revision, mode: null });
+    const notes = planNotes({ plan: plan.id, revision: plan.shown, items: plan.tree, gone, blame: plan.blame, feedback, editable: decidable, asOf: state.list.as_of, hooks, onBlame });
+    const hidden = hideApproved ? approvedNow.refs : null;
+    const lines = mode === 'delta' ? deltaDiff(plan, fold, assist, notes, () => choose({ mode: 'whole' }), split, hidden) : planDiff({ state: 'ready', data: plan }, fold, assist, split, notes, hidden);
     const lost = lostOf(plan.id);
     body = [
       current && lost ? lostBlock(lost, { onDismiss: () => { dismissLost(plan.id); draw(); } }) : null,
@@ -402,13 +414,17 @@ function draw() {
     ];
   } else if (change.look === 'placement') {
     const reading = change.assist && change.assist.reading;
-    body = [h('div', { class: 'change-diff', id: 'review-diff', role: 'group', 'aria-label': `The change in ${change.name}`, dataset: { view: split ? 'split' : 'unified' } }, reading ? [loading('Reading…')] : moveDiff(change, fold, change.assist, split))];
+    body = [h('div', { class: 'change-diff', id: 'review-diff', role: 'group', 'aria-label': `The change in ${change.name}`, dataset: { view: split ? 'split' : 'unified' } }, reading ? [loading('Reading…')] : moveDiff(change, fold, change.assist, split, hooks))];
   } else {
     body = [h('div', { class: 'review-body', id: 'review-body', dataset: { kind: change.look } }, otherBody(change, { entry, node: state.work?.node, history: state.work?.history ?? [], hooks }))];
   }
 
   // -- the choices that act on this change
   const showsLines = isPlan || change.look === 'placement';
+  const hideApprovedToggle =
+    isPlan && approvedNow.refs.size > 0
+      ? h('button', { type: 'button', id: 'review-hide-approved', class: 'small review-hide', 'aria-pressed': String(hideApproved), dataset: { focusKey: 'review-hide-approved' }, onclick: () => choose({ hide: hideApproved ? null : 'approved' }) }, 'Hide approved')
+      : null;
   const toggles = showsLines
     ? h(
         'div',
@@ -416,6 +432,7 @@ function draw() {
         isPlan ? revisionSelect(plan) : null,
         isPlan && plan.changes ? segmented('review-mode', 'How to read the plan', [['delta', 'Changes', 'mode-pick'], ['whole', 'Whole plan', 'mode-pick']], mode, 'mode', (picked) => choose({ mode: picked === 'delta' ? null : 'whole' })) : null,
         segmented('review-view', 'Layout of the lines', [['unified', 'Unified'], ['split', 'Split']], split ? 'split' : 'unified', 'view', (picked) => choose({ view: picked === 'split' ? 'split' : null })),
+        hideApprovedToggle,
       )
     : null;
 
@@ -432,7 +449,7 @@ function draw() {
   // -- the header
   const steps = fromList && at >= 0 ? steppers(order, at, state.by) : null;
   const viewed = inList
-    ? h('label', { class: 'change-viewed-label' }, h('input', { type: 'checkbox', class: 'change-viewed', 'aria-label': `Viewed ${change.name}`, id: 'review-viewed', dataset: { focusKey: 'review-viewed' }, checked: view.viewed !== null, onchange: (event) => setViewed(change, entry, event.currentTarget.checked) }), icon('viewed', { size: 14 }), h('span', {}, 'Viewed'))
+    ? h('label', { class: 'change-viewed-label' }, h('input', { type: 'checkbox', class: 'change-viewed', 'aria-label': `Viewed ${change.name}`, id: 'review-viewed', dataset: { focusKey: 'review-viewed' }, checked: view.viewed !== null, onchange: (event) => setViewed(change, entry, event.currentTarget.checked) }), h('span', {}, 'Viewed'))
     : null;
   const head = h(
     'header',

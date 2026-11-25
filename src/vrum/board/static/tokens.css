@@ -72,6 +72,9 @@
   --focus: #1c1b19;
   --ok: #1b6b44;
   --ok-soft: #e3f2ea;
+  --approve: #1b6b44;
+  --approve-hover: #145435;
+  --on-approve: #ffffff;
   --warn: #86560a;
   --warn-soft: #faefd6;
   --info: #25579f;
@@ -93,10 +96,6 @@
   --diff-context-gutter: #ebe8e1;
   --diff-hunk-bg: #e8eefa;
   --diff-hunk-text: #27508f;
-  /* A line a revision changed (`~`, M51): the item as it is now, with what each changed part was and is under it. */
-  --diff-change-bg: #fdf3dc;
-  --diff-change-gutter: #f6e4b9;
-  --diff-change-text: #6a4506;
   /* A quiet wash over a line that opens a dialog when the pointer is on it (it stays readable on every line colour). */
   --diff-hover: rgb(28 27 25 / 6%);
   --grid-line: #f0eee9;
@@ -127,6 +126,9 @@
   --focus: #ecebe7;
   --ok: #5fcf97;
   --ok-soft: #1f3a2e;
+  --approve: #21803b;
+  --approve-hover: #25853e;
+  --on-approve: #ffffff;
   --warn: #e8b650;
   --warn-soft: #3b3017;
   --info: #8db4ff;
@@ -146,9 +148,6 @@
   --diff-context-gutter: #2d3035;
   --diff-hunk-bg: #1f2b45;
   --diff-hunk-text: #a2c1ff;
-  --diff-change-bg: #33291a;
-  --diff-change-gutter: #46391c;
-  --diff-change-text: #f0c36a;
   --diff-hover: rgb(255 255 255 / 7%);
   --grid-line: #292c30;
   --grid-weekend: #24272b;

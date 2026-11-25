@@ -571,6 +571,9 @@ def _plan_changes_requested_problems(place: str, event: "EventItem") -> list[str
         for one in comments
     ):
         problems.append(f"{place}: comments must each name an item and say something")
+    approved = after.get("approved")
+    if not isinstance(approved, list) or not all(isinstance(one, str) for one in approved):
+        problems.append(f"{place}: approved must be a list of the items the person approved")
     if event.actor_kind != "person":
         problems.append(f"{place}: only a person asks for changes to a plan")
     return problems

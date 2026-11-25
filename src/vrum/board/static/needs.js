@@ -46,6 +46,7 @@ let after = null;
 // Whether the closed groups are open, kept while the page is drawn again (and the rail's own entries, which are separate).
 let routineOpen = false;
 let agentOpen = false;
+let hideViewed = false;
 const railOpen = { routine: false, agent: false };
 let waitingPlans = null; // the plans that wait for their agent to revise them, or null before they are read
 
@@ -231,17 +232,43 @@ function go(key) {
 // Opens a change's review page, in the order the person sees now.
 const openChange = (stop) => ui.navigate({ change: stop.change.id, group: drawn.by === 'level' ? null : drawn.by }, { page: 'review' });
 
+// Jumps to the next unviewed change (starting after the focused card, or the first unviewed overall).
+function jumpNextUnreviewed() {
+  if (!drawn) return;
+  const unviewed = drawn.cards.filter((card) => viewOf(card.change.key).viewed === null);
+  if (!unviewed.length) return;
+  const active = document.activeElement;
+  const currentAt = drawn.cards.findIndex((card) => card.li.contains(active));
+  const target = (currentAt >= 0 ? drawn.cards.slice(currentAt + 1).find((card) => viewOf(card.change.key).viewed === null) : null) ?? unviewed[0];
+  go(target.change.key);
+}
+
+// Hides viewed cards when Hide viewed is active, keeping groups tidy.
+function applyHideViewed() {
+  if (!drawn) return;
+  for (const card of drawn.cards) card.li.hidden = hideViewed && viewOf(card.change.key).viewed !== null;
+  for (const section of drawn.body.querySelectorAll('section.needs-group:not([data-group="agent"])')) {
+    const rows = [...section.querySelectorAll('li.needs-row')];
+    section.hidden = rows.length > 0 && rows.every((row) => row.hidden);
+  }
+}
+
 // How much was viewed, and the rail, from what is drawn and what the person has marked.
 function chrome() {
   if (!drawn || !drawn.list) return;
   const { changes } = drawn;
   const seen = changes.filter((change) => viewOf(change.key).viewed !== null).length;
+  if (!seen && hideViewed) hideViewed = false;
   drawn.overview.hidden = !changes.length;
   drawn.rail.hidden = !changes.length;
   drawn.railBox.hidden = !changes.length;
   put(drawn.reviewed, `Reviewed ${seen} of ${changes.length}`);
   drawn.bar.style.width = changes.length ? `${Math.round((100 * seen) / changes.length)}%` : '0%';
   drawn.overview.dataset.reviewed = String(seen);
+  drawn.hideViewedBtn.hidden = seen === 0;
+  drawn.hideViewedBtn.setAttribute('aria-pressed', String(hideViewed));
+  drawn.nextUnreviewedBtn.hidden = seen === 0 || seen >= changes.length;
+  applyHideViewed();
   drawn.groupSelect.value = drawn.by;
   fillRail(drawn.rail, drawn.railSelect, drawn.railSections, {
     isViewed: (change) => viewOf(change.key).viewed !== null,
@@ -334,11 +361,39 @@ export function mount(element, params) {
   const by = byOf(params ? params.get('group') : null);
   const groupSelect = h('select', { id: 'needs-group', onchange: () => ui.navigate({ group: groupSelect.value === 'level' ? null : groupSelect.value }) }, BY.map((one) => h('option', { value: one }, BY_WORDS[one])));
   groupSelect.value = by;
+  const hideViewedBtn = h(
+    'button',
+    {
+      type: 'button',
+      id: 'needs-hide-viewed',
+      class: 'small ghost needs-triage',
+      'aria-pressed': 'false',
+      hidden: true,
+      onclick: () => {
+        hideViewed = !hideViewed;
+        chrome();
+      },
+    },
+    'Hide viewed',
+  );
+  const nextUnreviewedBtn = h(
+    'button',
+    {
+      type: 'button',
+      id: 'needs-next-unreviewed',
+      class: 'small ghost needs-triage',
+      hidden: true,
+      onclick: jumpNextUnreviewed,
+    },
+    'Next unreviewed',
+  );
   const overview = h(
     'div',
     { class: 'needs-overview', id: 'needs-overview', hidden: true },
     reviewed,
     h('span', { class: 'needs-progress', 'aria-hidden': 'true' }, bar),
+    hideViewedBtn,
+    nextUnreviewedBtn,
     h('label', { class: 'needs-group-choice', for: 'needs-group' }, h('span', {}, 'Group by'), groupSelect),
     keyButton(keysContent(), { id: 'needs-keys-button', label: 'Keys' }),
   );
@@ -347,7 +402,7 @@ export function mount(element, params) {
   const railBox = h('div', { class: 'needs-rail-box', hidden: true }, railSelect);
   const body = h('div', { class: 'needs-body', id: 'needs-body' }, loadingView());
   const layout = h('div', { class: 'needs-layout' }, railBox, rail, body);
-  drawn = { summary, said: saidBox, overview, reviewed, bar, groupSelect, by, rail, railSelect, railBox, body, layout, routineBox: null, railSections: [], list: null, changes: [], cards: [], byKey: new Map() };
+  drawn = { summary, said: saidBox, overview, reviewed, bar, hideViewedBtn, nextUnreviewedBtn, groupSelect, by, rail, railSelect, railBox, body, layout, routineBox: null, railSections: [], list: null, changes: [], cards: [], byKey: new Map() };
   forgetDrafts();
   next = null;
   after = null;
@@ -381,6 +436,7 @@ export function unmount() {
   watchDetails(() => {});
   // What was said about comments that were not kept is said once: it goes with the page. The plans that wait are read again when it is opened.
   forgetLost();
+  hideViewed = false;
   waitingPlans = null;
   drawn = null;
 }

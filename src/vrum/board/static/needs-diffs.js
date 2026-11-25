@@ -8,13 +8,14 @@
 // moved item beside its line and, in the split layout, the old state and the new one side by side (the same lines, each on its side). The
 // words are the server's and the board's own copy of the work (`store`); a flag or a score is evidence for a person and decides nothing.
 
-import { itemLink } from './ctx.js';
+import { itemLink, can } from './ctx.js';
 import { day, h, plural } from './dom.js';
 import { icon } from './icons.js';
 import { LINK, codeOf, dueChip, kindIcon, noSizeChip, parseNodeRef, priorityChip, ruleCode, sizeChip, itemSizeChip, statusChip } from './labels.js';
-import { diffLine, foldOver, hunk, sides, textLines } from './diff.js';
+import { diffLine, foldApproved, foldOver, hunk, sides, textLines } from './diff.js';
 import { itemSpec, lookupOf, moveSpec, newEpicSpec, opening } from './change-dialog.js';
 import { ordinal, percentOf, scoreLabel } from './needs-assist.js';
+import { includeSlot, leftOut } from './placement-picks.js';
 import { store } from './store.js';
 
 // A plan with more items than this folds each story's tasks behind a line that says how many.
@@ -94,9 +95,10 @@ export function planMeta(item, children, flags, { plain = false } = {}) {
   );
 }
 
-// What lines of a plan may carry besides the plan's own words (plan-notes.js): a button to comment on an item and what is said under
-// it (earlier comments, comments not sent yet, the box to write one). A plan that is only read has none.
-export const NO_NOTES = { button: () => null, below: () => [] };
+// What lines of a plan may carry besides the plan's own words (plan-notes.js): the controls beside an item's line (who last changed it,
+// approve it, ask for a change), what is carried for it from earlier at the end of its line, and what is said under it (earlier comments,
+// comments not sent yet, the box to write one). A plan that is only read has none.
+export const NO_NOTES = { controls: () => [], review: () => null, below: () => [] };
 
 // One item as lines: its line with its sign, what is said under it, its details as raw lines of the same sign and its acceptance
 // criteria. `closed` is the fold that hides it, if any; `details` false leaves out the details and the criteria (a removed item is
@@ -104,8 +106,11 @@ export const NO_NOTES = { button: () => null, below: () => [] };
 // stays (`.`) never opens anything and keeps its links.
 export function planLines(one, { sign = '+', depth, closed = null, flags = [], children = 0, fold, notes = NO_NOTES, details = true, data = {}, open = null }) {
   const spec = open && sign !== '.' ? open(one, sign) : null;
+  // The controls are next to their line and never in it: a line that opens a dialog is a button, and a button holds no button. They
+  // follow the line in the order of the page (so in the order of the keyboard) and sit over its right edge (plan-review.css).
+  const controls = notes.controls(one);
   const made = [
-    diffLine(sign, [(spec ? itemText : link)(one.ref, one.title), planMeta(one, children, flags, { plain: Boolean(spec) }), notes.button(one)], {
+    diffLine(sign, [(spec ? itemText : link)(one.ref, one.title), planMeta(one, children, flags, { plain: Boolean(spec) }), notes.review(one)], {
       ref: one.ref,
       depth,
       closed,
@@ -113,8 +118,9 @@ export function planLines(one, { sign = '+', depth, closed = null, flags = [], c
       data: { kind: one.kind, size: one.size, priority: one.priority, start: one.start_on, target: one.target_on, ...(spec ? { focusKey: `diff-line:${sign}:${one.ref}` } : {}), ...data },
       opens: spec ? opening(spec) : null,
     }),
+    controls.length ? h('div', { class: 'diff-comment-slot', dataset: { ref: one.ref, closed, controls: String(controls.length), sign } }, h('div', { class: 'slot-controls' }, controls)) : null,
     ...notes.below(one, closed, depth),
-  ];
+  ].filter(Boolean);
   if (!details) return made;
   if (one.body.trim()) made.push(...textLines(one.body, { sign, ref: one.ref, part: 'body', depth: depth + 1, key: `lines:${one.ref}`, open: fold.open, onOpen: fold.onOpen, closed }));
   for (const criterion of one.criteria) {
@@ -169,8 +175,9 @@ export const existingLines = (context) =>
 
 // The whole of a plan: the hunk header, the existing items it hangs under or points at as lines that stay, and every item it made
 // as an added line in the order the server gave (parents first), nested by depth, each with its details and criteria under it.
-// `notes` is what is said on the lines (comments, and what was said before).
-export function planDiff(entry, fold, assist, split, notes = NO_NOTES) {
+// `notes` is what is said on the lines (comments, and what was said before); `hidden` is the set of approved items whose lines are folded
+// away (Hide approved), or null.
+export function planDiff(entry, fold, assist, split, notes = NO_NOTES, hidden = null) {
   if (entry.state === 'failed') return [problem(`The whole plan could not be read: ${entry.error}`)];
   if (!entry.data) return [loading('Reading…')];
   const { tree, context } = entry.data;
@@ -200,8 +207,10 @@ export function planDiff(entry, fold, assist, split, notes = NO_NOTES) {
       at += 1;
     }
   }
-  if (!split) return [header, ...existingLines(context), ...out];
-  return [sides(existingLines(context), [header, ...existingLines(context), ...out], 'Nothing')];
+  // Hide approved: the lines of the approved items, folded behind one row for each run of them.
+  const shownOut = hidden ? foldApproved(out, hidden, { ...fold, side: 'new' }) : out;
+  if (!split) return [header, ...existingLines(context), ...shownOut];
+  return [sides(existingLines(context), [header, ...existingLines(context), ...shownOut], 'Nothing')];
 }
 
 // -- a suggested move ----------------------------------------------------------------------------------------
@@ -211,7 +220,7 @@ export function planDiff(entry, fold, assist, split, notes = NO_NOTES) {
 // parent or parents with the same work as removed lines. Beside each added line is how the moved item scores for the parent (the
 // same score the parent suggestions give), where that parent ranks when it is not first, the lowest score marked, and anything the
 // server says is worth weighing, in its words. A score is evidence for a person, never an approval.
-export function moveDiff(change, fold, assist, split) {
+export function moveDiff(change, fold, assist, split, hooks) {
   const move = change.item.placement;
   const moving = new Set(move.items.map((one) => one.ref));
   const titleFor = (one) => titleOf(one.ref, one.title);
@@ -240,8 +249,12 @@ export function moveDiff(change, fold, assist, split) {
     return [meta(chips), ...words];
   };
   // A line of a moved item opens the item as the move would leave it, whichever side of the move it is on.
-  const opens = (one, sign) => ({ opens: opening(moveSpec(one, move)), data: { kind: parseNodeRef(one.ref)?.kind, focusKey: `diff-line:${sign}:${one.ref}` } });
-  const added = (one, depth) => diffLine('+', [itemText(one.ref, titleFor(one)), from(one), ...scored(one)], { ref: one.ref, depth, className: 'diff-item-line', ...opens(one, '+') });
+  const opens = (one, sign) => ({ opens: opening(moveSpec(one, move)), data: { kind: parseNodeRef(one.ref)?.kind, moved: sign === '+' ? 'true' : null, included: String(!leftOut(move).has(one.ref)), focusKey: `diff-line:${sign}:${one.ref}` } });
+  // The item in its new place, with the control that includes it or leaves it where it is (the page keeps the choice until the decision).
+  const added = (one, depth) => [
+    diffLine('+', [itemText(one.ref, titleFor(one)), from(one), ...scored(one)], { ref: one.ref, depth, className: 'diff-item-line', ...opens(one, '+') }),
+    includeSlot(move, one.ref, { hooks, editable: can('write') }),
+  ];
   const removed = (one) => diffLine('-', [itemText(one.ref, titleFor(one))], { ref: one.ref, depth: 0, className: 'diff-item-line', ...opens(one, '-') });
 
   // The reason, then why the server calls the move routine or not, and why there are no scores when there are none.
@@ -269,12 +282,12 @@ export function moveDiff(change, fold, assist, split) {
   if (move.parent) {
     after.push(hunk(here(move.parent)));
     after.push(...siblings(move.parent));
-    for (const one of move.items) after.push(added(one, 0));
+    for (const one of move.items) after.push(...added(one, 0));
   } else if (move.new_epic) {
     after.push(hunk('A new epic'));
     after.push(diffLine('+', [kindIcon('epic', 14), ' ', h('strong', { class: 'diff-new-epic', dataset: { words: 'theirs' } }, move.new_epic.title)], { depth: 0, className: 'diff-item-line', data: { kind: 'epic', newEpic: 'true', focusKey: 'diff-line:+:new-epic' }, opens: opening(newEpicSpec(move.new_epic)) }));
     if (move.new_epic.body?.trim()) after.push(...textLines(move.new_epic.body, { ref: null, part: 'body', depth: 1, key: 'lines:new-epic', open: fold.open, onOpen: fold.onOpen, data: { newEpic: 'true' } }));
-    for (const one of move.items) after.push(added(one, 1));
+    for (const one of move.items) after.push(...added(one, 1));
   }
 
   // The old places, in the order the work is listed: each parent with the work taken from it as removed lines. The split layout also

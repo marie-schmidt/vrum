@@ -9,13 +9,13 @@ import { askCode, codeOf, gateCode, planCode, proposalCode } from './labels.js';
 // How each kind of change is named and what it is drawn with: its plain word and its icon.
 const SHAPES = {
   plan: { icon: 'plan', words: 'Plan' },
-  placement: { icon: 'move', words: 'Suggested move' },
+  placement: { icon: 'move', words: 'Move' },
   question: { icon: 'ask', words: 'Question' },
   approval: { icon: 'confirmed', words: 'Approval' },
   check: { icon: 'checklist', words: 'Check' },
   note: { icon: 'diamond', words: 'Notes' },
   gate: { icon: 'gate', words: 'Refused approval' },
-  lapse: { icon: 'clock', words: 'Claim ran out' },
+  lapse: { icon: 'clock', words: 'Stalled claim' },
 };
 const OTHER = { icon: 'needs', words: 'Needs a person' };
 

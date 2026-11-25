@@ -4,7 +4,7 @@
 // decision is the bar's, and a row of several notes or checks has a bar under each of them (decision-bar.js).
 
 import { offeredList } from './asks.js';
-import { itemLink } from './ctx.js';
+import { can, itemLink } from './ctx.js';
 import { checkBar, barsPerLine, noteBar, notesOf, openChecks } from './decision-bar.js';
 import { day, h, moment } from './dom.js';
 import { icon } from './icons.js';
@@ -25,7 +25,7 @@ const facts = (...rows) => {
 
 function askBody(change) {
   const { ask } = change.item;
-  return [h('div', { class: 'review-ask', dataset: { ask: ask.id } }, h('p', { class: 'review-question', dataset: { words: 'theirs' } }, ask.question), offeredList(ask))];
+  return [h('div', { class: 'review-ask', dataset: { ask: ask.id } }, h('p', { class: 'review-question', dataset: { words: 'theirs' } }, ask.question), can('write') ? null : offeredList(ask))];
 }
 
 // -- the checks of the work -----------------------------------------------------------------------------------

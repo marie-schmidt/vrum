@@ -360,10 +360,10 @@ async def routine_moves_wait_in_a_group_of_their_own() -> None:
             await expect(card).to_be_visible(timeout=SLOW)
             if await card.locator("div.decision-bar button.verdict").count() != 2:
                 wrong.append(f"buttons of {number}")
-            if (await card.locator("[data-fact='impact']").inner_text()).strip() != (
-                f"Moves {len(one['items'])}"
+            if await card.locator(".diff-line[data-sign='+'][data-ref]").count() != len(
+                one["items"]
             ):
-                wrong.append(f"impact of {number}")
+                wrong.append(f"lines on card of {number}")
         for number in routine:
             one = waiting[number]
             await open_review(w, f"placement:{number}")

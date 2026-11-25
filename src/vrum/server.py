@@ -1094,13 +1094,27 @@ def create_server(settings: Settings) -> GuardedServer:
             list[PlanCommentInput] | None,
             Field(description="Comments on items of that revision, each on the item or a part."),
         ] = None,
+        approved: Annotated[
+            list[Ref] | None,
+            Field(
+                description="Items of that revision you approve as they are. An item you "
+                "comment on cannot also be approved. An item the revision took out may be "
+                "approved (you agree it goes) or commented on (you want it back)."
+            ),
+        ] = None,
     ) -> PlanState:
-        """Ask for changes to a plan, with a summary and comments on its lines. Only a person can:
-        the board calls this for the person who is signed in, and an agent's call is refused. The
-        plan stays held, nothing is dropped, and the agent revises it for another review."""
+        """Ask for changes to a plan, with a summary, comments on its lines and the items you
+        approve as they are. Only a person can: the board calls this for the person who is signed
+        in, and an agent's call is refused. The plan stays held, nothing is dropped, and the agent
+        revises it for another review. An approved item stays approved while it does not change."""
         with _database_errors():
             return await plans.request_changes(
-                actor=_me(), plan=plan, revision=revision, summary=summary, comments=comments
+                actor=_me(),
+                plan=plan,
+                revision=revision,
+                summary=summary,
+                comments=comments,
+                approved=approved,
             )
 
     @mcp.tool()
@@ -1231,13 +1245,21 @@ def create_server(settings: Settings) -> GuardedServer:
         reason: Annotated[
             str | None, Field(description="Why. Needed to reject; optional to accept.")
         ] = None,
+        items: Annotated[
+            list[Ref] | None,
+            Field(
+                description="When accepting, the items to move: the others stay where they are. "
+                "Leave out to move them all."
+            ),
+        ] = None,
     ) -> PlacementState:
         """Accept or reject a proposal to move work, as one decision. Only a person can: the board
         calls this for the person who is signed in, and an agent's call is refused. Accepting makes
-        the moves as that person and leaves out an item that has moved or finished since."""
+        the moves as that person and leaves out an item that has moved or finished since, and any
+        item you did not choose when you name some."""
         with _database_errors():
             return await placements.decide(
-                actor=_me(), placement=placement, accepted=accepted, reason=reason
+                actor=_me(), placement=placement, accepted=accepted, reason=reason, only=items
             )
 
     @mcp.tool()

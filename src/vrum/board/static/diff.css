@@ -36,10 +36,14 @@
 .diff-code :is(.diff-meta, .actor, .chip) { text-indent: 0; }
 .diff-line[data-sign="+"] .diff-sign { background: var(--diff-add-gutter); color: var(--diff-add-text); }
 .diff-line[data-sign="+"] .diff-code { background: var(--diff-add-bg); color: var(--text); }
+.diff-line[data-sign="+"][data-moved="true"] .diff-sign { background: var(--diff-context-gutter); color: var(--diff-add-text); box-shadow: inset 3px 0 0 var(--diff-add-text); }
+.diff-line[data-sign="+"][data-moved="true"] .diff-sign .icon { margin-top: 0.25rem; color: inherit; }
+.diff-line[data-sign="+"][data-moved="true"] .diff-code { background: var(--diff-context-bg); color: var(--text); }
 .diff-line[data-sign="-"] .diff-sign { background: var(--diff-remove-gutter); color: var(--diff-remove-text); }
 .diff-line[data-sign="-"] .diff-code { background: var(--diff-remove-bg); color: var(--text); }
-.diff-line[data-sign="~"] .diff-sign { background: var(--diff-change-gutter); color: var(--diff-change-text); }
-.diff-line[data-sign="~"] .diff-code { background: var(--diff-change-bg); color: var(--text); }
+.diff-line[data-sign="changed"] .diff-sign { background: var(--diff-context-gutter); color: var(--diff-add-text); box-shadow: inset 3px 0 0 var(--diff-add-text); }
+.diff-line[data-sign="changed"] .diff-sign .icon { margin-top: 0.25rem; color: inherit; }
+.diff-line[data-sign="changed"] .diff-code { background: var(--diff-context-bg); color: var(--text); }
 .diff-line[data-sign="."] .diff-code { color: var(--text-2); }
 
 /* The raw text of a body: as written, in the manner of a file, never as Markdown. */
@@ -47,6 +51,7 @@
 .diff-item-line .diff-code, .diff-about .diff-code, .diff-context .diff-code, .diff-criterion .diff-code, .diff-gate .diff-code, .diff-check .diff-code, .diff-note .diff-code { font-size: var(--text-md); }
 .diff-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-left: var(--space-2); text-indent: 0; vertical-align: middle; }
 .diff-link, .diff-count, .diff-from, .diff-why, .diff-evidence { color: var(--text-2); font-family: var(--font-mono); font-size: var(--text-xs); }
+.diff-meta > :is(.diff-link, .diff-count) + :is(.diff-link, .diff-count)::before { content: "\00b7"; margin-right: var(--space-2); color: var(--text-3); }
 .diff-link a, .diff-from a { color: inherit; }
 .diff-from, .diff-why, .diff-evidence { margin-left: var(--space-2); font-family: var(--font-sans); font-size: var(--text-sm); }
 .diff-subject { font-weight: 650; }

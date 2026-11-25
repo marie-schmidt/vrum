@@ -208,7 +208,7 @@ async def test_a_plan_of_sixty_items_reads_whole_and_each_line_equals_what_the_t
                     ref: e.dataset.ref, size: e.dataset.size ?? null,
                     priority: e.dataset.priority,
                     start: e.dataset.start ?? null, target: e.dataset.target ?? null,
-                    title: e.querySelector('a.diff-item').textContent.trim(),
+                    title: e.querySelector('.diff-item').textContent.trim(),
                     chip: e.querySelector('.chip.size')?.dataset.size ?? null,
                     links: [...e.querySelectorAll('.diff-link')]
                         .map((a) => [a.dataset.linkType, a.dataset.target]),
@@ -384,7 +384,9 @@ async def test_the_lines_of_a_suggested_move_are_the_old_places_minus_and_the_ne
         await open_review(page, f"placement:{listed['id']}")
         card = page.locator("#review-page")
         await expect(card.locator(".change-letter, .diffstat, .change-summary")).to_have_count(0)
-        await expect(card.locator(".change-kind-word")).to_have_text("Suggested move")
+        await expect(card.locator(".change-kind .item-code")).to_have_text(
+            f"Proposal {listed['id']}"
+        )
         # The proposer's reason is the commit message, whole.
         assert await card.locator(".needs-move-reason").text_content() == listed["reason"]
         # The new parent: its first two children stay, for context, and the three come under it.
@@ -831,12 +833,12 @@ async def test_every_word_and_sign_of_a_review_reads_in_both_themes(
             await page.goto(f"{project.address}#/needs")
             await expect(page.locator("#needs-body li.needs-row").first).to_be_visible(timeout=SLOW)
             await settle(page)
-            # Every kind of mark is on screen: added lines, a hunk row, the kind and the level.
+            # Every kind of mark is on screen: added lines, a hunk row, the kind and the byline.
             for part in (
                 ".diff-line[data-sign='+']",
                 ".diff-hunk",
                 ".change-kind",
-                ".level-chip",
+                ".change-facts",
             ):
                 await expect(page.locator(f"#needs-body {part}").first).to_be_visible()
             found = await contrast(w, scratch)

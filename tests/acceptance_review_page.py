@@ -65,10 +65,10 @@ async def the_page_shows_the_whole_plan() -> None:
         folded = await big_card.locator(".change-preview .diff-fold").all_inner_texts()
         proof(
             "M52",
-            "the list shows a plan as a compact card: what it frees as a fact (Frees N, the number "
-            "of items it makes) and a short preview of its lines, at most six, with a fold that "
-            "says how much is behind it for a plan of 45 items",
-            impact == f"Frees {total}"
+            "the list shows a plan as a compact card: its item count as a fact (N items) and a "
+            "short preview of its lines, at most six, with a fold that says how much is behind it "
+            "for a plan of 45 items",
+            impact == f"{total} items"
             and preview > 0
             and big_preview <= 6
             and any(re.search(r"\d+", fold) for fold in folded),
@@ -400,7 +400,6 @@ async def a_move_is_lines_taken_out_and_put_in() -> None:
         await the_needs_page(w)
         card = page.locator(f"li.needs-row[data-change='placement:{made['id']}']")
         await expect(card).to_have_count(1, timeout=SLOW)
-        impact = (await card.locator("[data-fact='impact']").inner_text()).strip()
         await open_review(w, f"placement:{made['id']}")
         scope = review_page(page)
         added = await lines_of(scope, ITEM_LINES, len(moved))
@@ -412,10 +411,9 @@ async def a_move_is_lines_taken_out_and_put_in() -> None:
             "M49",
             "a suggested move is drawn on its review page as a diff: the proposer's reason, the "
             "epic it goes under with two of its own stories as context and each moved story as "
-            "an added line that says where it comes from, the epic it leaves with the same "
-            "stories as removed lines, all equal to what list_placements says, and the bar "
-            "after the last line; the card says how many it moves as a fact (Moves 3), and the "
-            "lowest score is on the page as a percent, where the status letter R was "
+            "a move line that says where it comes from, the epic it leaves with the same stories "
+            "as removed lines, all equal to what list_placements says, and the bar after the last "
+            "line; the lowest score is on the page as a percent, where the status letter R was "
             "(replaced by M52)",
             added == moved
             and removed == moved
@@ -424,9 +422,8 @@ async def a_move_is_lines_taken_out_and_put_in() -> None:
             and all(one["from_parent"] == misc["ref"] for one in listed["items"])
             and misc["title"] in written
             and await the_diff_is_before_the_decision(scope)
-            and impact == f"Moves {len(moved)}"
             and f"{lowest}%" in [" ".join(s.split()) for s in scores],
-            f"{len(added)} added, {len(removed)} removed, {len(context)} context, {impact}",
+            f"{len(added)} moved, {len(removed)} removed, {len(context)} context",
         )
 
 

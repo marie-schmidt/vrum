@@ -532,14 +532,15 @@ you). Rejecting still ends a plan, with its reason, in either state.
   `revision` (the first draft is revision 1) and `revisions` (one entry for each: who made it and
   when, the `note` its author gave, how many items it held, the items it took out, and the number
   of the feedback a person gave on it); `feedback` (each request, oldest first: who asked, when, on
-  which revision, the summary and the comments); and `changes`, how the revision shown differs from
-  the one before it (items `added`, `removed` or `changed`, with the old values of what changed in
-  `before`). Each comment names its `item` and its `field` (empty when it is about the item as a
+  which revision, the summary, the comments and the items they `approved`); `changes`, how the
+  revision shown differs from the one before it (items `added`, `removed` or `changed`, with the
+  old values of what changed in `before`); and `blame` (see "Approving lines, and who changed
+  each" below). Each comment names its `item` and its `field` (empty when it is about the item as a
   whole) and carries `quoted`, the words it was about as they were in that revision, so that a
   later change can never attach a comment to other words. Give `revision` to read an earlier
-  revision exactly as it was submitted: its `tree`, its `changes` and the feedback on it do not
-  change when the plan is revised. A list of plans gives each plan's `revision` and when it was
-  revised and none of the rest.
+  revision exactly as it was submitted: its `tree`, its `changes`, its `blame` as of then and the
+  feedback on it do not change when the plan is revised. A list of plans gives each plan's
+  `revision` and when it was revised and none of the rest.
 - **Sending a revision.** `revise_plan` takes the plan's number, the whole plan as it should be now
   in the words `create_plan` uses, and a `note` that says what changed. An item that continues one
   the plan has gives its `ref`; an item without a `ref` is new; an item the plan has that no entry
@@ -604,6 +605,60 @@ const revised = await vrum.revise_plan({
   })),
 });
 return { revision: revised.revision, removed: revised.removed, counts: revised.counts };
+```
+
+**Approving lines, and who changed each.** A person can also say yes to a line. With **Request
+changes** the board sends, besides the summary and the comments, `approved`: the references of the
+items of the revision they reviewed that they approve as they are. Asking for a change to an item
+is a comment on it, so an item is either approved or commented on in one request, never both: a
+request that does both is refused with every problem listed and nothing is recorded. A request with
+approvals and no comments is allowed (it still needs a summary, and the plan still waits for you).
+An item the reviewed revision took out can be approved too, which means the person agrees it goes,
+or commented on, which means they want it back (`quoted` then holds its words as they were). The
+answer, `feedback[].approved` and the `plan_changes_requested` event all carry `approved`, epics
+first and each item once. An approval is a mark on the line and nothing is released by it: a plan is
+still approved or rejected as one decision for the whole current revision.
+
+- **`blame`.** `list_plans` with `plan` gives, for every item of the revision shown and every item
+  that revision took out (epics first, by number), `ref`, `change` (`added` when the item came into
+  the plan in `revision`, `changed` when any part of it last changed in `revision`, `removed` when
+  the revision shown took it out), `revision`, `by`, `by_kind`, `at` and `note`, which are those of
+  the revision that did it (so `note` is what its author said changed), and `review`: what a person
+  has said about the item since. `blame` is `null` in a list, and reading an earlier revision gives
+  it as of that revision.
+- **What `review.state` means.** `approved`: a person approved the item as it is now (`by`, `at`,
+  `revision` is the revision they read and `feedback` the number of their feedback). `asked`: a
+  person asked for a change to it and it has not changed since. `changed`: a person said something
+  about it and it has changed since, so it needs a fresh look from them. `none`: nobody has said
+  anything about it, and the other fields are `null`. The latest word about an item is the one that
+  counts, and a word stands only while every part of the item is exactly as it was when it was said.
+  For an item the shown revision took out only a word on the revision that took it out counts.
+- **How to use it.** Read `blame` before you revise. Leave an item that is `approved` exactly as it
+  is: the person has read it and does not have to read it again, and any part you change makes it
+  `changed`. Change what is `asked` (the comments are in the feedback that `review.feedback` names),
+  and say in your `note` what you changed. An item that is `changed` is waiting for the person's
+  next look, and `none` was not read by anyone yet.
+
+```ts
+// Plan 1402 waits for its agent. List the items a person has not approved, with what they said
+// about each, so that the revision changes those and leaves the approved items as they are.
+const { items } = await vrum.list_plans({ plan: 1402 });
+const plan = items[0];
+if (!plan || !plan.blame) return "There is no such plan.";
+const said = new Map((plan.feedback ?? []).map((one) => [one.id, one]));
+return plan.blame
+  .filter((line) => line.review.state !== "approved")
+  .map((line) => {
+    const asked = line.review.feedback === null ? undefined : said.get(line.review.feedback);
+    return {
+      item: line.ref,
+      state: line.review.state,
+      lastChange: `${line.change} in revision ${line.revision} by ${line.by}`,
+      comments: (asked?.comments ?? [])
+        .filter((one) => one.item === line.ref)
+        .map((one) => one.text),
+    };
+  });
 ```
 
 **A template.** A template is data and never code: a named plan with variables and `{{name}}`
@@ -759,6 +814,16 @@ under **Suggested moves**, and a person accepts it, which makes the moves as tha
 the new epic only then, or rejects it with a reason. An item that has moved or finished since is
 left out and the person is told. You may have 25 proposals waiting, and an item can be in only one.
 `list_placements` shows them with how they ended.
+
+A person can also accept a proposal **in part**: `decide_placement` takes `items`, the references of
+the ones to move when accepting, and the others stay where they are. The record says so in
+`skipped`, each as `{ref, why}` with `why` "<the person's name> left it out" (the same list that
+already names an item that moved or finished since), and `applied` names what moved, so a proposer
+reads from `list_placements`, or from the `placement_accepted` event of the change feed, which of
+its items were taken. Leave `items` out to move them all. Naming none is refused ("Name at least
+one item to move, or reject the proposal."), as is naming an item that is not in the proposal or
+naming items while rejecting, and a refusal changes nothing. Only a person decides a proposal, and
+no key can have `decide_placement`.
 
 **What a proposal says about itself.** Read with `status: "proposed"`, `list_placements` also works
 out, for each proposal that still waits, how well each item fits the parent it was proposed for:

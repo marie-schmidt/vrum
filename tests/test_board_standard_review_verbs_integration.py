@@ -491,7 +491,7 @@ async def test_a_refused_approval_and_a_lapsed_claim_are_lifted_blocked_or_dropp
 
 async def lines_of(page: Page) -> Counter[str]:
     found: list[str] = await page.locator("#review-diff .diff-line").evaluate_all(
-        """els => els.filter((e) => ['+', '-', '~'].includes(e.dataset.sign))
+        """els => els.filter((e) => ['+', '-', 'changed'].includes(e.dataset.sign))
             .map((e) => [e.dataset.sign, e.dataset.ref ?? '', e.dataset.part ?? ''].join('|'))"""
     )
     return Counter(found)
@@ -560,7 +560,8 @@ async def test_unified_split_changes_and_whole_plan_each_change_the_lines_of_a_p
             )
         )
         assert (
-            await old.locator(".diff-line[data-sign='+'], .diff-line[data-sign='~']").count() == 0
+            await old.locator(".diff-line[data-sign='+'], .diff-line[data-sign='changed']").count()
+            == 0
         )
         assert await new.locator(".diff-line[data-sign='-']").count() == 0
         # What was added has an empty old side and what was removed an empty new side.
@@ -901,6 +902,10 @@ async def test_a_name_sits_on_the_baseline_of_the_words_beside_it() -> None:
         level_with(await offsets(page, "#review-page .plan-revision-author .actor"))
         await w.open("#/needs")
         await open_review(page, f"note:{waiting.noted['ref']}")
+        # The note is read after the page opens: wait for its facts before measuring them.
+        await expect(page.locator("#review-page .review-note .review-fact .actor")).to_have_count(
+            1, timeout=SLOW
+        )
         level_with(await offsets(page, "#review-page .review-note .review-fact .actor"))
         # A name inside a chip is centred with the chip's own text.
         await w.open("#/needs")

@@ -2,7 +2,7 @@
 # Look around Vrum with sample data, without touching your own install.
 #
 #   ./demo.sh         starts a separate copy of Vrum with a made-up project in it (Riverside
-#                     Bike Share: 13 epics, 65 stories, 190 tasks, with requirements, notes
+#                     Bike Share: 13 epics, 65 stories, 191 tasks, with requirements, notes
 #                     (some with the person who decided them), claims and handoff notes), then
 #                     says where it is and how to sign in. Running it again starts again from a
 #                     fresh database.

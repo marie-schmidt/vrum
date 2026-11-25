@@ -710,10 +710,10 @@ async def every_kind_opens_a_page_that_says_what_the_tools_say() -> None:
 
 # -- the choices that act on one change -----------------------------------------------------
 
-# What a change adds, removes or changes, as (sign, item, part) of every `+`, `-` and `~` line,
-# sorted: the same change reads the same in the unified and the split view.
+# What a change adds, removes or changes, as (sign, item, part) of every `+`, `-` and `changed`
+# line, sorted: the same change reads the same in the unified and the split view.
 SIGNED = """el => [...el.querySelectorAll('.change-diff .diff-line')]
-    .filter(l => ['+', '-', '~'].includes(l.dataset.sign))
+    .filter(l => ['+', '-', 'changed'].includes(l.dataset.sign))
     .map(l => `${l.dataset.sign}|${l.dataset.ref ?? ''}|${l.dataset.part ?? ''}`)
     .sort()"""
 
@@ -1004,3 +1004,7 @@ async def standard_on_the_page() -> None:
     from tests.acceptance_standard_decide import standard_decisions  # noqa: PLC0415
 
     await standard_decisions()
+    # What pressing a red or green line of a diff shows is in a file of its own.
+    from tests.acceptance_standard_change import standard_changes  # noqa: PLC0415
+
+    await standard_changes()

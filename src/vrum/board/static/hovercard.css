@@ -15,6 +15,7 @@
 }
 .hovercard[data-placement="above"] { animation-name: hovercard-in-above; }
 .hovercard[data-size="wide"] { max-width: min(42rem, calc(100vw - 2 * var(--space-2))); }
+.hovercard[data-passive="true"] { pointer-events: none; }
 @keyframes hovercard-in { from { opacity: 0; transform: translateY(-4px); } }
 @keyframes hovercard-in-above { from { opacity: 0; transform: translateY(4px); } }
 

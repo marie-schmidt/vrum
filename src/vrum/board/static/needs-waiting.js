@@ -38,14 +38,15 @@ function row(plan, asOf, by) {
   return h(
     'li',
     { class: 'waiting-row', dataset: { plan: plan.id } },
-    h('span', { class: 'change-kind' }, icon('plan', { size: 16 }), h('span', { class: 'change-kind-word' }, 'Plan'), h('span', { class: 'item-code needs-code' }, planCode(plan.id))),
+    icon('plan', { size: 16, className: 'change-lead-icon' }),
     viewLink('review', { change: `plan:${plan.id}`, group: by && by !== 'level' ? by : null }, { class: 'change-title plan-link', dataset: { plan: plan.id } }, h('span', { class: 'change-title-text', dataset: { words: 'theirs' } }, plan.title)),
+    h('span', { class: 'change-kind' }, h('span', { class: 'item-code needs-code' }, planCode(plan.id))),
     h(
       'ul',
       { class: 'plain change-facts' },
-      plan.by ? h('li', { class: 'chip change-fact', dataset: { fact: 'by' } }, actorLabel(plan.by, plan.by_kind)) : null,
-      h('li', { class: 'chip change-fact', dataset: { fact: 'waiting' } }, icon('clock', { size: 13 }), h('time', { class: 'needs-time', datetime: plan.asked, title: plan.asked }, waitedWords(plan.asked, asOf))),
-      plan.revision > 1 ? h('li', { class: 'chip change-fact change-revision', dataset: { fact: 'revision' } }, `Revision ${plan.revision}`) : null,
+      plan.by ? h('li', { class: 'change-fact', dataset: { fact: 'by' } }, actorLabel(plan.by, plan.by_kind)) : null,
+      h('li', { class: 'change-fact', dataset: { fact: 'waiting' } }, 'Waiting ', h('time', { class: 'needs-time', datetime: plan.asked, title: plan.asked }, waitedWords(plan.asked, asOf))),
+      plan.revision > 1 ? h('li', { class: 'change-fact change-revision', dataset: { fact: 'revision' } }, `Revision ${plan.revision}`) : null,
     ),
   );
 }

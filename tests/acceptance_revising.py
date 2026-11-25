@@ -934,7 +934,7 @@ async def the_example_in_the_docs() -> None:
     (with the plan's number put in): it reads the feedback and sends a revision that continues
     every item and rewords the one title the person commented on."""
     blocks = re.findall(r"```ts\n(.*?)```", DOCS.read_text(encoding="utf-8"), flags=re.S)
-    (example,) = [b for b in blocks if b.startswith("// Plan 1402 waits for its agent")]
+    (example,) = [b for b in blocks if b.startswith("// Plan 1402 waits for its agent. Read what")]
     owner = register()
     project = make_project(owner)
     async with connect(project.mcp_url, project.key) as agent:

@@ -42,7 +42,7 @@ async function readPlacements() {
 
 async function readChecks(node) {
   const read = await call('get_node', { node });
-  return { data: { checks: read.checks, status: read.status }, refs: [node] };
+  return { data: { checks: read.checks, status: read.status, where: read.where ?? null }, refs: [node] };
 }
 
 async function readNotes(ids) {

@@ -1087,8 +1087,8 @@ FLEET = epic(
     story(
         "Spare parts stock",
         "",
-        task("List of parts and where they are", priority="low"),
-        task("Reorder level for each part", priority="low"),
+        task("List of parts and where they are", priority="low", key="parts-list"),
+        task("Reorder level for each part", priority="low", key="reorder-level"),
         priority="low",
     ),
     story(
@@ -2812,6 +2812,19 @@ CHECKED_REASON = (
 SUGGESTION_REJECTED = (
     "Broken docks need the sensor work in Fleet first. Leave it in the Inbox until that lands."
 )
+# A proposal the steward makes by hand about two tasks that are not in the Inbox (M53): the parts
+# of the workshop's job cards are already a story of their own, so the list of parts and the
+# reorder level look as though they belong with it (keys of tasks of the "Spare parts stock" story,
+# and the key of the story they would move under). The planner accepts it IN PART: the list of
+# parts moves and the reorder level stays where it is, which the record says she left out. The
+# server's own words for it are `<person> left it out`.
+PARTIAL_ITEMS = ("parts-list", "reorder-level")
+PARTIAL_PARENT = "workshop"
+PARTIAL_LEFT_IN = "reorder-level"
+PARTIAL_REASON = (
+    "Parts are written against each job in the workshop story, so the list of parts and the "
+    "reorder level look like part of it. Moving them keeps everything about parts in one place."
+)
 
 
 @dataclass(frozen=True)
@@ -2926,6 +2939,15 @@ WINTER_ITEMS: tuple[dict[str, str], ...] = (
         "A bike is out of service for one morning and goes back on the street the same day.",
     },
     {
+        "key": "chains",
+        "kind": "task",
+        "title": "Buy spare studded chains for staff bikes",
+        "parent": "studded",
+        "size": "s",
+        "body": "Keep two sets at the depot for the bikes the technicians ride between stations.\n"
+        "A set fits one bike and goes back to the depot after each frost.",
+    },
+    {
         "key": "survey",
         "kind": "task",
         "title": "Survey the four stations for cover frames",
@@ -2958,18 +2980,24 @@ WINTER_CRITERIA: tuple[tuple[str, str], ...] = (
     ("fit-tyres", "The torque of every fitted tyre is written on the bike's job card"),
 )
 
-# The conversation about the winter plan (M51). The demo owner read the drafted plan, asked for two
-# changes with a comment on one line each (the title of a story, the details of a task) and said so
-# in a summary, and the planning agent sent revision 2 of the SAME plan, which changes those two
-# parts and nothing else (so its checks, its totals and its row on Needs a person stay as they were)
-# and says what it changed. WINTER_FEEDBACK is (item key, part, what the person said);
-# WINTER_REVISED is the new words of the two parts, by item key; WINTER_NOW is the plan as it reads
-# now, at revision 2.
+# The conversation about the winter plan (M51, M53). The demo owner read the drafted plan (revision
+# 1: eight items) and asked for changes with a summary: a comment on the title of a story, on the
+# details of a task and on a task she wants dropped ("Staff bikes do not need spare chains"), and
+# four items approved as they are (WINTER_APPROVED). The planning agent sent revision 2 of the SAME
+# plan, which changes the two parts that were asked about, REMOVES the task she asked to drop (so
+# the review shows red lines beside the changed ones) and leaves the approved items alone, so they
+# still read as approved, with her name and the revision she read, on every line the revision did
+# not touch. Its checks, its totals and its row on Needs a person stay as they were: the removed
+# task is dropped, and it counts as a task of the project. WINTER_FEEDBACK is (item key, part or
+# None for the whole item, what the person said); WINTER_REVISED is the new words of the two parts,
+# by item key; WINTER_REMOVED is the keys of the items revision 2 takes out; WINTER_NOW is the plan
+# as it reads now, at revision 2.
 WINTER_FEEDBACK_SUMMARY = (
-    "Two things before I can approve this: the studded tyres story needs a title that names the "
-    "routes, and the fitting task has to say how long a bike is off the street."
+    "Three things before I can approve this: the studded tyres story needs a title that names the "
+    "routes, the fitting task has to say how long a bike is off the street, and the staff bikes "
+    "do not need spare chains."
 )
-WINTER_FEEDBACK: tuple[tuple[str, str, str], ...] = (
+WINTER_FEEDBACK: tuple[tuple[str, str | None, str], ...] = (
     (
         "studded",
         "title",
@@ -2981,7 +3009,12 @@ WINTER_FEEDBACK: tuple[tuple[str, str, str], ...] = (
         "body",
         "'One morning' is not enough for the rota. How many hours is a bike off the street?",
     ),
+    ("chains", None, "Staff bikes do not need spare chains."),
 )
+# The items the owner approved as they were in revision 1. None of them is commented on, and
+# revision 2 leaves every one of them as it was. The story about battery swaps is not among them:
+# it is the one the check for look-alikes names.
+WINTER_APPROVED = ("covers", "survey", "supplier", "fit-covers")
 WINTER_REVISED: dict[str, dict[str, str]] = {
     "studded": {"title": "Studded tyres on the river path, both bridges and the hill route"},
     "fit-tyres": {
@@ -2990,12 +3023,16 @@ WINTER_REVISED: dict[str, dict[str, str]] = {
         "the same afternoon."
     },
 }
+WINTER_REMOVED = ("chains",)
 WINTER_REVISION_NOTE = (
-    "Named the routes in the title of the studded tyres story and said how long a bike is off the "
-    "street for the fitting. Nothing else changed."
+    "Named the routes in the title of the studded tyres story, said how long a bike is off the "
+    "street for the fitting and took out the task for spare chains, which the staff bikes do not "
+    "need. Nothing else changed."
 )
 WINTER_NOW: tuple[dict[str, str], ...] = tuple(
-    {**item, **WINTER_REVISED.get(item["key"], {})} for item in WINTER_ITEMS
+    {**item, **WINTER_REVISED.get(item["key"], {})}
+    for item in WINTER_ITEMS
+    if item["key"] not in WINTER_REMOVED
 )
 
 # A second, small plan that waits for its agent (M51): the operations agent drafted it under the

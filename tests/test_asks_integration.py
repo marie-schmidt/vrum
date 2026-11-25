@@ -475,6 +475,7 @@ async def test_needs_a_person_lists_exactly_what_waits_by_story_and_shrinks_as_i
         assert note_row["notes"] == [note["id"]] and "not yet confirmed" in note_row["reason"]
         lapse_row = found[("lapse", lapsed["ref"])]
         assert lapse_row["count"] == 2 and "ran out 2 times" in lapse_row["reason"]
+        assert (lapse_row["waiting"], lapse_row["waiting_kind"]) == ("second-agent", "agent")
         # Longest waiting first, and nothing is told to the agent that a person must do.
         assert all(
             rows(needs)[i]["waiting_since"] <= rows(needs)[i + 1]["waiting_since"]

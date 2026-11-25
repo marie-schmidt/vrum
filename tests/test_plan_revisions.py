@@ -2,6 +2,7 @@
 drifted from the revision a person reviewed, and how the comments of a request for changes are
 checked and given the words they are about."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -9,7 +10,12 @@ import pytest
 from vrum.common import Refusal
 from vrum.notify_events import object_of, types_of
 from vrum.plan_revisions import (
+    PlanComment,
     PlanCommentInput,
+    PlanFeedback,
+    PlanRevisionInfo,
+    blame_of,
+    clean_approved,
     clean_comments,
     clean_summary,
     diff_revisions,
@@ -148,3 +154,124 @@ def test_a_revision_is_news_like_a_proposal_and_a_request_like_a_decision() -> N
     assert types_of("plan_changes_requested", None, {"plan": 3}) == ["plan.decided"]
     assert object_of("plan_revised", 9, {"plan": 3}) == "plan:3"
     assert object_of("plan_changes_requested", 9, {"plan": 3}) == "plan:3"
+
+
+NOW = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+
+def revision(number: int, by: str = "planner", note: str | None = None) -> PlanRevisionInfo:
+    return PlanRevisionInfo(
+        revision=number,
+        by=by,
+        by_kind="agent",
+        at=NOW + timedelta(hours=number),
+        note=note,
+        items=0,
+        removed=[],
+        feedback=None,
+    )
+
+
+def feedback(
+    number: int, on: int, approved: list[str] | None = None, asked: list[str] | None = None
+) -> PlanFeedback:
+    return PlanFeedback(
+        id=number,
+        revision=on,
+        by="Priya",
+        by_kind="person",
+        at=NOW + timedelta(hours=on, minutes=30),
+        summary="Look again.",
+        comments=[
+            PlanComment(item=ref, field=None, text="Change it.", quoted="x") for ref in asked or []
+        ],
+        approved=approved or [],
+    )
+
+
+def test_each_line_says_who_last_changed_it_and_in_which_revision() -> None:
+    first = [item("epic:1"), item("story:2", size="m"), item("task:3")]
+    second = [item("epic:1"), item("story:2", size="l"), item("task:3"), item("task:4")]
+    third = [item("epic:1"), item("story:2", size="l"), item("task:4", title="Renamed")]
+    rows = [revision(1, "drafter"), revision(2, "reviser", "Sized it"), revision(3, "third")]
+    found = {one.ref: one for one in blame_of({1: first, 2: second, 3: third}, rows, [], 3)}
+    assert [(r, found[r].change, found[r].revision, found[r].by) for r in found] == [
+        ("epic:1", "added", 1, "drafter"),
+        ("story:2", "changed", 2, "reviser"),
+        ("task:3", "removed", 3, "third"),
+        ("task:4", "changed", 3, "third"),
+    ]
+    assert found["story:2"].note == "Sized it"
+    assert all(one.review.state == "none" for one in found.values())
+
+
+def test_an_approval_stands_while_the_item_is_as_it_was_and_goes_stale_when_it_changes() -> None:
+    first = [item("epic:1"), item("story:2"), item("task:3"), item("task:4")]
+    second = [item("epic:1"), item("story:2"), item("task:3", size="s"), item("task:4")]
+    rows = [revision(1), revision(2)]
+    said = [feedback(10, 1, approved=["story:2", "task:3"], asked=["task:4"])]
+    found = {one.ref: one.review for one in blame_of({1: first, 2: second}, rows, said, 2)}
+    assert found["story:2"].state == "approved" and found["story:2"].revision == 1
+    assert found["story:2"].by == "Priya" and found["story:2"].feedback == 10
+    # Changed since it was approved: it needs a fresh look.
+    assert found["task:3"].state == "changed" and found["task:3"].revision == 1
+    # Asked for a change and not changed yet.
+    assert found["task:4"].state == "asked"
+    assert found["epic:1"].state == "none"
+
+
+def test_the_latest_word_about_an_item_is_the_one_that_counts() -> None:
+    items = [item("epic:1"), item("task:2")]
+    rows = [revision(1), revision(2)]
+    said = [feedback(10, 1, asked=["task:2"]), feedback(11, 2, approved=["task:2"])]
+    found = blame_of({1: items, 2: items}, rows, said, 2)
+    assert {one.ref: one.review.state for one in found}["task:2"] == "approved"
+    later = [feedback(10, 1, approved=["task:2"]), feedback(11, 2, asked=["task:2"])]
+    found = blame_of({1: items, 2: items}, rows, later, 2)
+    assert {one.ref: one.review.state for one in found}["task:2"] == "asked"
+
+
+def test_an_item_a_revision_took_out_can_be_agreed_to_or_asked_to_come_back() -> None:
+    first = [item("epic:1"), item("task:2"), item("task:3")]
+    second = [item("epic:1")]
+    rows = [revision(1), revision(2, note="Took out two")]
+    said = [
+        feedback(10, 1, asked=["task:2"]),
+        feedback(11, 2, approved=["task:3"]),
+    ]
+    found = {one.ref: one for one in blame_of({1: first, 2: second}, rows, said, 2)}
+    assert found["task:3"].change == "removed" and found["task:3"].review.state == "approved"
+    # A word from before the removal is about the item as it was: it no longer stands.
+    assert found["task:2"].change == "removed" and found["task:2"].review.state == "none"
+    wants_it_back = [feedback(12, 2, asked=["task:2"])]
+    again = {one.ref: one for one in blame_of({1: first, 2: second}, rows, wants_it_back, 2)}
+    assert again["task:2"].review.state == "asked"
+
+
+def test_the_approved_items_are_checked_with_the_comments_and_each_is_kept_once() -> None:
+    reviewed = [item("epic:1"), item("story:2"), item("task:3")]
+    gone = [item("task:9")]
+    asked = [PlanComment(item="task:3", field=None, text="Size it", quoted="x")]
+    assert clean_approved(["task:9", " Story:2 ", "story:2", "epic:1"], asked, reviewed, gone) == [
+        "epic:1",
+        "story:2",
+        "task:9",
+    ]
+    assert clean_approved(None, asked, reviewed) == []
+    with pytest.raises(Refusal) as raised:
+        clean_approved(["task:3", "task:77"], asked, reviewed, gone)
+    words = str(raised.value)
+    assert "2 problems" in words and "task:77" in words
+    assert "task:3 is approved and also has a comment" in words
+    assert "Nothing was changed." in words
+
+
+def test_a_comment_can_be_about_an_item_the_revision_took_out() -> None:
+    reviewed = [item("epic:1")]
+    gone = [item("task:9", title="Buy a tarp")]
+    made = clean_comments(
+        [PlanCommentInput(item="task:9", field=None, text="Keep it.")], reviewed, gone
+    )
+    assert made[0].quoted == "Buy a tarp"
+    with pytest.raises(Refusal):
+        clean_comments([PlanCommentInput(item="task:9", field=None, text="Keep it.")], reviewed)

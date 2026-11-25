@@ -36,6 +36,7 @@ from vrum.gate_reads import GATE_COLUMNS, GateState, gate_from
 from vrum.graph import change_status, require_node
 from vrum.plan_checks import PlanCheck, duplicate_check, local_checks, unindexed_elsewhere
 from vrum.plan_revisions import (
+    PlanBlame,
     PlanComment,
     PlanCommentInput,
     PlanContext,
@@ -46,6 +47,8 @@ from vrum.plan_revisions import (
     PlanItemLink,
     PlanItemRead,
     PlanRevisionInfo,
+    blame_of,
+    clean_approved,
     clean_comments,
     clean_summary,
     diff_revisions,
@@ -137,6 +140,12 @@ class PlanState(BaseModel):
         description="How the revision shown differs from the one before it: items added, "
         "removed and changed. Null for the first revision, and in a list."
     )
+    blame: list[PlanBlame] | None = Field(
+        description="For each item of the revision shown (and each item it took out), the "
+        "revision that last added, changed or removed it, who made that and with what note, and "
+        "what a person has said about it since: approved, asked for a change, changed since they "
+        "looked, or nothing. Only with plan; null in a list."
+    )
     drift: list[PlanDrift] | None = Field(
         description="Only for the current revision of a plan that is still held: the items that "
         "have been changed since it was submitted, outside a revision. While there are any it "
@@ -181,6 +190,7 @@ def plan_from(row: dict[str, Any]) -> PlanState:
         revisions=None,
         feedback=None,
         changes=None,
+        blame=None,
         drift=None,
     )
 
@@ -339,6 +349,7 @@ def _history(
                     at=event["at"],
                     summary=after["summary"],
                     comments=[PlanComment.model_validate(one) for one in after["comments"]],
+                    approved=list(after["approved"]),
                 )
             )
     asked = {one.revision: one.id for one in feedback}
@@ -620,6 +631,7 @@ class PlanBook:
                     f"Plan {plan} has revisions 1 to {current}, so there is no revision {shown}."
                 )
             revisions, feedback = _history(await _revision_events(conn, plan))
+            snapshots = {n: await snapshot_of(conn, plan, n) for n in range(1, shown + 1)}
             refs = list(found["items"] or [])
             held = found["state"] in ("proposed", "changes_requested")
             live = shown == current and held
@@ -652,6 +664,7 @@ class PlanBook:
                 "revisions": revisions,
                 "feedback": feedback,
                 "changes": None if previous is None else diff_revisions(previous, reviewed),
+                "blame": blame_of(snapshots, revisions, feedback, shown),
                 "drift": drift,
             }
         )
@@ -753,10 +766,12 @@ class PlanBook:
         revision: int,
         summary: str,
         comments: list[PlanCommentInput] | None,
+        approved: list[str] | None = None,
     ) -> PlanState:
-        """A person's feedback on one revision of a plan: a summary and comments on its lines. The
-        plan stays held, and the agent revises it; nothing is dropped and nothing becomes free.
-        Only a person can, and only for the current revision, once."""
+        """A person's feedback on one revision of a plan: a summary, comments on its lines and the
+        items they approve as they are. The plan stays held, and the agent revises it; nothing is
+        dropped and nothing becomes free. Only a person can, and only for the current revision,
+        once."""
         require_person(f"Plan {plan}", "ask for changes to a plan")
         said = clean_summary(summary)
         async with self._database.transaction() as conn:
@@ -783,7 +798,18 @@ class PlanBook:
                     "the agent has not sent a new revision yet. Nothing was changed."
                 )
             reviewed = await snapshot_of(conn, plan, revision)
-            made = clean_comments(comments, reviewed)
+            kept = {one["ref"] for one in reviewed}
+            removed = (
+                [
+                    one
+                    for one in await snapshot_of(conn, plan, revision - 1)
+                    if one["ref"] not in kept
+                ]
+                if revision > 1
+                else []
+            )
+            made = clean_comments(comments, reviewed, removed)
+            approves = clean_approved(approved, made, reviewed, removed)
             await record_event(
                 conn,
                 action=PLAN_CHANGES_REQUESTED,
@@ -794,6 +820,7 @@ class PlanBook:
                     "revision": revision,
                     "summary": said,
                     "comments": [one.model_dump() for one in made],
+                    "approved": approves,
                 },
             )
             done = await fetch_one(

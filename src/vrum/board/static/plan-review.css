@@ -1,7 +1,7 @@
-/* The review conversation on the review page (M51, M52): what changed since the revision before (`~` lines with what each part was and is),
-   what was asked for in earlier feedback, the comments written on the lines of a plan, a plan changed outside a revision, comments that were
-   not kept and the dialog that asks for changes. The lines themselves are diff.css's and the page is review.css's. A sign and words carry
-   every meaning; colours only help, and are only ever a token (tokens.css). */
+/* The review conversation on the review page (M51, M52): what changed since the revision before (neutral modified item rows with each changed
+   part shown as red `-` and green `+` underneath), what was asked for in earlier feedback, the comments written on the lines of a plan, a plan
+   changed outside a revision, comments that were not kept and the dialog that asks for changes. The lines themselves are diff.css's and the page
+   is review.css's. A sign and words carry every meaning; colours only help, and are only ever a token (tokens.css). */
 
 /* -- what was asked for before, a plan changed outside a revision, comments that were not kept ------------------------ */
 
@@ -52,15 +52,69 @@
 .pending-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); }
 .comment-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
-/* The button on a line: faint until the line is pointed at or the button has the focus, always there on a touch screen. */
-.diff-code .diff-comment { margin-left: var(--space-2); vertical-align: middle; opacity: 0; text-indent: 0; }
-.diff-line:hover .diff-comment, .diff-comment:focus-visible, .diff-comment:hover { opacity: 1; }
+/* The controls of a line sit next to the line, not in it (a line that opens a dialog is a button, and a button holds no button), over the
+   line's right edge: who last changed it (always there, quiet), then approve and ask for a change, which are faint until the line is pointed
+   at or has the focus, or one of the controls has it, and always there on a touch screen. An approval that waits to be sent stays visible.
+   The line keeps its words clear of them. */
+.diff-comment-slot { position: relative; height: 0; }
+.diff-comment-slot[data-closed] { display: none; }
+.slot-controls { position: absolute; right: var(--space-2); bottom: 100%; z-index: 1; display: inline-flex; align-items: center; gap: var(--space-1); margin-bottom: 0.2rem; }
+.slot-control { display: inline-flex; }
+.slot-controls .diff-comment, .slot-controls .diff-approve:not([aria-pressed="true"]) { opacity: 0; }
+.diff-line:hover + .diff-comment-slot .slot-controls button, .diff-line:focus-visible + .diff-comment-slot .slot-controls button, .diff-comment-slot:hover .slot-controls button, .slot-controls button:focus-visible { opacity: 1; }
+.slot-controls .diff-approve:disabled { opacity: 0; }
+.diff-line:hover + .diff-comment-slot .diff-approve:disabled, .diff-comment-slot:hover .diff-approve:disabled { opacity: 0.55; }
+.diff-approve[aria-pressed="true"], .diff-include[aria-pressed="true"] { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.diff-include { gap: var(--space-1); padding: 0 var(--space-2); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; }
+.diff-include[aria-pressed="false"] { border-color: var(--border-strong); background: var(--surface); color: var(--text-2); }
+/* An item of a suggested move that is left where it is: its two lines (where it would go, where it is now) are quieter. */
+.diff-line[data-included="false"] .diff-code { color: var(--text-2); }
+.blame { min-height: var(--control-h-sm); padding: 0 var(--space-2); color: var(--text-2); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 650; white-space: nowrap; }
+.blame:hover { color: var(--text); }
+.blame-note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-line:has(+ .diff-comment-slot[data-controls="1"]) .diff-code { padding-right: 4rem; }
+.diff-line:has(+ .diff-comment-slot[data-include="true"]) .diff-code { padding-right: 6.5rem; }
+.diff-line:has(+ .diff-comment-slot[data-controls="2"]) .diff-code { padding-right: 6rem; }
+.diff-line:has(+ .diff-comment-slot[data-controls="3"]) .diff-code { padding-right: 8.5rem; }
+.diff-line:has(+ .diff-comment-slot[data-sign="-"]) .diff-code { padding-right: 9rem; }
+.diff-line:has(+ .diff-comment-slot[data-controls="3"][data-sign="-"]) .diff-code { padding-right: 13rem; }
 @media (hover: none) {
-  .diff-code .diff-comment { opacity: 1; }
+  .slot-controls .diff-comment, .slot-controls .diff-approve:not([aria-pressed="true"]) { opacity: 1; }
+  .slot-controls .diff-approve:disabled { opacity: 0.55; }
 }
 @media (pointer: coarse) {
-  .diff-comment, .comment-buttons button, .review-choice button, .unsent-go { min-height: 2.75rem; min-width: 2.75rem; }
+  .diff-comment, .diff-approve, .diff-include, .blame, .comment-buttons button, .review-choice button, .review-hide, .unsent-go { min-height: 2.75rem; min-width: 2.75rem; }
+  .diff-line:has(+ .diff-comment-slot) .diff-code { min-height: 2.75rem; }
+  .diff-line:has(+ .diff-comment-slot[data-controls="1"]) .diff-code { padding-right: 5rem; }
+  .diff-line:has(+ .diff-comment-slot[data-include="true"]) .diff-code { padding-right: 7.5rem; }
+  .diff-line:has(+ .diff-comment-slot[data-controls="2"]) .diff-code { padding-right: 8.5rem; }
+  .diff-line:has(+ .diff-comment-slot[data-controls="3"]) .diff-code { padding-right: 12rem; }
+  .diff-line:has(+ .diff-comment-slot[data-sign="-"]) .diff-code { padding-right: 10rem; }
+  .diff-line:has(+ .diff-comment-slot[data-controls="3"][data-sign="-"]) .diff-code { padding-right: 16rem; }
 }
+/* On a narrow screen the controls have a row of their own under the line, so that nothing sits over its words. */
+@media (max-width: 699.98px) {
+  .diff-comment-slot { height: auto; display: flex; justify-content: flex-end; padding: var(--space-1) var(--space-2) var(--space-1) 1.75rem; background: var(--diff-context-bg); }
+  .diff-line[data-sign="+"] + .diff-comment-slot { background: var(--diff-add-bg); }
+  .diff-line[data-sign="+"][data-moved="true"] + .diff-comment-slot { background: var(--diff-context-bg); }
+  .diff-line[data-sign="-"] + .diff-comment-slot { background: var(--diff-remove-bg); }
+  .diff-line[data-sign="changed"] + .diff-comment-slot { background: var(--diff-context-bg); }
+  .slot-controls { position: static; justify-content: flex-end; margin: 0; }
+  .slot-controls .diff-comment, .slot-controls .diff-approve:not([aria-pressed="true"]) { opacity: 1; }
+  .slot-controls .diff-approve:disabled { opacity: 0.55; }
+  .diff-line:has(+ .diff-comment-slot[data-controls][data-sign]) .diff-code { padding-right: var(--space-3); }
+}
+
+/* What is carried for a line from earlier, at its end: an icon and a word, in a soft colour that only helps (approved, a change asked for,
+   changed since it was looked at). An approval waiting to be sent has a dashed edge. */
+.diff-code .line-review { display: inline-flex; align-items: center; gap: var(--space-1); min-height: 1.5rem; margin-left: var(--space-2); padding: 0 var(--space-2); border: var(--border-w) solid transparent; border-radius: var(--radius-sm); font-family: var(--font-sans); font-size: var(--text-xs); font-weight: 650; line-height: 1.2; white-space: nowrap; text-indent: 0; vertical-align: middle; }
+.diff-code .line-review .icon { margin: 0; vertical-align: baseline; color: inherit; }
+.line-review[data-state="approved"] { background: var(--ok-soft); color: var(--ok); }
+.line-review[data-state="asked"] { background: var(--info-soft); color: var(--info); }
+.line-review[data-state="changed"] { background: var(--warn-soft); color: var(--warn); }
+.line-review[data-pending="true"] { border-style: dashed; border-color: currentColor; }
+
+.review-hide { white-space: nowrap; }
 
 .comment-form { display: grid; gap: var(--space-2); max-width: 40rem; }
 .comment-form .field { margin: 0; }

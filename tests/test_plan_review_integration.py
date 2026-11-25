@@ -59,6 +59,20 @@ def continuing(refs: dict[str, str], **changes: dict[str, Any]) -> list[dict[str
     return items
 
 
+async def a_revision_of(
+    agent: Client, plan: int, refs: dict[str, str], **changes: dict[str, Any]
+) -> dict[str, Any]:
+    """The agent's revision: every item continues and the ones named in `changes` differ."""
+    sent = await ok(
+        agent,
+        "revise_plan",
+        plan=plan,
+        items=continuing(refs, **changes),
+        note="Named the stations.",
+    )
+    return dict(sent)
+
+
 async def read(agent: Client, plan: int, **more: Any) -> dict[str, Any]:
     page = await ok(agent, "list_plans", plan=plan, **more)
     (one,) = page["items"]
@@ -227,6 +241,161 @@ async def test_a_requested_removal_drops_the_item_and_approving_never_frees_it()
         assert refs["t1"] in free and refs["t3"] not in free
         assert (await ok(agent, "get_node", node=refs["t3"]))["status"] == "dropped"
         await refused(agent, "claim_node", node=refs["t3"])
+
+
+async def test_items_approved_one_by_one_stay_approved_until_they_change_and_a_line_says_who() -> (
+    None
+):
+    owner = register(name="Priya Raman")
+    project = make_project(owner)
+    async with connect(project.mcp_url, project.key) as agent:
+        number, refs = await drafted(agent)
+        first = await read(agent, number)
+        # Nobody has said anything yet: every line is the agent's and unreviewed.
+        assert {
+            b["ref"]: (b["change"], b["revision"], b["review"]["state"]) for b in first["blame"]
+        } == {ref: ("added", 1, "none") for ref in refs.values()}
+        assert {b["by"] for b in first["blame"]} == {"tests"}
+
+        asked = person_call(
+            project,
+            owner,
+            "request_plan_changes",
+            plan=number,
+            revision=1,
+            summary="The stories are fine. Size the covers and say why the grip test is needed.",
+            approved=[refs["e"], refs["s1"], refs["t1"], refs["t2"]],
+            comments=[{"item": refs["t3"], "text": "Why is this the smallest?"}],
+        )
+        assert asked.status == 200, asked.body
+        given = asked.body["feedback"][0]
+        assert given["approved"] == sorted(
+            [refs["e"], refs["s1"], refs["t1"], refs["t2"]],
+            key=lambda ref: (
+                ("epic", "story", "task").index(ref.split(":")[0]),
+                int(ref.split(":")[1]),
+            ),
+        )
+        feed = (await ok(agent, "changes_since", limit=200))["items"]
+        (event,) = [e for e in feed if e["action"] == "plan_changes_requested"]
+        assert event["after"]["approved"] == given["approved"]
+        waiting = await read(agent, number)
+        states = {b["ref"]: b["review"] for b in waiting["blame"]}
+        assert states[refs["s1"]]["state"] == "approved" and states[refs["s1"]]["by"] == owner.name
+        assert states[refs["s1"]]["revision"] == 1 and states[refs["s1"]]["feedback"] == given["id"]
+        assert states[refs["t3"]]["state"] == "asked"
+        assert states[refs["s2"]]["state"] == "none"
+        await nothing_is_free(agent, refs)
+
+        # The agent changes the covers story and the supplier task, and nothing else.
+        await a_revision_of(
+            agent,
+            number,
+            refs,
+            s2={"title": "Weather covers for the four busiest stations"},
+            t1={"size": "m"},
+        )
+        current = await read(agent, number)
+        blame = {b["ref"]: b for b in current["blame"]}
+        assert (blame[refs["s2"]]["change"], blame[refs["s2"]]["revision"]) == ("changed", 2)
+        assert blame[refs["s2"]]["note"] == "Named the stations."
+        assert blame[refs["s2"]]["by"] == "tests"
+        # Approved and still as it was: it stays approved, and says it was in revision 1.
+        assert blame[refs["s1"]]["review"]["state"] == "approved"
+        assert (blame[refs["s1"]]["change"], blame[refs["s1"]]["revision"]) == ("added", 1)
+        # Approved but changed since: it needs a fresh look.
+        assert (blame[refs["t1"]]["change"], blame[refs["t1"]]["revision"]) == ("changed", 2)
+        assert blame[refs["t1"]]["review"]["state"] == "changed"
+        # Asked for a change and not changed: still asked.
+        assert blame[refs["t3"]]["review"]["state"] == "asked"
+        # An earlier revision reads as it was: nothing was changed in it, and the same approvals.
+        early = await read(agent, number, revision=1)
+        assert {b["revision"] for b in early["blame"]} == {1}
+
+        # The person approves what is left and asks again: the latest word counts.
+        again = person_call(
+            project,
+            owner,
+            "request_plan_changes",
+            plan=number,
+            revision=2,
+            summary="One left.",
+            approved=[refs["s2"], refs["t1"]],
+            comments=[{"item": refs["t3"], "text": "Still not sized."}],
+        )
+        assert again.status == 200, again.body
+        final = {b["ref"]: b["review"]["state"] for b in (await read(agent, number))["blame"]}
+        assert final[refs["s2"]] == final[refs["t1"]] == "approved"
+        assert final[refs["t3"]] == "asked"
+
+
+async def test_an_item_cannot_be_approved_and_asked_about_and_every_problem_is_listed() -> None:
+    owner = register()
+    project = make_project(owner)
+    async with connect(project.mcp_url, project.key) as agent:
+        number, refs = await drafted(agent)
+        said = person_call(
+            project,
+            owner,
+            "request_plan_changes",
+            plan=number,
+            revision=1,
+            summary="Check it.",
+            approved=[refs["t1"], "task:9999", refs["s1"]],
+            comments=[{"item": refs["t1"], "text": "Rename."}],
+        )
+        assert said.status == 400
+        words = said.body["message"]
+        assert "2 problems" in words and "task:9999" in words
+        assert f"{refs['t1']} is approved and also has a comment" in words
+        assert "Nothing was changed." in words
+        # Nothing was recorded: the plan still waits for a person.
+        assert (await read(agent, number))["state"] == "proposed"
+        # An agent cannot approve an item: the tool is for people only.
+        await refused(
+            agent,
+            "request_plan_changes",
+            plan=number,
+            revision=1,
+            summary="x",
+            approved=[refs["t1"]],
+        )
+
+
+async def test_an_item_a_revision_took_out_can_be_agreed_to_or_asked_to_come_back() -> None:
+    owner = register()
+    project = make_project(owner)
+    async with connect(project.mcp_url, project.key) as agent:
+        number, refs = await drafted(agent)
+        person_call(
+            project,
+            owner,
+            "request_plan_changes",
+            plan=number,
+            revision=1,
+            summary="Drop the covers task.",
+            comments=[{"item": refs["t3"], "text": "Remove this one."}],
+        )
+        kept = [s for s in continuing(refs) if s["key"] != "t3"]
+        await ok(agent, "revise_plan", plan=number, items=kept, note="Removed the covers task.")
+        removed = {b["ref"]: b for b in (await read(agent, number))["blame"]}[refs["t3"]]
+        assert (removed["change"], removed["revision"]) == ("removed", 2)
+        assert removed["review"]["state"] == "none"
+        # The person wants it back: a comment on the removed item is about it as it was.
+        asked = person_call(
+            project,
+            owner,
+            "request_plan_changes",
+            plan=number,
+            revision=2,
+            summary="The covers task stays.",
+            comments=[{"item": refs["t3"], "text": "Keep it after all."}],
+        )
+        assert asked.status == 200, asked.body
+        (comment,) = asked.body["feedback"][-1]["comments"]
+        assert (comment["item"], comment["quoted"]) == (refs["t3"], "Order covers")
+        state = {b["ref"]: b for b in (await read(agent, number))["blame"]}[refs["t3"]]
+        assert state["review"]["state"] == "asked"
 
 
 async def test_a_revision_that_is_refused_changes_nothing_and_says_every_problem() -> None:
@@ -688,6 +857,10 @@ async def test_the_database_refuses_a_malformed_revision_or_request_on_its_own()
         ),
         (
             asked + """'person', '{"plan": 1, "revision": 1, "summary": " ", "comments": []}'""",
+            "plan_changes_requested_has_its_words",
+        ),
+        (
+            asked + """'person', '{"plan": 1, "revision": 1, "summary": "x", "comments": []}'""",
             "plan_changes_requested_has_its_words",
         ),
         ("'plan_approved', 'a', 'person', '{\"plan\": 1}'", "plan_decided_names_its_plan"),

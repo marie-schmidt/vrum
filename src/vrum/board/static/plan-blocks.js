@@ -26,7 +26,13 @@ function orphanItem(comment, index) {
   return h(
     'li',
     { class: 'feedback-orphan', dataset: { ref: comment.item, comment: index, field: comment.field } },
-    h('p', {}, itemLink(comment.item, { class: 'item-link', dataset: { ref: comment.item } }, codeOf(comment.item)), ` is not in the plan now. About ${comment.field ? `the ${FIELD_WORDS[comment.field].toLowerCase()}` : 'the whole item'}:`),
+    h(
+      'p',
+      {},
+      itemLink(comment.item, { class: 'item-link', dataset: { ref: comment.item } }, codeOf(comment.item)),
+      h('span', { class: 'quiet' }, ' \u00b7 Not in the plan'),
+      h('span', { class: 'quiet' }, ` \u00b7 About ${comment.field ? `the ${FIELD_WORDS[comment.field].toLowerCase()}` : 'the whole item'}`),
+    ),
     h('blockquote', { class: 'comment-quote', dataset: { words: 'theirs' } }, comment.quoted),
     h('p', { class: 'comment-body', dataset: { words: 'theirs' } }, comment.text),
   );
@@ -51,7 +57,7 @@ export function feedbackSections(feedback, { revised, hasLine, openAll = false }
           'summary',
           {},
           icon('chevron_right', { size: 14, className: 'disclosure-chevron' }),
-          h('span', { class: 'feedback-title' }, `${whoWords(one.by, one.by_kind)} feedback on revision ${one.revision}`),
+          h('span', { class: 'feedback-title' }, h('span', isMe(one.by, one.by_kind) ? {} : { dataset: { words: 'theirs' } }, whoWords(one.by, one.by_kind)), ` feedback on revision ${one.revision}`),
           one.comments.length ? h('span', { class: 'feedback-count quiet' }, plural(one.comments.length, 'comment')) : null,
         ),
         h('p', { class: 'feedback-summary', dataset: { words: 'theirs' } }, one.summary),
@@ -101,17 +107,26 @@ export function driftBlock(revision, drift, { advice }) {
 
 // -- a revision arrived under comments that were not sent ---------------------------------------------------------
 
-// "Revision 2 arrived. Your 3 unsent comments were about revision 1 and were not kept.", with what they said behind a closed disclosure so
-// that they can be written again, and a way to dismiss it.
+// "Revision 2 arrived. Not kept: 3 unsent comments, 2 unsent approvals", with what they said behind a closed disclosure so that they can be
+// written again, and a way to dismiss it.
 export function lostBlock(lost, { onDismiss }) {
   const count = lost.comments.length;
+  const approved = lost.approved ?? [];
+  const kept = [count ? plural(count, 'unsent comment') : null, approved.length ? plural(approved.length, 'unsent approval') : null].filter(Boolean);
   return h(
     'div',
     { class: 'change-lost-box', role: 'status' },
     h(
       'div',
       { class: 'change-lost-text' },
-      h('p', { class: 'change-lost' }, h('strong', {}, `Revision ${lost.to} arrived`), ' ', h('span', {}, `Not kept: ${plural(count, 'unsent comment')}`)),
+      h(
+        'p',
+        { class: 'change-lost' },
+        h('strong', {}, `Revision ${lost.to} arrived`),
+        ' ',
+        h('span', {}, 'Not kept: '),
+        kept.map((part, at) => [at ? ', ' : null, h('span', {}, part)]),
+      ),
       h(
         'details',
         { class: 'change-lost-list' },
@@ -120,6 +135,7 @@ export function lostBlock(lost, { onDismiss }) {
           'ul',
           { class: 'plain lost-comments' },
           lost.comments.map((one) => h('li', {}, h('strong', {}, codeOf(one.item)), one.field ? ` (${FIELD_WORDS[one.field].toLowerCase()})` : '', ': ', h('span', { dataset: { words: 'theirs' } }, one.text))),
+          approved.length ? h('li', { class: 'lost-approved' }, h('strong', {}, 'Approved'), ': ', approved.map(codeOf).join(', ')) : null,
         ),
       ),
     ),

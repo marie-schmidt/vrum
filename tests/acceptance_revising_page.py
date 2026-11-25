@@ -34,12 +34,15 @@ from tests.helpers import connect, ok
 from tests.world import Person, Project, join_project, make_project, register
 
 NARROW = {"width": 390, "height": 900}
-CHANGED_LINES = ".diff-line[data-sign='~'][data-ref]:not([data-part]):visible"
+CHANGED_LINES = ".diff-line[data-sign='changed'][data-ref]:not([data-part]):visible"
 # An item taken out, not a part of a changed item that was taken out.
 REMOVED_LINES = ".diff-line[data-sign='-'][data-ref]:not([data-part]):visible"
 THE_PAGE = "body"
 BUTTONS_THAT_DECIDE = "button.verdict"
-WRITING = "button.diff-comment, form.comment-form, .diff-comment-pending, button.decision-comment"
+WRITING = (
+    "button.diff-comment, button.diff-approve, button.diff-include, form.comment-form, "
+    ".diff-comment-pending, button.decision-comment"
+)
 NEW_TITLE = "Studded tyres for the river path and the hill route"
 NEW_BODY = "At the depot.\nFour hours each, from 8 until noon."
 
@@ -404,10 +407,10 @@ async def the_conversation() -> None:
             "comment and who said it on which revision; the feedback itself is one section above "
             "the diff, open by default, with the summary in full and how many comments it has",
             len(threads) == 3
-            and under[refs["tyres"]][0] == "~"
+            and under[refs["tyres"]][0] == "changed"
             and said_1 in under[refs["tyres"]][1]
             and "Studded tyres" in under[refs["tyres"]][1]
-            and under[refs["fit"]][0] == "~"
+            and under[refs["fit"]][0] == "changed"
             and said_2 in under[refs["fit"]][1]
             and under[refs["order"]][0] == "-"
             and said_3 in under[refs["order"]][1]

@@ -23,6 +23,7 @@ from tests import scripted_oidc as oidc
 from tests.demo_flow import (
     Flow,
     comments_on,
+    in_order,
     later_counts,
     spring_plan,
     winter_plan,
@@ -258,7 +259,7 @@ def texts() -> list[str]:
     found = [item.title for item in all_items()] + [item.body for item in all_items()]
     found += [loose.title for loose in data.LOOSE] + [loose.body for loose in data.LOOSE]
     found += [data.INBOX_BODY, data.GROUPED.epic_title, data.GROUPED.epic_body, data.GROUPED.reason]
-    found += [data.SUGGESTION_REJECTED, data.CHECKED_REASON]
+    found += [data.SUGGESTION_REJECTED, data.CHECKED_REASON, data.PARTIAL_REASON]
     for gate in data.GATES:
         found += [gate.question or "", gate.comment or ""]
     found += [item.get("title", "") + item.get("body", "") for item in data.WINTER_ITEMS]
@@ -1059,6 +1060,27 @@ def test_the_steward_proposes_two_loose_stories_by_hand_for_a_person_to_look_at_
     assert data.CHECKED_REASON and "\u2014" not in data.CHECKED_REASON
 
 
+def test_the_steward_proposes_two_tasks_for_a_person_to_accept_in_part() -> None:
+    names = Names.of_description()
+    assert len(data.PARTIAL_ITEMS) == 2 and data.PARTIAL_LEFT_IN in data.PARTIAL_ITEMS
+    parts = [names.node(key) for key in data.PARTIAL_ITEMS]
+    target = names.node(data.PARTIAL_PARENT)
+    # Two tasks of one story that nobody works on, holds or waits for, and another story to move
+    # them under, so that each move is real and the one left out is only left out by the person.
+    assert {one.item.kind for one in parts} == {"task"} and target.item.kind == "story"
+    assert {one.item.status for one in parts} == {"new"}
+    assert len({one.parent for one in parts}) == 1 and parts[0].parent != target.key
+    busy = {step.key for step in data.HANDOFFS} | {held.key for held in data.HELD}
+    busy |= {held.key for held in data.LAPSED} | {gate.key for gate in data.GATES}
+    busy |= {asked.key for asked in data.ASKED}
+    assert not set(data.PARTIAL_ITEMS) & busy
+    assert not [link for link in data.LINKS if set(data.PARTIAL_ITEMS) & {link.source, link.target}]
+    assert data.PARTIAL_REASON and "\u2014" not in data.PARTIAL_REASON
+    # The steward is allowed to propose it, and it is not one of the proposals about the Inbox.
+    assert "propose_placement" in data.STEWARD_TOOLS
+    assert not set(data.PARTIAL_ITEMS) & {loose.title for loose in data.LOOSE}
+
+
 def test_one_story_of_the_winter_plan_repeats_work_that_exists_in_other_words() -> None:
     repeated = [item for item in data.WINTER_ITEMS if item["title"] == data.WINTER_REPEATS]
     assert len(repeated) == 1 and repeated[0]["kind"] == "story"
@@ -1119,7 +1141,7 @@ def test_the_drafted_winter_plan_hangs_under_an_existing_epic_and_is_worth_revie
     assert len(set(keys)) == len(keys) and not set(keys) & set(names.nodes)
     kinds = [item["kind"] for item in items]
     # No epic of its own: the stories hang under one that exists, so the review has context.
-    assert (kinds.count("epic"), kinds.count("story"), kinds.count("task")) == (0, 3, 4)
+    assert (kinds.count("epic"), kinds.count("story"), kinds.count("task")) == (0, 3, 5)
     assert names.node(data.WINTER_UNDER).item.kind == "epic"
     assert data.WINTER_TITLE not in {epic.title for epic in data.EPICS}
     by_key = {str(item["key"]): item for item in items}
@@ -1131,8 +1153,8 @@ def test_the_drafted_winter_plan_hangs_under_an_existing_epic_and_is_worth_revie
             assert by_key[parent]["kind"] == "story", item["key"]
         assert item.get("size", "m") in ("xs", "s", "m", "l", "xl")
     # What makes it worth reviewing: one item left unsized on purpose, one high priority, details
-    # of two or three lines on each story and on two tasks, dates on one story and a criterion on
-    # each story and on one task.
+    # of two or three lines on each story and on three tasks (one of them is taken out by the
+    # second revision), dates on one story and a criterion on each story and on one task.
     assert [key for key, item in by_key.items() if "size" not in item] == ["fit-covers"]
     assert [key for key, item in by_key.items() if item.get("priority") == "high"] == ["studded"]
     for key, item in by_key.items():
@@ -1142,6 +1164,7 @@ def test_the_drafted_winter_plan_hangs_under_an_existing_epic_and_is_worth_revie
     assert sorted(
         key for key, item in by_key.items() if item["kind"] == "task" and item.get("body")
     ) == [
+        "chains",
         "fit-covers",
         "fit-tyres",
     ]
@@ -1190,19 +1213,29 @@ def test_the_winter_plan_is_written_as_the_references_the_server_gave_and_create
 def test_the_winter_plan_has_a_conversation_whose_revision_changes_only_what_was_asked() -> None:
     names = Names.of_description()
     by_key = {str(item["key"]): item for item in data.WINTER_ITEMS}
-    # The owner commented on the title of a story and on the details of a task.
+    # The owner commented on the title of a story, on the details of a task and on a whole task
+    # that she wants dropped.
     assert [(key, part) for key, part, _ in data.WINTER_FEEDBACK] == [
         ("studded", "title"),
         ("fit-tyres", "body"),
+        ("chains", None),
     ]
     assert by_key["studded"]["kind"] == "story" and by_key["fit-tyres"]["kind"] == "task"
     for key, part, text in data.WINTER_FEEDBACK:
-        assert key in by_key and part in FIELDS
+        assert key in by_key and (part is None or part in FIELDS)
         assert PlanCommentInput(item="story:1", field=part, text=text).text == text
         assert 0 < len(text) <= MOST_COMMENT_CHARS and "\u2014" not in text
     assert 0 < len(data.WINTER_FEEDBACK_SUMMARY) <= MOST_SUMMARY_CHARS
     assert 0 < len(data.WINTER_REVISION_NOTE) <= MOST_NOTE_CHARS
-    # The revision changes exactly the parts commented on, to other words, and nothing else.
+    # She approved four items as they were; none of them is commented on, none is taken out and the
+    # story the check for look-alikes names is not among them.
+    commented = {key for key, _, _ in data.WINTER_FEEDBACK}
+    assert len(data.WINTER_APPROVED) == len(set(data.WINTER_APPROVED)) == 4
+    assert set(data.WINTER_APPROVED) <= set(by_key) - commented - set(data.WINTER_REMOVED)
+    assert "winter-battery" not in data.WINTER_APPROVED
+    # The revision changes exactly the two parts commented on, to other words, takes out the task
+    # she asked to drop (a task without tasks of its own, with nothing waiting for it) and changes
+    # nothing else.
     assert {key: set(parts) for key, parts in data.WINTER_REVISED.items()} == {
         "studded": {"title"},
         "fit-tyres": {"body"},
@@ -1210,32 +1243,52 @@ def test_the_winter_plan_has_a_conversation_whose_revision_changes_only_what_was
     for key, parts in data.WINTER_REVISED.items():
         for part, words in parts.items():
             assert words.strip() and words != by_key[key][part], (key, part)
+    assert data.WINTER_REMOVED == ("chains",)
+    assert by_key["chains"]["kind"] == "task" and "chains" not in data.WINTER_APPROVED
+    assert not [item for item in data.WINTER_ITEMS if item.get("parent") == "chains"]
+    assert not [link for link in data.WINTER_LINKS if "chains" in link[:2]]
+    assert not [node for node, _ in data.WINTER_CRITERIA if node == "chains"]
     now = {str(item["key"]): item for item in data.WINTER_NOW}
-    assert list(now) == list(by_key)
+    assert list(now) == [key for key in by_key if key != "chains"]
     assert {key for key in now if now[key] != by_key[key]} == {"studded", "fit-tyres"}
     # The story that repeats existing work and the one left unsized are as they were drafted, so
     # the plan's checks do not change with the revision.
     assert now["winter-battery"] == by_key["winter-battery"]
     assert now["fit-covers"] == by_key["fit-covers"] and "size" not in now["fit-covers"]
-    # What revise_plan is given: the whole plan again, every item continuing its own, links and
-    # criteria left out (so they are kept), and nothing different from the draft but those parts.
+    # What revise_plan is given: the whole plan again less the task taken out, every item
+    # continuing its own, links and criteria left out (so they are kept), and nothing different
+    # from the draft but those parts.
     refs = {key: f"{by_key[key]['kind']}:{number}" for number, key in enumerate(by_key, 1)}
     under = names.node(data.WINTER_UNDER).ref
-    drafted = winter_plan(TODAY, lambda key: names.node(key).ref)["items"]
+    drafted = [
+        item
+        for item in winter_plan(TODAY, lambda key: names.node(key).ref)["items"]
+        if item["key"] not in data.WINTER_REMOVED
+    ]
     revision = winter_revision(TODAY, lambda key: names.node(key).ref, refs)
     parsed = [RevisionItem(**item) for item in revision]
-    assert [str(item.ref) for item in parsed] == list(refs.values())
+    assert [str(item.ref) for item in parsed] == [
+        ref for key, ref in refs.items() if key not in data.WINTER_REMOVED
+    ]
     assert [str(item.parent) for item in parsed if item.kind == "story"] == [under] * 3
     for before, after in zip(drafted, revision, strict=True):
         key = str(before["key"])
         assert {**after, "ref": None} == {**before, **data.WINTER_REVISED.get(key, {}), "ref": None}
         assert after["ref"] == refs[key]
     assert [item.start_on for item in parsed if item.start_on] == ["2026-12-02"]
-    # The comments are written as request_plan_changes takes them, each on its item's reference.
+    # The comments are written as request_plan_changes takes them, each on its item's reference,
+    # and a comment on a whole item names no part.
     comments = comments_on(refs, data.WINTER_FEEDBACK)
-    assert [(c["item"], c["field"]) for c in comments] == [
+    assert [(c["item"], c.get("field")) for c in comments] == [
         (refs["studded"], "title"),
         (refs["fit-tyres"], "body"),
+        (refs["chains"], None),
+    ]
+    assert [str(ref) for ref in in_order(["task:9", "story:2", "task:3", "epic:7"])] == [
+        "epic:7",
+        "story:2",
+        "task:3",
+        "task:9",
     ]
 
 
@@ -1411,7 +1464,7 @@ def test_the_loader_stops_with_a_plain_message_when_a_row_says_the_wrong_thing(
 
 def test_what_the_later_part_adds_is_counted_and_the_totals_are_sensible() -> None:
     added = later_counts()
-    assert added == {"epics": 1, "stories": 12, "tasks": 10, "links": 6, "rules": 5}
+    assert added == {"epics": 1, "stories": 12, "tasks": 11, "links": 6, "rules": 5}
     totals = expected_totals()
     base = expected_counts()
     kept = len(kept_of_description())
@@ -1419,7 +1472,7 @@ def test_what_the_later_part_adds_is_counted_and_the_totals_are_sensible() -> No
         totals[kind] == base[kind] + added.get(kind, 0) + (kept if kind == "notes" else 0)
         for kind in base
     )
-    assert (totals["epics"], totals["stories"], totals["tasks"]) == (13, 65, 190)
+    assert (totals["epics"], totals["stories"], totals["tasks"]) == (13, 65, 191)
     assert totals["links"] == len(data.LINKS) + 6
     assert totals["notes"] == 40
 
@@ -1435,3 +1488,82 @@ def test_four_tasks_say_where_they_were_found_and_never_wait_for_it() -> None:
         # The pair is not linked another way too, so each link says one thing.
         assert (link.source, link.target) not in other
         assert (link.target, link.source) not in other
+
+
+def the_blame_of_the_winter_plan() -> tuple[Flow, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The winter plan as list_plans says it at revision 2 and at revision 1 (only `blame`, and
+    the number and comments of the owner's feedback), as the description says it should be."""
+    flow = Flow(cast(Any, SimpleNamespace()))
+    flow.winter_refs = {
+        str(item["key"]): f"{item['kind']}:{number}"
+        for number, item in enumerate(data.WINTER_ITEMS, start=1)
+    }
+    refs = flow.winter_refs
+    given = {"id": 7, "comments": [{"item": refs[key]} for key, _, _ in data.WINTER_FEEDBACK]}
+
+    def line(key: str, now: bool) -> dict[str, Any]:
+        removed, changed = key in data.WINTER_REMOVED, key in data.WINTER_REVISED
+        asked = key in {k for k, _, _ in data.WINTER_FEEDBACK}
+        approved = key in data.WINTER_APPROVED
+        if now and (removed or changed):
+            how, revision, note = (
+                ("removed" if removed else "changed"),
+                2,
+                data.WINTER_REVISION_NOTE,
+            )
+        else:
+            how, revision, note = "added", 1, None
+        word = "approved" if approved else ("changed" if now else "asked") if asked else "none"
+        if now and removed:
+            word = "none"
+        said = word != "none"
+        return {
+            "ref": refs[key],
+            "change": how,
+            "revision": revision,
+            "by": data.RECORDER,
+            "by_kind": "agent",
+            "note": note,
+            "review": {
+                "state": word,
+                "revision": 1 if said else None,
+                "by": data.OWNER if said else None,
+                "feedback": 7 if said else None,
+            },
+        }
+
+    winter = {"blame": [line(str(item["key"]), True) for item in data.WINTER_ITEMS]}
+    first = {"blame": [line(str(item["key"]), False) for item in data.WINTER_ITEMS]}
+    return flow, winter, first, given
+
+
+def test_the_loader_reads_who_changed_each_line_of_the_winter_plan_and_what_the_owner_said() -> (
+    None
+):
+    flow, winter, first, given = the_blame_of_the_winter_plan()
+    said = flow.check_the_blame(winter, first, given)
+    assert said == "4 approved and unchanged, 2 changed since she looked, 1 removed"
+
+
+BLAME_WRONG = [
+    (lambda w, f: w["blame"].pop(), "does not name each line"),
+    (
+        lambda w, f: w["blame"][0]["review"].update(state="none"),
+        "at revision 2 is not as described",
+    ),
+    (lambda w, f: w["blame"][2]["review"].update(state="approved"), "at revision 2 is not"),
+    (lambda w, f: w["blame"][5]["review"].update(by="Someone"), "at revision 2 is not"),
+    (lambda w, f: w["blame"][0].update(note="x"), "carry the note"),
+    (lambda w, f: f["blame"][4]["review"].update(state="approved"), "at revision 1 is not"),
+    (lambda w, f: f["blame"][5].update(revision=2), "at revision 1 is not"),
+]
+
+
+@pytest.mark.parametrize(("change", "wanted"), BLAME_WRONG)
+def test_the_loader_stops_when_the_blame_is_not_what_the_description_says(
+    change: Any, wanted: str
+) -> None:
+    flow, winter, first, given = the_blame_of_the_winter_plan()
+    change(winter, first)
+    with pytest.raises(SystemExit, match=wanted):
+        flow.check_the_blame(winter, first, given)

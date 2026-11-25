@@ -1,13 +1,14 @@
 // What a revision changed in a plan, as a diff (M51): the way to read a revised plan, since the person already read the revision before.
 // Items the revision added are `+` lines as in the whole plan, items it took out are `-` lines as they were, and an item that is in
-// both revisions but differs is a `~` line (the item as it is now) with, under it, each part that changed: a `-` line with what it was
-// and a `+` line with what it is. Items that did not change are not drawn, except an item that something was said about (a comment
-// from before, one not sent yet): it is drawn as a line that stays, with what was said under it, so that the person can see whether
-// the agent answered it. What is left out is counted by a fold, and one press opens the whole plan.
+// both revisions but differs sits on a neutral modified header row (`changed`, with a dot in the gutter and a short badge naming the
+// changed field or count) with, under it, each part that changed: a `-` line with what it was and a `+` line with what it is. Items that
+// did not change are not drawn, except an item that something was said about (a comment from before, one not sent yet): it is drawn as a
+// line that stays, with what was said under it, so that the person can see whether the agent answered it. What is left out is counted by a
+// fold, and one press opens the whole plan.
 
 import { day, h, plural } from './dom.js';
 import { LINK, PRIORITY, SIZE_POINTS, SIZE_WORDS, byRef, codeOf, parseNodeRef, ruleCode } from './labels.js';
-import { diffLine, foldOver, hunk, sides, textLines } from './diff.js';
+import { diffLine, foldApproved, foldOver, hunk, sides, textLines } from './diff.js';
 import { changedSpec, itemSpec, opening } from './change-dialog.js';
 import { childrenOf, link, planLines } from './needs-diffs.js';
 import { FIELD_WORDS } from './plan-comments.js';
@@ -86,23 +87,77 @@ function partLines(part, ref, depth, old, now, { lookup, fold, spec }) {
   return { minus: one('-', old, `lines:old:${ref}`), plus: one('+', now, `lines:new:${ref}`) };
 }
 
-// The revision's changes as lines. `data` is what was read for the revision shown (the plan with its tree, changes and, when something
-// was taken out, `previous`), `assist` its checks' flags and `notes` what is said on the lines. `showWhole()` opens the whole plan,
-// which the fold of the items that did not change asks for. In the split layout the old column holds the line as it was (what was
-// removed, what each changed part was, and the item's own line as a line that stays) and the new column the line as it is (what was
-// added, the item as it is now, what each changed part is, and what is said on the lines): the same signed lines, each on its side.
-export function deltaDiff(data, fold, assist, notes, showWhole, split = false) {
+// "Revision 2: 1 added, 2 changed, 1 removed": the hunk row of a revision read as what it changed.
+export function deltaHeader(data) {
+  const kinds = { added: 0, changed: 0, removed: 0 };
+  for (const one of data.changes) kinds[one.change] += 1;
+  const said = Object.entries(kinds)
+    .filter(([, count]) => count > 0)
+    .map(([way, count]) => `${count} ${way}`);
+  return hunk(`Revision ${data.shown}`, ': ', said.length ? said.flatMap((one, at) => (at ? [', ', one] : [one])) : 'no item changed');
+}
+
+const NO_FOLD = { open: () => false, onOpen: () => {} };
+
+// A compact before/after pair for a card preview: one red `-` line and one green `+` line per changed field, clipping long multiline
+// details to their first line so the card stays scannable while still showing a real GitHub-style before/after diff.
+function compactPartLines(part, ref, depth, old, now, { lookup, spec }) {
+  const oneLine = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return quiet('none');
+    const lines = raw.split('\n');
+    const first = lines[0].trim();
+    return lines.length > 1 ? `${first} \u2026` : first;
+  };
+  const label = () => h('span', { class: 'diff-field' }, `${FIELD_WORDS[part]}:`);
+  const opened = (sign) => ({ data: { focusKey: `diff-line:${sign}:${ref}:${part}` }, opens: opening(spec) });
+  const render = (sign, value) =>
+    diffLine(sign, [label(), ' ', h('span', { dataset: { words: 'theirs' } }, part === 'body' ? oneLine(value) : valueWords(part, value, lookup))], { ref, part, depth, className: 'diff-part', ...opened(sign) });
+  return [render('-', old), render('+', now)];
+}
+
+// What a revision changed, for a card's preview: the hunk row and, for each item the revision added, changed or took out, its own line
+// (`+`, `changed` or `-`, as on the review page) with the controls of `notes` beside it and, for a changed item, crisp red `-` and green `+`
+// before/after lines for the fields that changed, as a list of groups of elements (one per item) so the card shows up to six items before folding.
+export function deltaPreview(data, assist, notes) {
   const { tree, changes, previous } = data;
   const now = new Map(tree.map((one) => [one.ref, one]));
   const before = new Map((previous ?? []).map((one) => [one.ref, one]));
   const children = childrenOf(tree);
   const lookup = (ref) => now.get(ref)?.title ?? before.get(ref)?.title ?? store.nodes.get(ref)?.title ?? '';
-  const kinds = { added: 0, changed: 0, removed: 0 };
-  for (const one of changes) kinds[one.change] += 1;
-  const said = Object.entries(kinds)
-    .filter(([, count]) => count > 0)
-    .map(([way, count]) => `${count} ${way}`);
-  const header = hunk(`Revision ${data.shown}`, ': ', said.length ? said.flatMap((one, at) => (at ? [', ', one] : [one])) : 'no item changed');
+  const groups = [];
+  for (const entry of [...changes].sort((a, b) => byRef(a.ref, b.ref))) {
+    const kind = parseNodeRef(entry.ref)?.kind;
+    const depth = kind === 'epic' ? 0 : kind === 'story' ? 1 : 2;
+    const mine = now.get(entry.ref);
+    const common = { depth, flags: assist.flags.get(entry.ref) ?? [], children: children.get(entry.ref) || 0, fold: NO_FOLD, notes, details: false };
+    if (entry.change === 'added' && mine) groups.push(planLines(mine, { ...common, sign: '+', open: (item) => itemSpec('added', item, { lookup }) }));
+    else if (entry.change === 'removed' && before.has(entry.ref)) {
+      groups.push(planLines(before.get(entry.ref), { ...common, sign: '-', children: 0, flags: [], open: (item) => itemSpec('removed', item, { lookup: (ref) => before.get(ref)?.title ?? lookup(ref) }) }));
+    } else if (entry.change === 'changed' && mine) {
+      const spec = changedSpec(mine, entry, { lookup });
+      const was = entry.before;
+      const is = nowValues(mine);
+      const parts = PARTS.filter((one) => entry.fields.includes(one)).flatMap((part) => compactPartLines(part, entry.ref, depth + 1, was[part], is[part], { lookup, spec }));
+      groups.push([...planLines(mine, { ...common, sign: 'changed', open: () => spec }), ...parts]);
+    }
+  }
+  return { header: deltaHeader(data), groups };
+}
+
+// The revision's changes as lines. `data` is what was read for the revision shown (the plan with its tree, changes and, when something
+// was taken out, `previous`), `assist` its checks' flags and `notes` what is said on the lines. `showWhole()` opens the whole plan,
+// which the fold of the items that did not change asks for. In the split layout the old column holds the line as it was (what was
+// removed, what each changed part was, and the item's own line as a line that stays) and the new column the line as it is (what was
+// added, the item as it is now, what each changed part is, and what is said on the lines): the same signed lines, each on its side.
+// `hidden` is the set of approved items whose lines are folded away, or null.
+export function deltaDiff(data, fold, assist, notes, showWhole, split = false, hidden = null) {
+  const { tree, changes, previous } = data;
+  const now = new Map(tree.map((one) => [one.ref, one]));
+  const before = new Map((previous ?? []).map((one) => [one.ref, one]));
+  const children = childrenOf(tree);
+  const lookup = (ref) => now.get(ref)?.title ?? before.get(ref)?.title ?? store.nodes.get(ref)?.title ?? '';
+  const header = deltaHeader(data);
   const unified = [];
   const oldSide = [];
   const newSide = [];
@@ -122,13 +177,13 @@ export function deltaDiff(data, fold, assist, notes, showWhole, split = false) {
       shown += 1;
       emit('new', planLines(mine, { ...common, sign: '+', open: (item) => itemSpec('added', item, { lookup }) }));
     } else if (entry.change === 'removed') {
-      // Taken out: the line as it was. What was said about it before is under it; nothing can be said about it now.
+      // Taken out: the line as it was, with what was said about it before under it. A person can still agree it goes, or ask for it back.
       const old = before.get(entry.ref);
-      if (old) emit('old', planLines(old, { ...common, sign: '-', details: false, notes: notes.removed, children: 0, flags: [], open: (item) => itemSpec('removed', item, { lookup }) }));
+      if (old) emit('old', planLines(old, { ...common, sign: '-', details: false, children: 0, flags: [], open: (item) => itemSpec('removed', item, { lookup: (ref) => before.get(ref)?.title ?? lookup(ref) }) }));
     } else if (entry.change === 'changed' && mine) {
       shown += 1;
       const spec = changedSpec(mine, entry, { lookup });
-      emit('new', planLines(mine, { ...common, sign: '~', details: false, open: () => spec }));
+      emit('new', planLines(mine, { ...common, sign: 'changed', details: false, open: () => spec }));
       // The item as it was, for the old column to start the parts that changed from.
       if (split) emit('old', [diffLine('.', [link(entry.ref, entry.before?.title ?? mine.title)], { ref: entry.ref, part: 'before', depth, className: 'diff-before-head' })]);
       const was = entry.before;
@@ -145,5 +200,7 @@ export function deltaDiff(data, fold, assist, notes, showWhole, split = false) {
   }
   const left = tree.length - shown;
   if (left > 0) emit('new', [foldOver('unchanged', `${plural(left, 'more item')}, unchanged`, 0, showWhole)]);
-  return split ? [header, sides(oldSide, newSide, 'Nothing')] : [header, ...unified];
+  // Hide approved: the lines of the approved items, folded behind one row for each run of them, in each column.
+  const folded = (side, lines) => (hidden ? foldApproved(lines, hidden, { ...fold, side }) : lines);
+  return split ? [header, sides(folded('old', oldSide), folded('new', newSide), 'Nothing')] : [header, ...folded('new', unified)];
 }

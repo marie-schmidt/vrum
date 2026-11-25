@@ -12,7 +12,8 @@ import { h, moment, put } from './dom.js';
 import { field } from './forms.js';
 import { icon } from './icons.js';
 import { actorLabel, codeOf } from './labels.js';
-import { COMMENT_FIELDS, FIELD_WORDS, addPending, changePending, closeComposer, composerOf, pendingOf, quotedOf, removePending, threadsOf } from './plan-comments.js';
+import { COMMENT_FIELDS, FIELD_WORDS, addPending, approvedOf, changePending, closeComposer, composerOf, hasPendingComment, pendingOf, quotedOf, removePending, threadsOf, toggleApproved } from './plan-comments.js';
+import { approveButton, blameChip, commentButton, reviewChip, reviewsOf, stateOf } from './plan-verdicts.js';
 
 const MOST_COMMENT = 2000; // what the server accepts for one comment
 
@@ -51,8 +52,9 @@ export function threadRow(thread, { depth, closed = null, asOf = null }) {
 }
 
 // The box to write a comment under a line, or to change one that is not sent yet. It is a form under the line, not a dialog: the
-// person keeps reading the plan while they write. It opens empty; what is typed is kept while the page is drawn again.
-function composerRow(ref, item, state, { plan, revision, depth, closed, hooks }) {
+// person keeps reading the plan while they write. It opens empty; what is typed is kept while the page is drawn again. An item that a
+// revision took out can only be asked for back as a whole (`wholeOnly`).
+function composerRow(ref, item, state, { plan, revision, depth, closed, hooks, wholeOnly = false }) {
   const problem = h('p', { class: 'problem comment-problem', role: 'alert' });
   const show = (words) => {
     state.problem = words;
@@ -63,7 +65,7 @@ function composerRow(ref, item, state, { plan, revision, depth, closed, hooks })
     'select',
     { class: 'comment-field', value: state.field, dataset: { focusKey: `field:${ref}` }, onchange: () => (state.field = choose.value) },
     h('option', { value: '' }, 'The whole item'),
-    COMMENT_FIELDS.map(([name, words]) => h('option', { value: name }, words)),
+    wholeOnly ? null : COMMENT_FIELDS.map(([name, words]) => h('option', { value: name }, words)),
   );
   const text = h('textarea', {
     class: 'comment-text',
@@ -176,41 +178,61 @@ function pendingRow(one, { plan, revision, depth, closed, hooks }) {
 }
 
 // What can be said on the lines of one revision of a plan. `items` are the items of that revision by reference (so that the words a
-// comment is about can be worked out), `feedback` is the earlier feedback to show under the lines it was about, and `editable` is
-// whether the person can write comments: only for a plan that waits for a person, and only for someone who can edit the project.
-// Returns `button(item)` (what goes at the end of an item's line), `below(item, closed, depth)` (the rows under it), `has(ref)`
-// (whether anything is said on it), `removed` (the same for an item that is no longer in the plan: earlier comments only) and
-// `threads` (the earlier comments by item).
-export function planNotes({ plan, revision, items, feedback, editable, asOf = null, hooks }) {
+// comment is about can be worked out), `gone` the items the revision took out as they were (they can be agreed to go or asked for back),
+// `blame` the server's account of who last changed each line and what a person said about it, `feedback` the earlier feedback to show
+// under the lines it was about, and `editable` whether the person can approve and write comments: only for a plan that waits for a person,
+// and only for someone who can edit the project. `onBlame(revision)` reads the plan as of a revision. `compact` is a card's preview: the
+// approve control and the carried state only, no comments, no blame and nothing under a line.
+// Returns `controls(item)` (the controls of the slot next to an item's line), `review(item)` (what is carried or waiting, at the end of
+// its line), `below(item, closed, depth)` (the rows under it), `has(ref)` (whether anything is said on it) and `threads` (the earlier
+// comments by item).
+export function planNotes({ plan, revision, items, gone = [], blame = null, feedback, editable, asOf = null, hooks, onBlame = null, compact = false }) {
   const threads = threadsOf(feedback);
   const byRef = new Map(items.map((one) => [one.ref, one]));
+  const goneRefs = new Set(gone.map((one) => one.ref));
+  const reviews = reviewsOf(blame);
+  const waiting = approvedOf(plan, revision);
   const spoken = (ref) => (threads.get(ref) ?? []).map((one) => (depth, closed) => threadRow(one, { depth, closed, asOf }));
   const below = (one, closed, depth) => {
+    if (compact) return [];
     const rows = spoken(one.ref).map((make) => make(depth, closed));
     if (!editable) return rows;
     const state = composerOf(plan, revision, one.ref);
     for (const comment of pendingOf(plan, revision)) {
       if (comment.item === one.ref && !(state.open && state.editing === comment.id)) rows.push(pendingRow(comment, { plan, revision, depth, closed, hooks }));
     }
-    if (state.open) rows.push(composerRow(one.ref, one, state, { plan, revision, depth, closed, hooks }));
+    if (state.open) rows.push(composerRow(one.ref, one, state, { plan, revision, depth, closed, hooks, wholeOnly: goneRefs.has(one.ref) }));
     return rows;
   };
   return {
     threads,
     below,
-    button: (one) =>
-      editable
-        ? h(
-            'button',
-            { type: 'button', class: 'ghost icon-only small diff-comment', 'aria-label': `Comment on ${codeOf(one.ref)}`, title: `Comment on ${codeOf(one.ref)}`, dataset: { ref: one.ref, focusKey: `comment:${one.ref}` }, onclick: () => open(one.ref) },
-            icon('comment', { size: 14 }),
-          )
-        : null,
-    has: (ref) => byRef.has(ref) && (threads.has(ref) || (editable && (pendingOf(plan, revision).some((one) => one.item === ref) || composerOf(plan, revision, ref).open))),
-    removed: {
-      button: () => null,
-      below: (one, closed, depth) => spoken(one.ref).map((make) => make(depth, closed)),
+    controls(one) {
+      const made = [];
+      const known = reviews.get(one.ref);
+      if (!compact && known && onBlame) made.push(blameChip(known, { onPress: () => onBlame(known.revision) }));
+      if (editable) {
+        made.push(
+          approveButton({
+            ref: one.ref,
+            removed: goneRefs.has(one.ref),
+            pressed: waiting.has(one.ref),
+            blocked: hasPendingComment(plan, revision, one.ref),
+            onToggle: () => {
+              toggleApproved(plan, revision, one.ref);
+              hooks.redraw(`approve:${one.ref}`);
+            },
+          }),
+        );
+        if (!compact) made.push(commentButton({ ref: one.ref, onOpen: () => open(one.ref) }));
+      }
+      return made;
     },
+    review(one) {
+      const shown = stateOf(one.ref, { reviews, approved: waiting });
+      return shown ? reviewChip({ ref: one.ref, ...shown }) : null;
+    },
+    has: (ref) => byRef.has(ref) && (threads.has(ref) || (editable && (hasPendingComment(plan, revision, ref) || composerOf(plan, revision, ref).open))),
   };
 
   // Opens the box under a line, empty; a box that is already open (or a comment being changed) is left as it is.

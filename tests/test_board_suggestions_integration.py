@@ -267,7 +267,7 @@ async def test_a_proposal_is_one_row_and_accepting_it_moves_the_items_as_the_per
         await expect(page.locator("#sidebar-needs-count")).to_have_text("1")
 
         proposal = row(page, "placement", loose[0])
-        await expect(proposal.locator(".change-kind-word")).to_have_text("Suggested move")
+        await expect(proposal.locator(".change-kind-word")).to_have_count(0)
         await expect(proposal.locator(".change-kind .item-code")).to_have_text(
             f"Proposal {move['id']}"
         )
@@ -289,7 +289,7 @@ async def test_a_proposal_is_one_row_and_accepting_it_moves_the_items_as_the_per
             one["ref"] for one in asked["items"]
         ]
         for line, ref in zip(await added.all(), loose, strict=True):
-            await expect(line.locator("a.item-link .item-code").first).to_have_text(code(ref))
+            await expect(line.locator(".item-link .item-code").first).to_have_text(code(ref))
             await expect(line.locator(".diff-from")).to_contain_text("Inbox")
         await expect(proposal.locator(DECIDING)).to_have_text(["Approve", "Reject…"])
         await no_overflow(page)

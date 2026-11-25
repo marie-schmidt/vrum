@@ -738,6 +738,7 @@ async def a_stale_decision_is_refused_in_the_servers_words() -> None:
 
 WRITING = (
     "button.verdict, button.decision-comment, input#answer-remember, button.diff-comment, "
+    "button.diff-approve, button.diff-include, "
     "form.comment-form, .needs-yes, .needs-no, .needs-changes, .ask-choice"
 )
 
@@ -791,7 +792,7 @@ async def close_the_dialog(page: Page) -> None:
 async def the_page_says_nothing_in_sentences() -> None:
     """No text of six words or more on the list, in its rail, on any review page or in any dialog
     they open, that is not somebody's own words, the server's refusal or a hover card."""
-    _, project, _, made, seen = await a_busy_project()
+    _, project, viewer, made, seen = await a_busy_project()
     found: dict[str, list[str]] = {}
     scanned = 0
     async with browser_page(project.address, token=project.key, name=None) as w:
@@ -832,6 +833,13 @@ async def the_page_says_nothing_in_sentences() -> None:
         await review(page).locator("button.decision-comment").click()
         await expect(review(page).locator("div.decision-comment-box")).to_be_visible(timeout=SLOW)
         found["the comment box"] = await sentences(page)
+    # What somebody else's feedback on a plan is called, as a viewer reads it: a name is words
+    # too, so a label that holds a name is not a sentence.
+    async with browser_page(project.address, token=None, person=viewer, name=None) as w:
+        for number in (made["plan"], made["later"]):
+            await the_review_page(w, f"plan:{number}")
+            found[f"plan {number} as a viewer"] = await sentences(w.page)
+            scanned += 1
     said = {where: texts for where, texts in found.items() if texts}
     proof(
         "M52",

@@ -12,7 +12,7 @@ Nothing here reads the database: the models, how two snapshots differ, how live 
 from the snapshot a person reviewed, and how the comments of a request are checked and quoted."""
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -104,6 +104,10 @@ class PlanFeedback(BaseModel):
     at: datetime
     summary: str
     comments: list[PlanComment]
+    approved: list[str] = Field(
+        description="The items the person approved as they were in that revision (an item it "
+        "removed counts when the person agreed with the removal)."
+    )
 
 
 class PlanRevisionInfo(BaseModel):
@@ -124,6 +128,35 @@ class PlanItemChange(BaseModel):
     change: str = Field(description="added, removed or changed, compared with the revision before.")
     fields: list[str] = Field(description="For a change, which parts changed.")
     before: dict[str, Any] = Field(description="For a change, those parts as they were.")
+
+
+class PlanReview(BaseModel):
+    state: Literal["approved", "asked", "changed", "none"] = Field(
+        description="approved (a person approved the item as it is now), asked (a person asked "
+        "for a change to it and it has not changed since), changed (a person reviewed it and it "
+        "has changed since: it needs a fresh look) or none (nobody has said anything about it)."
+    )
+    revision: int | None = Field(description="The revision the person's latest word was about.")
+    by: str | None = Field(description="The person who said it.")
+    at: datetime | None
+    feedback: int | None = Field(description="The number of the feedback it was said in.")
+
+
+class PlanBlame(BaseModel):
+    """Who last changed an item of a plan, in which revision and with what note, and what a person
+    has said about it since: the review of each line, like git blame is for code."""
+
+    ref: str
+    change: Literal["added", "changed", "removed"] = Field(
+        description="How the item came to be as it is: added in that revision, changed in it, or "
+        "(for an item the shown revision took out) removed by it."
+    )
+    revision: int = Field(description="The revision that added, changed or removed it.")
+    by: str = Field(description="Who made that revision.")
+    by_kind: str
+    at: datetime
+    note: str | None = Field(description="What that revision says changed, in its author's words.")
+    review: PlanReview
 
 
 class PlanDrift(BaseModel):
@@ -242,22 +275,35 @@ def clean_summary(summary: str) -> str:
     return cleaned
 
 
+def _known(reviewed: list[dict[str, Any]], removed: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a person can say something about in a revision: its items and the items it took out
+    (they can be approved as removed, or asked to come back)."""
+    items = {one["ref"]: one for one in removed}
+    items.update({one["ref"]: one for one in reviewed})
+    return items
+
+
 def clean_comments(
-    comments: list[PlanCommentInput] | None, reviewed: list[dict[str, Any]]
+    comments: list[PlanCommentInput] | None,
+    reviewed: list[dict[str, Any]],
+    removed: list[dict[str, Any]] | None = None,
 ) -> list[PlanComment]:
     """The comments of a request for changes, each checked against the revision that was reviewed
-    and given the words it is about. Every problem is listed together."""
+    (or an item it took out) and given the words it is about. Every problem is listed together."""
     wanted = comments or []
     if len(wanted) > MOST_COMMENTS:
         raise Refusal(f"A request may have at most {MOST_COMMENTS} comments. Nothing was changed.")
-    items = {one["ref"]: one for one in reviewed}
+    items = _known(reviewed, removed or [])
     problems: list[str] = []
     made: list[PlanComment] = []
     for number, comment in enumerate(wanted, start=1):
         item = comment.item.strip().lower()
         text = comment.text.strip()
         if item not in items:
-            problems.append(f"Comment {number}: {item} is not an item of the revision reviewed.")
+            problems.append(
+                f"Comment {number}: {item} is not an item of the revision reviewed, or one it "
+                "took out."
+            )
             continue
         if comment.field is not None and comment.field not in FIELDS:
             problems.append(
@@ -288,3 +334,112 @@ def clean_comments(
             f"problem{'s' if len(problems) != 1 else ''}:\n{shown}\nNothing was changed."
         )
     return made
+
+
+def clean_approved(
+    approved: list[str] | None,
+    comments: list[PlanComment],
+    reviewed: list[dict[str, Any]],
+    removed: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """The items a person approves as they are, checked against the revision reviewed (and the
+    items it took out). An item cannot be approved and also have a comment asking for a change.
+    Every problem is listed together; the answer is sorted and has each item once."""
+    known = _known(reviewed, removed or [])
+    asked = {one.item for one in comments}
+    chosen: list[str] = []
+    problems: list[str] = []
+    for number, raw in enumerate(approved or [], start=1):
+        item = raw.strip().lower()
+        if item not in known:
+            problems.append(
+                f"Approved item {number}: {item} is not an item of the revision reviewed, or one "
+                "it took out."
+            )
+        elif item in asked:
+            problems.append(
+                f"{item} is approved and also has a comment asking for a change. Approve it or "
+                "ask for the change, not both."
+            )
+        elif item not in chosen:
+            chosen.append(item)
+    if problems:
+        shown = "\n".join(f"{n}. {problem}" for n, problem in enumerate(problems, 1))
+        raise Refusal(
+            f"The request was not sent, because of {len(problems)} "
+            f"problem{'s' if len(problems) != 1 else ''}:\n{shown}\nNothing was changed."
+        )
+    return sorted(chosen, key=split_node_ref_order)
+
+
+def blame_of(
+    snapshots: dict[int, list[dict[str, Any]]],
+    revisions: list[PlanRevisionInfo],
+    feedback: list[PlanFeedback],
+    shown: int,
+) -> list[PlanBlame]:
+    """For each item of the revision shown (and each item it took out), who last changed it and
+    what a person has said about it. `snapshots` holds every revision up to `shown`, as it was
+    submitted. An approval or a request for a change stands for an item while the item is as it
+    was when the person said it; once it changes the item is `changed`: it needs a fresh look."""
+    by_revision = {one.revision: one for one in revisions}
+    values = {
+        revision: {item["ref"]: values_of(item) for item in items}
+        for revision, items in snapshots.items()
+    }
+    last: dict[str, tuple[int, str]] = {}
+    for revision in range(1, shown + 1):
+        now = values.get(revision, {})
+        before = values.get(revision - 1, {})
+        for ref, then in now.items():
+            if ref not in before:
+                last[ref] = (revision, "added")
+            elif before[ref] != then:
+                last[ref] = (revision, "changed")
+    wanted = [item["ref"] for item in snapshots.get(shown, [])]
+    gone: list[str] = []
+    if shown > 1:
+        gone = [ref for ref in values.get(shown - 1, {}) if ref not in values.get(shown, {})]
+    mentions: dict[str, list[tuple[PlanFeedback, str]]] = {}
+    for one in feedback:
+        if one.revision > shown:
+            continue
+        for ref in one.approved:
+            mentions.setdefault(ref, []).append((one, "approved"))
+        for comment in one.comments:
+            mentions.setdefault(comment.item, []).append((one, "asked"))
+    found: list[PlanBlame] = []
+    for ref in sorted(wanted + gone, key=split_node_ref_order):
+        removed = ref in gone
+        revision, how = (shown, "removed") if removed else last[ref]
+        info = by_revision[revision]
+        review = PlanReview(state="none", revision=None, by=None, at=None, feedback=None)
+        said = mentions.get(ref, [])
+        if said:
+            one, word = max(said, key=lambda found_one: (found_one[0].id, found_one[1] == "asked"))
+            if removed:
+                stands = one.revision == shown
+            else:
+                stands = values[one.revision].get(ref) == values[shown][ref]
+            state = word if stands else "changed"
+            if not (removed and not stands):
+                review = PlanReview(
+                    state=state,  # type: ignore[arg-type]
+                    revision=one.revision,
+                    by=one.by,
+                    at=one.at,
+                    feedback=one.id,
+                )
+        found.append(
+            PlanBlame(
+                ref=ref,
+                change=how,  # type: ignore[arg-type]
+                revision=revision,
+                by=info.by,
+                by_kind=info.by_kind,
+                at=info.at,
+                note=info.note,
+                review=review,
+            )
+        )
+    return found

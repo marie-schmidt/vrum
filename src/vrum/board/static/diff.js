@@ -6,26 +6,30 @@
 // What is folded is in the page all the same (marked `data-closed`, which hides it) so that the page, a search in it and a test
 // can see everything the change holds; opening a fold only takes the mark off. Which folds are open is the card's to remember.
 
-import { h } from './dom.js';
+import { h, plural } from './dom.js';
 import { icon } from './icons.js';
 
 // How many lines of a body are shown before "Show N more lines".
 export const MOST_LINES = 6;
 
-const WORDS = { '+': 'added', '-': 'removed', '.': 'existing', '~': 'changed' };
+const WORDS = { '+': 'added', '-': 'removed', '.': 'existing', changed: 'changed' };
 
 // A hunk row: a quiet label in the colours of a hunk, in plain words (no marks around it). `content` is its words (a link may be among them).
 export const hunk = (...content) => h('div', { class: 'diff-hunk' }, ...content);
 
 // One line of a change. The sign is in the gutter and is the meaning; the colour behind it only helps, and a screen reader is told
-// "added", "removed", "changed" or "existing" first. `ref` is the item the line is about (a body or a criterion names its item); `part` says
-// what kind of line it is when it is not the item itself ("body" or "criteria"); `closed` is the key of the fold that hides it.
+// "added", "removed", "changed" or "existing" first. A modified item header (`changed`) sits on a neutral row with a small dot in the
+// gutter instead of a full-row colour wash; red (`-`) and green (`+`) stay strictly for removed and added items or fields. `ref` is the
+// item the line is about (a body or a criterion names its item); `part` says what kind of line it is when it is not the item itself
+// ("body" or "criteria"); `closed` is the key of the fold that hides it.
 export function diffLine(sign, content, { ref = null, part = null, depth = 0, closed = null, className = '', data = {}, opens = null } = {}) {
+  const gutter = sign === 'changed' ? icon('modified', { size: 12 }) : sign === '+' && data.moved === 'true' ? icon('arrow_right', { size: 12 }) : sign;
+  const word = sign === '+' && data.moved === 'true' ? 'moved' : WORDS[sign];
   const line = h(
     'div',
     { class: `diff-line${className ? ` ${className}` : ''}`, dataset: { sign, ref, part, depth: String(Math.min(depth, 5)), closed, ...data } },
-    h('span', { class: 'diff-sign', 'aria-hidden': 'true' }, sign),
-    h('div', { class: 'diff-code' }, h('span', { class: 'sr-only' }, `${WORDS[sign]}: `), content),
+    h('span', { class: 'diff-sign', 'aria-hidden': 'true' }, gutter),
+    h('div', { class: 'diff-code' }, h('span', { class: 'sr-only' }, `${word}: `), content),
   );
   if (opens) openable(line, opens);
   return line;
@@ -88,11 +92,50 @@ export function textLines(text, { ref, part, depth, key, open, onOpen, sign = '+
   const shown = lines.slice(0, MOST_LINES).map((one) => line(one, false));
   const row = foldRow(key, `Show ${lines.length - MOST_LINES} more lines`, depth, onOpen);
   if (closed) row.dataset.closed = closed;
+  if (ref) row.dataset.ref = ref;
   return [...shown, row, ...lines.slice(MOST_LINES).map((one) => line(one, true))];
 }
 
 // A fold over whole lines that are folded away (a story's tasks in a large plan): the row says how many are behind it.
 export const foldOver = (key, words, depth, onOpen) => foldRow(key, words, depth, onOpen);
+
+// "Hide approved" (M53): the lines of the items in `refs` (an item line, its comment slot and what is said under it, its details,
+// criteria and changed parts: everything that names the item) are folded behind ONE row for each run of them, which says how many
+// items are behind it. The lines stay in the page, hidden, as any fold's do. `side` keeps the keys of the two columns of the split layout
+// apart; a run that was opened stays open while the page is drawn again (`open`, `onOpen`). Lines already hidden by another fold are
+// left to it.
+export function foldApproved(lines, refs, { open, onOpen, side = 'new' }) {
+  const out = [];
+  let run = null;
+  const finish = () => {
+    if (run && run.button) run.button.textContent = plural(run.items.size, 'approved item');
+    run = null;
+  };
+  for (const line of lines) {
+    const data = line.dataset ?? {};
+    const mine = data.ref && refs.has(data.ref) && !data.closed;
+    if (!mine) {
+      if (!data.closed) finish();
+      out.push(line);
+      continue;
+    }
+    if (!run) {
+      const key = `approved:${side}:${data.ref}`;
+      if (open(key)) run = { key, items: new Set(), button: null };
+      else {
+        const row = foldRow(key, '', Number(data.depth ?? 0), onOpen);
+        row.dataset.fold = 'approved';
+        out.push(row);
+        run = { key, items: new Set(), button: row.querySelector('button') };
+      }
+    }
+    run.items.add(data.ref);
+    if (run.button) line.dataset.closed = run.key;
+    out.push(line);
+  }
+  finish();
+  return out;
+}
 
 // The split view of a change that has a before and an after: two columns side by side, the old state and the new. The same lines are
 // drawn as in the unified view, each on the side it belongs to: nothing is left out and nothing is added to what is added or removed.

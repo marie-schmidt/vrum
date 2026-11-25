@@ -53,6 +53,8 @@ NOT_TOOLS = {
     "changes_requested",
     "plan_changes_requested",
     "look_into",
+    "by_kind",
+    "placement_accepted",
 }
 # Files the text names that are made when it is used, or that live in the reader's own project.
 NOT_IN_THE_REPOSITORY = {".env", ".mcp.json", "CLAUDE.md"}

@@ -7,6 +7,7 @@ import { changesOf } from './changes.js';
 import { moveAssist, planAssist } from './needs-assist.js';
 import { detailOf, keepOnly } from './needs-details.js';
 import { groupsOf } from './needs-groups.js';
+import { approvedSummary } from './plan-verdicts.js';
 import { store } from './store.js';
 
 export const titleOfRef = (ref) => store.nodes.get(ref)?.title ?? '';
@@ -28,6 +29,7 @@ export function prepare(list, wanted = () => true) {
     if (change.look === 'plan') {
       change.assist = planAssist(entry);
       change.warn = change.assist.warn;
+      change.review = entry && entry.data ? approvedSummary(entry.data, change.item.plan.id) : null;
     } else if (change.look === 'placement') {
       const assist = moveAssist(entry);
       change.assist = assist;

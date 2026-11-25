@@ -25,7 +25,8 @@ import { hoverCard } from './hovercard.js';
 import { icon } from './icons.js';
 import { askCode, codeOf, gateCode, noteCode, parseNodeRef } from './labels.js';
 import { changesDialog } from './plan-changes.js';
-import { clearPending, pendingOf, problemOf, setProblem } from './plan-comments.js';
+import { approvedOf, clearPending, pendingOf, problemOf, setProblem } from './plan-comments.js';
+import { forgetPicks, leftOut } from './placement-picks.js';
 import { sync } from './store.js';
 
 // The classes the older selectors know the verbs by.
@@ -62,7 +63,8 @@ function makeBar({ kind, barKind, hooks, remember = null, onRefused = () => {}, 
   const problem = h('p', { class: 'problem decision-problem needs-problem', role: 'alert' });
   if (remember && remember.read()) refuse(problem, remember.read());
   const buttons = [];
-  const lock = (on) => buttons.forEach((button) => { button.disabled = on || disabled; });
+  const off = new Set(); // verbs that cannot be pressed now, whatever the bar is doing
+  const lock = (on) => buttons.forEach((button) => { button.disabled = on || disabled || off.has(button); });
   const failed = (error) => {
     if (!(error instanceof Refusal)) throw error;
     hooks.refused();
@@ -71,15 +73,16 @@ function makeBar({ kind, barKind, hooks, remember = null, onRefused = () => {}, 
     onRefused();
   };
 
-  // `spec`: verb (data-verb), label, code (for the label of the button), words (what the button says), hover (its hover card), and
-  // either run() or open().
+  // `spec`: verb (data-verb), label, code (for the label of the button), words (what the button says), hover (its hover card), `tone`
+  // ('approve' green, 'danger' red-tinted, or null neutral), and either run() or open().
   function verb(spec) {
-    const { name, words, code, hover, primary = false, answer = null, run = null, open = null, ariaLabel = null, extra = '' } = spec;
+    const { name, words, code, hover, tone = null, answer = null, run = null, open = null, ariaLabel = null, extra = '', off: cannot = false } = spec;
+    const toneClass = tone === 'approve' ? 'verdict-approve' : tone === 'danger' ? 'danger' : '';
     const button = h(
       'button',
       {
         type: 'button',
-        class: `small verdict${primary ? ' primary' : ''} ${OLD_CLASSES[name] ?? ''} ${extra}`.replace(/\s+/g, ' ').trim(),
+        class: `small verdict ${toneClass} ${OLD_CLASSES[name] ?? ''} ${extra}`.replace(/\s+/g, ' ').trim(),
         'aria-label': ariaLabel ?? `${VERB_WORDS[name]} ${code}`,
         dataset: { verb: name, answer, focusKey: `${code}:${name}${answer ? `:${answer}` : ''}` },
         onclick: async () => {
@@ -104,9 +107,13 @@ function makeBar({ kind, barKind, hooks, remember = null, onRefused = () => {}, 
       },
       words,
     );
-    button.disabled = disabled;
+    button.disabled = disabled || cannot;
     buttons.push(button);
-    return h('span', { class: 'verdict-holder' }, button, hoverCard(button, h('p', { class: 'verdict-hover' }, hover), { closeOnPress: true }));
+    if (cannot) off.add(button);
+    // A disabled button hears no pointer: its card belongs to the holder around it, which does.
+    const holder = h('span', { class: 'verdict-holder' }, button);
+    holder.append(hoverCard(disabled || cannot ? holder : button, h('p', { class: 'verdict-hover' }, hover), { closeOnPress: true }));
+    return holder;
   }
 
   const dialogRefused = () => {
@@ -129,20 +136,25 @@ function wrap(bar, children, { state = null, comment = null } = {}) {
 
 // -- the comment on one line --------------------------------------------------------------------------------
 
-// A comment goes with an answer (and "Keep as a decision" with it) or, on a check, says how it was checked. It is one icon button in the
-// bar's row; the box opens beside it and keeps what was typed while the page is drawn again (`draft`: { open, text, remember }).
-function commentControl({ code, draft, label, keep = false, hooks }) {
-  const toggle = h('button', {
-    type: 'button',
-    class: 'small ghost icon-only decision-comment',
-    'aria-label': label,
-    'aria-expanded': String(draft.open),
-    dataset: { focusKey: `${code}:comment`, hasText: draft.text.trim() ? 'true' : null },
-    onclick: () => {
-      draft.open = !draft.open;
-      hooks.redraw(draft.open ? `${code}:comment-text` : `${code}:comment`);
+// A comment goes with an answer (and "Keep as a decision" with it) or, on a check, says how it was checked. It is a labelled button
+// beside the decision verbs; the box opens under (or above) the bar and keeps what was typed while the page is drawn again (`draft`: { open, text, remember }).
+function commentControl({ code, draft, label, text: buttonText = 'Comment', keep = false, hooks }) {
+  const toggle = h(
+    'button',
+    {
+      type: 'button',
+      class: 'small ghost decision-comment',
+      'aria-label': label,
+      'aria-expanded': String(draft.open),
+      dataset: { focusKey: `${code}:comment`, hasText: draft.text.trim() ? 'true' : null },
+      onclick: () => {
+        draft.open = !draft.open;
+        hooks.redraw(draft.open ? `${code}:comment-text` : `${code}:comment`);
+      },
     },
-  }, icon('comment', { size: 14 }));
+    icon('comment', { size: 14 }),
+    h('span', {}, buttonText),
+  );
   const hovered = h('span', { class: 'verdict-holder' }, toggle, hoverCard(toggle, h('p', { class: 'verdict-hover' }, label), { closeOnPress: true }));
   let box = null;
   if (draft.open) {
@@ -204,6 +216,9 @@ function planBar(change, hooks, entry) {
   // until it shows what it is about.
   const reading = Boolean(entry && entry.data && entry.data.revision !== revision);
   const mine = pendingOf(plan.id, revision);
+  const approvedNow = approvedOf(plan.id, revision);
+  // The words of the items approved, for the dialog's list: what the plan holds and what the revision took out.
+  const titles = new Map([...(entry?.data?.previous ?? []), ...(entry?.data?.tree ?? [])].map((one) => [one.ref, one.title]));
   const remember = { read: () => problemOf(plan.id), write: (said) => setProblem(plan.id, said) };
   const bar = makeBar({ kind: 'plan', barKind: 'approve', hooks, remember, onRefused: hooks.reread, disabled: reading });
   const them = total === 1 ? 'it' : 'each one';
@@ -211,7 +226,7 @@ function planBar(change, hooks, entry) {
     name: 'approve',
     words: 'Approve',
     code,
-    primary: true,
+    tone: 'approve',
     hover: `Frees ${allOf(total, 'item')} for agents to take. Nothing is dropped. It cannot be undone.`,
     run: async () => {
       await call('approve_plan', { plan: plan.id, approved: true, revision });
@@ -232,6 +247,7 @@ function planBar(change, hooks, entry) {
         code,
         revision,
         comments: [...pendingOf(plan.id, revision)],
+        approved: [...approvedOf(plan.id, revision)].map((ref) => ({ ref, title: titles.get(ref) ?? '' })),
         onSent: () => {
           clearPending(plan.id);
           notify(`Asked for changes to ${code}.`);
@@ -246,6 +262,7 @@ function planBar(change, hooks, entry) {
     name: 'reject',
     words: 'Reject…',
     code,
+    tone: 'danger',
     hover: `Drops ${allOf(total, 'item')} and leaves your reason on ${them}. It cannot be undone.`,
     open: () =>
       reasonDialog({
@@ -267,7 +284,9 @@ function planBar(change, hooks, entry) {
         },
       }),
   });
-  const state = mine.length ? h('span', { class: 'decision-state quiet', dataset: { unsent: String(mine.length) } }, `${mine.length} unsent`) : null;
+  // What is waiting to be sent, as facts: "2 approved, 3 unsent" (an approval and a comment go with Request changes only).
+  const parts = [approvedNow.size ? `${approvedNow.size} approved` : null, mine.length ? `${mine.length} unsent` : null].filter(Boolean);
+  const state = parts.length ? h('span', { class: 'decision-state quiet', dataset: { unsent: mine.length ? String(mine.length) : null, approved: approvedNow.size ? String(approvedNow.size) : null } }, parts.join(', ')) : null;
   return wrap(bar, [approve, changes, reject], { state });
 }
 
@@ -285,16 +304,26 @@ function placementBar(change, hooks) {
   const code = change.code;
   const bar = makeBar({ kind: 'placement', barKind: 'approve', hooks });
   const where = move.parent ? `under ${codeOf(move.parent)}` : 'under it';
+  // The items the person left where they are (the page keeps the choice until the proposal is decided): Approve moves the others.
+  const kept = move.items.filter((one) => !leftOut(move).has(one.ref));
+  const partial = kept.length < move.items.length;
+  const moving = { items: kept };
+  const them = kept.length === 1 ? 'it' : 'them';
   const approve = bar.verb({
     name: 'approve',
     words: 'Approve',
     code,
-    primary: true,
-    hover: move.parent
-      ? `Moves ${movedWords(move)} ${where}. Nothing else changes. You can move ${move.items.length === 1 ? 'it' : 'them'} back by hand.`
-      : `Makes a new epic, ${move.new_epic?.title ?? ''}, and moves ${movedWords(move)} ${where}. You can move ${move.items.length === 1 ? 'it' : 'them'} back by hand.`,
+    tone: 'approve',
+    off: kept.length === 0,
+    hover: !kept.length
+      ? 'Nothing to move'
+      : move.parent
+        ? `Moves ${movedWords(moving)} ${where}. Nothing else changes. You can move ${them} back by hand.`
+        : `Makes a new epic, ${move.new_epic?.title ?? ''}, and moves ${movedWords(moving)} ${where}. You can move ${them} back by hand.`,
     run: async () => {
-      const result = await call('decide_placement', { placement: move.id, accepted: true });
+      // A list of items goes only when some are left out: all included is the proposal as it was made.
+      const result = await call('decide_placement', { placement: move.id, accepted: true, ...(partial ? { items: kept.map((one) => one.ref) } : {}) });
+      forgetPicks(move);
       notify(`Accepted ${code}.`);
       if (result.skipped.length) hooks.say(result.skipped.map((one) => `${codeOf(one.ref)} left where it is: ${one.why}`));
       await sync().catch(() => {});
@@ -304,6 +333,7 @@ function placementBar(change, hooks) {
     name: 'reject',
     words: 'Reject…',
     code,
+    tone: 'danger',
     hover: 'Moves nothing. Your reason goes back to whoever proposed it. It cannot be undone.',
     open: () =>
       reasonDialog({
@@ -319,12 +349,15 @@ function placementBar(change, hooks) {
             throw error;
           }
           notify(`Rejected ${code}.`);
+          forgetPicks(move);
           await sync().catch(() => {});
           hooks.decided();
         },
       }),
   });
-  return wrap(bar, [approve, reject]);
+  // What the decision does now, as a fact, when some items are left out: "2 of 3 move".
+  const state = partial ? h('span', { class: 'decision-state quiet', dataset: { moving: String(kept.length), of: String(move.items.length) } }, `${kept.length} of ${move.items.length} move`) : null;
+  return wrap(bar, [approve, reject], { state });
 }
 
 // -- notes ----------------------------------------------------------------------------------------------------
@@ -339,7 +372,7 @@ export function noteBar(change, note, hooks) {
     name: 'approve',
     words: 'Approve',
     code,
-    primary: true,
+    tone: 'approve',
     hover: 'Records you as the person who reviewed the note. It does not check that it is true. Changing it later needs your word.',
     open: async () => {
       let done = false;
@@ -359,6 +392,7 @@ export function noteBar(change, note, hooks) {
     name: 'reject',
     words: 'Reject…',
     code,
+    tone: 'danger',
     hover: 'Withdraws the note with your reason. It stays as a record marked withdrawn. It cannot be undone.',
     open: () =>
       reasonDialog({
@@ -395,7 +429,7 @@ export function checkBar(change, check, hooks) {
     name: 'approve',
     words: 'Approve',
     code: codeOf(node),
-    primary: true,
+    tone: 'approve',
     ariaLabel: `Approve ${codeOf(node)}: ${check.text}`,
     hover: 'Ticks the check as you, with how you checked if you say. You can untick it on the item\u2019s page.',
     run: async () => {
@@ -408,7 +442,7 @@ export function checkBar(change, check, hooks) {
       await sync().catch(() => {});
     },
   });
-  const comment = commentControl({ code, draft, label: 'How you checked', hooks });
+  const comment = commentControl({ code, draft, label: 'How you checked', text: 'Add note', hooks });
   return wrap(bar, [approve], { comment });
 }
 
@@ -459,7 +493,7 @@ function askBar(change, hooks) {
         name: 'approve',
         words: 'Approve',
         code,
-        primary: true,
+        tone: 'approve',
         answer: yes,
         hover: `Sends yes to ${asker}. ${ask.effect === 'gates' ? 'It opens the gate.' : effectHover(ask)} Your answer is final.`,
         run: () => give(yes),
@@ -468,6 +502,7 @@ function askBar(change, hooks) {
         name: 'reject',
         words: 'Reject…',
         code,
+        tone: 'danger',
         answer: no,
         hover: `Sends no to ${asker}. ${ask.effect === 'gates' ? 'The gate stays refused.' : effectHover(ask)} Your answer is final.`,
         open: () =>
@@ -490,14 +525,13 @@ function askBar(change, hooks) {
       }),
     );
   } else if (ask.choices) {
-    ask.choices.forEach((choice, at) => {
+    ask.choices.forEach((choice) => {
       verbs.push(
         bar.verb({
           name: 'answer',
           words: h('span', { dataset: { words: 'theirs' } }, choice),
           code,
           answer: choice,
-          primary: at === 0,
           ariaLabel: `Answer ${code}: ${choice}`,
           hover: `Sends \u201c${choice}\u201d to ${asker}. ${effectHover(ask)} Your answer is final.`,
           run: () => give(choice),
@@ -510,7 +544,6 @@ function askBar(change, hooks) {
         name: 'answer',
         words: 'Answer…',
         code,
-        primary: true,
         hover: `Opens a box for your words and sends them to ${asker}. Your answer is final.`,
         open: () =>
           answerDialog(ask, async (answer, comment) => {
@@ -525,7 +558,7 @@ function askBar(change, hooks) {
       }),
     );
   }
-  const comment = commentControl({ code, draft, label: 'Add a comment', keep: true, hooks });
+  const comment = commentControl({ code, draft, label: 'Add a comment', text: 'Comment', keep: true, hooks });
   return wrap(bar, verbs, { comment });
 }
 
@@ -545,6 +578,7 @@ function dropVerb(bar, change, hooks, { words, hover }) {
     name: 'drop',
     words,
     code,
+    tone: 'danger',
     hover,
     open: () =>
       reasonDialog({
@@ -577,7 +611,6 @@ function gateBar(change, hooks) {
     name: 'lift',
     words: 'Lift the gate…',
     code: gate ? gateCode(gate.id) : change.code,
-    primary: true,
     hover:
       gate && gate.kind === 'approval' && gate.answer === null && gate.ask !== null
         ? `Frees the work and closes the question it asked (${askCode(gate.ask)}). It cannot be undone.`
@@ -596,7 +629,6 @@ function lapseBar(change, hooks) {
     name: 'block',
     words: 'Block it…',
     code,
-    primary: true,
     hover: 'Marks the work blocked, with your reason as its note. You can change its status again.',
     open: () =>
       reasonDialog({

@@ -52,8 +52,9 @@ uv run python scripts/export_graph.py http://127.0.0.1:8000/mcp graph.json
   last changed it. The file is readable only by you and holds everything in the project, so keep it
   private. Accounts, sessions, keys, people and invitations are never in it. The board's **Status
   and export** page has the same download. Gates, drafted plans and their decisions (with every
-  revision of a plan and the feedback people gave on it), saved plan
-  templates, questions and their answers, and proposals to move work are all in it as part of the
+  revision of a plan and the feedback people gave on it, including the lines they approved), saved plan
+  templates, questions and their answers, and proposals to move work (including the items a
+  person left out when accepting one in part) are all in it as part of the
   history, so they come back as they were (a timer gate still holds its task, a drafted plan is
   still held and a person can still decide it).
 - **Import:** `scripts/import_graph.py` loads such a file into an **empty project** (make one on the

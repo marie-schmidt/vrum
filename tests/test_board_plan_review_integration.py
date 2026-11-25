@@ -180,7 +180,7 @@ async def test_comments_are_written_changed_and_removed_and_not_sent_until_the_d
         await expect(pending(card)).to_have_count(0)
         await expect(card.locator("details.change-unsent")).to_have_count(0)
         # The first revision says nothing about revisions, and has no way to read what changed.
-        await expect(card.locator(".chip.change-revision")).to_have_count(0)
+        await expect(card.locator(".change-revision")).to_have_count(0)
         await expect(card.locator("#review-mode")).to_have_count(0)
         await expect(card.locator(".change-diff")).to_have_attribute("data-mode", "whole")
 
@@ -347,7 +347,9 @@ async def test_request_changes_sends_exactly_the_comments_and_the_plan_waits_for
         await page.locator("#review-view button[data-view='split']").click()
         await expect(pending(card)).to_have_count(3)
         await page.locator("#review-view button[data-view='unified']").click()
-        await card.locator(f"a.diff-item[data-ref='{refs['t1']}']").click()
+        # An item's line shows the item in a dialog, and its link goes to its page.
+        await card.locator(f".diff-item[data-ref='{refs['t1']}']").first.click()
+        await page.locator("dialog#change-dialog a#change-open").click()
         await on_page(page, "item")
         await page.locator("#back-to-view").click()
         await on_page(page, "review")
@@ -506,13 +508,11 @@ async def test_a_revision_comes_back_as_what_changed_with_earlier_comments_under
         )
         assert (sent["plan"], sent["revision"]) == (number, 2)
         listed = card_of(page, f"plan:{number}")
-        await expect(listed.locator(".chip.change-revision")).to_have_text(
-            "Revision 2", timeout=SLOW
-        )
+        await expect(listed.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         await expect(listed).to_have_attribute("data-revision", "2")
         page = await open_needs(w, number)
         card = in_card(page, number)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 2", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         await expect(card.locator("#review-diff")).to_have_attribute("data-revision", "2")
         revision = card.locator("li.plan-revision[data-revision='2']")
         await expect(revision.locator("p.plan-revision-note")).to_have_text(NOTE)
@@ -532,7 +532,13 @@ async def test_a_revision_comes_back_as_what_changed_with_earlier_comments_under
         )
         assert await refs_of(sign_lines(card, "+")) == added
         assert await refs_of(sign_lines(card, "-")) == removed
-        assert await refs_of(sign_lines(card, "~")) == changed
+        assert await refs_of(sign_lines(card, "changed")) == changed
+        # Modified item headers sit on muted grey with a green dot icon (no `~`), and their changed
+        # parts are shown as red `-` and green `+` lines right underneath.
+        for ref in changed:
+            modified = card.locator(f".diff-item-line[data-sign='changed'][data-ref='{ref}']")
+            await expect(modified.locator(".diff-sign svg.icon-modified")).to_have_count(1)
+            assert (await modified.locator(".diff-sign").text_content() or "").strip() == ""
         unchanged = len(server["tree"]) - len(added) - len(changed)
         fold = card.locator("button.diff-fold[data-fold='unchanged']")
         await expect(fold).to_have_text(f"{unchanged} more items, unchanged")
@@ -580,10 +586,19 @@ async def test_a_revision_comes_back_as_what_changed_with_earlier_comments_under
         await expect(box.locator("summary .feedback-count")).to_have_text("3 comments")
         await expect(box.locator(".feedback-summary")).to_have_text(SUMMARY)
 
-        # Comments can be written on a changed line, and on an added one, but not on a removed one.
-        await expect(sign_lines(card, "~").locator("button.diff-comment")).to_have_count(2)
-        await expect(sign_lines(card, "+").locator("button.diff-comment")).to_have_count(1)
-        await expect(sign_lines(card, "-").locator("button.diff-comment")).to_have_count(0)
+        # Comments can be written on a changed line, on an added one and on a removed one (to ask
+        # for it back): each line has its comment button next to it (never in it).
+        buttons = await refs_of(card.locator("button.diff-comment"))
+        assert sorted(buttons) == sorted(
+            [
+                *await refs_of(sign_lines(card, "changed")),
+                *await refs_of(sign_lines(card, "+")),
+                *await refs_of(sign_lines(card, "-")),
+            ]
+        )
+        for sign, count in (("changed", 2), ("+", 1), ("-", 1)):
+            drawn = await refs_of(sign_lines(card, sign))
+            assert len([ref for ref in buttons if ref in drawn]) == count, sign
 
         # Marking it viewed (from the list's own mark) leaves the diff, threads and the feedback
         # where they are on this page.
@@ -656,10 +671,10 @@ async def test_a_revision_over_unsent_comments_says_so_and_resets_viewed() -> No
         title = "Weather covers for the four busiest stations"
         await a_revision(agent, number, refs, NOTE, s2={"title": title})
         card = in_card(page, number)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 2", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         lost = card.locator("p.change-lost")
         await expect(lost.locator("strong")).to_have_text("Revision 2 arrived")
-        await expect(lost.locator("span")).to_have_text("Not kept: 2 unsent comments")
+        await expect(lost).to_have_text("Revision 2 arrived Not kept: 2 unsent comments")
         # What they said is behind a closed disclosure, so that they can be written again.
         said = card.locator("details.change-lost-list")
         await expect(said).not_to_have_attribute("open", "")
@@ -683,13 +698,15 @@ async def test_a_revision_over_unsent_comments_says_so_and_resets_viewed() -> No
         await say_comment(card, refs["s2"], "Is this the right supplier?")
         await a_revision(agent, number, refs, "Again.", s2={"title": "Covers for four stations"})
         card = in_card(page, number)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 3", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 3", timeout=SLOW)
         await expect(card.locator("p.change-lost strong")).to_have_text("Revision 3 arrived")
-        await expect(card.locator("p.change-lost span")).to_have_text("Not kept: 1 unsent comment")
+        await expect(card.locator("p.change-lost")).to_have_text(
+            "Revision 3 arrived Not kept: 1 unsent comment"
+        )
         await w.go("#/activity")
         await on_page(page, "activity")
         page = await open_needs(w, number)
-        await expect(in_card(page, number).locator(".chip.change-revision")).to_have_text(
+        await expect(in_card(page, number).locator(".change-revision")).to_have_text(
             "Revision 3", timeout=SLOW
         )
         await expect(page.locator("p.change-lost")).to_have_count(0)
@@ -713,7 +730,7 @@ async def test_a_decision_on_a_moved_on_revision_is_refused_in_words_and_read_ag
         # The board hears of nothing from now on, so the revision arrives behind its back.
         await hold_back_news(page)
         await a_revision(agent, number, refs, "Renamed.", s2={"title": "Four busiest stations"})
-        await expect(card.locator(".chip.change-revision")).to_have_count(0)
+        await expect(card.locator(".change-revision")).to_have_count(0)
         stale = as_person(
             owner, project, "approve_plan", plan=number, approved=True, revision=1
         ).body["message"]
@@ -723,7 +740,7 @@ async def test_a_decision_on_a_moved_on_revision_is_refused_in_words_and_read_ag
         # plan again at once (the news is still held back): the card is revision 2.
         problem_line = card.locator("#review-bar p.decision-problem")
         await expect(problem_line).to_contain_text(stale)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 2", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         await expect(problem_line).to_contain_text(stale)
         assert (await read(agent, number))["state"] == "proposed"
         await expect(card.locator(".change-diff")).to_have_attribute("data-mode", "delta")
@@ -745,7 +762,7 @@ async def test_a_decision_on_a_moved_on_revision_is_refused_in_words_and_read_ag
         ).body["message"]
         assert "is at revision 3 now, and you reviewed revision 2" in late
         await expect(dialog.locator("form > .problem")).to_contain_text(late)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 3", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 3", timeout=SLOW)
         await dialog.get_by_role("button", name="Cancel").click()
         again = await read(agent, number)
         assert (again["state"], again["revision"], again["feedback"]) == ("proposed", 3, [])
@@ -811,7 +828,7 @@ async def test_a_plan_changed_outside_a_revision_says_so_and_approval_is_refused
 
         # A revision brings the plan in line with what a person read, and then it can be approved.
         await a_revision(agent, number, refs, "Put the supplier back.")
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 2", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         await expect(card.locator("section.change-drift")).to_have_count(0)
         await expect(card.locator("#review-bar p.decision-problem")).to_have_text("")
         await card.locator("button.needs-yes").click()
@@ -938,7 +955,7 @@ async def test_the_plans_page_reads_every_revision_as_it_was_submitted_and_decid
                 await expect(page.locator("#review-mode button[data-mode='delta']")).to_have_text(
                     "Changes"
                 )
-                for sign, way in (("+", "added"), ("-", "removed"), ("~", "changed")):
+                for sign, way in (("+", "added"), ("-", "removed"), ("changed", "changed")):
                     assert await refs_of(sign_lines(diff, sign)) == [
                         c["ref"] for c in server["changes"] if c["change"] == way
                     ], (revision, sign)
@@ -989,9 +1006,11 @@ async def test_the_plans_page_reads_every_revision_as_it_was_submitted_and_decid
 
         # The current revision has the bar and a button to comment on each line.
         await expect(page.locator("#review-bar button.verdict")).to_have_count(3)
-        # An item is a link to its page; the back arrow goes to where the person came from.
+        # An item's line shows it in a dialog, and the link there goes to its page; the back
+        # arrow goes to where the person came from.
         await select.select_option("3")
-        await page.locator(f"#review-diff a.diff-item[data-ref='{refs['t4']}']").first.click()
+        await page.locator(f"#review-diff .diff-item[data-ref='{refs['t4']}']").first.click()
+        await page.locator("dialog#change-dialog a#change-open").click()
         await on_page(page, "item")
         await page.locator("#back-to-view").click()
         await on_page(page, "review")
@@ -1099,11 +1118,11 @@ async def test_a_viewer_reads_the_whole_conversation_and_has_no_write_control() 
 
         # Everything a person who can write reads: the revision, the note, what changed, what was
         # asked for before under its lines, and the plans that wait for their agent.
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 2", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 2", timeout=SLOW)
         await expect(
             card.locator("li.plan-revision[data-revision='2'] p.plan-revision-note")
         ).to_have_text(NOTE)
-        assert await refs_of(sign_lines(card, "~")) == [
+        assert await refs_of(sign_lines(card, "changed")) == [
             c["ref"] for c in server["changes"] if c["change"] == "changed"
         ]
         await expect(card.locator("div.diff-thread")).to_have_count(2)
@@ -1296,7 +1315,7 @@ async def test_the_conversation_and_the_plans_page_fit_390_pixels() -> None:
         await page.set_viewport_size(NARROW)
         await open_needs(w)
         card = in_card(page, number)
-        await expect(card.locator(".chip.change-revision")).to_have_text("Revision 3", timeout=SLOW)
+        await expect(card.locator(".change-revision")).to_have_text("Revision 3", timeout=SLOW)
         # Revision 3 changed one item (the earlier comments were about revision 2 and are under it);
         # write a comment under its line, with the box open, and the dialog over it all.
         await say_comment(
@@ -1390,11 +1409,11 @@ async def test_every_part_of_the_conversation_reads_in_both_themes_at_390_and_12
             await expect(card.locator("section.change-drift")).to_be_visible(timeout=SLOW)
             await card.locator("details.change-lost-list summary").click()
             for part in (
-                ".chip.change-revision",
+                ".change-revision",
                 "#review-mode",
                 "p.change-lost",
                 "section.change-feedback details[open]",
-                ".diff-line[data-sign='~']",
+                ".diff-line[data-sign='changed']",
                 ".diff-part[data-sign='-']",
                 ".diff-part[data-sign='+']",
                 "div.diff-thread",

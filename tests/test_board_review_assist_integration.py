@@ -227,7 +227,7 @@ async def test_plan_checks_equal_the_servers_and_flags_sit_beside_the_items_they
         # The flag sits on the line of the item and the line still says what it said.
         line = card.locator(f".diff-line[data-ref='{refs['t1']}']")
         await expect(line).to_contain_text("A task nobody sized")
-        await expect(line.locator("a.diff-item")).to_have_count(1)
+        await expect(line.locator(".diff-item")).to_have_count(1)
         # Nothing was given a size: the check says so, and the graph agrees.
         assert (await ok(agent, "get_node", node=refs["t1"]))["size"] is None
         assert (await ok(agent, "list_nodes", query="no:size"))["total"] == unsized_before

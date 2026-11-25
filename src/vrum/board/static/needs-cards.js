@@ -25,17 +25,18 @@ export const levelChip = (level) =>
 // the same order.
 export const reviewChoices = (change, by) => ({ change: change.id, group: by && by !== 'level' ? by : null });
 
-// The kind of a change with its icon and plain word, and its code ("Plan 9", "Proposal 7", "Q-12", "T-160", "Gate 5"): the code is here and
-// not in the title.
-export const kindChip = (change) =>
-  h(
+// The kind of a change with its icon, plain word (only when the code or title does not already say it) and muted code
+// ("Plan 1415", "Proposal 1367", "Q-522", "T-160", "Gate 1382").
+export const kindChip = (change, { withIcon = true } = {}) => {
+  const skipWord = change.code.toLowerCase().startsWith(change.words.toLowerCase()) || change.look === 'placement';
+  return h(
     'span',
     { class: 'change-kind' },
-    icon(change.icon, { size: 16 }),
-    // "Plan 45" already says what it is: the word is not said twice.
-    change.code.toLowerCase().startsWith(change.words.toLowerCase()) ? null : h('span', { class: 'change-kind-word' }, change.words),
+    withIcon ? icon(change.icon, { size: 16 }) : null,
+    skipWord ? null : h('span', { class: 'change-kind-word' }, change.words),
     h('span', { class: `item-code needs-code${change.item.ask ? ' ask-code' : ''}` }, change.code),
   );
+};
 
 // The card. `view` is the page's memory of it (viewed, folded, whether the preview is opened out), `fp` is what the server sent for it,
 // `entry` is what was read for it (needs-details.js) and `hooks` are what a decision tells the page. `onChrome()` is called when the
@@ -47,8 +48,8 @@ export function cardOf(change, { view, fp, entry, asOf, hooks, onChrome, by }) {
   const reading = change.look === 'placement' && change.assist.reading;
   const choices = reviewChoices(change, by);
 
-  // The title opens the review page. A suggested move's title holds links to the items it moves, and a link cannot hold a link, so there it is
-  // a plain element that opens the page when its words are pressed (Open is the link for the keyboard).
+  // The title leads the visual hierarchy and opens the review page. A suggested move's title holds links to the items it moves, and a link
+  // cannot hold a link, so there it is a plain element that opens the page when its words are pressed (Review is the link for the keyboard).
   const title =
     change.look === 'placement'
       ? h('span', {
@@ -60,7 +61,7 @@ export function cardOf(change, { view, fp, entry, asOf, hooks, onChrome, by }) {
           },
         }, titleNodes(change))
       : viewLink('review', choices, { class: 'change-title', dataset: { focusKey: `title:${change.key}` } }, titleNodes(change));
-  const open = viewLink('review', choices, { class: 'action-link small change-open', 'aria-label': `Open ${change.code} ${change.title}`, dataset: { focusKey: `open:${change.key}` } }, 'Open');
+  const open = viewLink('review', choices, { class: 'action-link small change-open', 'aria-label': `Review ${change.code} ${change.title}`, dataset: { focusKey: `open:${change.key}` } }, 'Review', icon('arrow_right', { size: 13 }));
   const viewed = h('input', { type: 'checkbox', class: 'change-viewed', 'aria-label': `Viewed ${change.name}`, dataset: { focusKey: `viewed:${change.key}` } });
   viewed.disabled = loading;
   viewed.addEventListener('change', () => card.setViewed(viewed.checked));
@@ -68,11 +69,17 @@ export function cardOf(change, { view, fp, entry, asOf, hooks, onChrome, by }) {
   const head = h(
     'header',
     { class: 'change-head', tabindex: -1, dataset: { focusKey: `head:${change.key}` } },
-    kindChip(change),
-    levelChip(change.level),
-    title,
-    changed,
-    h('span', { class: 'change-tools' }, h('label', { class: 'change-viewed-label' }, viewed, icon('viewed', { size: 14 }), h('span', {}, 'Viewed')), open),
+    h(
+      'div',
+      { class: 'change-lead' },
+      icon(change.icon, { size: 16, className: 'change-lead-icon' }),
+      title,
+      kindChip(change, { withIcon: false }),
+      // Omit the level chip when already grouped by level so cards inside "Stories" or "Tasks" do not stutter.
+      by === 'level' ? null : levelChip(change.level),
+      changed,
+    ),
+    h('span', { class: 'change-tools' }, h('label', { class: 'change-viewed-label' }, viewed, h('span', {}, 'Viewed')), open),
   );
 
   const preview = h('div', { class: 'change-preview', id: `preview-${change.key.replace(/[^a-z0-9]+/gi, '-')}` });

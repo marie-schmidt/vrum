@@ -1,8 +1,9 @@
-// What a person has done in the review of a plan and not sent (M51), kept in the page's memory and never in the browser's storage, so
-// that it lives until the board is reloaded: the comments written on the lines of a plan, the words typed into a comment that is
-// not added yet, which way a plan is being read (what changed, or the whole plan) and the last refusal of a decision. A comment
-// names the revision it was written on, because the server keeps it with that revision and refuses a request for another: when a
-// newer revision arrives, the unsent comments of the old one are not kept and the plan says so once.
+// What a person has done in the review of a plan and not sent (M51, M53), kept in the page's memory and never in the browser's storage, so
+// that it lives until the board is reloaded: the comments written on the lines of a plan, the items approved as they are (M53), the
+// words typed into a comment that is not added yet, which way a plan is being read (what changed, or the whole plan) and the last
+// refusal of a decision. A comment or an approval names the revision it was made on, because the server keeps it with that revision and
+// refuses a request for another: when a newer revision arrives, the unsent ones of the old one are not kept and the plan says so once.
+// An item cannot be both approved and commented on in one request (the server refuses it), so the page never holds both.
 //
 // Nothing here draws anything or asks the server for anything: needs.js, the plan's card and the plan's page read and change it.
 
@@ -31,6 +32,7 @@ export function quotedOf(item, field) {
 }
 
 const pending = new Map(); // `${plan}:${revision}` -> [{ id, item, field, text, quoted }], in the order they were added
+const approvals = new Map(); // `${plan}:${revision}` -> the references of the items approved as they are and not sent
 const composers = new Map(); // `${plan}:${revision}:${item}` -> { open, field, text, editing, problem }
 const lost = new Map(); // plan -> { from, to, comments: [{ item, field, text }] }
 const seen = new Map(); // plan -> the newest revision the page has drawn
@@ -50,7 +52,32 @@ export const pendingOf = (plan, revision) => {
 export function addPending(plan, revision, { item, field, text, quoted }) {
   serial += 1;
   pendingOf(plan, revision).push({ id: serial, item, field: field || null, text, quoted });
+  // A comment asks for a change: it takes the item's approval back.
+  approvedOf(plan, revision).delete(item);
   return serial;
+}
+
+// -- the approvals that are not sent -------------------------------------------------------------------------
+
+export const approvedOf = (plan, revision) => {
+  const key = keyOf(plan, revision);
+  if (!approvals.has(key)) approvals.set(key, new Set());
+  return approvals.get(key);
+};
+
+// Whether an item cannot be approved now: it has a comment that is not sent.
+export const hasPendingComment = (plan, revision, item) => pendingOf(plan, revision).some((one) => one.item === item);
+
+// Approves an item as it is, or takes that back. An item with a comment waiting is not approved (returns false and changes nothing).
+export function toggleApproved(plan, revision, item) {
+  const set = approvedOf(plan, revision);
+  if (set.has(item)) {
+    set.delete(item);
+    return false;
+  }
+  if (hasPendingComment(plan, revision, item)) return false;
+  set.add(item);
+  return true;
 }
 
 export function changePending(plan, revision, id, { field, text, quoted }) {
@@ -64,9 +91,10 @@ export function removePending(plan, revision, id) {
   if (at >= 0) list.splice(at, 1);
 }
 
-// Sent: what was written for any revision of the plan is gone, and so is what was being typed.
+// Sent: what was written or approved for any revision of the plan is gone, and so is what was being typed.
 export function clearPending(plan) {
   for (const key of [...pending.keys()]) if (key.startsWith(`${plan}:`)) pending.delete(key);
+  for (const key of [...approvals.keys()]) if (key.startsWith(`${plan}:`)) approvals.delete(key);
   for (const key of [...composers.keys()]) if (key.startsWith(`${plan}:`)) composers.delete(key);
 }
 
@@ -81,8 +109,8 @@ export const closeComposer = (state) => Object.assign(state, { open: false, fiel
 
 // -- a revision that arrives under the person -------------------------------------------------------------
 
-// Called with the revision the page is about to draw for a plan. When it is newer than the one drawn before and comments were
-// written for an older one, they are not kept (the server would refuse them: they name a revision); what they said is kept in a
+// Called with the revision the page is about to draw for a plan. When it is newer than the one drawn before and comments or approvals
+// were made for an older one, they are not kept (the server would refuse them: they name a revision); what they said is kept in a
 // notice so that they can be written again.
 export function noticeRevision(plan, revision) {
   const before = seen.get(plan);
@@ -90,11 +118,18 @@ export function noticeRevision(plan, revision) {
   if (before === undefined || revision <= before) return;
   // The last refusal was about the card that is replaced, unless the page is reading the plan again because of it.
   if (problems.has(plan) && !problems.get(plan).rereading) problems.delete(plan);
-  const old = [...pending.entries()].filter(([key]) => key.startsWith(`${plan}:`) && Number(key.split(':')[1]) < revision);
+  const older = ([key]) => key.startsWith(`${plan}:`) && Number(key.split(':')[1]) < revision;
+  const old = [...pending.entries()].filter(older);
+  const oldApproved = [...approvals.entries()].filter(older);
   const comments = old.flatMap(([, list]) => list.map(({ item, field, text }) => ({ item, field, text })));
+  const approved = oldApproved.flatMap(([, set]) => [...set]);
   for (const [key] of old) pending.delete(key);
+  for (const [key] of oldApproved) approvals.delete(key);
   for (const key of [...composers.keys()]) if (key.startsWith(`${plan}:`) && Number(key.split(':')[1]) < revision) composers.delete(key);
-  if (comments.length) lost.set(plan, { from: Math.max(...old.filter(([, list]) => list.length).map(([key]) => Number(key.split(':')[1]))), to: revision, comments });
+  if (comments.length || approved.length) {
+    const from = [...old.filter(([, list]) => list.length), ...oldApproved.filter(([, set]) => set.size)].map(([key]) => Number(key.split(':')[1]));
+    lost.set(plan, { from: Math.max(...from), to: revision, comments, approved });
+  }
 }
 
 export const lostOf = (plan) => lost.get(plan) ?? null;

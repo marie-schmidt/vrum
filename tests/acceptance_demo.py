@@ -31,17 +31,36 @@ from playwright.async_api import Error as BrowserError
 from playwright.async_api import expect
 
 from tests import demo_data
+from tests.acceptance_granular_page import (
+    PREVIEW_ITEMS,
+    disagreements,
+    facts_of,
+    hovered,
+    lines,
+    mode_and_view,
+    preview_of,
+    runs_of,
+)
 from tests.acceptance_review import (
     CONTEXT_LINES,
     ITEM_LINES,
     lines_of,
     open_review,
+    plan_card,
     review_page,
     the_diff_is_before_the_decision,
     whole_plan,
 )
-from tests.acceptance_revising_page import CHANGED_LINES, THREADS, failing, holds
+from tests.acceptance_revising_page import CHANGED_LINES, REMOVED_LINES, THREADS, failing, holds
 from tests.acceptance_scenario import Failed, chapter, clip, http_request, proof
+from tests.acceptance_standard_change import (
+    each_way,
+    line_of,
+    lookup_of,
+    open_it,
+    snapshot,
+    wrong_item,
+)
 from tests.acceptance_standard_page import (
     change_id,
     groups_wrong,
@@ -52,7 +71,7 @@ from tests.acceptance_standard_page import (
 )
 from tests.board_helpers import NOTE_STATUS_WORDS, SLOW, Watched, browser_page, go
 from tests.board_m14 import events_of, every_item, ids_of, open_working, show_tab
-from tests.demo_flow import Flow
+from tests.demo_flow import Flow, in_order
 from tests.demo_world import (
     Names,
     asks_of_description,
@@ -723,8 +742,22 @@ async def the_sample_plans_have_a_conversation(client: Client, held: dict[str, A
     studded = by_title[demo_data.WINTER_REVISED["studded"]["title"]]
     fitting = by_title["Fit studded tyres on forty bikes"]
     old = {item["ref"]: item for item in first["tree"]}
+    drafted = {str(item["key"]): item for item in demo_data.WINTER_ITEMS}
+    chains = next(r for r, item in old.items() if item["title"] == drafted["chains"]["title"])
+    approved_refs = in_order(by_title[drafted[key]["title"]] for key in demo_data.WINTER_APPROVED)
     (given,) = winter["feedback"]
     changes = {c["ref"]: c for c in winter["changes"]}
+    lines = {line["ref"]: line for line in winter["blame"]}
+    flow = Flow(cast(Any, None))
+    flow.winter_refs = {
+        key: next(r for r, item in old.items() if item["title"] == one["title"])
+        for key, one in drafted.items()
+    }
+    try:
+        flow.check_the_blame(winter, first, given)
+        blame_problem = ""
+    except SystemExit as stopped:
+        blame_problem = str(stopped)
     needs = await ok(client, "needs_a_person")
     plan_rows = [i for g in needs["groups"] for i in g["items"] if i["kind"] == "plan"]
     by_owner = (await ok(client, "changes_since", actor=demo_data.OWNER, newest=True, limit=100))[
@@ -742,9 +775,10 @@ async def the_sample_plans_have_a_conversation(client: Client, held: dict[str, A
         "M51",
         "the sample has a plan with a conversation: the winter plan is at revision 2 of the same "
         "plan, made by the planning agent with its note after the owner asked for changes to "
-        "revision 1 with a summary and a comment on a story's title and on a task's details, each "
-        "keeping the words it was about; revision 2 changes exactly those two parts (the old "
-        "words are in before), revision 1 still reads as it was drafted, nothing was changed "
+        "revision 1 with a summary and a comment on a story's title, on a task's details and on "
+        "a whole task she wants dropped, each keeping the words it was about; revision 2 changes "
+        "the two parts (the old words are in before) and takes out the task, which is dropped, "
+        "revision 1 still reads as it was drafted, nothing was changed "
         "outside a revision, and its seven items are held; it is one row on Needs a person and "
         "that row says revision 2; the change feed has the owner's request (as a person) and the "
         "agent's revision; and the spring plan waits for its agent at revision 1 with the "
@@ -759,16 +793,20 @@ async def the_sample_plans_have_a_conversation(client: Client, held: dict[str, A
         == (demo_data.OWNER, "person", 1, demo_data.WINTER_FEEDBACK_SUMMARY)
         and [(c["field"], c["text"]) for c in given["comments"]]
         == [(part, text) for _, part, text in demo_data.WINTER_FEEDBACK]
-        and [c["item"] for c in given["comments"]] == [studded, fitting]
+        and [c["item"] for c in given["comments"]] == [studded, fitting, chains]
         and [c["quoted"] for c in given["comments"]]
-        == [old[studded]["title"], old[fitting]["body"]]
+        == [old[studded]["title"], old[fitting]["body"], old[chains]["title"]]
         and old[studded]["title"] != demo_data.WINTER_REVISED["studded"]["title"]
-        and set(changes) == {studded, fitting}
+        and set(changes) == {studded, fitting, chains}
         and changes[studded]["fields"] == ["title"]
         and changes[fitting]["fields"] == ["body"]
+        and changes[chains]["change"] == "removed"
         and changes[studded]["before"] == {"title": old[studded]["title"]}
         and changes[fitting]["before"] == {"body": old[fitting]["body"]}
-        and {c["change"] for c in winter["changes"]} == {"changed"}
+        and {c["change"] for c in winter["changes"]} == {"changed", "removed"}
+        and chains not in {item["ref"] for item in winter["tree"]}
+        and nodes[chains]["status"] == "dropped"
+        and not nodes[chains]["held_by"]
         and winter["drift"] == []
         and first["shown"] == 1
         and first["changes"] is None
@@ -794,6 +832,71 @@ async def the_sample_plans_have_a_conversation(client: Client, held: dict[str, A
         and names.node(demo_data.WINTER_UNDER).ref == spring["context"][0]["ref"],
         f"winter at revision {winter['revision']} after {len(given['comments'])} comments, "
         f"{len(changes)} changed; spring waits for its agent",
+    )
+    gone_line = lines[chains]
+    proof(
+        "M53",
+        "the winter plan shows a removal and what the owner approved, line by line: she approved "
+        "four items as they were in revision 1 (the feedback and the change feed carry them, "
+        "none of them is commented on and none was changed), revision 2 left them alone, so "
+        "blame says each was added in revision 1 by the planning agent and is approved by her on "
+        "revision 1; the two lines she commented on that revision 2 changed read changed, with "
+        "the revision and the agent's note; the task she asked to drop is removed by revision 2 "
+        "(its line is in blame with the note and no word of hers counts), the story nobody said "
+        "anything about reads none, and revision 1, read as it was, has every line added and the "
+        "three she commented on asked; every line of both revisions is in blame in the order the "
+        "server lists items",
+        given["approved"] == approved_refs
+        and len(approved_refs) == 4
+        and not set(approved_refs) & {c["item"] for c in given["comments"]}
+        and not set(approved_refs) & set(changes)
+        and [e["after"]["approved"] for e in asked if e["after"]["plan"] == winter["id"]]
+        == [approved_refs]
+        and [e["after"]["approved"] for e in asked if e["after"]["plan"] == spring["id"]] == [[]]
+        and waiting_for_agent["approved"] == []
+        and [line["ref"] for line in winter["blame"]] == in_order(old)
+        and [line["ref"] for line in first["blame"]] == in_order(old)
+        and all(
+            (lines[r]["change"], lines[r]["revision"], lines[r]["by"], lines[r]["by_kind"])
+            == ("added", 1, demo_data.RECORDER, "agent")
+            and (
+                lines[r]["review"]["state"],
+                lines[r]["review"]["by"],
+                lines[r]["review"]["revision"],
+                lines[r]["review"]["feedback"],
+            )
+            == ("approved", demo_data.OWNER, 1, given["id"])
+            for r in approved_refs
+        )
+        and all(
+            (lines[r]["change"], lines[r]["revision"], lines[r]["note"])
+            == ("changed", 2, demo_data.WINTER_REVISION_NOTE)
+            and lines[r]["review"]["state"] == "changed"
+            and lines[r]["review"]["by"] == demo_data.OWNER
+            for r in (studded, fitting)
+        )
+        and (gone_line["change"], gone_line["revision"], gone_line["note"])
+        == ("removed", 2, demo_data.WINTER_REVISION_NOTE)
+        and gone_line["review"]["state"] == "none"
+        and [
+            lines[r]["review"]["state"]
+            for r in old
+            if r not in {*approved_refs, studded, fitting, chains}
+            and old[r]["title"] == demo_data.WINTER_REPEATS
+        ]
+        == ["none"]
+        and {line["ref"]: line["review"]["state"] for line in first["blame"]}
+        == {
+            r: "approved"
+            if r in approved_refs
+            else "asked"
+            if r in (studded, fitting, chains)
+            else "none"
+            for r in old
+        }
+        and all(line["change"] == "added" and line["revision"] == 1 for line in first["blame"])
+        and not blame_problem,
+        f"{len(approved_refs)} approved and unchanged, 2 changed, 1 removed{blame_problem}",
     )
 
 
@@ -982,11 +1085,17 @@ async def the_waiting_plans_have_a_conversation_on_the_page(w: Watched, client: 
         plans[demo_data.SPRING_TITLE]["id"],
     )
     (winter,) = (await ok(client, "list_plans", plan=winter_id))["items"]
+    (first,) = (await ok(client, "list_plans", plan=winter_id, revision=1))["items"]
     (spring,) = (await ok(client, "list_plans", plan=spring_id))["items"]
     needs = await ok(client, "needs_a_person")
     by_title = {item["title"]: item["ref"] for item in winter["tree"]}
     studded = by_title[demo_data.WINTER_REVISED["studded"]["title"]]
     fitting = by_title["Fit studded tyres on forty bikes"]
+    chains = next(
+        item["ref"]
+        for item in first["tree"]
+        if item["title"] == "Buy spare studded chains for staff bikes"
+    )
     await visit(w, "#/needs")
     card = page.locator(f"li.needs-row[data-change='plan:{winter_id}']")
     await expect(card).to_have_count(1, timeout=SLOW)
@@ -1003,7 +1112,9 @@ async def the_waiting_plans_have_a_conversation_on_the_page(w: Watched, client: 
     scope = review_page(page)
     await expect(scope.locator("[data-fact='revision']")).to_have_text("Revision 2", timeout=SLOW)
     await expect(scope.locator(CHANGED_LINES)).to_have_count(2, timeout=SLOW)
+    await expect(scope.locator(REMOVED_LINES)).to_have_count(1, timeout=SLOW)
     changed = await lines_of(scope, CHANGED_LINES)
+    removed = await lines_of(scope, REMOVED_LINES)
     note = words(await scope.locator("p.plan-revision-note").last.inner_text())
     header = words(await scope.locator(".diff-hunk").first.inner_text()).lower()
     threads = await scope.locator(".diff-thread").evaluate_all(THREADS)
@@ -1023,10 +1134,12 @@ async def the_waiting_plans_have_a_conversation_on_the_page(w: Watched, client: 
     proof(
         "M51",
         "in a browser the winter plan's card says Revision 2 and its review page what its "
-        "agent said changed, draws what changed since revision 1 (two items: the title of the "
-        "story and the details of the task, so the hunk row says 2 changed) with the owner's "
-        "two comments as threads under those two lines and the summary of the feedback in "
-        "full, and has both revisions to read and the three verdicts; the spring plan, which "
+        "agent said changed, draws what changed since revision 1 (the title of a story and the "
+        "details of a task, as `~` lines, and the task the owner asked to drop, as a red `-` "
+        "line, so the hunk row says 2 changed and 1 removed) with the owner's three comments "
+        "as threads under those lines (the one on the dropped task under its red line) and the "
+        "summary of the feedback in full, and has both revisions to read and the three "
+        "verdicts; the spring plan, which "
         "waits for its agent, is a line in the closed group of plans that wait for their agent "
         "(linking to its review page) and in no row, and the number on the sidebar is still "
         "the tool's; its review page reads that it waits for the agent to revise it, with the "
@@ -1034,17 +1147,19 @@ async def the_waiting_plans_have_a_conversation_on_the_page(w: Watched, client: 
         "plan's own page and the one line under the summary are gone)",
         holds(
             sorted(changed) == sorted([studded, fitting]),
+            removed == [chains],
             demo_data.WINTER_REVISION_NOTE in note,
-            "revision 2" in header and "2 changed" in header,
-            sorted(under) == sorted([studded, fitting]),
+            "revision 2" in header and "2 changed" in header and "1 removed" in header,
+            sorted(under) == sorted([studded, fitting, chains]),
             all(
                 text in under[ref]
                 for ref, text in (
                     (studded, demo_data.WINTER_FEEDBACK[0][2]),
                     (fitting, demo_data.WINTER_FEEDBACK[1][2]),
+                    (chains, demo_data.WINTER_FEEDBACK[2][2]),
                 )
             ),
-            demo_data.WINTER_FEEDBACK_SUMMARY in feedback and "2 comments" in feedback,
+            demo_data.WINTER_FEEDBACK_SUMMARY in feedback and "3 comments" in feedback,
             f"Plan {spring_id}" in line and demo_data.SPRING_TITLE in line,
             link >= 1 and spring_rows == 0,
             badge == str(needs["total"]),
@@ -1138,6 +1253,83 @@ async def the_waiting_review_is_assisted_on_the_page(w: Watched, client: Client)
         and not wrong,
         f"{len(routine)} routine of {len(waiting)} moves, {len(careful)} to look at twice, "
         f"flags on {[f[0] for f in flagged]}" + (f"; wrong: {wrong}" if wrong else ""),
+    )
+
+
+async def the_demo_lines_open_what_the_tools_say(w: Watched, client: Client) -> None:
+    """M52: pressing a green, red or changed line of the sample's plans and moves opens the dialog
+    the tools describe, with the sample's real titles and details: the winter plan at revision 2
+    (the changed, added and removed items, old and new) and the plan that waits for its agent, the
+    moves the steward proposed (old and new parent), read only, and no sentence in any of them."""
+    page = w.page
+    plans = {p["title"]: p for p in (await ok(client, "list_plans", limit=200))["items"]}
+    winter_id = plans[demo_data.WINTER_TITLE]["id"]
+    (winter,) = (await ok(client, "list_plans", plan=winter_id))["items"]
+    (first,) = (await ok(client, "list_plans", plan=winter_id, revision=1))["items"]
+    lookup = lookup_of(winter, first)
+    # An item the revision took out reads as revision 1 had it, so its parent is named as that
+    # revision named it (the story's title was changed by revision 2).
+    lookup_as_was = lookup_of(first, winter)
+    by_ref = {one["ref"]: one for one in winter["tree"]}
+    gone = {one["ref"]: one for one in first["tree"]}
+    wrong: list[str] = []
+    opened = 0
+    await open_review(w, f"plan:{winter_id}")
+    scope = review_page(page)
+    for entry in winter["changes"]:
+        ref = entry["ref"]
+        mode, sign = {
+            "changed": ("changed", "changed"),
+            "added": ("added", "+"),
+            "removed": ("removed", "-"),
+        }[entry["change"]]
+        seen, trouble = await each_way(page, line_of(scope, sign, ref), ("click", "enter"))
+        wrong += trouble
+        for snap in seen:
+            opened += 1
+            item = gone[ref] if mode == "removed" else by_ref[ref]
+            wrong += [
+                f"{ref} {mode}: {found}"
+                for found in wrong_item(
+                    snap,
+                    mode,
+                    item,
+                    lookup_as_was if mode == "removed" else lookup,
+                    entry if mode == "changed" else None,
+                )
+            ]
+    moves = (await ok(client, "list_placements", status="proposed", limit=50))["items"]
+    for move in moves[:2]:
+        await open_review(w, f"placement:{move['id']}")
+        one = move["items"][0]
+        node = await ok(client, "get_node", node=one["ref"])
+        titles = {
+            ref: (await ok(client, "get_node", node=ref))["title"]
+            for ref in (node["parent"], move["parent"])
+            if ref
+        }
+        await open_it(page, line_of(review_page(page), "+", one["ref"]), "click")
+        snap = await snapshot(page)
+        await page.keyboard.press("Escape")
+        opened += 1
+        parent = {f[0]: f for f in snap["fields"]}.get("parent")
+        if snap["mode"] != "moved" or parent is None or parent[1] != "changed":
+            wrong.append(f"{one['ref']} opens {snap['mode']}")
+        elif move["parent"] and not (
+            titles[node["parent"]] in parent[2][0][1] and titles[move["parent"]] in parent[2][1][1]
+        ):
+            wrong.append(f"{one['ref']}: the parents are not {node['parent']} and {move['parent']}")
+        if snap["said"] or snap["buttons"] != ["Close"]:
+            wrong.append(f"{one['ref']}: {snap['buttons']} {snap['said']}")
+    proof(
+        "M52",
+        "pressing a changed, added or removed line of the sample's winter plan (revision 2) and "
+        "the first story of two of the sample's suggested moves, with the mouse and with Enter, "
+        "opens the dialog the tools describe, with the sample's real titles and details (the "
+        "parts that changed old and new, every other part plain; a moved story's parent old "
+        "and new), read only, with no sentence of the board's own in it",
+        not wrong and opened >= len(winter["changes"]) * 2 + 2,
+        f"{opened} dialogs" + (f"; wrong: {wrong[:3]}" if wrong else ""),
     )
 
 
@@ -1330,11 +1522,24 @@ async def the_sample_sorts_and_holds(
     for move in held["placements"]:
         by_state.setdefault(move["state"], []).append(move)
     wrong: list[str] = []
-    (accepted,) = by_state.get("accepted", [None])
+    decided_ones = by_state.get("accepted", [])
+    story_moves = [p for p in decided_ones if p["items"][0]["ref"].startswith("story:")]
+    moves_in_part = [p for p in decided_ones if p["skipped"]]
     (rejected,) = by_state.get("rejected", [None])
     grouped = [p for p in by_state.get("proposed", []) if p["new_epic"]]
-    if accepted is None or rejected is None or len(grouped) != 1:
-        raise Failed("M43: the sample does not hold one accepted, one rejected and one new epic")
+    if (
+        len(story_moves) != 1
+        or len(moves_in_part) != 1
+        or len(decided_ones) != 2
+        or rejected is None
+        or len(grouped) != 1
+    ):
+        raise Failed(
+            "M43: the sample does not hold one accepted move of a story, one accepted in part, "
+            "one rejected and one new epic"
+        )
+    (accepted,) = story_moves
+    (in_part,) = moves_in_part
     moved_story = accepted["applied"][0]
     history = (await ok(client, "node_history", node=moved_story))["items"]
     move = [e for e in history if e["action"] == "move"][-1]
@@ -1374,6 +1579,60 @@ async def the_sample_sorts_and_holds(
         and not any(n["title"] == demo_data.GROUPED.epic_title for n in held["nodes"])
         and {n["title"] for n in loose} >= set(demo_data.GROUPED.stories),
         f"{len(held['placements'])} proposals: {', '.join(sorted(by_state))}",
+    )
+
+    stays, moved = (
+        [one["ref"] for one in in_part["skipped"]],
+        in_part["applied"],
+    )
+    workshop = names.node(demo_data.PARTIAL_PARENT).ref
+    kept_ref = names.node(demo_data.PARTIAL_LEFT_IN).ref
+    moved_history = [
+        e
+        for e in (await ok(client, "node_history", node=moved[0]))["items"]
+        if e["action"] == "move"
+    ]
+    stayed_history = [
+        e
+        for e in (await ok(client, "node_history", node=stays[0]))["items"]
+        if e["action"] == "move"
+    ]
+    decided_in_part = [
+        e
+        for e in (
+            await ok(client, "changes_since", actor=demo_data.PLANNER, newest=True, limit=100)
+        )["items"]
+        if e["action"] == "placement_accepted" and e["after"]["placement"] == in_part["id"]
+    ]
+    proof(
+        "M53",
+        "the sample has a suggested move that a person accepted in part: the steward proposed "
+        f"moving two tasks of the story Spare parts stock under {workshop}, and "
+        f"{demo_data.PLANNER} accepted it naming only one, so that one moved (as herself) and the "
+        "other stayed where it was and the record says she left it out, in words that name her "
+        "and nothing else as the reason, which the change feed carries too",
+        in_part["state"] == "accepted"
+        and in_part["decided_by"] == demo_data.PLANNER
+        and in_part["proposed_by"] == demo_data.STEWARD
+        and [one["ref"] for one in in_part["items"]]
+        == [names.node(key).ref for key in demo_data.PARTIAL_ITEMS]
+        and moved
+        == [
+            names.node(key).ref
+            for key in demo_data.PARTIAL_ITEMS
+            if key != demo_data.PARTIAL_LEFT_IN
+        ]
+        and stays == [kept_ref]
+        and in_part["skipped"] == [{"ref": kept_ref, "why": f"{demo_data.PLANNER} left it out"}]
+        and nodes[moved[0]]["parent"] == workshop
+        and nodes[kept_ref]["parent"] != workshop
+        and [(e["actor"], e["actor_kind"]) for e in moved_history]
+        == [(demo_data.PLANNER, "person")]
+        and not stayed_history
+        and len(decided_in_part) == 1
+        and [(one["ref"], one["why"]) for one in decided_in_part[0]["after"]["skipped"]]
+        == [(kept_ref, f"{demo_data.PLANNER} left it out")],
+        f"{moved[0]} moved, {stays[0]} left out",
     )
 
     gates_seen: dict[str, Any] = {}
@@ -1532,6 +1791,104 @@ async def the_sample_plan_is_worth_reviewing(client: Client, held: dict[str, Any
     )
 
 
+async def the_demo_shows_a_removal_and_who_approved_what(w: Watched, client: Client) -> None:
+    """M53: the winter plan's card previews what changed (the two changed lines and the red line of
+    the task the owner asked to drop), its review page says on every line who last changed it
+    and what the owner said that still stands (four items approved and carried over, the two she
+    commented on changed since, the battery story nobody spoke of), Hide approved folds the
+    approved runs, and the Activity page says what the request carried and which item of a
+    suggested move the planner left out."""
+    page = w.page
+    plans = {p["title"]: p for p in (await ok(client, "list_plans", limit=200))["items"]}
+    winter_id = plans[demo_data.WINTER_TITLE]["id"]
+    (winter,) = (await ok(client, "list_plans", plan=winter_id))["items"]
+    (first,) = (await ok(client, "list_plans", plan=winter_id, revision=1))["items"]
+    drafted = {str(item["key"]): item for item in demo_data.WINTER_ITEMS}
+    by_title = {item["title"]: item["ref"] for item in first["tree"]}
+    ref_of = {key: by_title[item["title"]] for key, item in drafted.items()}
+    approved = sorted(ref_of[key] for key in demo_data.WINTER_APPROVED)
+    changes = {c["ref"]: c["change"] for c in winter["changes"]}
+    signs = {"changed": "changed", "added": "+", "removed": "-"}
+    wanted = [(signs[changes[ref]], ref) for ref in in_order(changes)]
+    moves = (await ok(client, "list_placements", status="accepted", limit=50))["items"]
+    (in_part,) = [p for p in moves if p["skipped"]]
+
+    await visit(w, "#/needs")
+    card = plan_card(page, winter_id)
+    await expect(card.locator(PREVIEW_ITEMS).first).to_be_visible(timeout=SLOW)
+    await expect(card.locator(".diff-hunk").first).to_be_visible(timeout=SLOW)
+    on_card = await preview_of(card)
+    await open_review(w, f"plan:{winter_id}")
+    scope = review_page(page)
+    await mode_and_view(page, "delta", "unified")
+    on_page = await preview_of(scope)
+    changes_read = await lines(scope)
+    gone_lines = scope.locator(".diff-line[data-sign='-']")
+    gone_words = words(" ".join(await gone_lines.all_inner_texts()))
+    wrong = disagreements(changes_read, winter, "the demo's changes")
+    await mode_and_view(page, "whole", "unified")
+    whole_read = await lines(scope)
+    wrong += disagreements(whole_read, winter, "the demo's whole plan")
+    facts = await facts_of(scope)
+    order = [ref for ref, line in whole_read.items()]
+    toggle = page.locator("button#review-hide-approved")
+    await toggle.click()
+    rows = scope.locator(".diff-foldrow[data-fold='approved']")
+    runs = runs_of(order, set(approved))
+    await expect(rows).to_have_count(len(runs), timeout=SLOW)
+    counts = [int(re.search(r"\d+", words(t)).group()) for t in await rows.all_inner_texts()]  # type: ignore[union-attr]
+    await toggle.click()
+    carried_words = await hovered(
+        page, scope.locator(f".line-review[data-ref='{approved[0]}']").first
+    )
+    await visit(w, "#/activity")
+    await expect(page.locator("#feed li.event").first).to_be_visible(timeout=SLOW)
+    await read_the_whole_feed(page)
+    history = words(await page.locator("#feed").inner_text())
+    asked = [
+        e
+        for e in (await ok(client, "changes_since", newest=True, limit=100))["items"]
+        if e["action"] == "plan_changes_requested" and e["after"]["plan"] == winter_id
+    ]
+    (request,) = asked
+    proof(
+        "M53",
+        "the winter plan shows a removal and who approved what: its card says Revision 2 and "
+        "previews what changed (the title and details lines as changed lines and the task the "
+        "owner asked to drop as a red line), the same lines in the same order as the review "
+        "page's Changes read, where the red line says what the task was (its details, whole); "
+        "every line of the review page, in the Changes and the Whole plan read, says what the "
+        "server's blame says (the four items she approved read approved by her on revision 1 and "
+        "r1, the two she commented on read changed and r2, the story nobody spoke of reads r1 "
+        "and nothing else), the progress fact says 4 of 7 approved, Hide approved folds the "
+        "approved runs and says how many each holds, the chip of an approval names her and the "
+        "revision she read; and the Activity page says her request carried three comments and "
+        "four approved items and says the suggested move was accepted with one moved and one "
+        "left out, naming the item and who left it out",
+        holds(
+            on_card["hunk"] == on_page["hunk"],
+            on_card["hunk"].startswith("Revision 2"),
+            on_page["lines"] == wanted,
+            on_card["lines"] == wanted,
+            sum(1 for sign, _ in on_card["lines"] if sign == "-") == 1,
+            demo_data.WINTER_ITEMS[5]["title"] in gone_words and "Size S" in gone_words,
+            not wrong,
+            len(whole_read) == len(demo_data.WINTER_NOW) == 7,
+            facts.get("review") == "4 of 7 approved",
+            runs and counts == runs and sum(counts) == len(approved),
+            winter["blame"] and request["after"]["approved"] == approved,
+            demo_data.OWNER in carried_words and "revision 1" in carried_words,
+            f"asked for changes to revision 1 of Plan {winter_id}" in history,
+            "(3 comments, 4 approved)" in history,
+            f"accepted Proposal {in_part['id']} (1 moved, 1 left out)" in history,
+            f"({demo_data.PLANNER} left it out)" in history,
+        ),
+        f"{on_card['hunk']}; {len(whole_read)} lines read; {counts} hidden"
+        + (f"; wrong: {wrong[:3]}" if wrong else "")
+        + failing(),
+    )
+
+
 async def demo() -> None:
     chapter("Demo: ./demo.sh makes a copy with sample data, again from fresh, and stop removes it")
     project, port = project_name(), port_number()
@@ -1617,6 +1974,8 @@ async def demo() -> None:
                 await the_waiting_review_is_assisted_on_the_page(w, client)
                 await the_waiting_plans_have_a_conversation_on_the_page(w, client)
                 await the_demo_list_is_grouped_and_every_page_is_plain(w, client, held)
+                await the_demo_lines_open_what_the_tools_say(w, client)
+                await the_demo_shows_a_removal_and_who_approved_what(w, client)
                 marker = f"Marker {port}"
                 await ok(client, "create_node", kind="epic", title=marker)
                 made = [n for n in await all_nodes(client) if n["title"] == marker]

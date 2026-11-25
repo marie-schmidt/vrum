@@ -415,7 +415,7 @@ async def test_a_drafted_plan_is_one_row_that_is_approved_and_its_work_is_free()
         await expect(plan.locator(".change-kind .item-code")).to_have_text(f"Plan {made['plan']}")
         await expect(plan.locator("a.change-title")).to_have_text("Checkout plan")
         await expect(plan.locator("li[data-fact=by] .actor-name")).to_have_text(HARNESS_AGENT)
-        await expect(plan.locator("li[data-fact=impact]")).to_have_text("Frees 7")
+        await expect(plan.locator("li[data-fact=impact]")).to_have_text("7 items")
         # The card is a preview: the first lines of the plan and how many more there are. Every
         # item is a line of the diff on its review page, in the order the server read them.
         await expect(plan.locator(".diff-item-line")).to_have_count(6, timeout=SLOW)

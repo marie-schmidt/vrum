@@ -404,7 +404,7 @@ async def test_a_suggested_moves_title_has_no_code_and_the_codes_inside_it_are_l
             f"Proposal {world.other[0]}"
         )
         await expect(card(page, change).locator("a.change-open")).to_have_attribute(
-            "aria-label", re.compile(rf"^Open Proposal {world.other[0]} Move ")
+            "aria-label", re.compile(rf"^Review Proposal {world.other[0]} Move ")
         )
         # Pressing its words (not a code) opens the review page.
         await title.click(position={"x": 4, "y": 6})
@@ -433,27 +433,38 @@ async def test_a_rail_entry_has_a_level_word_only_before_a_code_that_does_not_na
         served = await rows(agent)
         page = w.page
         await the_list(page, w, agent)
+        # In Level grouping, the rail shows each entry's kind icon and never repeats the level word
+        # ("TASK", "NOTE", "STORY") under a heading that already names it; Waiting for their agent
+        # sits below a visual divider.
         entries = await page.evaluate(
+            """() => [...document.querySelectorAll('nav#needs-rail a.rail-change')].map((a) => ({
+                change: a.dataset.change || 'plan:' + a.dataset.plan,
+                code: a.querySelector('.rail-code').textContent,
+                level: a.querySelector('.rail-level')?.textContent ?? null,
+                hasIcon: Boolean(a.querySelector('.rail-kind-icon svg')),
+            }))"""
+        )
+        assert len(entries) == len(served) + 1
+        assert all(one["hasIcon"] for one in entries), entries
+        assert all(one["level"] is None for one in entries), entries
+        # In Topic grouping, the level word appears only when the code does not already say it.
+        await w.open("#/needs?group=topic")
+        await expect(page.locator("#needs-body li.needs-row")).to_have_count(
+            len(served), timeout=SLOW
+        )
+        topic_entries = await page.evaluate(
             """() => [...document.querySelectorAll('nav#needs-rail a.rail-change')].map((a) => ({
                 change: a.dataset.change || 'plan:' + a.dataset.plan,
                 code: a.querySelector('.rail-code').textContent,
                 level: a.querySelector('.rail-level')?.textContent ?? null,
             }))"""
         )
-        assert len(entries) == len(served) + 1
-        by_change = {one["change"]: one for one in entries}
-        for row in served:
-            one = by_change[change_of(row)]
-            if re.match(r"[A-Za-z]+ \d", one["code"]):
-                assert one["level"] is None, one
-            else:
-                assert one["level"] is not None and one["level"].lower() == row["level"], one
-        # The plan, a move whose level is story and a question on a task, by name.
+        by_change = {one["change"]: one for one in topic_entries}
         assert by_change[f"plan:{world.plan}"]["level"] is None
         assert by_change[f"plan:{world.agent_plan}"]["level"] is None
         assert by_change[f"placement:{world.other[0]}"]["code"].startswith("Proposal ")
         assert by_change[f"placement:{world.other[0]}"]["level"] is None
-        assert any(one["code"].startswith("Q-") and one["level"] for one in entries)
+        assert any(one["code"].startswith("Q-") and one["level"] for one in topic_entries)
         # The drop-down says the same, in one line each.
         options = await page.evaluate(
             "() => [...document.querySelectorAll('select#needs-rail-select option[value]')]"
@@ -519,6 +530,7 @@ async def test_open_goes_to_the_review_page_of_every_kind_which_shows_what_the_t
                     if p["id"] == row["placement"]["id"]
                 ][0]
                 plus = review.locator(".diff-line[data-sign='+'][data-ref]:not([data-part])")
+                await expect(plus).to_have_count(len(served_move["items"]), timeout=SLOW)
                 assert await plus.evaluate_all("els => els.map((e) => e.dataset.ref)") == [
                     one["ref"] for one in served_move["items"]
                 ]
@@ -530,8 +542,13 @@ async def test_open_goes_to_the_review_page_of_every_kind_which_shows_what_the_t
             elif row["ask"]:
                 ask = row["ask"]
                 assert (await review.locator("p.review-question").text_content()) == ask["question"]
-                offered = await review.locator("ul.ask-offered li").all_text_contents()
-                assert [o.lower() for o in offered] == [c.lower() for c in (ask["choices"] or [])]
+                # Writers get choice buttons in the bar, not a duplicate list of pills above it.
+                await expect(review.locator("ul.ask-offered")).to_have_count(0)
+                if ask["choices"]:
+                    bar_answers = await review.locator(
+                        "#review-bar button.verdict[data-answer]"
+                    ).evaluate_all("els => els.map((e) => e.dataset.answer)")
+                    assert [a.lower() for a in bar_answers] == [c.lower() for c in ask["choices"]]
                 await expect(review.locator("[data-fact=effect]")).to_be_visible()
                 await expect(review.locator("section[data-part=conversation]")).to_contain_text(
                     "Asked by"
@@ -711,7 +728,12 @@ async def bar_facts(bar: Locator) -> dict[str, Any]:
                 answers: [...el.querySelectorAll('button.verdict')]
                     .map((b) => b.dataset.answer ?? null),
                 comment: el.querySelectorAll('button.decision-comment').length,
-                first: el.querySelector('button.verdict')?.classList.contains('primary'),
+                tones: [...el.querySelectorAll('button.verdict')].map((b) =>
+                    b.classList.contains('verdict-approve') ? 'approve'
+                    : b.classList.contains('danger') ? 'danger'
+                    : b.classList.contains('primary') ? 'primary'
+                    : 'neutral'
+                ),
                 wrap: getComputedStyle(el).flexWrap,
             };
         }"""
@@ -757,8 +779,12 @@ async def test_the_bar_is_one_row_for_every_kind_and_has_only_that_kinds_verbs()
             assert facts["verbs"] == verbs, (change, facts)
             if answers is not None:
                 assert facts["answers"] == answers, (change, facts)
-            assert facts["first"] is True
-            assert facts["wrap"] == "nowrap"
+            wanted_tones = [
+                "approve" if v == "approve" else "danger" if v in ("reject", "drop") else "neutral"
+                for v in verbs
+            ]
+            assert facts["tones"] == wanted_tones, (change, facts)
+            assert facts["wrap"] == ("wrap" if BARS[kind] == "answer" else "nowrap")
             # One row: every button of the bar is at the same height, within two pixels.
             assert max(facts["tops"]) - min(facts["tops"]) <= 2, (change, facts)
             assert facts["comment"] == (1 if kind in ("ask", "check") else 0)
@@ -873,4 +899,125 @@ async def test_long_titles_details_and_choices_are_theirs_and_never_read_as_sent
                     await page.locator(f"#review-view button[data-view={view}]").click()
                 found = await sentences(page)
                 assert found == [], (change_of(row), view, found)
+        assert w.problems == []
+
+
+async def test_critique_polish_hierarchy_semantic_buttons_warnings_and_triage_controls() -> None:
+    from tests.test_board_plan_review_integration import a_revision, asked
+    from tests.test_plan_review_integration import drafted
+
+    owner = register(name="Priya Raman")
+    project = make_project(owner)
+    async with (
+        connect(project.mcp_url, project.key) as agent,
+        browser_page(project.address, token=project.key, name=None) as w,
+    ):
+        world = await full_world(agent, project, owner)
+        # Add a revised plan with an edited title so the card shows real inline -/+ lines.
+        rev_plan, rev_refs = await drafted(agent, title="Revised plan")
+        asked(
+            project,
+            owner,
+            rev_plan,
+            1,
+            "Rename the covers.",
+            [{"item": rev_refs["s2"], "field": "title", "text": "Be specific."}],
+        )
+        await a_revision(
+            agent,
+            rev_plan,
+            rev_refs,
+            "Renamed covers.",
+            s2={"title": "Weather covers for the four busiest docks"},
+        )
+        # Add a question with long choices to verify buttons never clip text.
+        epic = await ok(agent, "create_node", actor="x", kind="epic", title="Pricing")
+        story = await ok(
+            agent, "create_node", actor="x", kind="story", title="Zones", parent=epic["ref"]
+        )
+        task = await ok(
+            agent, "create_node", actor="x", kind="task", title="Pick zones", parent=story["ref"]
+        )
+        await ok(agent, "claim_node", node=task["ref"])
+        long_choices = [
+            "One zone for the whole city",
+            "Two zones: the centre and the outer districts",
+            "Zone per neighbourhood",
+        ]
+        await ok(
+            agent,
+            "finish_work",
+            node=task["ref"],
+            outcome="blocked",
+            note="Waiting on zones.",
+            ask={"question": "How many price zones?", "choices": long_choices},
+        )
+        page = w.page
+        await the_list(page, w, agent)
+
+        # Level mode: no stuttering [Story] or [Task] chips inside Stories/Tasks sections,
+        # and [ ] Viewed has no extra eye icon.
+        await expect(page.locator("#needs-body .level-chip")).to_have_count(0)
+        await expect(page.locator(".change-viewed-label svg.icon-viewed")).to_have_count(0)
+
+        # Long choice question: no duplicate offered list for a writer, no Option-1 primary bias,
+        # labeled Comment button, and zero horizontal clipping of the long button text.
+        q_card = page.locator("li.needs-row[data-kind='ask']", has_text="Pick zones")
+        await expect(q_card.locator("ul.ask-offered")).to_have_count(0)
+        await expect(q_card.locator("button.verdict.primary")).to_have_count(0)
+        await expect(q_card.locator("button.decision-comment")).to_have_text("Comment")
+        clipped = await q_card.locator("button.verdict[data-verb='answer']").evaluate_all(
+            "els => els.filter(e => e.scrollWidth > e.clientWidth + 1).map(e => e.textContent)"
+        )
+        assert clipped == [], clipped
+
+        # Semantic review buttons: Approve is green (.verdict-approve), Reject/Drop are red
+        # (.danger), Block is neutral (neither primary nor approve nor danger).
+        plan_card = card(page, f"plan:{world.plan}")
+        await expect(plan_card.locator("button.verdict[data-verb='approve']")).to_have_class(
+            re.compile(r"\bverdict-approve\b")
+        )
+        await expect(plan_card.locator("button.verdict[data-verb='reject']")).to_have_class(
+            re.compile(r"\bdanger\b")
+        )
+        # Plan card surfaces its warnings right above Approve in a compact Checks strip.
+        await expect(plan_card.locator(".card-checks .card-check-row")).not_to_have_count(0)
+        # Revised plan card previews real inline -/+ lines for the modified story.
+        rev_card = card(page, f"plan:{rev_plan}")
+        await expect(rev_card.locator(".diff-part[data-sign='-']")).to_have_count(1, timeout=SLOW)
+        await expect(rev_card.locator(".diff-part[data-sign='+']")).to_have_count(1)
+
+        # Suggested move: moved items carry the arrow gutter (data-moved=true) and labeled
+        # Include/Skip toggles.
+        move_card = card(page, f"placement:{world.other[0]}")
+        await expect(move_card.locator(".diff-item-line[data-moved='true']")).not_to_have_count(0)
+        await expect(move_card.locator("button.diff-include").first).to_have_text("Include")
+        await move_card.locator("button.diff-include").first.click()
+        await expect(move_card.locator("button.diff-include").first).to_have_text("Skip")
+
+        # Stalled claim card shows the stalled agent and does not repeat its own title/size.
+        lapse_card = card(page, f"lapse:{world.waiting.lapsed['ref']}")
+        await expect(lapse_card.locator("li[data-fact=by] .actor-name")).to_have_text(
+            "second-agent"
+        )
+        await expect(lapse_card.locator("li[data-fact=impact]")).to_have_text("lapsed 2 times")
+        await expect(lapse_card.locator(".change-preview .chip.size")).to_have_count(0)
+        await expect(lapse_card.locator("button.verdict[data-verb='block']")).not_to_have_class(
+            re.compile(r"\b(primary|verdict-approve|danger)\b")
+        )
+        await expect(lapse_card.locator("button.verdict[data-verb='drop']")).to_have_class(
+            re.compile(r"\bdanger\b")
+        )
+
+        # Reviewed N of M active triage: Hide viewed and Next unreviewed appear once something
+        # is marked Viewed and filter/jump cleanly.
+        await expect(page.locator("#needs-hide-viewed")).to_be_hidden()
+        await plan_card.locator("input.change-viewed").check()
+        await expect(page.locator("#needs-hide-viewed")).to_be_visible()
+        await expect(page.locator("#needs-next-unreviewed")).to_be_visible()
+        await page.locator("#needs-hide-viewed").click()
+        await expect(plan_card).to_be_hidden()
+        await page.locator("#needs-hide-viewed").click()
+        await expect(plan_card).to_be_visible()
+        assert await sentences(page) == []
         assert w.problems == []

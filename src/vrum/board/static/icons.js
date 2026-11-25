@@ -27,8 +27,9 @@ export const ICONS = {
   move: [line(12, 2, 12, 22), line(2, 12, 22, 12), path('M9 5l3-3 3 3'), path('M9 19l3 3 3-3'), path('M5 9l-3 3 3 3'), path('M19 9l3 3-3 3')],
   template: [rect(3, 3, 18, 18, 2), line(3, 9, 21, 9), line(9, 9, 9, 21)],
   discovered: [path('M4 4v6a4 4 0 0 0 4 4h10'), path('M14 10l4 4-4 4')],
-  // A change to review (a square with a plus above a minus) and what a reviewer marks as seen (an eye).
+  // A change to review (a square with a plus above a minus), an item modified in place (a solid dot) and what a reviewer marks as seen (an eye).
   diff: [rect(3, 3, 18, 18, 2), line(12, 6.5, 12, 12.5), line(9, 9.5, 15, 9.5), line(9, 16.5, 15, 16.5)],
+  modified: [circle(12, 12, 4.5, { fill: 'currentColor' })],
   viewed: [path('M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z'), circle(12, 12, 3)],
   // A comment on a line of a plan: a speech bubble.
   comment: [path('M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z')],

@@ -71,3 +71,24 @@ export function checksBlock(change, assist) {
     assist.ok ? h('p', { class: 'check-ok quiet' }, icon('check', { size: 14 }), assist.ok.map((part) => h('span', { class: 'check-ok-part', dataset: { check: part } }, part))) : null,
   );
 }
+
+// A compact strip on a plan card right above Approve, so warnings are visible on the card itself before anyone presses Approve.
+export function cardChecksStrip(change, assist) {
+  if (!assist || !assist.open || !assist.open.length) return null;
+  return h(
+    'div',
+    { class: 'card-checks', 'aria-label': `Warnings on ${change.code}` },
+    h(
+      'ul',
+      { class: 'plain card-checks-list' },
+      assist.open.map((check) =>
+        h(
+          'li',
+          { class: 'card-check-row', dataset: { check: check.kind, state: check.state } },
+          icon(SIGNS[check.state] ?? 'info', { size: 14 }),
+          h('span', { class: 'card-check-words', dataset: { words: 'theirs' } }, linked(check.words)),
+        ),
+      ),
+    ),
+  );
+}

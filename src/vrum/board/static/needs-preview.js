@@ -6,14 +6,19 @@
 //
 // A row of several checks or several notes has a bar under each of them (decision-bar.js): the bar of the row would not say which.
 
-import { itemLink } from './ctx.js';
+import { itemLink, can } from './ctx.js';
 import { h, plural } from './dom.js';
-import { codeOf, noteCode, parseNodeRef, kindIcon } from './labels.js';
+import { codeOf, noteCode, parseNodeRef, kindIcon, statusChip } from './labels.js';
 import { barsPerLine, checkBar, noteBar, openChecks, notesOf } from './decision-bar.js';
 import { offeredList } from './asks.js';
 import { diffLine, foldOver, hunk, openable } from './diff.js';
+import { cardChecksStrip } from './needs-checks.js';
 import { addsWords, aboutLines, childrenOf, depthsOf, itemText, loading, planLines, problem } from './needs-diffs.js';
 import { itemSpec, lookupOf, moveSpec, newEpicSpec, noteSpec, opening } from './change-dialog.js';
+import { deltaPreview } from './plan-diffs.js';
+import { planNotes } from './plan-notes.js';
+import { includeSlot, leftOut } from './placement-picks.js';
+import { whereLine } from './whereabouts.js';
 import { store } from './store.js';
 
 // The most lines of a diff a preview shows before its fold.
@@ -23,12 +28,16 @@ const NO_FOLD = { open: () => false, onOpen: () => {} };
 const titleOf = (ref, fallback = '') => store.nodes.get(ref)?.title ?? fallback;
 const reading = () => [loading('Reading…')];
 
-// The lines of a list, the first PREVIEW_LINES of them unless it is opened, and the fold that says how many more there are.
+// The lines of a list (each an element, or the group of elements an item has: its line and its controls), the first PREVIEW_LINES of them
+// unless it is opened, and the fold that says how many more there are.
 function limited(lines, { expanded, onMore, word }) {
-  if (expanded || lines.length <= PREVIEW_LINES) return lines;
-  return [...lines.slice(0, PREVIEW_LINES), foldOver('preview', plural(lines.length - PREVIEW_LINES, word), 0, onMore)];
+  if (expanded || lines.length <= PREVIEW_LINES) return lines.flat();
+  return [...lines.slice(0, PREVIEW_LINES).flat(), foldOver('preview', plural(lines.length - PREVIEW_LINES, word), 0, onMore)];
 }
 
+// A plan's first items. A plan that was revised is read as what the revision changed, as its review page reads it: the items it added,
+// changed or took out, each with its sign, the red lines as they were. The first revision is the plan as it is. The approve control of each
+// line and what is carried for it (approved, asked, changed since) are beside the line; a comment is written on the review page.
 function planPreview(change, entry, ctx) {
   const { plan } = change.item;
   const data = entry && entry.data && entry.data.revision === plan.revision ? entry.data : null;
@@ -37,8 +46,25 @@ function planPreview(change, entry, ctx) {
   const children = childrenOf(tree);
   const depthOf = depthsOf(tree, context);
   const lookup = lookupOf(tree, context);
-  const lines = tree.map((one) => planLines(one, { depth: depthOf(one), flags: change.assist.flags.get(one.ref) ?? [], children: children.get(one.ref) || 0, fold: NO_FOLD, details: false, open: (item) => itemSpec('added', item, { lookup }) })[0]);
-  return [hunk(addsWords(tree)), ...limited(lines, { ...ctx, word: 'more item' })];
+  const removed = new Set((data.changes ?? []).filter((one) => one.change === 'removed').map((one) => one.ref));
+  const notes = planNotes({
+    plan: plan.id,
+    revision: data.shown,
+    items: tree,
+    gone: (data.previous ?? []).filter((one) => removed.has(one.ref)),
+    blame: data.blame,
+    feedback: [],
+    editable: can('write') && plan.state === 'proposed',
+    hooks: ctx.hooks,
+    compact: true,
+  });
+  const warnStrip = cardChecksStrip(change, change.assist);
+  if (plan.revision > 1 && data.changes) {
+    const { header, groups } = deltaPreview(data, change.assist, notes);
+    return [header, ...limited(groups, { ...ctx, word: 'more item' }), warnStrip];
+  }
+  const groups = tree.map((one) => planLines(one, { depth: depthOf(one), flags: change.assist.flags.get(one.ref) ?? [], children: children.get(one.ref) || 0, fold: NO_FOLD, notes, details: false, open: (item) => itemSpec('added', item, { lookup }) }));
+  return [hunk(addsWords(tree)), ...limited(groups, { ...ctx, word: 'more item' }), warnStrip];
 }
 
 function placementPreview(change, ctx) {
@@ -51,27 +77,36 @@ function placementPreview(change, ctx) {
   if (!move.parent && move.new_epic) {
     lines.push(diffLine('+', [kindIcon('epic', 14), ' ', h('strong', { class: 'diff-new-epic', dataset: { words: 'theirs' } }, move.new_epic.title)], { depth: 0, className: 'diff-item-line', data: { kind: 'epic', newEpic: 'true', focusKey: 'diff-line:+:new-epic' }, opens: opening(newEpicSpec(move.new_epic)) }));
   }
-  for (const one of move.items) lines.push(diffLine('+', [itemText(one.ref, titleOf(one.ref, one.title)), from(one)], { ref: one.ref, depth: move.parent ? 0 : 1, className: 'diff-item-line', data: { kind: parseNodeRef(one.ref)?.kind, focusKey: `diff-line:+:${one.ref}` }, opens: opening(moveSpec(one, move)) }));
+  const left = leftOut(move);
+  for (const one of move.items) {
+    lines.push([
+      diffLine('+', [itemText(one.ref, titleOf(one.ref, one.title)), from(one)], { ref: one.ref, depth: move.parent ? 0 : 1, className: 'diff-item-line', data: { kind: parseNodeRef(one.ref)?.kind, moved: 'true', included: String(!left.has(one.ref)), focusKey: `diff-line:+:${one.ref}` }, opens: opening(moveSpec(one, move)) }),
+      includeSlot(move, one.ref, { hooks: ctx.hooks, editable: can('write') }),
+    ]);
+  }
   return [hunk(move.parent ? here(move.parent) : 'A new epic'), ...limited(lines, { ...ctx, word: 'more line' })];
 }
 
+// Show the question; only show the passive list of offered answers for viewers, since writers already have the choice buttons in the bar.
 function askPreview(change) {
   const { ask } = change.item;
-  return [h('p', { class: 'preview-question', dataset: { words: 'theirs' } }, ask.question), offeredList(ask)];
+  return [h('p', { class: 'preview-question', dataset: { words: 'theirs' } }, ask.question), can('write') ? null : offeredList(ask)];
 }
 
-// One line of the checks a person has to tick, with its bar under it when there are several.
+// One line of the checks a person has to tick, with its bar under it when there are several, plus any branch/PR link from where the work is.
 function checksPreview(change, entry, ctx) {
   if (!entry || (entry.state === 'loading' && !entry.data)) return reading();
   if (!entry.data) return [problem(`The checks could not be read: ${entry.error}`)];
   const open = openChecks(entry);
   const several = barsPerLine(change, entry);
+  const where = entry.data.where ? whereLine(entry.data.where) : null;
   return [
     h(
       'ul',
       { class: 'plain preview-checks' },
       open.map((check) => h('li', { class: 'preview-check', dataset: { item: check.item } }, h('span', { class: 'diff-check-words', dataset: { words: 'theirs' } }, check.text), several ? checkBar(change, check, ctx.hooks) : null)),
     ),
+    where ? h('div', { class: 'preview-where' }, where) : null,
   ];
 }
 
@@ -104,6 +139,19 @@ function gatePreview(change) {
   return [diffLine('-', h('span', { class: 'needs-gate-words', dataset: { gate: gate.id, words: 'theirs' } }, gate.words), { ref: change.item.node, depth: 0, className: 'diff-gate', data: { gate: gate.id } })];
 }
 
+// Context for a stalled claim without repeating its own title and size (already in the card header and byline): its parent story and status.
+function lapsePreview(change) {
+  const node = store.nodes.get(change.item.node);
+  const parent = node?.parent ? store.nodes.get(node.parent) : null;
+  if (!node && !parent) return [];
+  const parts = [];
+  if (parent) {
+    parts.push(h('span', { class: 'quiet' }, 'In '), itemLink(parent.ref, { class: 'item-link', dataset: { ref: parent.ref } }, h('span', { class: 'item-code' }, codeOf(parent.ref)), ' ', h('span', { dataset: { words: 'theirs' } }, parent.title)));
+  }
+  if (node) parts.push(statusChip(node.status));
+  return [h('p', { class: 'preview-lapse' }, parts)];
+}
+
 // What the card shows of a change, as a list of elements (possibly none). `ctx`: `entry` (what was read for it), `expanded` (the fold
 // was pressed), `onMore()` (draw the rest) and `hooks` (for the bars under the lines of several checks or notes).
 export function previewOf(change, ctx) {
@@ -121,6 +169,8 @@ export function previewOf(change, ctx) {
       return notesPreview(change, ctx.entry, ctx);
     case 'gate':
       return gatePreview(change);
+    case 'lapse':
+      return lapsePreview(change);
     default:
       return aboutLines(change.item).slice(-1);
   }

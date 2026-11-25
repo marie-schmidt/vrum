@@ -302,9 +302,12 @@ function describePlacement(event, a) {
       return ['proposed ', proposalCode(event.id), ': move ', itemList((a.items || []).map((one) => one.ref)), ' ', proposalWhere(a), `: ${whole(a.reason)}`];
     case 'placement_accepted': {
       const left = a.skipped || [];
+      // When some items were not moved (left out, or moved or finished since), how many moved and how many did not.
+      const counts = left.length ? ` (${(a.applied || []).length} moved, ${left.length} left out)` : '';
       return [
         'accepted ',
         proposalCode(a.placement),
+        counts,
         a.applied?.length ? [': moved ', itemList(a.applied)] : '',
         a.epic ? [a.applied?.length ? ', in the new epic ' : ': made the new epic ', node(a.epic)] : '',
         left.length ? [a.applied?.length || a.epic ? '; left ' : ': left ', left.map((one, at) => [at ? ', ' : '', node(one.ref), ` where it is (${whole(one.why)})`])] : '',
@@ -337,8 +340,11 @@ function describeGatesAndPlans(event, a) {
       return ['sent revision ', String(a.revision), ' of ', planLink(a.plan), removed ? ` (removed ${removed})` : '', a.note ? `: ${whole(a.note)}` : ''];
     }
     case 'plan_changes_requested': {
+      // How many comments and approvals went with it; a count of nothing is left out.
       const said = (a.comments || []).length;
-      return ['asked for changes to revision ', String(a.revision), ' of ', planLink(a.plan), `: ${whole(a.summary)}`, said ? ` (${plural(said, 'comment')})` : ''];
+      const approved = (a.approved || []).length;
+      const counts = [said ? plural(said, 'comment') : null, approved ? `${approved} approved` : null].filter(Boolean);
+      return ['asked for changes to revision ', String(a.revision), ' of ', planLink(a.plan), `: ${whole(a.summary)}`, counts.length ? ` (${counts.join(', ')})` : ''];
     }
     case 'plan_approved':
       return ['approved ', ofRevision(a.revision), planLink(a.plan), a.reason ? `, saying: “${whole(a.reason)}”` : ''];

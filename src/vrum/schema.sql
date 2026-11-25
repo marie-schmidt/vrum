@@ -1077,6 +1077,7 @@ CREATE TABLE events (
             AND coalesce(after->>'revision', '') ~ '^[0-9]+$'
             AND btrim(coalesce(after->>'summary', '')) <> ''
             AND coalesce(jsonb_typeof(after->'comments'), '') = 'array'
+            AND coalesce(jsonb_typeof(after->'approved'), '') = 'array'
             AND actor_kind = 'person'
         )
     ),

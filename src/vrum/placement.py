@@ -745,12 +745,24 @@ class PlacementBook:
         return placement_from(row, titles)
 
     async def decide(
-        self, *, actor: str, placement: int, accepted: bool, reason: str | None
+        self,
+        *,
+        actor: str,
+        placement: int,
+        accepted: bool,
+        reason: str | None,
+        only: list[str] | None = None,
     ) -> PlacementState:
         """Accept a proposal, which makes its moves as this person, or reject it. Only a person
-        can; a proposal is decided once."""
+        can; a proposal is decided once. With `only` (when accepting) just those items move and
+        the others are left where they are, said so in the record."""
         require_person(f"Proposal {placement}", "accept or reject a proposal to move work")
         why = clean_reason(reason, "reason")
+        if only is not None and not accepted:
+            raise Refusal(
+                "Name the items to move only when accepting. To turn a proposal down, reject it "
+                "with a reason. Nothing was changed."
+            )
         if not accepted and why is None:
             raise Refusal(
                 "A rejected proposal needs a reason: say why, so that whoever proposed it knows. "
@@ -763,6 +775,20 @@ class PlacementBook:
                     f"There is no proposal {placement} in this project. list_placements shows them."
                 )
             refs = sorted(i["ref"] for i in found["items"])
+            chosen = None if only is None else {one.strip().lower() for one in only}
+            if chosen is not None:
+                strangers = sorted(chosen - set(refs))
+                if strangers:
+                    raise Refusal(
+                        f"{', '.join(code(one) for one in strangers)} "
+                        f"{'is' if len(strangers) == 1 else 'are'} not in proposal {placement}, "
+                        f"which moves {', '.join(code(one) for one in refs)}. Nothing was changed."
+                    )
+                if not chosen:
+                    raise Refusal(
+                        "Name at least one item to move, or reject the proposal. Nothing was "
+                        "changed."
+                    )
             # Holding the items serialises two people deciding the same proposal.
             locked = {ref: await require_node(conn, ref, lock=True) for ref in refs}
             again = await self.get(conn, placement)
@@ -788,7 +814,9 @@ class PlacementBook:
                         )
                 for item in found["items"]:
                     current = locked[item["ref"]]
-                    if current["status"] in ("done", "dropped"):
+                    if chosen is not None and item["ref"] not in chosen:
+                        skipped.append({"ref": item["ref"], "why": f"{actor} left it out"})
+                    elif current["status"] in ("done", "dropped"):
                         skipped.append({"ref": item["ref"], "why": f"it is {current['status']}"})
                     elif current["parent"] != item["from_parent"]:
                         skipped.append(
@@ -799,8 +827,9 @@ class PlacementBook:
                         )
                 if len(skipped) == len(found["items"]):
                     raise Refusal(
-                        "Every item has moved or finished since this was proposed, so there is "
-                        "nothing to do. Reject the proposal. Nothing was changed."
+                        "Every item has moved or finished since this was proposed, or was left "
+                        "out, so there is nothing to do. Reject the proposal. Nothing was "
+                        "changed."
                     )
                 if target is None:
                     epic = NewEpic.model_validate(found["new_epic"])

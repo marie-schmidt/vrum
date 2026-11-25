@@ -25,10 +25,12 @@ let current = null; // the card that is open: { trigger, card, timer, frame, box
 // `h('span', {}, trigger, hoverCard(trigger, content))`. `content` is anything `h` takes as
 // children. `size` is 'wide' for a card that holds a table. `onOpen({ card, update })` runs each time the
 // card opens, for a card that fills itself then; `update()` places it again after it grew. `closeOnPress`
-// is for the card of a button that does something when it is pressed: the press ends the hover.
-export function hoverCard(trigger, content, { size = 'normal', onOpen = null, closeOnPress = false } = {}) {
+// is for the card of a button that does something when it is pressed: the press ends the hover. `passive`
+// is for a card with nothing to press in it that sits among controls (the controls of a line of a plan):
+// the pointer goes through it, so it never covers the control under it.
+export function hoverCard(trigger, content, { size = 'normal', onOpen = null, closeOnPress = false, passive = false } = {}) {
   counter += 1;
-  const card = h('div', { id: `hovercard-${counter}`, class: 'hovercard', role: 'tooltip', hidden: true, dataset: { size } }, content);
+  const card = h('div', { id: `hovercard-${counter}`, class: 'hovercard', role: 'tooltip', hidden: true, dataset: { size, passive: passive ? 'true' : null } }, content);
   const state = { trigger, card, timer: 0, frame: 0, box: '', opened: 0, touched: false, onOpen };
   trigger.setAttribute('aria-describedby', card.id);
 

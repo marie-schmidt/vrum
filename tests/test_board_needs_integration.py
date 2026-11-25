@@ -281,13 +281,14 @@ async def test_the_page_draws_exactly_what_the_server_says_waits_by_story_in_ord
         note_row = row(page, "note", waiting.noted["ref"])
         await expect(note_row.locator(".preview-note")).to_contain_text("The webhook retries")
         lapse_row = row(page, "lapse", waiting.lapsed["ref"] if waiting.lapsed else "")
-        await expect(lapse_row.locator(".change-kind-word")).to_have_text("Claim ran out")
-        # Only a verb decides: a claim that ran out has Block and Drop, a check one verb, notes two.
+        await expect(lapse_row.locator(".change-kind-word")).to_have_text("Stalled claim")
+        await expect(lapse_row.locator("li[data-fact=by] .actor-name")).to_have_text("second-agent")
+        # Only a verb decides: a stalled claim has Block and Drop, a check one verb, notes two.
         await expect(lapse_row.locator(DECIDING)).to_have_text(["Block it…", "Drop it…"])
         await expect(check_row.locator(DECIDING)).to_have_text(["Approve"])
         await expect(note_row.locator(DECIDING)).to_have_text(["Approve", "Reject…"])
         for each in (check_row, note_row, lapse_row):
-            await expect(each.locator("a.change-open")).to_have_text("Open")
+            await expect(each.locator("a.change-open")).to_have_text("Review")
         await the_page_says_no_ask_number_the_old_way(page)
 
         # Open goes to the review page of the change, which has the way back to this list.

@@ -26,6 +26,7 @@ from tests.acceptance_context import context
 from tests.acceptance_demo import demo
 from tests.acceptance_finding import finding
 from tests.acceptance_gates import discovered, gates
+from tests.acceptance_granular import granular
 from tests.acceptance_graph import graph
 from tests.acceptance_hardening import hardening
 from tests.acceptance_moving import moving
@@ -87,6 +88,7 @@ CHAPTERS: dict[str, Callable[[], Awaitable[None]]] = {
     "assist": assist,
     "revising": revising,
     "standard": standard,
+    "granular": granular,
     "demo": demo,
     "moving": moving,
 }

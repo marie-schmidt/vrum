@@ -228,6 +228,25 @@ async def asks_of_agents(client: Any) -> list[dict[str, Any]]:
     return [found for found in items if found["effect"] != "gates"]
 
 
+def blame_without_times(blame: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """The blame of a plan's lines as the tools read it, without the times (a restore keeps them
+    and so does an import, but they are the history's to show)."""
+    return [
+        (
+            b["ref"],
+            b["change"],
+            b["revision"],
+            b["by"],
+            b["note"],
+            b["review"]["state"],
+            b["review"]["revision"],
+            b["review"]["by"],
+            b["review"]["feedback"],
+        )
+        for b in blame
+    ]
+
+
 async def held_and_proposed(client: Any, refs: list[str]) -> dict[str, Any]:
     """What gates, drafted plans, plan templates, proposals to move work and the link that says
     where work was found came to, as the tools say it, without the times (which a restore keeps and
@@ -261,9 +280,12 @@ async def held_and_proposed(client: Any, refs: list[str]) -> dict[str, Any]:
                         f["by"],
                         f["summary"],
                         [(c["item"], c["field"], c["text"], c["quoted"]) for c in f["comments"]],
+                        f["approved"],
                     )
                     for f in whole["feedback"]
                 ],
+                "blame": blame_without_times(whole["blame"]),
+                "first_blame": blame_without_times(first["blame"]),
                 "tree": whole["tree"],
                 "changes": whole["changes"],
                 "first": first["tree"],
@@ -303,6 +325,8 @@ async def held_and_proposed(client: Any, refs: list[str]) -> dict[str, Any]:
                 m["reason"],
                 m["decided_by"],
                 m["decision_reason"],
+                m["applied"],
+                m["skipped"],
             )
             for m in moves
         ],  # fmt: skip
@@ -377,6 +401,7 @@ async def moving() -> None:
             "request_plan_changes", plan=talked_plan["plan"], revision=1,
             summary="One task too many.",
             comments=[{"item": talked_refs["t2"], "field": "title", "text": "Is this needed?"}],
+            approved=[talked_refs["t1"]],
         )  # fmt: skip
         revised_items = [
             {**item, "ref": talked_refs[item["key"]]} for item in PLAN if item["key"] != "t2"
@@ -398,6 +423,21 @@ async def moving() -> None:
         on_board(
             "decide_placement", placement=turned_down["id"], accepted=False, reason="Leave it."
         )
+        # A move a person accepted in part (M53): two stories to move, one named, so one moved and
+        # the other left where it is.
+        source, target = await tree(client, 0), await tree(client, 0)
+        second_story = await ok(
+            client, "create_node", kind="story", title="Second story", parent=source[0]["ref"]
+        )
+        in_part = await ok(
+            client, "propose_placement", items=[source[1]["ref"], second_story["ref"]],
+            parent=target[0]["ref"], reason="Both look like part of the other epic.",
+        )  # fmt: skip
+        on_board(
+            "decide_placement", placement=in_part["id"], accepted=True, items=[source[1]["ref"]]
+        )
+        left_out_story = second_story["ref"]
+        left_out_parent = source[0]["ref"]
         gate_refs = [timed["ref"], approving["ref"]]
         held_before = await held_and_proposed(client, gate_refs)
         asked_before = await asks_of_agents(client)
@@ -694,6 +734,7 @@ async def moving() -> None:
         ]
         waiting_plan = next(p for p in held_there["plans"] if p[2] == "proposed")
         waiting_move = next(m for m in held_there["moves"] if m[1] == "proposed")
+        left_out_there = (await ok(client, "get_node", node=left_out_story))["parent"]
     plan_path = f"/board/api/projects/{empty_project.id}/tool"
     approved_there = empty_project.owner.call(
         "POST", f"{plan_path}/approve_plan", {"plan": waiting_plan[0], "approved": True}
@@ -775,12 +816,45 @@ async def moving() -> None:
         "moves the story as that person",
         held_restored["moves"] == held_before["moves"]
         and held_there["moves"] == held_before["moves"]
-        and [m[1] for m in held_there["moves"]] == ["proposed", "rejected"]
+        and [m[1] for m in held_there["moves"]] == ["proposed", "rejected", "accepted"]
         and held_there["moves"][1][6] == "Leave it."
         and ("placement", waiting_move[2][0]) in needs_there
         and moved_there.status == 200
         and moved_story == waiting_move[3],
         f"{len(held_there['moves'])} proposals in every copy",
+    )
+    partial_move = next(m for m in held_before["moves"] if m[1] == "accepted")
+    t1_ref = next(f for f in taken_plan["feedback"])[5][0]
+    by_line = {b[0]: b for b in taken_plan["blame"]}
+    proof(
+        "M53",
+        "approvals, the blame of every line and a move accepted in part go through a backup and "
+        "restore and through an export and import into a fresh project: the feedback keeps the "
+        "item the person approved, blame reads the same in every copy (which revision last "
+        "changed each line, who made it, the agent's note, and what a person said that still "
+        "stands, for revision 2 and for revision 1), the approved task reads approved and the "
+        "task revision 2 took out reads removed; the move keeps what it moved and the story the "
+        "person left out, who is named, which stays where it was in every copy",
+        held_restored["talked"] == held_before["talked"]
+        and held_there["talked"] == held_before["talked"]
+        and taken_plan["feedback"][0][5] == [t1_ref]
+        and by_line[t1_ref][5:8] == ("approved", 1, by_line[t1_ref][7])
+        and by_line[t1_ref][1:3] == ("added", 1)
+        and any(b[1] == "removed" and b[2] == 2 and b[5] == "none" for b in taken_plan["blame"])
+        and all(
+            b[5] == "asked" or b[5] == "approved"
+            for b in taken_plan["first_blame"]
+            if b[5] != "none"
+        )
+        and held_restored["moves"] == held_before["moves"]
+        and held_there["moves"] == held_before["moves"]
+        and len(partial_move[8]) == 1
+        and partial_move[8][0]["ref"] == left_out_story
+        and partial_move[8][0]["why"].endswith(" left it out")
+        and len(partial_move[7]) == 1
+        and left_out_story not in partial_move[7]
+        and left_out_there == left_out_parent,
+        f"{len(taken_plan['blame'])} lines, {len(partial_move[7])} moved, 1 left out",
     )
     timed_page = next(
         t for s, t in copy_of.items() if s.startswith(f"task-{number_of(timed['ref'])}-")

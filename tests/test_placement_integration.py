@@ -368,6 +368,61 @@ async def test_work_that_moved_since_is_left_out_and_said_so() -> None:
         assert (await ok(agent, "list_placements", status="proposed"))["total"] == 1
 
 
+async def test_a_person_can_accept_some_of_the_items_and_leave_the_others_where_they_are() -> None:
+    owner = register(name="Priya Raman")
+    project = make_project(owner)
+    async with connect(project.mcp_url, project.key) as agent:
+        refs = await a_sorted_project(agent)
+        made = await ok(
+            agent,
+            "propose_placement",
+            items=[refs["loose_pay"], refs["loose_mail"], refs["loose_login"]],
+            parent=refs["billing"],
+            reason="They all look like billing.",
+        )
+        # Naming nothing, a stranger, or items while rejecting is refused and changes nothing.
+        for arguments, words in (
+            ({"accepted": True, "items": []}, "Name at least one item"),
+            ({"accepted": True, "items": [refs["billing"]]}, "not in proposal"),
+            (
+                {"accepted": False, "reason": "No", "items": [refs["loose_pay"]]},
+                "only when accepting",
+            ),
+        ):
+            said = person_call(
+                project, owner, "decide_placement", placement=made["id"], **arguments
+            )
+            assert said.status == 400 and words in said.body["message"], said.body
+        assert (await ok(agent, "list_placements", status="proposed"))["total"] == 1
+        # An agent cannot decide it, whatever it names.
+        await refused(
+            agent,
+            "decide_placement",
+            placement=made["id"],
+            accepted=True,
+            items=[refs["loose_pay"]],
+        )
+
+        done = person_call(
+            project,
+            owner,
+            "decide_placement",
+            placement=made["id"],
+            accepted=True,
+            items=[refs["loose_pay"], refs["loose_login"]],
+        )
+        assert done.status == 200, done.body
+        assert done.body["state"] == "accepted"
+        assert sorted(done.body["applied"]) == sorted([refs["loose_pay"], refs["loose_login"]])
+        assert done.body["skipped"] == [
+            {"ref": refs["loose_mail"], "why": "Priya Raman left it out"}
+        ]
+        assert (await ok(agent, "get_node", node=refs["loose_pay"]))["parent"] == refs["billing"]
+        assert (await ok(agent, "get_node", node=refs["loose_login"]))["parent"] == refs["billing"]
+        assert (await ok(agent, "get_node", node=refs["loose_mail"]))["parent"] == refs["inbox"]
+        assert (await ok(agent, "needs_a_person"))["total"] == 0
+
+
 async def test_stories_are_grouped_under_a_new_epic_that_is_made_only_when_accepted() -> None:
     owner = register()
     project = make_project(owner)

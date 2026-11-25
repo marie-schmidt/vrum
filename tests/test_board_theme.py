@@ -116,16 +116,12 @@ def test_text_and_signals_on_every_surface_reach_four_and_a_half_to_one(theme: s
 DIFF_LINES = {
     "add": ("--diff-add-bg", "--diff-add-gutter", "--diff-add-text"),
     "remove": ("--diff-remove-bg", "--diff-remove-gutter", "--diff-remove-text"),
-    # A line a revision changed (`~`, M51).
-    "change": ("--diff-change-bg", "--diff-change-gutter", "--diff-change-text"),
 }
 DIFF_BACKS = [
     "--diff-add-bg",
     "--diff-add-gutter",
     "--diff-remove-bg",
     "--diff-remove-gutter",
-    "--diff-change-bg",
-    "--diff-change-gutter",
     "--diff-context-bg",
     "--diff-context-gutter",
     "--diff-hunk-bg",
@@ -221,11 +217,14 @@ def test_the_colours_of_review_assistance_read_in_both_themes_and_never_alone(th
 def test_the_colours_of_the_review_conversation_read_in_both_themes_and_never_alone(
     theme: str,
 ) -> None:
-    # M51: the `~` line of a changed item (its sign and the words of each part carry the meaning),
-    # what was said under a line (an earlier comment on the card's own surface, a comment not sent
-    # yet and the box to write one on the second surface), the notice of comments that were not
-    # kept, a plan changed outside a revision, and the state of a plan on its page. Each says its
-    # words as text beside any colour; these pairs only make them readable.
+    # M51 (and the grey + green-accent modified-item row): a modified item header sits on muted
+    # grey (`--diff-context-bg`) with bright text (`--text`), a muted grey gutter accented with a
+    # thin green edge and green dot (`--diff-add-text`), and a quiet changed-fields badge, while
+    # its changed parts are red `-` and green `+` underneath; what was said under a line (an
+    # earlier comment on the card's own surface, a comment not sent yet and the box to write one on
+    # the second surface), the notice of comments that were not kept, a plan changed outside a
+    # revision, and the state of a plan on its page. Each says its words as text beside any colour;
+    # these pairs only make them readable.
     def ratio(fore: str, back: str) -> float:
         return contrast(token(theme, fore), token(theme, back))
 
@@ -235,35 +234,34 @@ def test_the_colours_of_the_review_conversation_read_in_both_themes_and_never_al
         ("--text-2", "--surface"),
         ("--text", "--surface-2"),
         ("--text-2", "--surface-2"),
+        ("--text", "--diff-context-bg"),
+        ("--text-2", "--diff-context-bg"),
         ("--text-2", "--diff-context-gutter"),
+        ("--diff-add-text", "--diff-context-gutter"),
         ("--accent-text", "--surface"),
         ("--text", "--neutral-soft"),
+        ("--text-2", "--neutral-soft"),
         ("--text", "--warn-soft"),
         ("--text", "--danger-soft"),
         ("--warn", "--warn-soft"),
         ("--ok", "--ok-soft"),
         ("--danger", "--danger-soft"),
-        ("--diff-change-text", "--surface"),
-        ("--diff-change-text", "--surface-2"),
-        ("--text", "--diff-change-bg"),
-        ("--text-2", "--diff-change-bg"),
-        ("--text", "--diff-change-gutter"),
     ):
         if ratio(fore, on) < 4.5:
             low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
     assert low == []
-    # The edge of a thread or a comment, the sign of a notice and the gutter's sign are not text:
-    # three to one against what they sit on.
+    # The edge of a thread or a comment, the sign of a notice and the modified accent/dot in the
+    # gutter are not text: three to one against what they sit on.
     for edge, back in (
         ("--border-strong", "--surface"),
         ("--border-strong", "--surface-2"),
         ("--danger", "--danger-soft"),
         ("--warn", "--warn-soft"),
-        ("--diff-change-text", "--diff-change-gutter"),
+        ("--diff-add-text", "--diff-context-gutter"),
     ):
         assert ratio(edge, back) >= 3, (edge, back)
-    # The changed line is its own colour in each theme, not that of an addition or a removal.
-    assert token(theme, "--diff-change-bg") not in {
+    # The modified item row is muted grey, distinct from a full addition or removal row.
+    assert token(theme, "--diff-context-bg") not in {
         token(theme, "--diff-add-bg"),
         token(theme, "--diff-remove-bg"),
     }
@@ -284,6 +282,8 @@ def test_the_colours_of_the_standard_review_read_in_both_themes_and_never_alone(
     for fore, on in (
         ("--on-accent", "--accent"),
         ("--on-accent", "--accent-hover"),
+        ("--on-approve", "--approve"),
+        ("--on-approve", "--approve-hover"),
         ("--text", "--surface"),
         ("--text-2", "--surface"),
         ("--text-2", "--surface-2"),
@@ -293,6 +293,8 @@ def test_the_colours_of_the_standard_review_read_in_both_themes_and_never_alone(
         ("--accent-text", "--surface"),
         ("--accent-text", "--accent-soft"),
         ("--warn", "--warn-soft"),
+        ("--text", "--warn-soft"),
+        ("--danger", "--warn-soft"),
         ("--danger", "--danger-soft"),
         ("--ok", "--ok-soft"),
         ("--danger", "--surface"),
@@ -301,14 +303,97 @@ def test_the_colours_of_the_standard_review_read_in_both_themes_and_never_alone(
         if ratio(fore, on) < 4.5:
             low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
     assert low == []
-    # The edge of a level chip, of the sticky bar and of the comment box is not text: three to one
-    # against what the bar sits on.
+    # The edge of a level chip, of the sticky bar, of Approve and of the comment box is not text:
+    # three to one against what the bar sits on.
     for edge, back in (
         ("--border-strong", "--surface"),
         ("--border-strong", "--surface-2"),
         ("--accent", "--surface"),
+        ("--approve", "--surface"),
+        ("--approve-hover", "--surface"),
     ):
         assert ratio(edge, back) >= 3, (edge, back)
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_the_dialog_a_diff_line_opens_read_in_both_themes_and_never_alone(
+    theme: str,
+) -> None:
+    # The dialog of a red, green or changed line: words on the added and removed colours, the sign
+    # in its gutter, the quiet "none" and the labels, and the wash a line gets under the pointer.
+    # The sign and its words carry the meaning; these pairs only make them readable.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for fore, on in (
+        ("--text", "--diff-add-bg"),
+        ("--text", "--diff-remove-bg"),
+        ("--text-2", "--diff-add-bg"),
+        ("--text-2", "--diff-remove-bg"),
+        ("--diff-add-text", "--diff-add-gutter"),
+        ("--diff-remove-text", "--diff-remove-gutter"),
+        ("--text-2", "--diff-context-gutter"),
+        ("--text-2", "--surface"),
+        ("--text", "--surface"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # A line under the pointer keeps its words readable: the quiet wash laid over each colour.
+    red, green, blue, alpha = colour_tokens(theme)["--diff-hover"]
+    for back in ("--diff-add-bg", "--diff-remove-bg", "--surface", "--diff-context-bg"):
+        under = token(theme, back)
+        washed = tuple(
+            round(wash * alpha + base * (1 - alpha))
+            for wash, base in zip((red, green, blue), under, strict=True)
+        )
+        for fore in ("--text", "--text-2"):
+            assert contrast(token(theme, fore), washed) >= 4.5, (fore, back)
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_the_colours_of_granular_review_read_in_both_themes_and_never_alone(theme: str) -> None:
+    # M53: the carried state at the end of a line (approved, asked, changed since: each an icon
+    # and a word on its own soft back), an approval that waits (the same on a dashed edge), the
+    # pressed check mark, the chip of who changed a line over each colour a line can have (and
+    # under the pointer's wash), and a line of a move that is left where it is. The words and
+    # icons carry the meaning; these pairs only make them readable.
+    def ratio(fore: str, back: str) -> float:
+        return contrast(token(theme, fore), token(theme, back))
+
+    low = []
+    for fore, on in (
+        ("--ok", "--ok-soft"),
+        ("--info", "--info-soft"),
+        ("--warn", "--warn-soft"),
+        ("--text-2", "--diff-add-bg"),
+        ("--text-2", "--diff-remove-bg"),
+        ("--text-2", "--surface"),
+        ("--text-2", "--diff-context-bg"),
+        ("--text", "--diff-add-bg"),
+        ("--text", "--diff-remove-bg"),
+        ("--text", "--surface"),
+    ):
+        if ratio(fore, on) < 4.5:
+            low.append(f"{fore} on {on}: {ratio(fore, on):.2f}")
+    assert low == []
+    # The dashed edge and the edge of the pressed check mark are not text: three to one against
+    # their own back, and the chips sit on lines of every colour.
+    for edge, back in (("--ok", "--ok-soft"), ("--info", "--info-soft"), ("--warn", "--warn-soft")):
+        assert ratio(edge, back) >= 3, (edge, back)
+    # A chip under the pointer's wash keeps its words readable on every colour of a line.
+    red, green, blue, alpha = colour_tokens(theme)["--diff-hover"]
+    for back in ("--diff-add-bg", "--diff-remove-bg", "--surface", "--diff-context-bg"):
+        under = token(theme, back)
+        washed = tuple(
+            round(wash * alpha + base * (1 - alpha))
+            for wash, base in zip((red, green, blue), under, strict=True)
+        )
+        assert contrast(token(theme, "--text-2"), washed) >= 4.5, back
+    # The three states are told apart by more than a colour (an icon and a word each, written on
+    # the page) and are three different colours in each theme.
+    assert len({token(theme, name) for name in ("--ok", "--info", "--warn")}) == 3
 
 
 STATUS_COLOURS = {

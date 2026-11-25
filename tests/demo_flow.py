@@ -1,22 +1,24 @@
-"""The later part of the sample project of ./demo.sh (M42 to M51), loaded by tests/demo_world.py
+"""The later part of the sample project of ./demo.sh (M42 to M53), loaded by tests/demo_world.py
 after the plan, the notes, the claims and the checks, through the same real tools and the board's
 own calls: work that arrived loose from calls and notes and waits in an Inbox epic, a steward whose
 proposals say where it belongs (the real `suggest_parent` on the real embedding service, and the
-real scripts/steward.py), a person who accepted one proposal and one who rejected another, gates
+real scripts/steward.py), a person who accepted one proposal and one who rejected another, a third
+proposal about two tasks that a person accepted in part (one moved, one left out), gates
 on work (a timer and approvals, one of them refused), a plan that waits for approval, and two plan
 templates with a plan that was made from one and approved. Two drafted plans have a conversation
-(M51): the owner asked for changes to the winter plan, with comments on two lines, and its agent
-sent revision 2, which a person reads next; the owner asked for changes to a small spring plan and
-its agent has not revised it yet. The description is in tests/demo_data.py. Nothing here knows
-which epic a loose story belongs to: it uses what the server says, and it stops with a plain
-message if the model is sure of too few."""
+(M51, M53): the owner asked for changes to the winter plan, with comments on three lines (one asks
+for a task to be dropped) and four items approved as they are, and its agent sent revision 2, which
+removes that task and changes the two other lines, and which a person reads next; the owner asked
+for changes to a small spring plan and its agent has not revised it yet. The description is in
+tests/demo_data.py. Nothing here knows which epic a loose story belongs to: it uses what the
+server says, and it stops with a plain message if the model is sure of too few."""
 
 import asyncio
 import datetime
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -48,10 +50,10 @@ def kinds_of(items: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[s
 
 def later_counts() -> dict[str, int]:
     """How much the later part adds to each count that server_status gives: the Inbox and its
-    loose stories, the drafted winter plan (revision 2 holds the same items as revision 1), the
-    drafted spring plan that waits for its agent, and the plan made from the station launch
-    template (the winter and spring plans hang under an epic that exists and the launch template's
-    epic is named by a value, so none of them adds an epic of its own)."""
+    loose stories, the drafted winter plan (the task that revision 2 takes out is dropped, and a
+    dropped task still counts), the drafted spring plan that waits for its agent, and the plan made
+    from the station launch template (the winter and spring plans hang under an epic that exists
+    and the launch template's epic is named by a value, so none of them adds an epic of its own)."""
     winter = kinds_of(data.WINTER_ITEMS)
     spring = kinds_of(data.SPRING_ITEMS)
     launch_template = data.TEMPLATES[data.STATION_LAUNCH]
@@ -100,11 +102,13 @@ def winter_revision(
 ) -> list[dict[str, Any]]:
     """The items of `revise_plan` for revision 2 of the winter plan: the whole plan again, each
     item continuing the one it was (`refs` gives the reference the server gave each key), the
-    two parts that were asked for in new words and every other part as it was drafted. Links and
-    criteria are left out of the call, which keeps them."""
+    two parts that were asked for in new words and every other part as it was drafted, and the
+    items that revision 2 takes out left out. Links and criteria are left out of the call, which
+    keeps them."""
     return [
         {**item, **data.WINTER_REVISED.get(str(item["key"]), {}), "ref": refs[str(item["key"])]}
         for item in winter_plan(today, ref)["items"]
+        if item["key"] not in data.WINTER_REMOVED
     ]
 
 
@@ -120,11 +124,26 @@ def spring_plan(ref: Callable[[str], str]) -> dict[str, Any]:
     }
 
 
+def in_order(refs: Iterable[str]) -> list[str]:
+    """References in the order the server lists them: epics, stories, then tasks, each by number."""
+    return sorted(
+        refs,
+        key=lambda ref: (
+            ("epic", "story", "task").index(ref.split(":")[0]),
+            int(ref.split(":")[1]),
+        ),
+    )
+
+
 def comments_on(
-    refs: dict[str, str], feedback: tuple[tuple[str, str, str], ...]
+    refs: dict[str, str], feedback: tuple[tuple[str, str | None, str], ...]
 ) -> list[dict[str, str]]:
-    """What a person says on the lines of a plan, as `request_plan_changes` takes it."""
-    return [{"item": refs[key], "field": part, "text": text} for key, part, text in feedback]
+    """What a person says on the lines of a plan, as `request_plan_changes` takes it: a part of
+    the item, or the whole item when no part is named."""
+    return [
+        {"item": refs[key], **({} if part is None else {"field": part}), "text": text}
+        for key, part, text in feedback
+    ]
 
 
 class Flow:
@@ -136,7 +155,9 @@ class Flow:
         self.loose: dict[str, str] = {}
         self.grouped_proposal = 0
         self.checked_proposal = 0
+        self.partial_proposal = 0
         self.accepted: dict[str, Any] = {}
+        self.partial: dict[str, Any] = {}
         self.rejected: dict[str, Any] = {}
         self.waiting_ids: list[int] = []
         self.gate_ids: dict[str, dict[str, Any]] = {}
@@ -148,8 +169,9 @@ class Flow:
 
     def by_hand(self) -> set[int]:
         """The proposals the steward made itself and its script did not: the one that groups two
-        stories under a new epic and the one a person should look at twice."""
-        return {self.grouped_proposal, self.checked_proposal}
+        stories under a new epic, the one a person should look at twice and the one about two
+        tasks that a person accepts in part."""
+        return {self.grouped_proposal, self.checked_proposal, self.partial_proposal}
 
     async def call(self, tool: str, actor: str | None = None, **arguments: Any) -> dict[str, Any]:
         return await self.demo.call(tool, actor, **arguments)
@@ -213,6 +235,15 @@ class Flow:
             reason=data.CHECKED_REASON,
         )
         self.checked_proposal = by_hand["id"]
+        # About two tasks that are not in the Inbox: a person will accept it in part.
+        in_part = await self.call(
+            "propose_placement",
+            data.STEWARD,
+            items=[self.demo.ref(key) for key in data.PARTIAL_ITEMS],
+            parent=self.demo.ref(data.PARTIAL_PARENT),
+            reason=data.PARTIAL_REASON,
+        )
+        self.partial_proposal = in_part["id"]
         key = self.demo.keys[data.STEWARD]
         for extra, what in (("--dry-run", "would"), ("", "did")):
             arguments = [sys.executable, str(ROOT / "scripts" / "steward.py"), self.demo.url]
@@ -244,7 +275,9 @@ class Flow:
 
     async def people_decide(self) -> None:
         """The planner accepts the first proposal the steward's script made (the story moves, and
-        the history says she moved it), and the owner rejects the second, with a reason."""
+        the history says she moved it), and the owner rejects the second, with a reason. The planner
+        also accepts the proposal about two tasks IN PART (M53): the first moves, the second stays
+        where it is and the record says she left it out."""
         waiting = await self.call("list_placements", data.STEWARD, status="proposed", limit=50)
         made = sorted(
             (p for p in waiting["items"] if p["id"] not in self.by_hand()), key=lambda p: p["id"]
@@ -263,8 +296,25 @@ class Flow:
             raise_stopped(f"The accepted proposal did not move what it proposed: {done}")
         if no["state"] != "rejected" or no["decision_reason"] != data.SUGGESTION_REJECTED:
             raise_stopped(f"The rejected proposal was not recorded as a rejection: {no}")
-        self.accepted, self.rejected = done, no
-        self.waiting_ids = [p["id"] for p in made[2:]] + sorted(self.by_hand())
+        moves = [self.demo.ref(key) for key in data.PARTIAL_ITEMS if key != data.PARTIAL_LEFT_IN]
+        stays = self.demo.ref(data.PARTIAL_LEFT_IN)
+        in_part = await self.demo.as_person(
+            "decide_placement",
+            {"placement": self.partial_proposal, "accepted": True, "items": moves},
+            data.PLANNER,
+        )
+        if (
+            in_part["state"] != "accepted"
+            or in_part["applied"] != moves
+            or in_part["skipped"] != [{"ref": stays, "why": f"{data.PLANNER} left it out"}]
+        ):
+            raise_stopped(
+                f"The proposal accepted in part did not move only what was named: {in_part}"
+            )
+        self.accepted, self.rejected, self.partial = done, no, in_part
+        self.waiting_ids = [p["id"] for p in made[2:]] + sorted(
+            self.by_hand() - {self.partial_proposal}
+        )
 
     # -- gates ---------------------------------------------------------------------------------
 
@@ -332,23 +382,27 @@ class Flow:
         self.spring_refs = {made["key"]: made["ref"] for made in spring["created"]}
 
     async def a_conversation_about_plans(self) -> None:
-        """The owner reads the drafted winter plan and asks for changes, with a summary and a
-        comment on the title of a story and on the details of a task. The planning agent reads
-        what was said and sends revision 2 of the same plan, which changes exactly those two
-        parts, and says so. The owner also asks for changes to the spring plan, whose agent has
-        not revised it yet: it is the agent's turn, so it is not a row on Needs a person."""
-        for plan, refs, summary, feedback in (
+        """The owner reads the drafted winter plan and asks for changes, with a summary, comments
+        on the title of a story, on the details of a task and on a task she wants dropped, and
+        four items approved as they are. The planning agent reads what was said and sends revision
+        2 of the same plan, which changes the two parts, takes out the task and leaves the
+        approved items alone, and says so. The owner also asks for changes to the spring plan,
+        whose agent has not revised it yet: it is the agent's turn, so it is not a row on Needs a
+        person."""
+        for plan, refs, summary, feedback, approved in (
             (
                 self.winter,
                 self.winter_refs,
                 data.WINTER_FEEDBACK_SUMMARY,
                 data.WINTER_FEEDBACK,
+                data.WINTER_APPROVED,
             ),
             (
                 self.spring,
                 self.spring_refs,
                 data.SPRING_FEEDBACK_SUMMARY,
                 data.SPRING_FEEDBACK,
+                (),
             ),
         ):
             asked = await self.demo.as_person(
@@ -358,6 +412,7 @@ class Flow:
                     "revision": 1,
                     "summary": summary,
                     "comments": comments_on(refs, feedback),
+                    "approved": [refs[key] for key in approved],
                 },
                 data.OWNER,
             )
@@ -374,7 +429,8 @@ class Flow:
             items=winter_revision(self.demo.today, self.demo.ref, self.winter_refs),
             note=data.WINTER_REVISION_NOTE,
         )
-        if revised["plan"] != self.winter or revised["revision"] != 2 or revised["removed"]:
+        gone = [self.winter_refs[key] for key in data.WINTER_REMOVED]
+        if revised["plan"] != self.winter or revised["revision"] != 2 or revised["removed"] != gone:
             raise_stopped(f"The winter plan was not revised as described: {revised}.")
 
     async def check_the_winter_plan(self) -> None:
@@ -389,8 +445,8 @@ class Flow:
             self.demo.ref(target) for _, target, kind in data.WINTER_LINKS if kind == "relates_to"
         }
         unsized = [item["title"] for item in tree if item["size"] is None]
-        if len(tree) != len(data.WINTER_ITEMS) or whole["epics"] != 0:
-            raise_stopped(f"The winter plan reads {len(tree)} items, not {len(data.WINTER_ITEMS)}.")
+        if len(tree) != len(data.WINTER_NOW) or whole["epics"] != 0:
+            raise_stopped(f"The winter plan reads {len(tree)} items, not {len(data.WINTER_NOW)}.")
         if context != [(under, "parent"), *((ref, "linked") for ref in sorted(reaches))]:
             raise_stopped(f"The winter plan does not hang under {under} as described: {context}.")
         if len(unsized) != 1 or not all(item["body"] for item in tree if item["kind"] == "story"):
@@ -428,28 +484,47 @@ class Flow:
         words = [(c["item"], c["field"], c["text"]) for c in given["comments"]]
         asked = [(refs[k], part, text) for k, part, text in data.WINTER_FEEDBACK]
         quoted = [c["quoted"] for c in given["comments"]]
-        was = [drafted["studded"]["title"], drafted["fit-tyres"]["body"]]
+        was = [
+            drafted["studded"]["title"],
+            drafted["fit-tyres"]["body"],
+            drafted["chains"]["title"],
+        ]
         if (given["by"], given["by_kind"], given["revision"]) != (data.OWNER, "person", 1):
             raise_stopped(f"The winter plan's feedback is not the owner's on revision 1: {given}.")
         if given["summary"] != data.WINTER_FEEDBACK_SUMMARY or words != asked or quoted != was:
             raise_stopped(f"The winter plan's feedback is not as described: {given}.")
+        if given["approved"] != in_order(refs[key] for key in data.WINTER_APPROVED):
+            raise_stopped(f"The winter plan's feedback does not carry what was approved: {given}.")
         if winter["revisions"][0]["feedback"] != given["id"]:
             raise_stopped("Revision 1 of the winter plan does not point at its feedback.")
         changes = [(c["ref"], c["change"], c["fields"]) for c in winter["changes"]]
-        wanted = [(refs["studded"], "changed", ["title"]), (refs["fit-tyres"], "changed", ["body"])]
+        wanted = [
+            (refs["studded"], "changed", ["title"]),
+            (refs["fit-tyres"], "changed", ["body"]),
+            (refs["chains"], "removed", []),
+        ]
         if sorted(changes) != sorted(wanted):
-            raise_stopped(f"Revision 2 should change the two parts asked for, not: {changes}.")
+            raise_stopped(
+                f"Revision 2 should change two parts and take out a task, not: {changes}."
+            )
         before = {c["ref"]: c["before"] for c in winter["changes"]}
         if before != {
             refs["studded"]: {"title": was[0]},
             refs["fit-tyres"]: {"body": was[1]},
+            refs["chains"]: {},
         }:
             raise_stopped(f"Revision 2 does not say what the two parts were: {before}.")
         old = {item["ref"]: item for item in first["tree"]}
         if old[refs["studded"]]["title"] != was[0] or old[refs["fit-tyres"]]["body"] != was[1]:
             raise_stopped("Revision 1 of the winter plan no longer reads as it was drafted.")
+        if len(first["tree"]) != len(data.WINTER_ITEMS) or refs["chains"] not in old:
+            raise_stopped("Revision 1 of the winter plan should still hold the task taken out.")
+        removed = await self.call("get_node", node=refs["chains"])
+        if removed["status"] != "dropped" or removed["held_by"]:
+            raise_stopped(f"The task revision 2 took out should be dropped and free: {removed}.")
         if winter["drift"] != [] or winter["checks"] is None:
             raise_stopped(f"The winter plan was changed outside a revision: {winter['drift']}.")
+        blamed = self.check_the_blame(winter, first, given)
         (waiting,) = spring["feedback"]
         spring_words = [(c["item"], c["field"], c["text"]) for c in waiting["comments"]]
         spring_asked = [(self.spring_refs[k], p, t) for k, p, t in data.SPRING_FEEDBACK]
@@ -474,9 +549,64 @@ class Flow:
         if [p["id"] for p in waiting_for_agent["items"]] != [self.spring]:
             raise_stopped("Only the spring plan should be waiting for its agent.")
         return (
-            f"the winter plan is at revision 2 after {len(given['comments'])} comments, "
-            f"{len(changes)} items changed; the spring plan waits for its agent at revision 1 "
+            f"the winter plan is at revision 2 after {len(given['comments'])} comments and "
+            f"{len(given['approved'])} approved items, {len(changes)} items changed or taken out "
+            f"({blamed}); the spring plan waits for its agent at revision 1 "
             f"after {len(waiting['comments'])} comments"
+        )
+
+    def check_the_blame(
+        self, winter: dict[str, Any], first: dict[str, Any], given: dict[str, Any]
+    ) -> str:
+        """What the plan says about who changed each line and what the owner said of it (M53,
+        `blame` of list_plans with the plan's number). At revision 2: the items the owner approved
+        and revision 2 did not touch read approved by her, on revision 1; the two she commented on
+        that revision 2 changed read changed; the one the revision took out reads removed by
+        revision 2 with the agent's note and no word of hers; the one nobody said anything about
+        reads none. At revision 1 the same lines read as they were: added by the agent, the
+        approved ones approved and the three she commented on asked."""
+        refs = self.winter_refs
+        approved = {refs[key] for key in data.WINTER_APPROVED}
+        commented = {item["item"] for item in given["comments"]}
+        changed = {refs[key] for key in data.WINTER_REVISED}
+        gone = {refs[key] for key in data.WINTER_REMOVED}
+        now = {line["ref"]: line for line in winter["blame"]}
+        was = {line["ref"]: line for line in first["blame"]}
+        everything = {refs[str(item["key"])] for item in data.WINTER_ITEMS}
+        if set(now) != everything or set(was) != everything:
+            raise_stopped(f"The blame does not name each line of both revisions: {sorted(now)}.")
+        for ref, line in now.items():
+            if ref in gone:
+                how, revision, note = "removed", 2, data.WINTER_REVISION_NOTE
+            elif ref in changed:
+                how, revision, note = "changed", 2, data.WINTER_REVISION_NOTE
+            else:
+                how, revision, note = "added", 1, None
+            review = line["review"]
+            said_of: tuple[Any, ...]
+            if ref in approved:
+                said_of = ("approved", 1, data.OWNER, given["id"])
+            elif ref in changed:
+                said_of = ("changed", 1, data.OWNER, given["id"])
+            else:
+                said_of = ("none", None, None, None)
+            if (line["change"], line["revision"], line["by"], line["by_kind"]) != (
+                how,
+                revision,
+                data.RECORDER,
+                "agent",
+            ) or (review["state"], review["revision"], review["by"], review["feedback"]) != said_of:
+                raise_stopped(f"The blame of {ref} at revision 2 is not as described: {line}.")
+            if revision == 2 and line["note"] != note:
+                raise_stopped(f"The blame of {ref} does not carry the note of its revision.")
+        for ref, line in was.items():
+            review = line["review"]
+            word = "approved" if ref in approved else "asked" if ref in commented else "none"
+            if (line["change"], line["revision"]) != ("added", 1) or review["state"] != word:
+                raise_stopped(f"The blame of {ref} at revision 1 is not as described: {line}.")
+        return (
+            f"{len(approved)} approved and unchanged, {len(changed)} changed since she looked, "
+            f"{len(gone)} removed"
         )
 
     async def read_the_winter_checks(self) -> str:
@@ -655,9 +785,10 @@ class Flow:
             raise_stopped(
                 f"The Inbox holds {in_inbox['total']} stories, not the {left} that are left."
             )
-        if states.count("accepted") != 1 or states.count("rejected") != 1 or waiting_moves < 1:
+        if states.count("accepted") != 2 or states.count("rejected") != 1 or waiting_moves < 1:
             raise_stopped(
-                f"The proposals are not one accepted, one rejected and some waiting: {states}."
+                "The proposals are not two accepted (one in part), one rejected and some waiting: "
+                f"{states}."
             )
         moves = [
             e
@@ -666,6 +797,17 @@ class Flow:
         ]
         if not moves or (moves[-1]["actor"], moves[-1]["actor_kind"]) != (data.PLANNER, "person"):
             raise_stopped("The accepted move is not recorded as the planner's own.")
+        (moved,) = self.partial["applied"]
+        (stayed,) = [one["ref"] for one in self.partial["skipped"]]
+        under = self.demo.ref(data.PARTIAL_PARENT)
+        parents = [(await self.call("get_node", node=ref))["parent"] for ref in (moved, stayed)]
+        left_alone = [
+            e
+            for e in (await self.call("node_history", node=stayed))["items"]
+            if e["action"] == "move"
+        ]
+        if parents[0] != under or parents[1] == under or left_alone:
+            raise_stopped(f"The proposal accepted in part moved the wrong items: {parents}.")
 
         held: dict[str, list[str]] = {}
         for gate in data.GATES:
@@ -679,7 +821,7 @@ class Flow:
                 raise_stopped(f"The work behind the gate on {gate.key} is held or free wrongly.")
         held_now = sum(1 for by in held.values() if by)
         held_all = (await self.call("list_nodes", query="is:held", limit=200))["total"]
-        drafted = len(data.WINTER_ITEMS) + len(data.SPRING_ITEMS)
+        drafted = len(data.WINTER_NOW) + len(data.SPRING_ITEMS)
         if held_all != held_now + drafted:
             raise_stopped(
                 f"{held_all} items are held, not the {held_now} gated and {drafted} drafted."
@@ -748,6 +890,7 @@ class Flow:
         )
         said(
             f"    {len(data.LOOSE)} loose stories filed, 1 proposal accepted and 1 rejected, "
+            f"1 more accepted in part (1 moved, 1 left out), "
             f"{waiting_moves} waiting; {len(data.GATES)} gates, 3 plans, "
             f"{len(data.TEMPLATES)} plan templates; {sum(rows.values())} things need a person "
             f"({', '.join(f'{count} {kind}' for kind, count in sorted(rows.items()))})"

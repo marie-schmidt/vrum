@@ -14,22 +14,29 @@ import { viewLink } from './ctx.js';
 // A change's short title in the rail: the same title the card has.
 const shortTitle = (change) => change.title;
 
-// The word of a level ("Task") before a code that says nothing of it ("Q-13"); a code that already names what it is ("Plan 68",
-// "Proposal 64", "Gate 5") needs no word before it.
-const levelWord = (change) => (/^[A-Za-z]+ \d/.test(change.code) ? null : (LEVEL_WORDS[change.level] ?? change.level));
+// The word of a level ("Task") ONLY when the list is not already grouped by level and the code does not say it already ("Q-13", "S-26" in
+// Topic/Decision groups; never "TASK T-35" or "NOTE S-26" inside a Tasks or Notes group).
+const levelWord = (change, by) => {
+  if (by === 'level') return null;
+  if (/^(?:Plan|Proposal|Gate) \d/.test(change.code)) return null;
+  if ((change.level === 'story' && change.code.startsWith('S-')) || (change.level === 'task' && change.code.startsWith('T-')) || (change.level === 'epic' && change.code.startsWith('E-'))) return null;
+  return LEVEL_WORDS[change.level] ?? change.level;
+};
 
-// One change of the rail: its level, its code, a short title, a sign when it has something to weigh and a tick once viewed.
-function entry(change, isViewed, go) {
+// One change of the rail: its kind icon (so questions, checks, stalled claims and gates look distinct at a glance), its human title, a quiet
+// code and optional level word, a sign when it has something to weigh and a tick once viewed.
+function entry(change, by, isViewed, go) {
   const done = isViewed(change);
   const weighed = Boolean(change.warn && change.warn.total);
+  const level = levelWord(change, by);
   const link = h(
     'a',
-    { class: 'rail-change', href: '#/needs', dataset: { change: change.id, key: change.key, level: change.level, viewed: String(done), warning: weighed ? 'true' : null, focusKey: `rail:${change.key}` } },
-    levelWord(change) ? h('span', { class: 'rail-level' }, levelWord(change)) : null,
-    h('span', { class: 'rail-code item-code' }, change.code),
+    { class: 'rail-change', href: '#/needs', dataset: { change: change.id, key: change.key, kind: change.look, level: change.level, viewed: String(done), warning: weighed ? 'true' : null, focusKey: `rail:${change.key}` } },
+    h('span', { class: 'rail-kind-icon', 'aria-hidden': 'true' }, icon(change.icon, { size: 13 })),
     h('span', { class: 'rail-title-text', dataset: { words: 'theirs' } }, shortTitle(change)),
     weighed ? h('span', { class: 'rail-warning' }, icon('alert', { size: 14 }), h('span', { class: 'sr-only' }, 'has something to weigh')) : null,
     done ? h('span', { class: 'rail-viewed' }, icon('check', { size: 14 }), h('span', { class: 'sr-only' }, 'viewed')) : null,
+    h('span', { class: 'rail-meta' }, level ? h('span', { class: 'rail-level' }, level) : null, h('span', { class: 'rail-code item-code' }, change.code)),
   );
   link.addEventListener('click', (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button) return;
@@ -44,7 +51,14 @@ function waitingEntry(plan) {
   return h(
     'li',
     {},
-    viewLink('review', { change: `plan:${plan.id}` }, { class: 'rail-change', dataset: { plan: plan.id } }, h('span', { class: 'rail-code item-code' }, `Plan ${plan.id}`), h('span', { class: 'rail-title-text', dataset: { words: 'theirs' } }, plan.title)),
+    viewLink(
+      'review',
+      { change: `plan:${plan.id}` },
+      { class: 'rail-change', dataset: { plan: plan.id } },
+      h('span', { class: 'rail-kind-icon', 'aria-hidden': 'true' }, icon('plan', { size: 13 })),
+      h('span', { class: 'rail-title-text', dataset: { words: 'theirs' } }, plan.title),
+      h('span', { class: 'rail-meta' }, h('span', { class: 'rail-code item-code' }, `Plan ${plan.id}`)),
+    ),
   );
 }
 
@@ -60,7 +74,7 @@ export function fillRail(nav, select, sections, { isViewed, go, openOf, toggled 
     nav,
     h('h2', { class: 'rail-title' }, icon('diff', { size: 16 }), 'Changes', h('span', { class: 'heading-count' }, String(total))),
     sections.map((section) => {
-      const list = h('ul', { class: 'plain rail-list' }, section.plans ? section.plans.map(waitingEntry) : section.changes.map((change) => entry(change, isViewed, go)));
+      const list = h('ul', { class: 'plain rail-list' }, section.plans ? section.plans.map(waitingEntry) : section.changes.map((change) => entry(change, section.by, isViewed, go)));
       if (section.shut) {
         const box = h(
           'details',
@@ -81,7 +95,7 @@ export function fillRail(nav, select, sections, { isViewed, go, openOf, toggled 
         h(
           'optgroup',
           { label: `${section.title} (${section.count})` },
-          section.changes.map((change) => h('option', { value: change.key }, `${[levelWord(change), change.code, shortTitle(change)].filter(Boolean).join(' ')}${change.warn && change.warn.total ? ' (has something to weigh)' : ''}${isViewed(change) ? ' (viewed)' : ''}`)),
+          section.changes.map((change) => h('option', { value: change.key }, `${[shortTitle(change), `(${change.code})`].filter(Boolean).join(' ')}${change.warn && change.warn.total ? ' (has something to weigh)' : ''}${isViewed(change) ? ' (viewed)' : ''}`)),
         ),
       ),
   );

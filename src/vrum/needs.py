@@ -215,12 +215,17 @@ class Needs:
                 conn,
                 f"SELECT {_NODE}, "
                 f"{_LAPSES} AS lapses, "
-                "greatest(max(e.at), s.lapsed_claim_at) AS since "
+                "greatest(max(e.at), s.lapsed_claim_at) AS since, "
+                "coalesce(s.lapsed_claim_by, "
+                "(array_agg(e.before->>'actor' ORDER BY e.id DESC))[1]) AS actor, "
+                "coalesce(s.lapsed_claim_by_kind, "
+                "(array_agg(e.before->>'actor_kind' ORDER BY e.id DESC))[1]) AS actor_kind "
                 f"FROM {_FROM_NODE} LEFT JOIN events e ON e.node = s.ref "
                 "AND e.action = 'claimed' AND e.before IS NOT NULL "
                 "WHERE s.kind IN ('story', 'task') AND s.status NOT IN ('done', 'dropped') "
                 "AND s.claimed_by IS NULL "
-                f"GROUP BY {_NODE_GROUP}, s.lapsed_claim_by, s.lapsed_claim_at "
+                f"GROUP BY {_NODE_GROUP}, s.lapsed_claim_by, s.lapsed_claim_by_kind, "
+                "s.lapsed_claim_at "
                 f"HAVING {_LAPSES} >= 2 AND NOT EXISTS (SELECT 1 FROM events h "
                 "WHERE h.node = s.ref AND h.action = 'handoff' "
                 "AND h.at > greatest(max(e.at), s.lapsed_claim_at))",
@@ -314,6 +319,8 @@ class Needs:
                         "something may be wrong with it."
                     ),
                     waiting_since=row["since"],
+                    waiting=row["actor"],
+                    waiting_kind=row["actor_kind"],
                     count=row["lapses"],
                 )
             )
