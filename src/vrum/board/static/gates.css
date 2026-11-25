@@ -13,7 +13,6 @@
 .gate-actions { margin-top: var(--space-1); }
 .gate-fields { display: grid; gap: var(--space-3); min-width: 0; }
 .gate-fields[hidden] { display: none; }
-dialog.modal .lift-words { margin: 0 0 var(--space-3); overflow-wrap: anywhere; }
 
 /* Work that is held: the one small clock of the strip, and the lines of its hover card, one for each hold. */
 .held-chip { cursor: default; }

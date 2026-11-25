@@ -98,8 +98,7 @@ export const kindLabel = (kind) => (KIND[kind] || { label: kind }).label;
 // A note has one status. Unconfirmed and Confirmed are the two ways it can be in force; Replaced (stored as
 // `superseded`) and Withdrawn are the two ways it can have ended, and an ended note never changes again.
 // `tone` is the colour class of its chip (base.css); the sign is the same thing as plain text.
-export const NOTE_STATUSES = ['unconfirmed', 'confirmed', 'superseded', 'withdrawn'];
-export const NOTE_STATUS = {
+const NOTE_STATUS = {
   unconfirmed: { label: 'Unconfirmed', sign: '◌', icon: 'unconfirmed', tone: 'warn', hint: 'No person has reviewed it yet' },
   confirmed: { label: 'Confirmed', sign: '✓', icon: 'confirmed', tone: 'ok', hint: 'A person reviewed it and stands behind it' },
   superseded: { label: 'Replaced', sign: '→', icon: 'arrow_right', tone: '', hint: 'A newer note replaced it' },
@@ -136,7 +135,6 @@ export const PRIORITY = {
 
 // How each link reads from one end and from the other. `discovered_from` says where work was found: it never makes anything
 // wait, so it has its own quiet look and no arrow.
-export const LINK_TYPES = ['needs_first', 'supersedes', 'duplicates', 'relates_to', 'discovered_from'];
 export const LINK = {
   needs_first: { label: 'needs first', back: 'is needed first by', line: 'solid thick with an arrow' },
   supersedes: { label: 'supersedes', back: 'is superseded by', line: 'long dashes with an arrow' },
@@ -170,7 +168,7 @@ export function byRef(a, b) {
   const y = parseNodeRef(b);
   return KIND_ORDER[x.kind] - KIND_ORDER[y.kind] || x.number - y.number;
 }
-export const NODE_KINDS = ['epic', 'story', 'task'];
+const NODE_KINDS = ['epic', 'story', 'task'];
 export const isNodeKind = (kind) => NODE_KINDS.includes(kind);
 // What a person reads for any of the five kinds: E-1, S-4 and T-20 for work, AC-3 for an acceptance criterion and N-7 for a note.
 export const itemCode = (kind, number) => (kind === 'rule' ? ruleCode(number) : kind === 'note' ? noteCode(number) : nodeCode(kind, number));
@@ -281,7 +279,7 @@ export const itemSizeChip = (node, { labelled = false } = {}) => sizeChip(node, 
 // Whether a card says it has no size: the very rule of the `no:size` filter, for work that is still open. A story or
 // task with none of its own, apart from a story that has tasks (it adds up theirs). Never an epic, and never work that
 // is done or dropped.
-export const needsSize = (node) => node.kind !== 'epic' && node.status !== 'done' && node.status !== 'dropped' && !Object.hasOwn(SIZE_POINTS, node.size) && !addsUp(node);
+const needsSize = (node) => node.kind !== 'epic' && node.status !== 'done' && node.status !== 'dropped' && !Object.hasOwn(SIZE_POINTS, node.size) && !addsUp(node);
 
 // The faint chip of work with no size yet, in the place of a size chip. It is not a button: the item's own page
 // has the control that gives it one.

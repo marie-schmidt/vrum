@@ -192,7 +192,6 @@ button.graph-node.is-unconfirmed { border-style: dashed; border-color: var(--war
 /* An ended note is quieter by its colours (text that is dimmed with opacity falls under the contrast the pages keep), and struck through. */
 button.graph-node.is-ended { color: var(--text-2); background: var(--surface-2); border-color: var(--border); box-shadow: none; }
 button.graph-node.is-ended .n-title { text-decoration: line-through; text-decoration-thickness: 1px; }
-button.n-note.is-decided .n-ico { color: var(--info); }
 button.n-rule .n-ico { color: var(--ok); }
 button.n-wide { background: var(--info-soft); border-color: var(--info); }
 button.n-wide:hover { background: var(--info-soft); }

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from vrum.common import Refusal, is_node_ref
+from vrum.common import Refusal, is_node_ref, parse_iso_day
 
 # What a question can be about. A test checks that each of these is handled.
 KINDS = ("epic", "story", "task")
@@ -222,11 +222,9 @@ def _references(term: Term) -> list[str]:
 
 
 def _day(term: Term, value: str) -> date:
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            pass
+    parsed = parse_iso_day(value)
+    if parsed is not None:
+        return parsed
     raise _refuse(
         f"in {term.text!r}, {value!r} is not a day. Write it as YYYY-MM-DD, such as 2026-11-30."
     )

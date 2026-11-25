@@ -16,6 +16,7 @@
 
 import { h } from './dom.js';
 import { icon } from './icons.js';
+import { placePopover, popoverHost, trackAnchor, typeAheadIndex, usableIndex } from './popover.js';
 
 const ENHANCED = 'select:not([data-native], [multiple], [size])';
 const EDGE = 8; // What is kept free between the menu and the edge of the window, in pixels.
@@ -95,26 +96,7 @@ function setActive(state, index, { scroll = true } = {}) {
 // Where the menu goes: under what opened it, as wide as that at least, and above it when there is
 // not enough room below. It never leaves the window; a long list scrolls inside itself.
 function place(state) {
-  const { anchor, list } = state;
-  const box = anchor.getBoundingClientRect();
-  const width = document.documentElement.clientWidth;
-  const height = window.innerHeight;
-  list.style.minWidth = `${Math.ceil(box.width)}px`;
-  list.style.maxHeight = '';
-  // Measured from the corner of the window, so the room it has to spread in does not depend on where it was last.
-  list.style.left = '0px';
-  list.style.top = '0px';
-  const natural = list.offsetHeight;
-  const below = height - box.bottom - GAP - EDGE;
-  const above = box.top - GAP - EDGE;
-  const under = natural <= below || below >= above;
-  const room = Math.max(0, under ? below : above);
-  if (natural > room) list.style.maxHeight = `${room}px`;
-  const shown = Math.min(natural, room);
-  list.style.top = `${Math.round(under ? box.bottom + GAP : box.top - GAP - shown)}px`;
-  list.style.left = `${Math.round(Math.min(Math.max(box.left, EDGE), Math.max(EDGE, width - list.offsetWidth - EDGE)))}px`;
-  list.dataset.placement = under ? 'below' : 'above';
-  state.box = [box.left, box.top, box.width, box.height].join();
+  state.box = placePopover(state.list, state.anchor, { gap: GAP, edge: EDGE, matchWidth: true, resetOrigin: true });
 }
 
 // -- opening and closing ------------------------------------------------------------------------------------------
@@ -133,7 +115,7 @@ function show(select, { touch = false } = {}) {
   listen(state);
   draw(state);
   // While a dialog is open the rest of the page cannot be reached, so the menu goes inside it.
-  (select.closest('dialog[open]') || document.body).append(list);
+  popoverHost(select).append(list);
   current = state;
   select.setAttribute('aria-expanded', 'true');
   select.setAttribute('aria-controls', list.id);
@@ -151,24 +133,22 @@ function show(select, { touch = false } = {}) {
   });
   state.watch.observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'hidden', 'label', 'selected'], characterData: true });
   // The menu goes with its <select>: it follows it when the page moves it, and closes when it is gone.
-  const follow = () => {
-    if (current !== state) return;
-    if (!select.isConnected || select.disabled || !select.getClientRects().length) {
-      close();
-      return;
-    }
-    const box = state.anchor.getBoundingClientRect();
-    if ([box.left, box.top, box.width, box.height].join() !== state.box) place(state);
-    state.frame = requestAnimationFrame(follow);
-  };
-  state.frame = requestAnimationFrame(follow);
+  state.track = trackAnchor(() => (select.disabled ? null : state.anchor), {
+    ignore: list,
+    onMove: () => {
+      if (current === state) place(state);
+    },
+    onGone: () => {
+      if (current === state) close();
+    },
+  });
 }
 
 function close({ refocus = false } = {}) {
   const state = current;
   if (!state) return;
   current = null;
-  cancelAnimationFrame(state.frame);
+  state.track?.stop();
   state.watch.disconnect();
   state.list.remove();
   const { select } = state;
@@ -195,11 +175,7 @@ function choose(index) {
 
 // -- moving through it ---------------------------------------------------------------------------------------
 
-// The first option that can be chosen from `from` on, going `step` ways, or -1.
-function usable(state, from, step) {
-  for (let at = from; at >= 0 && at < state.rows.length; at += step) if (!state.rows[at].disabled) return at;
-  return -1;
-}
+const usable = (state, from, step) => usableIndex(state.rows, from, step);
 
 function moveTo(state, index) {
   if (index >= 0) setActive(state, index);
@@ -208,21 +184,8 @@ function moveTo(state, index) {
 // Letters typed light the next option that starts with them; the same letter again goes on to the
 // next option that starts with it.
 function typeAhead(state, key) {
-  const now = Date.now();
-  state.typed = now - state.typedAt > TYPING_MS ? key : state.typed + key;
-  state.typedAt = now;
-  const typed = state.typed.toLowerCase();
-  const again = [...typed].every((letter) => letter === typed[0]);
-  const needle = again ? typed[0] : typed;
-  const from = again ? state.active + 1 : state.active;
-  const count = state.rows.length;
-  for (let step = 0; step < count; step += 1) {
-    const at = (from + step + count) % count;
-    if (!state.rows[at].disabled && textOf(state.rows[at].option).toLowerCase().startsWith(needle)) {
-      setActive(state, at);
-      return;
-    }
-  }
+  const at = typeAheadIndex(state, key, (row) => textOf(row.option), { typingMs: TYPING_MS });
+  if (at >= 0) setActive(state, at);
 }
 
 // -- what the person does ----------------------------------------------------------------------------------------

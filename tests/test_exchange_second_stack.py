@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from tests.documents import a_legacy_file, decision, fact, legacy_event, node, rule
 from tests.helpers import REPO_ROOT, export_everything, ok, on_board, refused, rich_world
 from tests.second_stack import SecondStack
 from tests.world import Project
@@ -84,73 +83,6 @@ async def a_world_with_references(client: Client, project: Project) -> dict[str,
         ),
     )
     return world
-
-
-def old_file() -> dict[str, Any]:
-    """What a server before notes wrote (format version 2): two decisions, one replacing the
-    other, and two facts, one about a decision, one given up, with the events that recorded some
-    of them."""
-    return a_legacy_file(
-        nodes=[node("epic", 1), node("story", 1, "epic:1")],
-        rules=[rule(1, "story:1", status="held")],
-        decisions=[
-            decision(
-                1,
-                title="Use codes",
-                text="Codes by SMS",
-                reason="Cheap",
-                status="superseded",
-                superseded_by_id=2,
-                nodes=["story:1"],
-            ),
-            decision(
-                2,
-                title="Use codes by email",
-                text="Codes by email",
-                reason="SMS costs money",
-                project_wide=True,
-                nodes=["story:1"],
-                rule_ids=[1],
-                confirmed_by="Priya",
-                confirmed_at="2026-11-16T12:30:00.000000Z",
-            ),
-        ],
-        facts=[
-            fact(1, text="People log in on phones", source="Analytics", decision_ids=[2]),
-            fact(
-                2,
-                text="The office has a dog",
-                source="Somebody said",
-                status="withdrawn",
-                status_reason="It is a cat",
-            ),
-        ],
-        events=[
-            legacy_event(1, node="epic:1", action="create"),
-            legacy_event(
-                2,
-                action="decision_recorded",
-                decision_id=2,
-                actor="Marie",
-                actor_kind="person",
-                after={
-                    "title": "Use codes by email",
-                    "text": "Codes by email",
-                    "reason": "SMS costs money",
-                    "decided_by": "Marie",
-                    "decided_on": "2026-11-15",
-                    "project_wide": True,
-                },
-            ),
-            legacy_event(
-                3,
-                action="fact_linked",
-                fact_id=1,
-                decision_id=2,
-                after={"fact_id": 1},
-            ),
-        ],
-    )
 
 
 # -- loading a file ------------------------------------------------------------------------------
@@ -297,49 +229,6 @@ async def test_a_graph_exported_and_loaded_into_an_empty_server_comes_back_exact
         again_message = await refused(client, "import_graph", document=original)
         assert "already holds data" in again_message
         assert "nothing was imported" in again_message.lower()
-
-
-async def test_an_export_made_before_notes_loads_into_an_empty_server_and_moves_on_as_notes(
-    stack: SecondStack, tmp_path: Path
-) -> None:
-    stack.up()
-    old = tmp_path / "vrum-old-export.json"
-    old.write_text(json.dumps(old_file()), encoding="utf-8")
-
-    loaded = stack.python("import_graph.py", stack.url, old)
-
-    assert loaded.returncode == 0, loaded.stdout + loaded.stderr
-    assert "Imported 10 items" in loaded.stdout  # 2 nodes, 1 rule, 4 notes and 3 events
-    async with stack.client() as client:
-        moved = await export_everything(client)
-        assert moved["version"] == 6 and "decisions" not in moved and "facts" not in moved
-        # The decisions come first, then the facts, each numbered from 1 with no gaps.
-        by_id = {note["id"]: note for note in moved["notes"]}
-        assert sorted(by_id) == [1, 2, 3, 4]
-        assert by_id[1]["text"] == "Use codes\n\nCodes by SMS" and by_id[1]["decided_by"] == "Marie"
-        assert (by_id[1]["status"], by_id[1]["superseded_by_id"]) == ("superseded", 2)
-        assert by_id[2]["supersedes_ids"] == [1] and by_id[2]["project_wide"] is True
-        assert (by_id[2]["confirmed_by"], by_id[2]["rule_ids"]) == ("Priya", [1])
-        assert (by_id[3]["decided_by"], by_id[3]["why"]) == (None, "Analytics")
-        assert by_id[3]["note_ids"] == [2]
-        assert (by_id[4]["status"], by_id[4]["status_reason"]) == ("withdrawn", "It is a cat")
-        recorded = [e for e in moved["events"] if e["action"] == "note_recorded"]
-        assert [(e["note_id"], e["actor"]) for e in recorded] == [(2, "Marie")]
-        assert (await ok(client, "recall", node="story:1"))["project_wide_notes"]["count"] == 1
-        new = await ok(client, "add_note", text="After the old file", why="Here")
-        assert new["id"] == 5
-
-    # What it became is a file of today, and goes on into another new server as it is.
-    current = tmp_path / "vrum-export.json"
-    result = stack.python("export_graph.py", stack.url, current)
-    assert result.returncode == 0, result.stdout + result.stderr
-    kept = json.loads(current.read_text(encoding="utf-8"))
-    stack.destroy()
-    stack.up()
-    again = stack.python("import_graph.py", stack.url, current)
-    assert again.returncode == 0, again.stdout + again.stderr
-    async with stack.client() as client:
-        assert await export_everything(client) == kept
 
 
 async def refuses_bad_files_and_loads_nothing(client: Client, good: dict[str, Any]) -> None:

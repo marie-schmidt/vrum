@@ -79,7 +79,7 @@ const refOf = (item) => item.ref ?? `${item.kind}:${item.id}`;
 // The items whose title is exactly this (any case).
 const itemsTitled = (words) => findItems(words).items.filter((item) => item.title.trim().toLowerCase() === words);
 
-export function parseItem(text) {
+function parseItem(text) {
   const words = String(text || '').trim().toLowerCase();
   const code = /^([est])-(\d+)(?:\s.*)?$/.exec(words);
   if (code) return { ref: nodeRef(LETTERS[code[1]], Number(code[2])) };

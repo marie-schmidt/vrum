@@ -17,7 +17,7 @@ const max = (list, floor) => (list.length ? Math.max(...list) : floor);
 
 export const RANK = { epic: 0, story: 1, task: 2 };
 export const LEVEL_MAX = { epics: 0, stories: 1, tasks: 2 };
-export const TASK_DOT = { low: 3.2, normal: 4, high: 4.8, urgent: 5.6 };
+const TASK_DOT = { low: 3.2, normal: 4, high: 4.8, urgent: 5.6 };
 export const LEAF_DOT = { low: 5, normal: 6.5, high: 8, urgent: 9.5 };
 
 // The hierarchy as plain data: [{ ref, priority, stories: [{ ref, priority, tasks: [{ ref, priority }] }] }].
@@ -70,7 +70,7 @@ const HUB_SIZE = {
 const tasksUnder = (node) => (node.stories ? sum(node.stories.map((story) => story.tasks.length)) : node.tasks.length);
 
 // The radius of every epic and story, by the square root of its tasks against the busiest of its kind.
-export function hubRadii(tree, level) {
+function hubRadii(tree, level) {
   const sizes = HUB_SIZE[level];
   const found = new Map();
   const give = (nodes, [least, most]) => {

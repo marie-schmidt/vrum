@@ -11,6 +11,7 @@
 // Only one card is open at once.
 
 import { h } from './dom.js';
+import { placePopover, popoverHost, trackAnchor } from './popover.js';
 
 const GAP = 6; // between the trigger and the card
 const EDGE = 8; // the card keeps this far from the edge of the window
@@ -76,22 +77,35 @@ function open(state) {
   if (!trigger.isConnected || !trigger.getClientRects().length) return;
   current = state;
   card.hidden = false;
-  (trigger.closest('dialog[open]') || document.body).append(card);
+  popoverHost(trigger).append(card);
   state.opened = performance.now();
   place(state);
   // A card that fills itself when it opens (who someone is, from the server) is placed again once it has its words.
-  state.onOpen?.({ card, update: () => current === state && place(state) });
+  state.onOpen?.({
+    card,
+    update: () => {
+      if (current === state) {
+        place(state);
+        state.track?.sync();
+      }
+    },
+  });
   document.addEventListener('keydown', onKey, true);
   document.addEventListener('pointerdown', onOutside, true);
   document.addEventListener('dragstart', onOutside, true);
-  state.frame = requestAnimationFrame(follow);
+  state.track = trackAnchor(() => trigger, {
+    ignore: card,
+    onMove: () => close(state),
+    onGone: () => close(state),
+  });
 }
 
 function close(state) {
   clearTimeout(state.timer);
   if (current !== state) return;
   current = null;
-  cancelAnimationFrame(state.frame);
+  state.track?.stop();
+  state.track = null;
   document.removeEventListener('keydown', onKey, true);
   document.removeEventListener('pointerdown', onOutside, true);
   document.removeEventListener('dragstart', onOutside, true);
@@ -109,40 +123,8 @@ function onOutside(event) {
   if (current && !current.trigger.contains(event.target) && !current.card.contains(event.target)) close(current);
 }
 
-const boxOf = (trigger) => {
-  const box = trigger.getBoundingClientRect();
-  return [box.left, box.top, box.width, box.height].join();
-};
-
-// The card goes with its trigger: when the page moves it (a scroll, a resize, a new layout) or draws
-// it again, the card closes, so it is never left hanging where its trigger was.
-function follow() {
-  if (!current) return;
-  const state = current;
-  const { trigger } = state;
-  if (!trigger.isConnected || !trigger.getClientRects().length || boxOf(trigger) !== state.box) {
-    close(state);
-    return;
-  }
-  state.frame = requestAnimationFrame(follow);
-}
-
 // Below the trigger when it fits there (or when there is more room below than above), otherwise above,
 // and never outside the window: a card taller than the room scrolls inside itself.
 function place(state) {
-  const { trigger, card } = state;
-  const box = trigger.getBoundingClientRect();
-  const { clientWidth: width, clientHeight: height } = document.documentElement;
-  card.style.maxHeight = '';
-  const natural = card.offsetHeight;
-  const below = height - box.bottom - GAP - EDGE;
-  const above = box.top - GAP - EDGE;
-  const under = natural <= below || below >= above;
-  const room = Math.max(0, under ? below : above);
-  if (natural > room) card.style.maxHeight = `${room}px`;
-  const shown = Math.min(natural, room);
-  card.style.top = `${Math.round(under ? box.bottom + GAP : box.top - GAP - shown)}px`;
-  card.style.left = `${Math.round(Math.min(Math.max(box.left, EDGE), Math.max(EDGE, width - card.offsetWidth - EDGE)))}px`;
-  card.dataset.placement = under ? 'below' : 'above';
-  state.box = boxOf(trigger);
+  state.box = placePopover(state.card, state.trigger, { gap: GAP, edge: EDGE });
 }

@@ -204,7 +204,7 @@ button.filter-toggle[aria-expanded="true"] { background: var(--surface-3); }
 .act-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); align-items: end; }
 .act-fields .field { margin: 0; }
 .act-fields :is(input, select) { width: 100%; }
-.act-fields .act-item, .act-fields .act-buttons { grid-column: 1 / -1; }
+.act-fields .act-buttons { grid-column: 1 / -1; }
 @container (min-width: 36rem) {
   .act-fields { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .act-fields > .field, .act-fields > .act-buttons { grid-column: span 2; }
@@ -247,7 +247,6 @@ button.filter-toggle[aria-expanded="true"] { background: var(--surface-3); }
 
 /* -- activity: who holds what, and what is free ----------------------------------------------------- */
 
-#acting-as { margin: 0; }
 .claims { display: grid; gap: 0; }
 /* li.claim: the rows of Activity. (The Board's card note and the item page's Claim fact also carry
    the word "claim" for their colour, and must not pick up a row's grid.) */

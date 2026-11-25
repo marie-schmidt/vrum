@@ -122,8 +122,6 @@ export const ICONS = {
   topic: [circle(7, 8, 3), circle(17, 8, 3), circle(12, 17, 3), line(9.6, 9.5, 10.4, 14.6), line(14.4, 9.5, 13.6, 14.6), line(10, 8, 14, 8)],
 };
 
-export const hasIcon = (name) => Object.hasOwn(ICONS, name);
-
 // An icon as an element. `size` is in pixels. Without a `label` it is hidden from screen readers.
 export function icon(name, { size = 16, label = null, className = '' } = {}) {
   const parts = ICONS[name] || ICONS.info;

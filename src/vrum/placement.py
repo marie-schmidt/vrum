@@ -23,6 +23,7 @@ finished since the proposal and says so, and makes the new epic only if somethin
 A proposer may have at most `MOST_OPEN` proposals waiting, so a steward cannot flood the person who
 has to read them."""
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -33,6 +34,7 @@ from vrum.common import (
     Refusal,
     fetch_all,
     fetch_one,
+    missing_node,
     page_size,
     parse_node_ref,
     record_event,
@@ -41,7 +43,7 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.gates import clean_reason
-from vrum.graph import clean_title, insert_node, move_in, require_node
+from vrum.graph import clean_title, insert_node, move_in, require_node, require_nodes
 from vrum.records import require_person
 from vrum.search import Searcher
 
@@ -304,8 +306,53 @@ _RANKED = (
     "1 - (q.v <=> CASE WHEN h.held IS NULL THEN c.own ELSE l2_normalize(c.own + h.held) END) "
     "AS score, coalesce(h.n, 0) AS holds "
     "FROM cand c CROSS JOIN q LEFT JOIN held h ON h.ref = c.ref), "
-    "ranked AS (SELECT s.*, row_number() OVER (ORDER BY s.score DESC, s.ref) AS rank "
+    "ranked AS (SELECT s.*, row_number() OVER (ORDER BY s.score DESC, s.ref) AS rank, "
+    "(count(*) OVER ())::integer AS ranked_total "
     "FROM scored s) "
+)
+
+# Batched version of _RANKED for review_many: computes candidate vectors and base descendant
+# centroids ONCE for all waiting items of one parent_kind, recomputing a parent's centroid only
+# for the at-most-one parent that actually holds any item in a job's `gone` exclusion list.
+_RANKED_BATCH = (
+    "WITH jobs AS MATERIALIZED ("
+    "SELECT j.job, j.q::vector AS v, j.gone, j.target "
+    "FROM jsonb_to_recordset(%(jobs)s::jsonb) AS j(job int, q text, gone text[], target text)), "
+    "cand AS MATERIALIZED ("
+    "SELECT c.ref, c.kind, c.title, l2_normalize(oi.embedding) AS own "
+    "FROM nodes c " + _CURRENT.format(i="oi", s="os", n="c") + " "
+    "WHERE " + _CANDIDATE + "), "
+    "descendants AS MATERIALIZED ("
+    "SELECT c.ref AS cand_ref, d.ref AS desc_ref, l2_normalize(di.embedding) AS emb "
+    "FROM cand c JOIN nodes d ON d.parent = c.ref OR d.parent IN "
+    "(SELECT g.ref FROM nodes g WHERE g.parent = c.ref) "
+    + _CURRENT.format(i="di", s="ds", n="d")
+    + "), "
+    "base_held AS MATERIALIZED ("
+    "SELECT cand_ref AS ref, l2_normalize(avg(emb)) AS held "
+    "FROM descendants GROUP BY cand_ref), "
+    "affected AS ("
+    "SELECT DISTINCT j.job, d.cand_ref "
+    "FROM jobs j JOIN descendants d ON d.desc_ref = ANY(j.gone)), "
+    "adj_held AS ("
+    "SELECT a.job, a.cand_ref AS ref, l2_normalize(avg(d.emb)) AS held "
+    "FROM affected a JOIN jobs j ON j.job = a.job "
+    "LEFT JOIN descendants d ON d.cand_ref = a.cand_ref AND NOT (d.desc_ref = ANY(j.gone)) "
+    "GROUP BY a.job, a.cand_ref), "
+    "scored AS ("
+    "SELECT j.job, j.target, c.ref, c.title, "
+    "1 - (j.v <=> CASE WHEN h.held IS NULL THEN c.own "
+    "ELSE l2_normalize(c.own + h.held) END) AS score "
+    "FROM jobs j CROSS JOIN cand c "
+    "LEFT JOIN adj_held ah ON ah.job = j.job AND ah.ref = c.ref "
+    "LEFT JOIN base_held bh ON ah.ref IS NULL AND bh.ref = c.ref "
+    "CROSS JOIN LATERAL ("
+    "SELECT CASE WHEN ah.ref IS NOT NULL THEN ah.held ELSE bh.held END AS held) h), "
+    "ranked AS ("
+    "SELECT s.*, row_number() OVER (PARTITION BY s.job ORDER BY s.score DESC, s.ref) AS rank "
+    "FROM scored s) "
+    "SELECT job, ref, title, score, rank FROM ranked "
+    "WHERE rank <= 2 OR ref = target ORDER BY job, rank"
 )
 
 _BECAUSE = (
@@ -385,24 +432,23 @@ class Placement:
             current_parent=current_parent,
         )
 
-    async def _ranking(
-        self, query: _Query, *, limit: int, include: str | None
+    async def _ranking_in(
+        self, conn: Any, query: _Query, *, limit: int, include: str | None
     ) -> list[dict[str, Any]]:
         """The best `limit` plus one parents, with the score of `include` too, best first."""
-        async with self._database.transaction() as conn:
-            return await fetch_all(
-                conn,
-                _RANKED
-                + "SELECT ref, title, own_score, held_score, score, holds, rank FROM ranked "
-                "WHERE rank <= %(limit)s + 1 OR ref = %(current)s::text ORDER BY rank",
-                {
-                    "q": query.vector,
-                    "parent_kind": query.parent_kind,
-                    "gone": query.gone,
-                    "limit": limit,
-                    "current": include,
-                },
-            )
+        return await fetch_all(
+            conn,
+            _RANKED + "SELECT ref, title, own_score, held_score, score, holds, rank, ranked_total "
+            "FROM ranked "
+            "WHERE rank <= %(limit)s + 1 OR ref = %(current)s::text ORDER BY rank",
+            {
+                "q": query.vector,
+                "parent_kind": query.parent_kind,
+                "gone": query.gone,
+                "limit": limit,
+                "current": include,
+            },
+        )
 
     async def suggest_parent(
         self,
@@ -432,15 +478,8 @@ class Placement:
         current_parent = query.current_parent
         gone = query.gone
         vector = query.vector
-        params = {
-            "q": vector,
-            "parent_kind": parent_kind,
-            "gone": gone,
-            "limit": limit,
-            "current": current_parent,
-        }
-        rows = await self._ranking(query, limit=limit, include=current_parent)
         async with self._database.transaction() as conn:
+            rows = await self._ranking_in(conn, query, limit=limit, include=current_parent)
             because = await fetch_all(
                 conn,
                 _BECAUSE,
@@ -458,14 +497,11 @@ class Placement:
             )
             counted = await fetch_one(
                 conn,
-                _RANKED
-                + "SELECT (SELECT count(*) FROM nodes c WHERE "
-                + _CANDIDATE
-                + ") AS total, "
-                "(SELECT count(*) FROM cand) AS ranked",
-                params,
+                "SELECT count(*) AS total FROM nodes c WHERE " + _CANDIDATE,
+                {"parent_kind": parent_kind},
             )
         assert counted is not None
+        ranked_total = int(rows[0]["ranked_total"]) if rows else 0
         reasons: dict[str, list[LookAlike]] = {}
         for one in because:
             reasons.setdefault(one["candidate"], []).append(
@@ -497,17 +533,12 @@ class Placement:
             sure=margin is not None and margin >= SURE_MARGIN,
             margin=margin,
             inbox=inbox["ref"] if inbox else None,
-            not_considered=int(counted["total"]) - int(counted["ranked"]),
+            not_considered=int(counted["total"]) - ranked_total,
         )
 
-    async def _item_warning(self, item: PlacementItem, parent: str) -> str | None:
+    @staticmethod
+    def _warning_for(item: PlacementItem, parent: str, row: dict[str, Any] | None) -> str | None:
         """Something to weigh before moving an item, said as accepting a proposal would meet it."""
-        async with self._database.transaction() as conn:
-            row = await fetch_one(
-                conn,
-                "SELECT status, parent, claimed_by FROM node_state WHERE ref = %s",
-                (item.ref,),
-            )
         name = code(item.ref)
         if row is None:
             return f"{name} cannot be found."
@@ -525,64 +556,180 @@ class Placement:
             return f"{name} is in progress: moving it changes where work under way is."
         return None
 
-    async def review(self, state: PlacementState, budget: int) -> tuple[PlacementState, int]:
-        """A proposal that waits for a person, with how each item scores for the parent it would
-        go under (the same ranking as suggest_parent), whether it is routine and why. Reads only.
-        `budget` is how many more items may be ranked; the rest is given back."""
-        if state.parent is None:
-            words = "A new epic has no parent that exists, so there is nothing to score against."
-            ok, why = routine_words(state, [], None)
-            return state.model_copy(
-                update={"scores": [], "scores_note": words, "routine": ok, "routine_why": why}
-            ), budget
+    async def review_many(self, states: list[PlacementState], budget: int) -> list[PlacementState]:
+        """Score waiting proposals together: one index_state check, one batch lookup of warnings
+        and stored vectors, and at most one ranking query per parent kind."""
+        if not states:
+            return []
+        new_epic_words = (
+            "A new epic has no parent that exists, so there is nothing to score against."
+        )
+        with_parent = [state for state in states if state.parent is not None]
+        if not with_parent:
+            return [
+                state.model_copy(
+                    update={
+                        "scores": [],
+                        "scores_note": new_epic_words,
+                        "routine": False,
+                        "routine_why": routine_words(state, [], None)[1],
+                    }
+                )
+                for state in states
+            ]
+
         meaning = await self._searcher.index_state()
-        scores: list[MoveScore] = []
-        note: str | None = None if meaning.meaning == "used" else meaning.note
-        if note is None and len(state.items) > budget:
-            note = "There are too many moved items waiting to score them all at once."
-        for item in state.items:
-            warning = await self._item_warning(item, state.parent)
-            gap = None
-            found: dict[str, Any] | None = None
-            if note is None:
-                try:
-                    query = await self._prepare(node=item.ref, kind=None, title=None, body=None)
-                    rows = await self._ranking(query, limit=1, include=state.parent)
-                    budget -= 1
+        base_note: str | None = None if meaning.meaning == "used" else meaning.note
+        all_refs = sorted({item.ref for state in with_parent for item in state.items})
+
+        async with self._database.transaction() as conn:
+            node_rows = {
+                row["ref"]: row
+                for row in await fetch_all(
+                    conn,
+                    "SELECT n.ref, n.kind, n.title, n.body, n.status, n.parent, "
+                    "CASE WHEN c.expires_at > clock_timestamp() THEN c.actor END AS claimed_by "
+                    "FROM nodes n LEFT JOIN claims c "
+                    "ON c.project_id = n.project_id AND c.node = n.ref "
+                    "WHERE n.ref = ANY(%s)",
+                    (all_refs,),
+                )
+            }
+            children_by_parent: dict[str, list[str]] = {}
+            stored_vectors: dict[str, str] = {}
+            if base_note is None:
+                for child in await fetch_all(
+                    conn, "SELECT parent, ref FROM nodes WHERE parent = ANY(%s)", (all_refs,)
+                ):
+                    children_by_parent.setdefault(child["parent"], []).append(child["ref"])
+                for vec in await fetch_all(
+                    conn,
+                    "SELECT s.ref, i.embedding::text AS vector FROM semantic_index i "
+                    "JOIN index_source s ON s.project_id = i.project_id "
+                    "AND s.item_type = i.item_type AND s.id = i.item_id "
+                    "AND s.content_hash = i.content_hash WHERE s.ref = ANY(%s)",
+                    (all_refs,),
+                ):
+                    stored_vectors[vec["ref"]] = str(vec["vector"])
+
+        proposal_notes: dict[int, str | None] = {}
+        item_gaps: dict[tuple[int, str], str] = {}
+        jobs_by_parent_kind: dict[str, list[dict[str, Any]]] = {}
+        job_index: dict[tuple[int, str], tuple[str, int]] = {}
+        for state in with_parent:
+            assert state.parent is not None
+            note = base_note
+            if note is None and len(state.items) > budget:
+                note = "There are too many moved items waiting to score them all at once."
+            proposal_notes[state.id] = note
+            if note is not None:
+                continue
+            for item in state.items:
+                row = node_rows.get(item.ref)
+                if row is None:
+                    item_gaps[(state.id, item.ref)] = str(missing_node(item.ref))
+                    continue
+                if row["kind"] == "epic":
+                    item_gaps[(state.id, item.ref)] = (
+                        f"{row['ref']} is an epic. An epic has no parent."
+                    )
+                    continue
+                vector = stored_vectors.get(item.ref)
+                if vector is None:
+                    text = f"{row['title']}\n{row['body']}".strip()
+                    vector = await self._searcher.vector_of(text)
+                    if vector is not None:
+                        stored_vectors[item.ref] = vector
+                if vector is None:
+                    item_gaps[(state.id, item.ref)] = (
+                        "The embedding service could not be reached, so nothing could be "
+                        "suggested. Try again in a moment."
+                    )
+                    continue
+                parent_kind = _PARENT_KIND[row["kind"]]
+                bucket = jobs_by_parent_kind.setdefault(parent_kind, [])
+                job_id = len(bucket)
+                gone = [row["ref"], *children_by_parent.get(row["ref"], ())]
+                bucket.append({"job": job_id, "q": vector, "gone": gone, "target": state.parent})
+                job_index[(state.id, item.ref)] = (parent_kind, job_id)
+                budget -= 1
+
+        ranked_by_job: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        if jobs_by_parent_kind:
+            async with self._database.transaction() as conn:
+                for parent_kind, jobs in jobs_by_parent_kind.items():
+                    rows = await fetch_all(
+                        conn,
+                        _RANKED_BATCH,
+                        {"jobs": json.dumps(jobs), "parent_kind": parent_kind},
+                    )
+                    for row in rows:
+                        ranked_by_job.setdefault((parent_kind, int(row["job"])), []).append(row)
+
+        reviewed: list[PlacementState] = []
+        for state in states:
+            if state.parent is None:
+                ok, why = routine_words(state, [], None)
+                reviewed.append(
+                    state.model_copy(
+                        update={
+                            "scores": [],
+                            "scores_note": new_epic_words,
+                            "routine": ok,
+                            "routine_why": why,
+                        }
+                    )
+                )
+                continue
+            note = proposal_notes[state.id]
+            scores: list[MoveScore] = []
+            for item in state.items:
+                warning = self._warning_for(item, state.parent, node_rows.get(item.ref))
+                gap = item_gaps.get((state.id, item.ref))
+                found: dict[str, Any] | None = None
+                best: dict[str, Any] | None = None
+                second: dict[str, Any] | None = None
+                if note is None and gap is None:
+                    rows = ranked_by_job.get(job_index[(state.id, item.ref)], [])
                     found = next((r for r in rows if r["ref"] == state.parent), None)
                     best = rows[0] if rows else None
                     second = rows[1] if len(rows) > 1 else None
-                except Refusal as refusal:
-                    gap = str(refusal)
-                    best = second = None
-                if found is None and gap is None:
-                    gap = (
-                        f"{code(state.parent)} cannot be ranked: it is not indexed yet, is "
-                        "dropped, or is the Inbox."
+                    if found is None:
+                        gap = (
+                            f"{code(state.parent)} cannot be ranked: it is not indexed yet, is "
+                            "dropped, or is the Inbox."
+                        )
+                margin = (
+                    None
+                    if best is None or second is None
+                    else float(best["score"] - second["score"])
+                )
+                scores.append(
+                    MoveScore(
+                        ref=item.ref,
+                        similarity=None if found is None else float(found["score"]),
+                        rank=None if found is None else int(found["rank"]),
+                        ranked=None,
+                        best=None if best is None else best["ref"],
+                        best_similarity=None if best is None else float(best["score"]),
+                        margin=margin,
+                        sure=margin is not None and margin >= SURE_MARGIN,
+                        warning=warning,
+                        note=gap,
                     )
-            else:
-                best = second = None
-            margin = (
-                None if best is None or second is None else float(best["score"] - second["score"])
-            )
-            scores.append(
-                MoveScore(
-                    ref=item.ref,
-                    similarity=None if found is None else float(found["score"]),
-                    rank=None if found is None else int(found["rank"]),
-                    ranked=None,
-                    best=None if best is None else best["ref"],
-                    best_similarity=None if best is None else float(best["score"]),
-                    margin=margin,
-                    sure=margin is not None and margin >= SURE_MARGIN,
-                    warning=warning,
-                    note=gap,
+                )
+            ok, why = routine_words(state, scores, note)
+            reviewed.append(
+                state.model_copy(
+                    update={
+                        "scores": scores,
+                        "scores_note": note,
+                        "routine": ok,
+                        "routine_why": why,
+                    }
                 )
             )
-        ok, why = routine_words(state, scores, note)
-        return state.model_copy(
-            update={"scores": scores, "scores_note": note, "routine": ok, "routine_why": why}
-        ), budget
+        return reviewed
 
 
 class PlacementBook:
@@ -625,10 +772,13 @@ class PlacementBook:
         assert counted is not None
         page, next_after_id = split_page(rows, limit)
         listed = [placement_from(row, titles) for row in page]
-        budget = MOST_SCORED
-        for index, one in enumerate(listed):
-            if one.state == "proposed":
-                listed[index], budget = await self._placement.review(one, budget)
+        proposed_indices = [index for index, one in enumerate(listed) if one.state == "proposed"]
+        if proposed_indices:
+            scored = await self._placement.review_many(
+                [listed[index] for index in proposed_indices], MOST_SCORED
+            )
+            for index, updated in zip(proposed_indices, scored, strict=True):
+                listed[index] = updated
         return PlacementPage(items=listed, total=int(counted["total"]), next_after_id=next_after_id)
 
     async def get(self, conn: Any, placement: int) -> dict[str, Any] | None:
@@ -671,7 +821,8 @@ class PlacementBook:
                     "Nothing was changed."
                 )
         async with self._database.transaction() as conn:
-            nodes = [await require_node(conn, ref) for ref in refs]
+            found_nodes = await require_nodes(conn, refs)
+            nodes = [found_nodes[ref] for ref in refs]
             kinds = {n["kind"] for n in nodes}
             if len(kinds) != 1 or kinds & {"epic"}:
                 raise Refusal(
@@ -764,7 +915,7 @@ class PlacementBook:
                 )
             refs = sorted(i["ref"] for i in found["items"])
             # Holding the items serialises two people deciding the same proposal.
-            locked = {ref: await require_node(conn, ref, lock=True) for ref in refs}
+            locked = await require_nodes(conn, refs, lock=True)
             again = await self.get(conn, placement)
             assert again is not None
             if again["state"] != "proposed":

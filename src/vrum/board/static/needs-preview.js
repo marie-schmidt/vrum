@@ -17,7 +17,7 @@ import { itemSpec, lookupOf, moveSpec, newEpicSpec, noteSpec, opening } from './
 import { store } from './store.js';
 
 // The most lines of a diff a preview shows before its fold.
-export const PREVIEW_LINES = 6;
+const PREVIEW_LINES = 6;
 
 const NO_FOLD = { open: () => false, onOpen: () => {} };
 const titleOf = (ref, fallback = '') => store.nodes.get(ref)?.title ?? fallback;

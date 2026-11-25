@@ -23,14 +23,9 @@ the item's key and words, who ticked it and when, and how it was checked. A tick
 is no longer in the text is exported too. The items themselves are not: the server works them out
 from the text again when it loads it.
 
-A file of an older version is still read: see exchange_legacy.py, which turns a version 1 or 2
-file (decisions and facts) into notes, a version 3 file (notes that were active, and rules that
-were held or settled) into the words of now, a version 4 file (a rule on a `story`, no
-definition of done) into one of version 5, and a version 5 file (no sizes, no checks) into one of
-version 6, before anything here looks at it.
-
-A claim or handoff event may say where the work was (repository, branch, commit, pull_request) and
-which run it was (run_label, client_name): the words of whereabouts.py, which the import checks.
+The current export format is version 6. A claim or handoff event may say where the work was
+(repository, branch, commit, pull_request) and which run it was (run_label, client_name): the words
+of whereabouts.py, which the import checks.
 
 Left out on purpose: claims (a claim is a lease that runs out, not part of the graph; the events
 that recorded it are exported) and everything that is worked out from the rest (what is ready, the
@@ -61,7 +56,6 @@ from vrum.common import (
 )
 from vrum.db import Database
 from vrum.definition_of_done import definition_items
-from vrum.exchange_legacy import convert
 from vrum.exchange_shapes import (
     ActorKind,
     Day,
@@ -789,9 +783,8 @@ def _where_problems(place: str, data: dict[str, Any]) -> list[str]:
     return []
 
 
-def _check_references(document: Document, origins: dict[int, str]) -> list[str]:
-    """Everything a file points at has to be in the file. Reported all at once, by place.
-    `origins` says which decision or fact a note was, for a file that was converted."""
+def _check_references(document: Document) -> list[str]:
+    """Everything a file points at has to be in the file. Reported all at once, by place."""
     problems: list[str] = []
     nodes: dict[str, NodeItem] = {}
     for index, node in enumerate(document.nodes):
@@ -867,8 +860,7 @@ def _check_references(document: Document, origins: dict[int, str]) -> list[str]:
         if note.superseded_by_id is not None:
             replaced_by.setdefault(note.superseded_by_id, []).append(note.id)
     for i, note in enumerate(document.notes):
-        came_from = f", from {origins[note.id]}" if note.id in origins else ""
-        place = f"notes[{i}] (id {note.id}{came_from})"
+        place = f"notes[{i}] (id {note.id})"
         for ref in note.nodes:
             need_node(place, "nodes", ref)
         for rule_id in note.rule_ids:
@@ -896,21 +888,13 @@ def _check_references(document: Document, origins: dict[int, str]) -> list[str]:
 
 def check_document(document: dict[str, Any]) -> Document:
     """Read a file that is to be imported, or refuse it in plain words, listing everything that is
-    wrong with it at once. Nothing is written. A file of version 1, 2, 3, 4 or 5 is turned into the
-    current version first (see exchange_legacy.py)."""
+    wrong with it at once. Nothing is written."""
     refuse_secrets(document)
-    origins: dict[int, str] = {}
-    version = document.get("version")
-    if type(version) is int and version in (1, 2, 3, 4, 5):
-        converted = convert(document)
-        if converted.problems:
-            raise refuse_file(converted.problems)
-        document, origins = converted.document, converted.origins
     try:
         parsed = Document.model_validate(document)
     except ValidationError as error:
         raise refuse_file(problems_in(error)) from None
-    problems = _check_references(parsed, origins)
+    problems = _check_references(parsed)
     if parsed.counts is not None:
         for section in SECTIONS:
             held = len(getattr(parsed, section))

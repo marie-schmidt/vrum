@@ -57,9 +57,6 @@ let dragging = false;
 let looking = 0; // the filter being read
 let watch = null;
 const collapsed = new Set(); // the refs of the epics whose lanes are folded away
-const handedOff = new Set(); // the refs of the work that has a handoff note
-let handoffsFrom = 0; // the news read for them so far
-let learning = false;
 
 const PRIORITY_ORDER = { urgent: 0, high: 1, normal: 2, low: 3 };
 const byPriority = (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || byRef(a.ref, b.ref);
@@ -111,7 +108,6 @@ export function mount(element, initial) {
   watch.observe(body);
   draw();
   look();
-  learnHandoffs();
 }
 
 export function unmount() {
@@ -138,37 +134,11 @@ export function update(next) {
   } else if (!sameLevel || (next.get('epic') || '') !== (before.get('epic') || '')) draw();
 }
 
-export function refresh(news) {
+export function refresh() {
   if (!root || dragging) return;
-  // The chips that call this pass what they changed, which is not news.
-  if (Array.isArray(news)) for (const event of news) if (event.action === 'handoff' && event.node) handedOff.add(event.node);
   fillEpicChoices(parts.select);
   if (params.get('q')) look();
   else draw();
-}
-
-// A list of work does not say which items have a handoff note, so the change feed is read for them,
-// once, from the start, and after that the news adds to it.
-async function learnHandoffs() {
-  if (learning) return;
-  learning = true;
-  try {
-    let after = handoffsFrom;
-    let latest = after;
-    for (;;) {
-      const page = await call('changes_since', { after_event_id: after, limit: 200 });
-      for (const event of page.items) if (event.action === 'handoff' && event.node) handedOff.add(event.node);
-      latest = page.latest_event_id;
-      if (page.next_after_id === null || page.next_after_id === undefined) break;
-      after = page.next_after_id;
-    }
-    handoffsFrom = Math.max(handoffsFrom, latest);
-  } catch {
-    // It only decorates the cards: without it they have no sign, and nothing else is wrong.
-  } finally {
-    learning = false;
-  }
-  if (root && !dragging) draw();
 }
 
 // -- the level ----------------------------------------------------------------------------------------
@@ -622,7 +592,7 @@ function card(node) {
     noSizeChip(node),
     progressChip(node, { quietWhenDone: true }),
     finished ? null : waitingChip(node),
-    handedOff.has(node.ref) ? handoffChip() : null,
+    node.has_handoff ? handoffChip() : null,
     heldChip(node),
     node.schedule_conflicts.length
       ? h('span', { class: 'chip warn conflict', title: `Planned to start ${beforeDue(node.schedule_conflicts)}` }, icon('alert', { size: 13 }), 'Schedule conflict')

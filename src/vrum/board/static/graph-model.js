@@ -28,7 +28,7 @@ export const clip = (text, size) => {
 };
 
 // The words of a kind inside a sentence: "this story", "this acceptance criterion".
-export const KIND_NOUN = { epic: 'epic', story: 'story', task: 'task', rule: 'acceptance criterion', note: 'note' };
+const KIND_NOUN = { epic: 'epic', story: 'story', task: 'task', rule: 'acceptance criterion', note: 'note' };
 
 // -- reading the store, fast ---------------------------------------------------------------------
 

@@ -24,9 +24,8 @@ import { icon } from './icons.js';
 import { keyButton } from './key-button.js';
 import { cardOf } from './needs-cards.js';
 import { indexChanged, isPlanNews, newsAbout, rereadPlans, watchDetails } from './needs-details.js';
-import { BY, BY_WORDS, byOf } from './needs-groups.js';
 import { keepKeys, keysContent } from './needs-keys.js';
-import { prepare, sectionsOf } from './needs-model.js';
+import { BY, BY_WORDS, byOf, draftOf, drawSaid, fingerprintOf, forgetDrafts, judge, keepViews, prepare, said, sectionsOf, viewOf } from './needs-model.js';
 import { fillRail } from './needs-rail.js';
 import { currentNeeds, onNeeds, readNeeds } from './needs-state.js';
 import { agentGroup, readWaitingQuietly } from './needs-waiting.js';
@@ -34,8 +33,6 @@ import { pageHeader } from './page.js';
 import { explainProblem, forgetLost, noticeRevision, settleProblem } from './plan-comments.js';
 import { loadingView, rememberFocus } from './records.js';
 import { onChange } from './store.js';
-import { drawSaid } from './needs-said.js';
-import { draftOf, fingerprintOf, forgetDrafts, judge, keepViews, said, viewOf } from './needs-views.js';
 
 let drawn = null; // the places of the page on show, and what was drawn last
 let stops = [];
@@ -50,7 +47,6 @@ const railOpen = { routine: false, agent: false };
 let waitingPlans = null; // the plans that wait for their agent to revise them, or null before they are read
 
 // What the person has done with each change (viewed, folded), the words typed into a comment and what a decision left undone are kept
-// while the board is open, in needs-views.js, so that this page and the review page agree.
 const drawSaidHere = () => drawSaid(drawn?.said);
 
 // -- moving on after a decision ----------------------------------------------------------------------------

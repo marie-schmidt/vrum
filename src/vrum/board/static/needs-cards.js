@@ -7,15 +7,67 @@
 // draws it and, when the person changes it, tells the page. A card that is folded keeps its header, its facts and its bar: only the
 // preview goes. Everything a card holds is the server's and is drawn as text.
 
-import { can, ui, viewLink } from './ctx.js';
-import { h, put } from './dom.js';
+import { effectChip, waitedWords } from './asks.js';
+import { can, itemLink, ui, viewLink } from './ctx.js';
+import { h, plural, put } from './dom.js';
 import { icon } from './icons.js';
-import { kindIcon } from './labels.js';
+import { actorLabel, codeOf, itemSizeChip, kindIcon } from './labels.js';
 import { LEVEL_WORDS } from './changes.js';
 import { decisionBar } from './decision-bar.js';
-import { factsOf } from './needs-facts.js';
+import { warnWords, worstOf } from './needs-assist.js';
 import { previewOf } from './needs-preview.js';
-import { titleNodes } from './needs-title.js';
+import { store } from './store.js';
+
+// -- title and facts shared by cards and the review page -----------------------------------------------------
+
+const refCode = (ref) => itemLink(ref, { class: 'item-link', dataset: { ref } }, codeOf(ref));
+
+export function titleNodes(change) {
+  const theirs = (words) => h('span', { class: 'change-title-text', dataset: { words: 'theirs' } }, words);
+  if (change.look !== 'placement') return [theirs(change.title)];
+  const move = change.item.placement;
+  const refs = move.items.map((one) => one.ref);
+  const named = refs.length > 3 ? refs.slice(0, 2) : refs;
+  const parts = ['Move '];
+  named.forEach((ref, at) => {
+    if (at) parts.push(refs.length <= 3 && at === named.length - 1 ? ' and ' : ', ');
+    parts.push(refCode(ref));
+  });
+  if (refs.length > 3) parts.push(` and ${refs.length - 2} more`);
+  parts.push(' under ');
+  if (move.parent) parts.push(refCode(move.parent), ' ', theirs(move.parent_title ?? store.nodes.get(move.parent)?.title ?? ''));
+  else parts.push('a new epic, ', theirs(move.new_epic?.title ?? ''));
+  return parts;
+}
+
+function impactWords(change) {
+  const { item } = change;
+  if (change.look === 'plan') return item.plan.state === 'proposed' ? `Frees ${item.plan.epics + item.plan.stories + item.plan.tasks}` : null;
+  if (change.look === 'placement') return `Moves ${item.placement.items.length}`;
+  if (change.look === 'check') return `${item.count} open`;
+  if (change.look === 'note') return plural(item.count, 'note');
+  if (change.look === 'lapse') return `Ran out \u00d7${item.count}`;
+  return null;
+}
+
+const factChip = (name, ...content) => h('li', { class: 'chip change-fact', dataset: { fact: name } }, ...content);
+
+export function factsOf(change, asOf) {
+  const { item } = change;
+  const out = [];
+  if (item.waiting) out.push(factChip('by', actorLabel(item.waiting, item.waiting_kind)));
+  const decided = change.look === 'plan' && (item.plan.state === 'approved' || item.plan.state === 'rejected');
+  if (!decided) out.push(factChip('waiting', icon('clock', { size: 13 }), h('time', { class: 'needs-time', datetime: item.waiting_since, title: item.waiting_since }, waitedWords(item.waiting_since, asOf))));
+  if (change.look === 'plan' && item.plan.revision > 1) out.push(h('li', { class: 'chip change-fact change-revision', dataset: { fact: 'revision', revision: item.plan.revision } }, `Revision ${item.plan.revision}`));
+  if (item.ask) out.push(h('li', { class: 'change-fact change-fact-holder', dataset: { fact: 'effect' } }, effectChip(item.ask)));
+  const impact = impactWords(change);
+  if (impact) out.push(factChip('impact', impact));
+  if (change.warn && change.warn.total) out.push(h('li', { class: 'chip change-fact change-warning', dataset: { fact: 'warnings', state: worstOf(change.warn) } }, icon('alert', { size: 13 }), warnWords(change.warn)));
+  const node = change.look === 'plan' || change.look === 'placement' ? null : store.nodes.get(item.node);
+  const size = node ? itemSizeChip(node, { labelled: true }) : null;
+  if (size) out.push(h('li', { class: 'change-fact change-fact-holder', dataset: { fact: 'size' } }, size));
+  return h('ul', { class: 'plain change-facts' }, out);
+}
 
 // The level of the work, as a chip with its icon and word. A plan and a note say what they are in their kind word already.
 export const levelChip = (level) =>

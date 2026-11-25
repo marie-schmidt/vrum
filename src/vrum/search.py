@@ -332,7 +332,7 @@ class Searcher:
                     if statuses_of.get((candidate.item_type, candidate.id)) in wanted_statuses
                 ]
             page = kept[offset : offset + limit]
-            details = await _details(conn, [(c.item_type, c.id) for c in page], text)
+            details = await _details(conn, [(c.item_type, c.id) for c in page], text, statuses_of)
             empty_words = mode != "meaning" and not words and await _query_has_no_words(conn, text)
         note = self._index_note(state, meaning, detail)
         if empty_words:
@@ -498,8 +498,8 @@ class Searcher:
                 in_force = await _in_force(conn, [(c.item_type, c.id) for c in candidates])
                 candidates = [c for c in candidates if (c.item_type, c.id) in in_force]
             pairs = [(c.item_type, c.id) for c in candidates]
-            statuses_of = await _statuses(conn, pairs)
             details = await _details(conn, pairs, None)
+            statuses_of = {pair: row["status"] for pair, row in details.items()}
         return candidates, details, statuses_of, self._index_note(state, "used")
 
     # -- before creating ----------------------------------------------------------------------
@@ -739,10 +739,28 @@ def _refs(pairs: list[tuple[str, int]]) -> list[str]:
     return [f"{kind}:{number}" for kind, number in pairs]
 
 
+# Computed status of a node (same rule as node_state.status, without the unrelated lateral joins
+# for rules, points, spans, checks or claims; short-circuits for non-new rows).
+_NODE_STATUS_SQL = (
+    "CASE WHEN {n}.status = 'new' "
+    "AND NOT EXISTS (SELECT 1 FROM links l "
+    "JOIN nodes t ON t.project_id = l.project_id AND t.ref = l.target "
+    "WHERE l.project_id = {n}.project_id AND l.source = {n}.ref "
+    "AND l.link_type = 'needs_first' AND t.status <> 'done') "
+    "AND NOT EXISTS (SELECT 1 FROM gate_state g "
+    "WHERE g.project_id = {n}.project_id AND g.node = {n}.ref "
+    "AND g.state IN ('waiting', 'refused')) "
+    "AND NOT EXISTS (SELECT 1 FROM plan_state p "
+    "WHERE p.project_id = {n}.project_id AND p.state IN ('proposed', 'changes_requested') "
+    "AND p.items ? {n}.ref) "
+    "THEN 'ready' ELSE {n}.status END"
+)
+
 _STATUS_QUERIES = (
     (
         _NODE_TYPES,
-        "SELECT kind AS item_type, number AS id, status FROM node_state WHERE ref = ANY(%(refs)s)",
+        f"SELECT n.kind AS item_type, n.number AS id, {_NODE_STATUS_SQL.format(n='n')} AS status "
+        "FROM nodes n WHERE n.ref = ANY(%(refs)s)",
     ),
     (("rule",), "SELECT 'rule' AS item_type, id, status FROM rules WHERE id = ANY(%(ids)s)"),
     (("note",), "SELECT 'note' AS item_type, id, status FROM notes WHERE id = ANY(%(ids)s)"),
@@ -772,12 +790,17 @@ _HEADLINE = (
 
 
 async def _details(
-    conn: AsyncConnection, pairs: list[tuple[str, int]], query: str | None
+    conn: AsyncConnection,
+    pairs: list[tuple[str, int]],
+    query: str | None,
+    statuses: dict[tuple[str, int], str] | None = None,
 ) -> dict[tuple[str, int], dict[str, Any]]:
-    """What a result shows about each item, read from the graph now."""
+    """What a result shows about each item, read from the graph now. When `statuses` was already
+    computed (by `search`), nodes skip recomputing ready status."""
     found: dict[tuple[str, int], dict[str, Any]] = {}
     params = {"q": query, "opts": _HIGHLIGHT}
-    for kinds, sql in _DETAIL_QUERIES:
+    node_query = _NODE_DETAIL_RAW if statuses is not None else _NODE_DETAIL_WITH_STATUS
+    for kinds, sql in ((_NODE_TYPES, node_query), *_OTHER_DETAIL_QUERIES):
         wanted = [(kind, item_id) for kind, item_id in pairs if kind in kinds]
         if not wanted:
             continue
@@ -785,20 +808,24 @@ async def _details(
             conn, sql, {**params, "ids": [item_id for _, item_id in wanted], "refs": _refs(wanted)}
         )
         for row in rows:
-            found[(row["item_type"], row["id"])] = row
+            pair = (row["item_type"], row["id"])
+            if statuses is not None and pair in statuses:
+                row["status"] = statuses[pair]
+            found[pair] = row
     return found
 
 
-_DETAIL_QUERIES = (
-    (
-        _NODE_TYPES,
-        "SELECT s.kind AS item_type, s.number AS id, s.title, s.status, s.parent, "
-        "p.kind AS parent_kind, p.title AS parent_title, "
-        "s.title || E'\\n' || s.body AS content, "
-        + _HEADLINE.format(search="n.search", content="s.title || E'\\n' || s.body")
-        + " AS headline FROM node_state s JOIN nodes n ON n.ref = s.ref "
-        "LEFT JOIN nodes p ON p.ref = s.parent WHERE s.ref = ANY(%(refs)s)",
-    ),
+_NODE_DETAIL_BASE = (
+    "SELECT n.kind AS item_type, n.number AS id, n.title, {status} AS status, n.parent, "
+    "p.kind AS parent_kind, p.title AS parent_title, "
+    "n.title || E'\\n' || n.body AS content, "
+    + _HEADLINE.format(search="n.search", content="n.title || E'\\n' || n.body")
+    + " AS headline FROM nodes n LEFT JOIN nodes p ON p.ref = n.parent WHERE n.ref = ANY(%(refs)s)"
+)
+_NODE_DETAIL_RAW = _NODE_DETAIL_BASE.format(status="n.status")
+_NODE_DETAIL_WITH_STATUS = _NODE_DETAIL_BASE.format(status=_NODE_STATUS_SQL.format(n="n"))
+
+_OTHER_DETAIL_QUERIES = (
     (
         ("rule",),
         "SELECT 'rule' AS item_type, r.id, r.title, r.status, r.node AS parent, "
@@ -997,8 +1024,9 @@ async def _overlap_items(
         )
     else:
         sql = (
-            "SELECT s.number AS id, s.title, s.status, e.ref AS epic, e.title AS epic_title "
-            "FROM node_state s LEFT JOIN nodes p ON p.ref = s.parent "
+            f"SELECT s.number AS id, s.title, {_NODE_STATUS_SQL.format(n='s')} AS status, "
+            "e.ref AS epic, e.title AS epic_title "
+            "FROM nodes s LEFT JOIN nodes p ON p.ref = s.parent "
             "JOIN nodes e ON e.ref = CASE s.kind WHEN 'epic' THEN s.ref "
             "WHEN 'story' THEN s.parent ELSE p.parent END "
             "WHERE s.kind = %(item_type)s AND s.number = ANY(%(numbers)s)"

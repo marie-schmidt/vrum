@@ -24,8 +24,7 @@ import { liftDialog } from './gates.js';
 import { hoverCard } from './hovercard.js';
 import { icon } from './icons.js';
 import { askCode, codeOf, gateCode, noteCode, parseNodeRef } from './labels.js';
-import { changesDialog } from './plan-changes.js';
-import { clearPending, pendingOf, problemOf, setProblem } from './plan-comments.js';
+import { changesDialog, clearPending, pendingOf, problemOf, setProblem } from './plan-comments.js';
 import { sync } from './store.js';
 
 // The classes the older selectors know the verbs by.

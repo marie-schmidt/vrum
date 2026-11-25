@@ -10,9 +10,28 @@
 
 import { Refusal, call, callAll } from './api.js';
 import { hash } from './changes.js';
-import { forgetSnapshots, readPlanWhole } from './plan-read.js';
+import { ensure, store } from './store.js';
 
-const entries = new Map(); // key -> { state: 'loading' | 'ready' | 'failed', data, hash, refs, error, token }
+const snapshots = new Map(); // `${plan}:${revision}` -> that revision's items
+
+async function snapshotOf(plan, revision) {
+  const key = `${plan}:${revision}`;
+  if (!snapshots.has(key)) snapshots.set(key, (await call('list_plans', { plan, revision })).items[0].tree);
+  return snapshots.get(key);
+}
+
+// The plan as the server reads it (the current revision, or `revision`), and `previous`: the items
+// of the revision before when it took something out, and null otherwise.
+export async function readPlanWhole(plan, revision = null) {
+  const found = (await call('list_plans', revision ? { plan, revision } : { plan })).items[0];
+  const removed = (found.changes ?? []).some((one) => one.change === 'removed');
+  const previous = found.shown > 1 && removed ? await snapshotOf(plan, found.shown - 1) : null;
+  return { ...found, checks: found.checks ?? null, previous };
+}
+
+const forgetSnapshots = () => snapshots.clear();
+
+const entries = new Map(); // key -> { state: 'loading' | 'ready' | 'failed', data, hash, refs, noteIds, error, token }
 let wake = () => {}; // told when any answer arrives: the page draws again
 
 // What to read for a change, or null when the row says it all.
@@ -22,7 +41,7 @@ function wanted(change) {
   // Every waiting proposal is read in one go: the server ranks them together and one read is cheap.
   if (change.look === 'placement') return { key: 'placements', refs: placementRefs(item.placement), read: readPlacements };
   if (change.look === 'check') return { key: `check:${item.node}`, refs: [item.node], read: () => readChecks(item.node) };
-  if (change.look === 'note') return { key: `note:${item.node}:${item.notes.join(',')}`, refs: [item.node], read: () => readNotes(item.notes) };
+  if (change.look === 'note') return { key: `note:${item.node}:${item.notes.join(',')}`, refs: [item.node], noteIds: new Set(item.notes), read: () => readNotes(item.notes) };
   return null;
 }
 
@@ -45,8 +64,16 @@ async function readChecks(node) {
   return { data: { checks: read.checks, status: read.status }, refs: [node] };
 }
 
+// Read notes from the shared store (one list_notes call across all rows, kept fresh on note news),
+// falling back to get_note only for an id not yet in the store.
 async function readNotes(ids) {
-  const notes = await Promise.all(ids.map((id) => call('get_note', { note_id: id })));
+  await ensure('notes');
+  const notes = await Promise.all(
+    ids.map((id) => {
+      const cached = store.notesById.get(id);
+      return cached ? Promise.resolve(cached) : call('get_note', { note_id: id });
+    }),
+  );
   return { data: { notes }, refs: [] };
 }
 
@@ -77,7 +104,7 @@ export function detailOf(change) {
   if (!need) return null;
   let entry = entries.get(need.key);
   if (!entry) {
-    entry = { state: 'loading', data: null, hash: '', refs: new Set(need.refs), error: null, token: 0, read: need.read };
+    entry = { state: 'loading', data: null, hash: '', refs: new Set(need.refs), noteIds: need.noteIds || null, error: null, token: 0, read: need.read };
     entries.set(need.key, entry);
     load(need.key, entry, need.read);
   }
@@ -95,6 +122,7 @@ export function newsAbout(events) {
       (event) =>
         entry.refs.has(event.node) ||
         entry.refs.has(event.other_node) ||
+        (entry.noteIds && (entry.noteIds.has(event.note_id) || entry.noteIds.has(event.other_note_id))) ||
         (key.startsWith('plan:') && ((event.rule_id !== null && event.rule_id !== undefined) || aboutPlan(event, Number(key.slice(5))))),
     );
     if (touched) load(key, entry, entry.read);

@@ -18,7 +18,7 @@ const YG = 14;
 const DUMMY = 10;
 
 // Epics, then stories, then tasks, each in the order it was made.
-export const byCreation = (model) => (a, b) => {
+const byCreation = (model) => (a, b) => {
   const x = model.node(a);
   const y = model.node(b);
   return ['epic', 'story', 'task'].indexOf(x.kind) - ['epic', 'story', 'task'].indexOf(y.kind) || x.number - y.number;
@@ -95,7 +95,7 @@ function nondecreasing(values) {
 // within the layer that crosses the fewest lines, and a line that is long enough to pass a layer runs
 // through a little slot kept for it there, so it never goes behind a box. Returns the boxes with their
 // place, the routes of the lines, and the size of the picture.
-export function layoutChain(refs, edges, order) {
+function layoutChain(refs, edges, order) {
   const pres = new Map(refs.map((r) => [r, []]));
   for (const e of edges) pres.get(e.dep).push(e.pre);
   const layer = new Map();

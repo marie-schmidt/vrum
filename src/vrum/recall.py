@@ -371,8 +371,7 @@ class Recaller:
                 # Whatever is linked or already shown is not "similar": it is known.
                 for row in await fetch_all(
                     conn,
-                    f"SELECT n.id FROM note_state n WHERE {linked} "
-                    f"OR (n.project_wide AND {in_force})",
+                    f"SELECT n.id FROM notes n WHERE {linked} OR (n.project_wide AND {in_force})",
                     params,
                 ):
                     exclude.add(("note", row["id"]))

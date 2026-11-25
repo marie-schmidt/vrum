@@ -135,9 +135,9 @@ def name_topics(
 
 
 # The epic a piece of work is under: itself for an epic, its parent for a story, its parent's
-# parent for a task.
+# parent for a task. Also returns the node's own title so callers do not query nodes twice.
 _EPICS = (
-    "SELECT n.ref, e.ref AS epic, e.title AS epic_title "
+    "SELECT n.ref, n.title, e.ref AS epic, e.title AS epic_title "
     "FROM nodes n LEFT JOIN nodes p ON p.ref = n.parent "
     "JOIN nodes e ON e.ref = CASE n.kind WHEN 'epic' THEN n.ref WHEN 'story' THEN n.parent "
     "ELSE p.parent END "
@@ -164,18 +164,14 @@ async def topics_of(conn: AsyncConnection, subjects: list[Subject]) -> list[Need
         return []
     every_ref = sorted({ref for subject in subjects for ref in subject.refs})
     anchors = sorted({subject.under for subject in subjects if subject.under})
-    found = {
-        row["ref"]: (row["epic"], row["epic_title"])
-        for row in await fetch_all(conn, _EPICS, (every_ref + anchors,))
-    }
+    node_rows = await fetch_all(conn, _EPICS, (sorted(set(every_ref + anchors)),))
+    found = {row["ref"]: (row["epic"], row["epic_title"]) for row in node_rows}
+    by_ref = {row["ref"]: row["title"] for row in node_rows}
     epics: list[tuple[str, str] | None] = []
     titles: list[str] = []
     for subject in subjects:
         anchor = subject.under or (subject.refs[0] if subject.refs else None)
         epics.append(found.get(anchor) if anchor else None)
-    named = await fetch_all(conn, "SELECT ref, title FROM nodes WHERE ref = ANY(%s)", (every_ref,))
-    by_ref = {row["ref"]: row["title"] for row in named}
-    for subject in subjects:
         titles.append(by_ref.get(subject.refs[0], "") if subject.refs else "")
     similarity: dict[tuple[int, int], float] = {}
     with_vector: list[int] = []

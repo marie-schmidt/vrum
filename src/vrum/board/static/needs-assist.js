@@ -27,7 +27,7 @@ const OK_WORDS = { circle: 'no circles', unsized: 'every task sized', duplicate:
 
 // "No circles", "Every task sized", "No repeated work": the checks that passed, each as a short label (the page draws them as one quiet row).
 // Nothing when none passed.
-export function okWords(checks) {
+function okWords(checks) {
   const said = checks.filter((one) => one.state === 'ok').map((one) => OK_WORDS[one.kind] ?? one.words);
   if (!said.length) return null;
   return said.map((line) => line.charAt(0).toUpperCase() + line.slice(1));

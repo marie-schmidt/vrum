@@ -35,7 +35,7 @@ export const VIEWS = ['board', 'graph', 'roadmap', 'lists'];
 export const SETTINGS = ['users', 'definition', 'templates', 'tools', 'status'];
 // The pages a record page can say it was reached from, and what each is called.
 export const FROM_PAGES = [...VIEWS, 'search', 'activity', 'needs', 'coverage'];
-export const FROM_TITLES = { board: 'Board', graph: 'Graph', roadmap: 'Roadmap', lists: 'Lists', search: 'Search', activity: 'Activity', needs: 'Needs a person', coverage: 'Coverage' };
+const FROM_TITLES = { board: 'Board', graph: 'Graph', roadmap: 'Roadmap', lists: 'Lists', search: 'Search', activity: 'Activity', needs: 'Needs a person', coverage: 'Coverage' };
 // The pages about the work itself, where the navigator of epics, stories and tasks is shown: the views, Search,
 // Activity, the page of what needs a person, the coverage report, the page of a record and the review page of a change (which is read from
 // the page of what needs a person and goes back to it). The settings pages and the Account page have none.
@@ -104,9 +104,6 @@ export function viewLink(page, choices, props, ...children) {
     ...children,
   );
 }
-
-// The same thing under the name the record pages use.
-export const pageLink = viewLink;
 
 // The record in an address, from `item=story:12` (or the Graph's `sel=story:12`): { kind, number,
 // id, ref }, or null. The kinds are epic, story, task, rule and note; `id` is the number

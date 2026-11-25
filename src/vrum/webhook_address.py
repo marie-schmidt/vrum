@@ -20,6 +20,7 @@ machine, a private network, a cloud provider's metadata address). So:
 
 Nothing here logs or shows an address: webhook addresses often hold a secret token."""
 
+import functools
 import http.client
 import ipaddress
 import socket
@@ -94,14 +95,22 @@ def parse(url: str, settings: WebhookSettings) -> Target:
     return Target(tls=tls, host=host, port=port or (443 if tls else 80), path=path)
 
 
-def _networks(settings: WebhookSettings) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+@functools.lru_cache(maxsize=32)
+def _networks(
+    entries: tuple[str, ...],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
     found: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    for entry in settings.allowed_hosts:
+    for entry in entries:
         try:
             found.append(ipaddress.ip_network(entry, strict=False))
         except ValueError:
             continue
-    return found
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=1)
+def _ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context()
 
 
 def why_not(address: str) -> str | None:
@@ -133,7 +142,7 @@ def _permitted(host: str, address: str, settings: WebhookSettings) -> bool:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
-    return any(ip in network for network in _networks(settings))
+    return any(ip in network for network in _networks(settings.allowed_hosts))
 
 
 def lookup(host: str, port: int) -> list[str]:
@@ -175,12 +184,11 @@ class _Pinned(http.client.HTTPConnection):
         super().__init__(target.host, target.port, timeout=timeout)
         self._address = address
         self._target = target
-        self._context = ssl.create_default_context()
 
     def connect(self) -> None:
         plain = socket.create_connection((self._address, self.port), self.timeout)
         if self._target.tls:
-            self.sock = self._context.wrap_socket(plain, server_hostname=self._target.host)
+            self.sock = _ssl_context().wrap_socket(plain, server_hostname=self._target.host)
         else:
             self.sock = plain
 

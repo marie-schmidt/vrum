@@ -16,14 +16,14 @@
 .diff-hunk { padding: var(--space-1) var(--space-3) var(--space-1) 2.25rem; background: var(--diff-hunk-bg); color: var(--diff-hunk-text); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
 .diff-hunk a { color: inherit; text-decoration-color: currentColor; }
 
-.diff-line, .diff-foldrow, .diff-action, .diff-annot { --step: 1.25rem; --hang: 1.25rem; --indent: 0rem; display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); min-width: 0; }
-.diff-line[data-depth="1"], .diff-foldrow[data-depth="1"], .diff-action[data-depth="1"], .diff-annot[data-depth="1"] { --indent: var(--step); }
-.diff-line[data-depth="2"], .diff-foldrow[data-depth="2"], .diff-action[data-depth="2"], .diff-annot[data-depth="2"] { --indent: calc(var(--step) * 2); }
-.diff-line[data-depth="3"], .diff-foldrow[data-depth="3"], .diff-action[data-depth="3"], .diff-annot[data-depth="3"] { --indent: calc(var(--step) * 3); }
-.diff-line[data-depth="4"], .diff-foldrow[data-depth="4"], .diff-action[data-depth="4"], .diff-annot[data-depth="4"] { --indent: calc(var(--step) * 4); }
-.diff-line[data-depth="5"], .diff-foldrow[data-depth="5"], .diff-action[data-depth="5"], .diff-annot[data-depth="5"] { --indent: calc(var(--step) * 5); }
+.diff-line, .diff-foldrow, .diff-annot { --step: 1.25rem; --hang: 1.25rem; --indent: 0rem; display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); min-width: 0; }
+.diff-line[data-depth="1"], .diff-foldrow[data-depth="1"], .diff-annot[data-depth="1"] { --indent: var(--step); }
+.diff-line[data-depth="2"], .diff-foldrow[data-depth="2"], .diff-annot[data-depth="2"] { --indent: calc(var(--step) * 2); }
+.diff-line[data-depth="3"], .diff-foldrow[data-depth="3"], .diff-annot[data-depth="3"] { --indent: calc(var(--step) * 3); }
+.diff-line[data-depth="4"], .diff-foldrow[data-depth="4"], .diff-annot[data-depth="4"] { --indent: calc(var(--step) * 4); }
+.diff-line[data-depth="5"], .diff-foldrow[data-depth="5"], .diff-annot[data-depth="5"] { --indent: calc(var(--step) * 5); }
 @media (max-width: 699.98px) {
-  .diff-line, .diff-foldrow, .diff-action, .diff-annot { --step: 0.75rem; --hang: 1rem; grid-template-columns: 1.75rem minmax(0, 1fr); }
+  .diff-line, .diff-foldrow, .diff-annot { --step: 0.75rem; --hang: 1rem; grid-template-columns: 1.75rem minmax(0, 1fr); }
   .diff-hunk { padding-left: 1.75rem; }
 }
 
@@ -54,7 +54,6 @@
 .diff-check-words.waiting { font-weight: 650; color: var(--text); }
 .diff-check[data-waiting="true"] .diff-code { color: var(--text); }
 .diff-gate .needs-gate-words { overflow-wrap: anywhere; }
-.diff-note-meta .diff-code { font-size: var(--text-sm); }
 
 /* A fold: what is behind it, and one press opens all of it. What is folded is in the page and hidden. */
 .diff-line[data-closed], .diff-foldrow[data-closed], .diff-line[data-clipped], .diff-annot[data-closed] { display: none; }
@@ -94,21 +93,8 @@
   .diff-side[data-side="old"] { border-right: 0; }
 }
 
-/* What a person can do on the card of a note or a check, in place: confirm a note, tick a check, say how it was checked. */
-.diff-action .diff-sign { background: var(--diff-context-gutter); }
-.diff-action .diff-code { padding: 0.3rem var(--space-3) 0.3rem calc(var(--space-2) + var(--indent) + var(--hang)); background: var(--diff-context-bg); color: var(--text-2); text-indent: 0; }
 /* What is said under a line (plan-notes.js): it sits under the line it is about, one step in. */
 .diff-annot .diff-code { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-3) var(--space-2) calc(var(--space-3) + var(--indent)); background: var(--surface); color: var(--text); font-size: var(--text-sm); text-indent: 0; }
-.diff-action:has(.change-problem:empty:only-child) { display: none; }
-.change-tick-label { display: inline-flex; align-items: center; gap: var(--space-2); text-indent: 0; cursor: pointer; }
-.change-how { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.change-how-field { width: min(100%, 30rem); }
-.change-problem { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); }
-.change-problem:not(:empty) { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
-.change-how-open { font-size: var(--text-sm); margin-left: var(--space-2); }
-@media (pointer: coarse) {
-  .change-confirm, .change-how-open { min-height: 2.75rem; }
-}
 
 /* A red, green or changed line is a button that shows the work as the screen a person would use for it (change-dialog.js). The words in it are
    underlined as the thing that can be pressed, and the line is washed quietly while the pointer is on it. */

@@ -30,7 +30,7 @@ export function waitedWords(since, asOf) {
 
 // What an ask did to the work, as the short words of a chip, and what each means as the chip's hover card says it. It waited for the
 // answer (or still does), it was left free to take, or it is the approval a gate holds the work for.
-export const EFFECT_WORDS = { blocks: 'Blocks work', parks: 'Work stays free', gates: 'Gates work' };
+const EFFECT_WORDS = { blocks: 'Blocks work', parks: 'Work stays free', gates: 'Gates work' };
 export const effectHover = (ask) =>
   ask.effect === 'parks'
     ? 'The work was released and stays free to take.'
@@ -77,7 +77,7 @@ export function answerDialog(ask, send) {
 // `onAnswered(ask)` is called after the server took the answer; a refusal is said in its own words beside the buttons and nothing
 // is changed. `onAsk()` is called when an answer is about to be sent and `onRefused()` when the server refused it, for a page that
 // moves on to the next thing once an answer is taken. Null for a person who can only look.
-export function askControls(ask, { onAnswered = () => {}, onAsk = () => {}, onRefused = () => {}, draft = { open: false, text: '' } } = {}) {
+function askControls(ask, { onAnswered = () => {}, onAsk = () => {}, onRefused = () => {}, draft = { open: false, text: '' } } = {}) {
   if (!can('write')) return null;
   const problem = h('p', { class: 'problem ask-problem', role: 'alert' });
   const buttons = [];

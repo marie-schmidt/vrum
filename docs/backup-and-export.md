@@ -62,34 +62,8 @@ uv run python scripts/export_graph.py http://127.0.0.1:8000/mcp graph.json
   number of its own kind. It is all or nothing, and the file can be as big as one request may be
   (4 MiB unless you raise `VRUM_MAX_REQUEST_BYTES`). A project that already holds anything
   refuses. To move a bigger graph, back it up and restore it.
-- **A file made before sizes and checks.** The current file is version 6. A file of version 5 has
-  no sizes and no ticks of checks: it is still loaded, with no size on any story or task and
-  nothing ticked, and the checklist comes from the definition of done it holds.
-- **A file made before acceptance criteria could be on a task.** In
-  a file of version 4 or earlier an acceptance criterion was in a story, and
-  the file says `story` where version 5 and later say `node` (a story or a task): it is still loaded, with
-  each criterion on the story it was in, and the history says `node` too. Such a file has no
-  definition of done, so the project starts with an empty one.
-- **A file made before notes had one status.** In a file of version
-  3 a note was `active` (with who confirmed it kept apart) and an acceptance criterion was held or
-  settled. It is still loaded: an active note that a person had confirmed becomes a confirmed note and any
-  other active note an unconfirmed one, a note that was replaced or withdrawn stays so and keeps
-  who had confirmed it, and a held criterion becomes open and a settled one met. The history
-  says the same words.
-- **A file made before notes.** Until version 3 a project kept decisions and facts as two kinds of
-  record, and a file written then (format version 1 or 2) is still loaded. Its decisions become
-  notes first, in the order of their ids, and its facts after them, numbered from 1 with no gaps
-  (the first decision is `note:1`). A decision's title becomes the first line of the note's text
-  (the title, a blank line, then the text; just the text when the two were the same), its reason
-  becomes the note's why, and who decided it and when are kept. A fact's source becomes the
-  note's why, and nobody decided it. Who recorded a decision is taken from the history of the
-  decision (`unknown` when the file has none), and a fact keeps who recorded it. Replaced and
-  withdrawn, confirmed and project-wide, and what each concerned (a fact that concerned a decision
-  now concerns that decision's note) all carry over, and so does the history, on the new ids. A
-  file written before names were verified (version 1) has no person or agent mark on its notes and
-  history, and shows them as unknown. What a text says is left as it was written, so a
-  `[[decision:7]]` or `[[fact:5]]` in it is plain text now: it names nothing, and `[[note:7]]` is
-  how a note is named.
+- **Format version.** Export files use format version 6. Files written in older versions are
+  refused cleanly without changing anything.
 
 ```
 uv run python scripts/import_graph.py http://127.0.0.1:8000/mcp graph.json

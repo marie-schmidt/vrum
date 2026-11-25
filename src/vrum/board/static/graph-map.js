@@ -27,8 +27,8 @@ import { createSim } from './graph-sim.js';
 import { clip, code, codeOf, linksOf, s, wrap } from './graph-shared.js';
 import { store } from './store.js';
 
-export const MOST_ZOOM = 8;
-export const LEAST_ZOOM = 0.6;
+const MOST_ZOOM = 8;
+const LEAST_ZOOM = 0.6;
 const HUES = 6;
 const STEP = 1000 / 60; // one step of the simulation, in milliseconds
 const NAMES_EVERY = 100; // while the map moves, its names are placed again this often
@@ -74,7 +74,7 @@ export function tipContent(model, ref) {
 }
 
 // The links of the item looked at, each with the other end lifted to something the picture shows.
-export function partnersOf(ref, lift) {
+function partnersOf(ref, lift) {
   const seen = new Set();
   return linksOf(ref)
     .map((row) => ({ ...row, other: lift(row.other) }))

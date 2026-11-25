@@ -21,17 +21,53 @@ function emit(change) {
 }
 
 // The work, by reference. A page that writes an item into it (`store.nodes.set(ref, node)`) is
-// heard: the path, the tab's title and the navigator follow at once.
+// heard: the path, the tab's title and the navigator follow at once. Secondary indexes for epics
+// and children are built lazily and cleared on any write so lookups stay O(1).
 class Nodes extends Map {
   constructor(nodes) {
     super();
+    this._epics = null;
+    this._children = null;
     for (const node of nodes) super.set(node.ref, node);
+  }
+
+  _buildIndexes() {
+    const epicList = [];
+    const children = new Map();
+    for (const node of this.values()) {
+      if (node.kind === 'epic') epicList.push(node);
+      if (node.parent) {
+        let list = children.get(node.parent);
+        if (!list) {
+          list = [];
+          children.set(node.parent, list);
+        }
+        list.push(node);
+      }
+    }
+    epicList.sort((a, b) => a.number - b.number);
+    this._epics = epicList;
+    this._children = children;
+  }
+
+  allEpics() {
+    if (this._epics === null) this._buildIndexes();
+    return this._epics;
+  }
+
+  childrenOf(ref) {
+    if (this._children === null) this._buildIndexes();
+    return this._children.get(ref) || [];
   }
 
   set(ref, node) {
     const before = this.get(ref);
     super.set(ref, node);
-    if (before !== node) emit({ node: ref });
+    if (before !== node) {
+      this._epics = null;
+      this._children = null;
+      emit({ node: ref });
+    }
     return this;
   }
 }
@@ -40,7 +76,9 @@ export const store = {
   nodes: new Nodes([]), // ref (story:12) -> node
   links: [], // { id, source, target, link_type }
   rules: null, // loaded when a page asks for them
+  rulesById: new Map(),
   notes: null,
+  notesById: new Map(),
   references: null, // every [[reference]] written in any text, loaded when the graph asks
   info: { poll_seconds: 5 },
   index: null, // what the index can do now, and how many items are waiting
@@ -52,34 +90,74 @@ const LOADERS = {
   notes: () => callAll('list_notes', {}),
   references: async () => (await callPaged('find_mentions', {})).items,
 };
+const pending = new Map(); // deduplicates concurrent ensure(name) calls
+
+function storeCollection(name, items) {
+  store[name] = items;
+  if (name === 'rules') store.rulesById = new Map(items.map((one) => [one.id, one]));
+  else if (name === 'notes') store.notesById = new Map(items.map((one) => [one.id, one]));
+}
 
 // Load what a page needs beyond the work itself, and keep it fresh from then on.
 export async function ensure(name) {
-  if (store[name] === null) store[name] = await LOADERS[name]();
+  if (store[name] !== null) return;
+  let running = pending.get(name);
+  if (!running) {
+    running = LOADERS[name]()
+      .then((items) => {
+        storeCollection(name, items);
+      })
+      .finally(() => {
+        pending.delete(name);
+      });
+    pending.set(name, running);
+  }
+  await running;
 }
 
 // The acceptance criteria and the notes, for what names them (the quick switcher, the feed, a reference in
 // a text).
 export const ensureContext = () => Promise.all([ensure('rules'), ensure('notes')]);
 
-async function reload() {
-  const [nodes, links] = await Promise.all([callAll('list_nodes', {}), exported('links')]);
-  store.nodes = new Nodes(nodes);
-  store.links = links;
-  for (const name of Object.keys(LOADERS)) {
-    if (store[name] !== null) store[name] = await LOADERS[name]();
+const NON_NODE_ACTIONS = new Set(['plan_template_saved', 'plan_template_deleted', 'placement_proposed', 'placement_rejected']);
+const REF_ACTIONS = new Set(['create', 'update', 'rule_created', 'rule_updated', 'note_recorded']);
+const affectsNodes = (event) => !event.action.startsWith('note_') && !NON_NODE_ACTIONS.has(event.action);
+const affectsLinks = (event) => event.action === 'link_added' || event.action === 'link_removed';
+const affectsRules = (event) => event.action.startsWith('rule_');
+const affectsNotes = (event) => event.action.startsWith('note_');
+const affectsRefs = (event) => REF_ACTIONS.has(event.action);
+
+async function reload(events = null) {
+  const all = events === null;
+  const tasks = [];
+  if (all || events.some(affectsNodes)) {
+    tasks.push(
+      callAll('list_nodes', {}).then((nodes) => {
+        store.nodes = new Nodes(nodes);
+      }),
+    );
   }
+  if (all || events.some(affectsLinks)) {
+    tasks.push(
+      exported('links').then((links) => {
+        store.links = links;
+      }),
+    );
+  }
+  const checks = { rules: affectsRules, notes: affectsNotes, references: affectsRefs };
+  for (const name of Object.keys(LOADERS)) {
+    if (store[name] !== null && (all || events.some(checks[name]))) {
+      tasks.push(
+        LOADERS[name]().then((items) => {
+          storeCollection(name, items);
+        }),
+      );
+    }
+  }
+  if (tasks.length) await Promise.all(tasks);
 }
 
-// The work as it is now. A claim runs out with no change event, so a page that shows claims asks
-// again when one is due to, instead of waiting for news that never comes.
-export async function refreshWork() {
-  const nodes = await callAll('list_nodes', {});
-  store.nodes = new Nodes(nodes);
-}
-
-async function refreshIndex() {
-  const index = await indexState();
+function applyIndex(index) {
   const changed =
     !store.index ||
     store.index.waiting_to_index !== index.waiting_to_index ||
@@ -88,16 +166,34 @@ async function refreshIndex() {
   if (changed) emit({ index });
 }
 
-export async function start() {
-  store.info = await get('/board/api/info');
-  const head = await call('changes_since', { after_event_id: 0, limit: 1 });
-  store.cursor = head.latest_event_id;
-  await reload();
-  await refreshIndex();
+async function refreshIndex() {
+  applyIndex(await indexState());
 }
 
-// Ask what changed since the last look. When something did, load the data again and say so.
-// Used by the timer, and straight after the board's own change so that it shows at once.
+let idleIndexTicks = 0;
+// When search by meaning is healthy and nothing is waiting or changed, re-check the index every
+// second poll (10s) rather than hashing index_source on every 5s tick.
+const INDEX_IDLE_EVERY = 2;
+
+export async function start() {
+  pending.clear();
+  idleIndexTicks = 0;
+  const [info, head, nodes, links, index] = await Promise.all([
+    get('/board/api/info'),
+    call('changes_since', { after_event_id: 0, limit: 1 }),
+    callAll('list_nodes', {}),
+    exported('links'),
+    indexState(),
+  ]);
+  store.info = info;
+  store.cursor = head.latest_event_id;
+  store.nodes = new Nodes(nodes);
+  store.links = links;
+  applyIndex(index);
+}
+
+// Ask what changed since the last look. When something did, load only the collections affected and
+// say so. Used by the timer, and straight after the board's own change so that it shows at once.
 export async function sync() {
   const events = [];
   let after = store.cursor;
@@ -110,16 +206,21 @@ export async function sync() {
     after = page.next_after_id;
   }
   store.cursor = Math.max(store.cursor, latest);
-  await refreshIndex();
+  const indexBusy = !store.index || store.index.waiting_to_index > 0 || store.index.meaning !== 'used';
+  const checkIndex = events.length > 0 || indexBusy || ++idleIndexTicks >= INDEX_IDLE_EVERY;
+  if (checkIndex) idleIndexTicks = 0;
   if (events.length) {
-    await reload();
+    await Promise.all([reload(events), refreshIndex()]);
     emit({ events });
+  } else if (checkIndex) {
+    await refreshIndex();
   }
   return events;
 }
 
 let timer = null;
 let waking = null;
+let syncing = false;
 
 // How soon to ask again after a check-in failed. One failure is usually a tab that was asleep or a slow moment, so
 // the board asks again at once and says it cannot reach the server only when it keeps failing (onTrouble is told
@@ -128,8 +229,17 @@ const RETRY_MS = 3000;
 
 export function keepSynced(onTrouble, onWell = () => {}) {
   stopSyncing();
+  syncing = true;
   let failures = 0;
+  const schedule = (wait) => {
+    clearTimeout(timer);
+    timer = null;
+    if (!syncing || document.visibilityState === 'hidden') return;
+    timer = setTimeout(tick, wait);
+  };
   const tick = async () => {
+    timer = null;
+    if (!syncing || document.visibilityState === 'hidden') return;
     let wait = store.info.poll_seconds * 1000;
     try {
       await sync();
@@ -140,21 +250,24 @@ export function keepSynced(onTrouble, onWell = () => {}) {
       onTrouble(error, failures);
       wait = Math.min(wait, RETRY_MS);
     }
-    clearTimeout(timer);
-    timer = setTimeout(tick, wait);
+    schedule(wait);
   };
-  timer = setTimeout(tick, store.info.poll_seconds * 1000);
-  // A tab that comes back to the front checks at once, instead of showing a note about the time it was away.
+  schedule(store.info.poll_seconds * 1000);
+  // Pause polling while hidden and check immediately when the tab returns to the front.
   waking = () => {
-    if (document.visibilityState === 'visible' && timer !== null) {
+    if (!syncing) return;
+    if (document.visibilityState === 'hidden') {
       clearTimeout(timer);
-      timer = setTimeout(tick, 0);
+      timer = null;
+    } else if (document.visibilityState === 'visible') {
+      schedule(0);
     }
   };
   document.addEventListener('visibilitychange', waking);
 }
 
 export function stopSyncing() {
+  syncing = false;
   if (timer !== null) clearTimeout(timer);
   timer = null;
   if (waking !== null) document.removeEventListener('visibilitychange', waking);
@@ -166,8 +279,8 @@ export function stopSyncing() {
 // Everything is named by its reference (story:12). Epics, then stories, then tasks, each by number,
 // is the order the server gives and the order everything here keeps.
 export const nodeOf = (ref) => store.nodes.get(ref);
-export const epics = () => [...store.nodes.values()].filter((node) => node.kind === 'epic').sort((a, b) => a.number - b.number);
-export const childrenOf = (ref) => [...store.nodes.values()].filter((node) => node.parent === ref);
+export const epics = () => [...store.nodes.allEpics()];
+export const childrenOf = (ref) => [...store.nodes.childrenOf(ref)];
 
 export function epicOf(node) {
   let current = node;
@@ -210,7 +323,7 @@ export function describeItem(ref) {
     const node = store.nodes.get(ref);
     return node ? { kind, number, name: nodeCode(kind, number), title: node.title, parent: node.parent || null } : null;
   }
-  const record = (store[{ rule: 'rules', note: 'notes' }[kind]] || []).find((one) => one.id === number);
+  const record = kind === 'rule' ? store.rulesById.get(number) : store.notesById.get(number);
   if (!record) return null;
   return {
     kind,

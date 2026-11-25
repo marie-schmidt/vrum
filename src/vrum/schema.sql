@@ -697,10 +697,10 @@ CREATE FUNCTION size_points(size text) RETURNS integer LANGUAGE sql IMMUTABLE AS
     SELECT CASE size WHEN 'xs' THEN 1 WHEN 's' THEN 2 WHEN 'm' THEN 3 WHEN 'l' THEN 5 WHEN 'xl' THEN 8 END
 $$;
 
--- What a story adds up to. With tasks that are not dropped, the sum of theirs (a task with no size
--- adds nothing and is counted in `unsized` unless it is done). With none, the story's own size.
--- A dropped story with no tasks adds nothing. node_state shows it for a story and adds it up for
--- an epic.
+-- What a story adds up to: its points, its tasks done and total, and the dates its tasks span.
+-- With tasks that are not dropped, the sum of theirs (a task with no size adds nothing and is
+-- counted in `unsized` unless it is done). With none, the story's own size. A dropped story with
+-- no tasks adds nothing. node_state reads it once for a story and sums it once for an epic.
 CREATE VIEW story_points WITH (security_invoker = true) AS
 SELECT s.project_id, s.ref, s.parent, s.status,
        CASE WHEN t.live > 0 THEN t.total
@@ -711,13 +711,22 @@ SELECT s.project_id, s.ref, s.parent, s.status,
             ELSE 0 END AS points_done,
        CASE WHEN t.live > 0 THEN t.unsized
             WHEN s.status NOT IN ('done', 'dropped') AND s.size IS NULL THEN 1
-            ELSE 0 END AS unsized
+            ELSE 0 END AS unsized,
+       t.tasks_done,
+       t.live AS tasks_total,
+       CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL THEN s.start_on
+            ELSE t.span_start END AS span_start,
+       CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL THEN s.target_on
+            ELSE t.span_end END AS span_end
 FROM nodes s
 CROSS JOIN LATERAL (
     SELECT count(*)::integer AS live,
+           (count(*) FILTER (WHERE k.status = 'done'))::integer AS tasks_done,
            coalesce(sum(size_points(k.size)), 0)::integer AS total,
            coalesce(sum(size_points(k.size)) FILTER (WHERE k.status = 'done'), 0)::integer AS done,
-           (count(*) FILTER (WHERE k.status <> 'done' AND k.size IS NULL))::integer AS unsized
+           (count(*) FILTER (WHERE k.status <> 'done' AND k.size IS NULL))::integer AS unsized,
+           min(k.start_on) AS span_start,
+           max(k.target_on) AS span_end
     FROM nodes k
     WHERE k.project_id = s.project_id AND k.parent = s.ref AND k.status <> 'dropped'
 ) t
@@ -1144,6 +1153,11 @@ CREATE UNIQUE INDEX plan_is_decided_once ON events (project_id, ((after->>'plan'
     WHERE action IN ('plan_approved', 'plan_rejected');
 CREATE INDEX events_gates_idx ON events (project_id, node, id) WHERE action = 'gate_added';
 CREATE INDEX events_plans_idx ON events (project_id, id) WHERE action = 'plan_proposed';
+CREATE INDEX events_asks_idx ON events (project_id, id) WHERE action = 'ask_raised';
+CREATE INDEX events_handoffs_idx ON events (project_id, node, id) WHERE action = 'handoff';
+CREATE INDEX events_templates_idx
+    ON events (project_id, (after->>'name'), id DESC)
+    WHERE action IN ('plan_template_saved', 'plan_template_deleted');
 -- Each revision of a plan is made once, and each revision is asked for changes at most once.
 CREATE UNIQUE INDEX plan_revision_is_made_once
     ON events (project_id, ((after->>'plan')::bigint), ((after->>'revision')::integer))
@@ -1219,6 +1233,8 @@ SELECT p.project_id, p.id, p.actor AS proposed_by, p.actor_kind AS proposed_by_k
        coalesce(r.at, p.at) AS revised_at,
        d.id AS decision_event_id, d.actor AS decided_by, d.at AS decided_at,
        d.after->>'reason' AS reason,
+       c.actor AS changes_requested_by, c.actor_kind AS changes_requested_by_kind,
+       c.at AS changes_requested_at,
        CASE WHEN d.action = 'plan_approved' THEN 'approved'
             WHEN d.action = 'plan_rejected' THEN 'rejected'
             WHEN c.id IS NOT NULL THEN 'changes_requested'
@@ -1320,26 +1336,32 @@ SELECT n.project_id, n.ref, n.kind, n.number, n.kind_rank, n.parent, n.title, n.
        w.conflicts AS schedule_conflicts,
        coalesce(n.target_on < current_date AND n.status NOT IN ('done', 'dropped'), false)
            AS overdue,
-       sp.span_start,
-       sp.span_end,
+       CASE WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.start_on
+            ELSE agg.span_start END AS span_start,
+       CASE WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.target_on
+            ELSE agg.span_end END AS span_end,
        (n.start_on IS NULL AND n.target_on IS NULL
-        AND (sp.span_start IS NOT NULL OR sp.span_end IS NOT NULL)) AS span_worked_out,
-       c.actor AS claimed_by,
-       c.actor_kind AS claimed_by_kind,
-       c.expires_at AS claim_expires_at,
-       lc.actor AS lapsed_claim_by,
-       lc.actor_kind AS lapsed_claim_by_kind,
-       lc.expires_at AS lapsed_claim_at,
-       CASE WHEN n.kind <> 'task' THEN pr.done END AS progress_done,
-       CASE WHEN n.kind <> 'task' THEN pr.total END AS progress_total,
+        AND (agg.span_start IS NOT NULL OR agg.span_end IS NOT NULL)) AS span_worked_out,
+       CASE WHEN cl.live THEN c.actor END AS claimed_by,
+       CASE WHEN cl.live THEN c.actor_kind END AS claimed_by_kind,
+       CASE WHEN cl.live THEN c.expires_at END AS claim_expires_at,
+       CASE WHEN NOT cl.live THEN c.actor END AS lapsed_claim_by,
+       CASE WHEN NOT cl.live THEN c.actor_kind END AS lapsed_claim_by_kind,
+       CASE WHEN NOT cl.live THEN c.expires_at END AS lapsed_claim_at,
+       CASE WHEN n.kind <> 'task' THEN agg.tasks_done END AS progress_done,
+       CASE WHEN n.kind <> 'task' THEN agg.tasks_total END AS progress_total,
        cr.total AS criteria_total,
        cr.met AS criteria_met,
-       pt.total AS points_total,
-       pt.done AS points_done,
-       pt.unsized AS unsized,
+       agg.points_total,
+       agg.points_done,
+       agg.unsized,
        ck.total AS checks_total,
        ck.ticked AS checks_ticked,
-       ck.verifier_open AS verifier_checks_open
+       ck.verifier_open AS verifier_checks_open,
+       EXISTS (
+           SELECT 1 FROM events e
+           WHERE e.project_id = n.project_id AND e.node = n.ref AND e.action = 'handoff'
+       ) AS has_handoff
 FROM nodes n
 CROSS JOIN LATERAL (
     SELECT count(*)::integer AS total, (count(*) FILTER (WHERE r.status = 'met'))::integer AS met
@@ -1347,57 +1369,51 @@ CROSS JOIN LATERAL (
     WHERE r.project_id = n.project_id AND r.node = n.ref AND r.status <> 'dropped'
 ) cr
 CROSS JOIN LATERAL (
-    SELECT coalesce(sum(x.total), 0)::integer AS total,
-           coalesce(sum(x.done), 0)::integer AS done,
-           coalesce(sum(x.unsized), 0)::integer AS unsized
+    SELECT coalesce(sum(x.points_total), 0)::integer AS points_total,
+           coalesce(sum(x.points_done), 0)::integer AS points_done,
+           coalesce(sum(x.unsized), 0)::integer AS unsized,
+           coalesce(sum(x.tasks_done), 0)::integer AS tasks_done,
+           coalesce(sum(x.tasks_total), 0)::integer AS tasks_total,
+           min(x.span_start) AS span_start,
+           max(x.span_end) AS span_end
     FROM (
         SELECT CASE WHEN n.status = 'dropped' THEN 0 ELSE coalesce(size_points(n.size), 0) END
-                   AS total,
+                   AS points_total,
                CASE WHEN n.status = 'done' THEN coalesce(size_points(n.size), 0) ELSE 0 END
-                   AS done,
+                   AS points_done,
                CASE WHEN n.status NOT IN ('done', 'dropped') AND n.size IS NULL THEN 1 ELSE 0 END
-                   AS unsized
+                   AS unsized,
+               0::integer AS tasks_done,
+               0::integer AS tasks_total,
+               n.start_on AS span_start,
+               n.target_on AS span_end
         WHERE n.kind = 'task'
         UNION ALL
-        SELECT sp.points_total, sp.points_done, sp.unsized
+        SELECT sp.points_total, sp.points_done, sp.unsized,
+               sp.tasks_done, sp.tasks_total, sp.span_start, sp.span_end
         FROM story_points sp
         WHERE n.kind = 'story' AND sp.project_id = n.project_id AND sp.ref = n.ref
         UNION ALL
-        SELECT sp.points_total, sp.points_done, sp.unsized
+        SELECT sp.points_total, sp.points_done, sp.unsized,
+               sp.tasks_done, sp.tasks_total, sp.span_start, sp.span_end
         FROM story_points sp
         WHERE n.kind = 'epic' AND sp.project_id = n.project_id AND sp.parent = n.ref
           AND sp.status <> 'dropped'
     ) x
-) pt
+) agg
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN n.kind = 'epic' THEN 0 ELSE
-               (SELECT count(*) FROM definition_items i WHERE i.project_id = n.project_id)::integer
-           END AS total,
-           CASE WHEN n.kind = 'epic' THEN 0 ELSE
-               (SELECT count(*) FROM definition_checks d
-                JOIN definition_items i ON i.project_id = d.project_id AND i.item_key = d.item_key
-                WHERE d.project_id = n.project_id AND d.node = n.ref)::integer
-           END AS ticked,
-           CASE WHEN n.kind = 'epic' OR n.status IN ('done', 'dropped') THEN 0 ELSE
-               (SELECT count(*) FROM definition_items i
-                WHERE i.project_id = n.project_id AND i.verifier_only AND NOT i.person_only
-                  AND NOT EXISTS (SELECT 1 FROM definition_checks d
-                                  WHERE d.project_id = n.project_id AND d.node = n.ref
-                                    AND d.item_key = i.item_key))::integer
-           END AS verifier_open
+    SELECT count(*)::integer AS total,
+           count(d.item_key)::integer AS ticked,
+           (count(*) FILTER (
+               WHERE n.status NOT IN ('done', 'dropped')
+                 AND i.verifier_only AND NOT i.person_only
+                 AND d.item_key IS NULL
+           ))::integer AS verifier_open
+    FROM definition_items i
+    LEFT JOIN definition_checks d
+        ON d.project_id = i.project_id AND d.node = n.ref AND d.item_key = i.item_key
+    WHERE n.kind <> 'epic' AND i.project_id = n.project_id
 ) ck
-CROSS JOIN LATERAL (
-    SELECT count(*) FILTER (WHERE t.status = 'done')::integer AS done, count(*)::integer AS total
-    FROM nodes t
-    WHERE n.kind <> 'task' AND t.project_id = n.project_id
-      AND t.kind = 'task' AND t.status <> 'dropped'
-      AND CASE n.kind
-              WHEN 'story' THEN t.parent = n.ref
-              ELSE t.parent IN (SELECT s.ref FROM nodes s
-                                WHERE s.project_id = n.project_id
-                                  AND s.parent = n.ref AND s.status <> 'dropped')
-          END
-) pr
 CROSS JOIN LATERAL (
     SELECT coalesce(array_agg(t.ref ORDER BY t.kind_rank, t.number), ARRAY[]::text[]) AS refs,
            coalesce(array_agg(t.ref ORDER BY t.kind_rank, t.number)
@@ -1411,52 +1427,15 @@ CROSS JOIN LATERAL (
     SELECT coalesce(array_agg(r.reason ORDER BY r.reason), ARRAY[]::text[]) AS reasons
     FROM (
         SELECT 'gate:' || g.id::text AS reason FROM gate_state g
-        WHERE g.node = n.ref AND g.state IN ('waiting', 'refused')
+        WHERE g.project_id = n.project_id AND g.node = n.ref AND g.state IN ('waiting', 'refused')
         UNION ALL
         SELECT 'plan:' || p.id::text FROM plan_state p
-        WHERE p.state IN ('proposed', 'changes_requested') AND p.items ? n.ref
+        WHERE p.project_id = n.project_id AND p.state IN ('proposed', 'changes_requested')
+          AND p.items ? n.ref
     ) r
 ) h
-CROSS JOIN LATERAL (
-    SELECT CASE
-               WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.start_on
-               WHEN n.kind = 'story' THEN (
-                   SELECT min(t.start_on) FROM nodes t
-                   WHERE t.project_id = n.project_id AND t.parent = n.ref
-                     AND t.status <> 'dropped')
-               WHEN n.kind = 'epic' THEN (
-                   SELECT min(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
-                                   THEN s.start_on
-                                   ELSE (SELECT min(t.start_on) FROM nodes t
-                                         WHERE t.project_id = n.project_id AND t.parent = s.ref
-                                           AND t.status <> 'dropped')
-                              END)
-                   FROM nodes s
-                   WHERE s.project_id = n.project_id AND s.parent = n.ref
-                     AND s.status <> 'dropped')
-           END AS span_start,
-           CASE
-               WHEN n.start_on IS NOT NULL OR n.target_on IS NOT NULL THEN n.target_on
-               WHEN n.kind = 'story' THEN (
-                   SELECT max(t.target_on) FROM nodes t
-                   WHERE t.project_id = n.project_id AND t.parent = n.ref
-                     AND t.status <> 'dropped')
-               WHEN n.kind = 'epic' THEN (
-                   SELECT max(CASE WHEN s.start_on IS NOT NULL OR s.target_on IS NOT NULL
-                                   THEN s.target_on
-                                   ELSE (SELECT max(t.target_on) FROM nodes t
-                                         WHERE t.project_id = n.project_id AND t.parent = s.ref
-                                           AND t.status <> 'dropped')
-                              END)
-                   FROM nodes s
-                   WHERE s.project_id = n.project_id AND s.parent = n.ref
-                     AND s.status <> 'dropped')
-           END AS span_end
-) sp
 LEFT JOIN claims c ON c.project_id = n.project_id AND c.node = n.ref
-    AND c.expires_at > clock_timestamp()
-LEFT JOIN claims lc ON lc.project_id = n.project_id AND lc.node = n.ref
-    AND lc.expires_at <= clock_timestamp();
+CROSS JOIN LATERAL (SELECT c.expires_at > clock_timestamp() AS live) cl;
 
 -- The wall between projects ---------------------------------------------------------------------
 
